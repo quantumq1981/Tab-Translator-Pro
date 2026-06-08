@@ -1,2 +1,3 @@
 # Tab-Translator-Pro
 An intelligent guitar tab-to-chord translator that instantly turns fret numbers and custom tunings into precise musical harmony.
+Tab Decoder Pro is a lightweight, high-precision utility that translates raw guitar tablature directly into accurate chord symbols. Powered by the TabTranslator Engine, the app uses a custom 12-bit harmonic bitmasking algorithm to analyze fret positions, capo offsets, and alternate tunings locally on your device. It bypasses heavy, resource-intensive audio processing to deliver lightning-fast, offline chord and inversion recognition with zero external dependencies.
