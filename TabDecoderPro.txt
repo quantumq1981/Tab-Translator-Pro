@@ -1,0 +1,561 @@
+mport React, { useEffect, useMemo, useRef, useState } from "react";
+
+/* ============================================================================
+ *  TAB DECODER · TabTranslator Pro  —  functional prototype  (v0.2)
+ *  Single-file React component. Pure-JS recognition engine, zero build step.
+ *
+ *  Two input modes:
+ *   • MANUAL  — paste / pick an ASCII tab slice, analyse one chord block.
+ *   • PDF CHART (Path A) — upload a *digital* (alphaTab-rendered) tab PDF; the
+ *     parser reconstructs string/column geometry from text positions, runs every
+ *     chord column through the SAME engine, and renders a one-chord-per-bar chart
+ *     (consecutive identical symbols inside a bar are collapsed).
+ *
+ *  Path A is for PDFs whose fret numbers are real text (e.g. anything exported
+ *  from chord-sheet-maker-pro / alphaTab). Scanned/photographed tab (raster) is
+ *  Path B — out of scope here, needs an OMR/Vision pipeline.
+ *
+ *  ENGINE INVARIANT: every chord-quality bitmask is DERIVED from an interval
+ *  array via makeMask(). Do NOT hardcode binary literals — the source spec's
+ *  literals disagreed with their own interval comments (it labelled
+ *  0b000010010101 as 0,4,7,10 but that value is actually {0,2,4,7}). Deriving
+ *  from intervals is the single source of truth and is verified by unit cases.
+ * ==========================================================================*/
+
+/* ---- bit helpers --------------------------------------------------------- */
+const makeMask = (intervals) => intervals.reduce((m, i) => m | (1 << (i % 12)), 0);
+const popcount = (n) => { let c = 0; while (n) { c += n & 1; n >>= 1; } return c; };
+const rotateRight = (mask, r) => ((mask >> r) | (mask << (12 - r))) & 0xfff; // root r → bit 0
+const toBinary12 = (mask) => mask.toString(2).padStart(12, "0");
+
+/* ---- static data stores -------------------------------------------------- */
+const TUNINGS = {
+  Standard: [40, 45, 50, 55, 59, 64], // E2 A2 D3 G3 B3 E4  (index 0 = lowest)
+  "Drop D": [38, 45, 50, 55, 59, 64], // D2 A2 D3 G3 B3 E4
+};
+const NOTE_SHARP = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+const NOTE_FLAT  = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"];
+const INTERVAL_LABELS = ["R", "♭2", "2", "♭3", "3", "4", "♭5", "5", "♭6", "6", "♭7", "7"];
+
+const QUALITIES = [
+  { name: "Power chord",    suffix: "5",     intervals: [0, 7],        rank: 6 },
+  { name: "Major",          suffix: "",      intervals: [0, 4, 7],     rank: 0 },
+  { name: "Minor",          suffix: "m",     intervals: [0, 3, 7],     rank: 1 },
+  { name: "Diminished",     suffix: "dim",   intervals: [0, 3, 6],     rank: 7 },
+  { name: "Augmented",      suffix: "aug",   intervals: [0, 4, 8],     rank: 8 },
+  { name: "Sus2",           suffix: "sus2",  intervals: [0, 2, 7],     rank: 5 },
+  { name: "Sus4",           suffix: "sus4",  intervals: [0, 5, 7],     rank: 4 },
+  { name: "Major 6th",      suffix: "6",     intervals: [0, 4, 7, 9],  rank: 9 },
+  { name: "Minor 6th",      suffix: "m6",    intervals: [0, 3, 7, 9],  rank: 10 },
+  { name: "Dominant 7th",   suffix: "7",     intervals: [0, 4, 7, 10], rank: 2 },
+  { name: "Major 7th",      suffix: "maj7",  intervals: [0, 4, 7, 11], rank: 11 },
+  { name: "Minor 7th",      suffix: "m7",    intervals: [0, 3, 7, 10], rank: 3 },
+  { name: "Half-dim 7th",   suffix: "m7♭5",  intervals: [0, 3, 6, 10], rank: 12 },
+  { name: "Diminished 7th", suffix: "dim7",  intervals: [0, 3, 6, 9],  rank: 13 },
+  { name: "7sus4",          suffix: "7sus4", intervals: [0, 5, 7, 10], rank: 14 },
+].map((q) => ({ ...q, mask: makeMask(q.intervals) }));
+
+const PRESETS = [
+  { label: "C major",        tuning: "Standard", tab: "e|-0-|\nB|-1-|\nG|-0-|\nD|-2-|\nA|-3-|\nE|-x-|" },
+  { label: "G major",        tuning: "Standard", tab: "e|-3-|\nB|-0-|\nG|-0-|\nD|-0-|\nA|-2-|\nE|-3-|" },
+  { label: "A minor",        tuning: "Standard", tab: "e|-0-|\nB|-1-|\nG|-2-|\nD|-2-|\nA|-0-|\nE|-x-|" },
+  { label: "E minor",        tuning: "Standard", tab: "e|-0-|\nB|-0-|\nG|-0-|\nD|-2-|\nA|-2-|\nE|-0-|" },
+  { label: "F (barre)",      tuning: "Standard", tab: "e|-1-|\nB|-1-|\nG|-2-|\nD|-3-|\nA|-3-|\nE|-1-|" },
+  { label: "C/E (slash)",    tuning: "Standard", tab: "e|-0-|\nB|-1-|\nG|-0-|\nD|-2-|\nA|-3-|\nE|-0-|" },
+  { label: "D/F# (slash)",   tuning: "Standard", tab: "e|-2-|\nB|-3-|\nG|-2-|\nD|-0-|\nA|-0-|\nE|-2-|" },
+  { label: "Asus4",          tuning: "Standard", tab: "e|-0-|\nB|-3-|\nG|-2-|\nD|-2-|\nA|-0-|\nE|-x-|" },
+  { label: "Dm7",            tuning: "Standard", tab: "e|-1-|\nB|-1-|\nG|-2-|\nD|-0-|\nA|-x-|\nE|-x-|" },
+  { label: "G7",             tuning: "Standard", tab: "e|-1-|\nB|-0-|\nG|-0-|\nD|-0-|\nA|-2-|\nE|-3-|" },
+  { label: "Cmaj7 (no 5th)", tuning: "Standard", tab: "e|-0-|\nB|-0-|\nG|-x-|\nD|-2-|\nA|-3-|\nE|-x-|" },
+  { label: "D5 (Drop D)",    tuning: "Drop D",   tab: "e|----|\nB|----|\nG|----|\nD|--0-|\nA|--0-|\nD|--0-|" },
+];
+
+/* ---- ASCII tab parser (manual mode) -------------------------------------- */
+function parseTab(text) {
+  const raw = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  const stringLines = raw.filter((l) => /[-x|0-9]/i.test(l)).slice(0, 6);
+  if (stringLines.length === 0) return { strings: [], blocks: [] };
+  const stripped = stringLines.map((l) => {
+    const m = l.match(/^\s*[a-gA-G][#b]?\d?\s*\|?(.*)$/);
+    return m ? m[1] : l.replace(/^\|/, "");
+  });
+  const n = stripped.length;
+  const events = [];
+  const strings = [];
+  stripped.forEach((content, k) => {
+    const stringIndex = n - 1 - k; // top line = highest string
+    strings.push({ idx: stringIndex, content: stringLines[k] });
+    for (let i = 0; i < content.length; i++) {
+      if (/[0-9]/.test(content[i])) {
+        let num = content[i], j = i + 1;
+        while (j < content.length && /[0-9]/.test(content[j])) { num += content[j]; j++; }
+        events.push({ stringIndex, col: i, fret: parseInt(num, 10) });
+        i = j - 1;
+      }
+    }
+  });
+  const TOL = 1;
+  events.sort((a, b) => a.col - b.col);
+  const blocks = [];
+  let cur = null;
+  for (const ev of events) {
+    if (!cur || ev.col > cur.anchor + TOL) { cur = { anchor: ev.col, col: ev.col, notes: [] }; blocks.push(cur); }
+    if (!cur.notes.some((nN) => nN.stringIndex === ev.stringIndex)) cur.notes.push({ stringIndex: ev.stringIndex, fret: ev.fret });
+  }
+  return { strings, blocks: blocks.map(({ col, notes }) => ({ col, notes })) };
+}
+
+/* ---- engine core --------------------------------------------------------- */
+function fretToMidi(block, tuningArr, capo, useSharp) {
+  return block.notes
+    .map(({ stringIndex, fret }) => {
+      const open = tuningArr[stringIndex];
+      if (open === undefined) return null;
+      const midi = open + capo + fret;
+      return { stringIndex, fret, midi, name: (useSharp ? NOTE_SHARP : NOTE_FLAT)[midi % 12] };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.midi - b.midi);
+}
+function normalise(notes) {
+  if (notes.length === 0) return { chroma: [], chordMask: 0, bassPc: null, bassMidi: null };
+  const bassMidi = notes[0].midi;
+  const chroma = [...new Set(notes.map((nN) => nN.midi % 12))].sort((a, b) => a - b);
+  return { chroma, chordMask: makeMask(chroma), bassPc: bassMidi % 12, bassMidi };
+}
+function recognise(chroma, chordMask, bassPc) {
+  if (chroma.length === 0) return null;
+  if (chroma.length === 1) return { roots: chroma[0], single: true, candidates: [], bassPc };
+  const candidates = [];
+  for (const root of chroma) {
+    const transposed = rotateRight(chordMask, root);
+    for (const q of QUALITIES) {
+      const inter = popcount(transposed & q.mask);
+      const extra = popcount(transposed & ~q.mask & 0xfff);
+      const missing = popcount(q.mask & ~transposed & 0xfff);
+      const score = inter - 0.8 * extra - 1.2 * missing;       // ranking
+      const confidence = inter / (inter + extra + missing);    // displayed (Jaccard)
+      candidates.push({ root, quality: q, transposed, inter, extra, missing, score, confidence });
+    }
+  }
+  candidates.sort((a, b) => (b.score - a.score) || (a.quality.rank - b.quality.rank));
+  const best = candidates[0];
+  return { best, candidates: candidates.slice(0, 4), isSlash: bassPc !== null && best.root !== bassPc, bassPc };
+}
+function symbolOf(result, useSharp) {
+  if (!result) return "—";
+  const names = useSharp ? NOTE_SHARP : NOTE_FLAT;
+  if (result.single) return names[result.roots] + " (single)";
+  const { best, isSlash, bassPc } = result;
+  const sym = names[best.root] + best.quality.suffix;
+  return isSlash ? `${sym}/${names[bassPc]}` : sym;
+}
+// frets keyed by engine string index (0 = low E) → chord symbol (standard tuning)
+function symbolForFrets(fretsByEng, useSharp) {
+  const notes = Object.entries(fretsByEng).map(([si, fret]) => ({ stringIndex: +si, fret }));
+  const midi = fretToMidi({ notes }, TUNINGS.Standard, 0, useSharp);
+  const norm = normalise(midi);
+  return symbolOf(recognise(norm.chroma, norm.chordMask, norm.bassPc), useSharp);
+}
+
+/* ============================================================================
+ *  PATH A — digital PDF parser (PDF.js text positions → chord chart)
+ *  Mirrors the validated reference algorithm:
+ *   1. extract integer text tokens with (x, top-down y)
+ *   2. cluster y → string lines; group lines → staff systems (run of ≥4)
+ *   3. per system: assign notes to strings by round((y-topY)/spacing)
+ *   4. cluster x → chord columns; map columns to measures via the number row
+ *   5. recognise each column; collapse consecutive duplicates per measure
+ * ==========================================================================*/
+const median = (a) => { const s = [...a].sort((x, y) => x - y); const n = s.length; return n ? (n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2) : 0; };
+function clusterVals(vals, gap) {
+  const s = [...new Set(vals)].sort((a, b) => a - b);
+  if (!s.length) return [];
+  const out = []; let cur = [s[0]];
+  for (let i = 1; i < s.length; i++) { if (s[i] - cur[cur.length - 1] <= gap) cur.push(s[i]); else { out.push(median(cur)); cur = [s[i]]; } }
+  out.push(median(cur)); return out;
+}
+function estimateSpacing(ys) {
+  const s = [...new Set(ys)].sort((a, b) => a - b);
+  const gaps = [];
+  for (let i = 1; i < s.length; i++) { const g = s[i] - s[i - 1]; if (g > 0.5 && g < 20) gaps.push(g); }
+  if (!gaps.length) return 7;
+  gaps.sort((a, b) => a - b);
+  return median(gaps.slice(0, Math.max(1, Math.ceil(gaps.length / 2)))) || 7;
+}
+function buildChart(tokens) {
+  const pages = {};
+  tokens.forEach((t) => (pages[t.page] = pages[t.page] || []).push(t));
+  const measures = new Map();
+  let systemsFound = 0, columnsFound = 0;
+
+  Object.values(pages).forEach((ds) => {
+    if (ds.length < 6) return;
+    const spacing = estimateSpacing(ds.map((d) => d.y));
+    const lineGap = spacing * 0.5, sysGap = spacing * 2.2, colGap = spacing * 1.3, pad = spacing * 0.7;
+
+    const lines = clusterVals(ds.map((d) => d.y), lineGap);
+    const groups = []; let cur = [lines[0]];
+    for (let i = 1; i < lines.length; i++) { if (lines[i] - cur[cur.length - 1] <= sysGap) cur.push(lines[i]); else { groups.push(cur); cur = [lines[i]]; } }
+    groups.push(cur);
+    const staves = groups.filter((g) => g.length >= 4).map((g) => ({ topY: Math.min(...g), botY: Math.max(...g) }));
+
+    staves.forEach((st, si) => {
+      systemsFound++;
+      const lo = st.topY - pad, hi = st.topY + spacing * 5 + pad;
+      const staffNotes = ds.filter((d) => d.y >= lo && d.y <= hi);
+
+      const prevBot = si > 0 ? staves[si - 1].botY : -Infinity;
+      const cand = ds.filter((d) => d.y > prevBot + pad && d.y < st.topY - pad);
+      let marks = [];
+      if (cand.length) {
+        const rowLines = clusterVals(cand.map((d) => d.y), lineGap);
+        let bestRow = null, bestCount = -1;
+        rowLines.forEach((ry) => { const c = cand.filter((d) => Math.abs(d.y - ry) <= lineGap).length; if (c > bestCount) { bestCount = c; bestRow = ry; } });
+        marks = cand.filter((d) => Math.abs(d.y - bestRow) <= lineGap).map((d) => ({ num: d.val, x: d.x })).sort((a, b) => a.x - b.x);
+        marks = marks.filter((m, i) => !(i > 0 && i < marks.length - 1 && m.num > marks[i - 1].num + 3 && m.num > marks[i + 1].num));
+      }
+
+      staffNotes.sort((a, b) => a.x - b.x);
+      const cols = []; let cc = [];
+      for (const d of staffNotes) { if (cc.length && d.x - cc[cc.length - 1].x > colGap) { cols.push(cc); cc = []; } cc.push(d); }
+      if (cc.length) cols.push(cc);
+
+      cols.forEach((col) => {
+        const cx = Math.min(...col.map((d) => d.x));
+        const frets = {};
+        col.forEach((d) => {
+          const top = Math.round((d.y - st.topY) / spacing); // 0 = high e
+          if (top < 0 || top > 5) return;
+          const eng = 5 - top;                                // 0 = low E
+          if (frets[eng] === undefined) frets[eng] = d.val;
+        });
+        if (!Object.keys(frets).length) return;
+        let meas = null;
+        for (const m of marks) if (cx >= m.x - pad) meas = m.num;
+        if (meas == null) return;
+        columnsFound++;
+        if (!measures.has(meas)) measures.set(meas, { number: meas, columns: [] });
+        measures.get(meas).columns.push({ x: cx, frets });
+      });
+    });
+  });
+
+  const list = [...measures.values()].sort((a, b) => a.number - b.number);
+  list.forEach((m) => m.columns.sort((a, b) => a.x - b.x));
+  return { measures: list, systemsFound, columnsFound };
+}
+async function extractTokens(buf) {
+  const pdfjsLib = window.pdfjsLib;
+  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  const tokens = [];
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const vp = page.getViewport({ scale: 1 });
+    const tc = await page.getTextContent();
+    for (const it of tc.items) {
+      const s = (it.str || "").trim();
+      const m = s.match(/\d+/);
+      if (!m) continue;
+      tokens.push({ x: it.transform[4], y: vp.height - it.transform[5], val: parseInt(m[0], 10), page: p });
+    }
+  }
+  return { tokens, pages: pdf.numPages };
+}
+
+/* ========================================================================== */
+/*  UI                                                                        */
+/* ========================================================================== */
+export default function TabDecoderPro() {
+  const [mode, setMode] = useState("manual");
+  const [tab, setTab] = useState(PRESETS[5].tab);
+  const [tuningName, setTuningName] = useState("Standard");
+  const [capo, setCapo] = useState(0);
+  const [useSharp, setUseSharp] = useState(true);
+  const [blockIdx, setBlockIdx] = useState(0);
+
+  const [pdfReady, setPdfReady] = useState(false);
+  const [pdfErr, setPdfErr] = useState("");
+  const [pdfBusy, setPdfBusy] = useState(false);
+  const [chart, setChart] = useState(null);
+  const [selFrets, setSelFrets] = useState(null);
+  const [selKey, setSelKey] = useState("");
+  const fileRef = useRef(null);
+
+  useEffect(() => {
+    if (window.pdfjsLib) { setPdfReady(true); return; }
+    const s = document.createElement("script");
+    s.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+    s.onload = () => { window.pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"; setPdfReady(true); };
+    s.onerror = () => setPdfErr("Could not load PDF.js from CDN. Check network/connector settings.");
+    document.body.appendChild(s);
+  }, []);
+
+  const onFile = async (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    setPdfErr(""); setPdfBusy(true); setChart(null); setSelFrets(null); setSelKey("");
+    try {
+      const buf = await f.arrayBuffer();
+      const { tokens, pages } = await extractTokens(buf);
+      const c = buildChart(tokens);
+      if (!c.measures.length) setPdfErr("No tab measures detected. Is this a digital (text) tab PDF rather than a scan?");
+      setChart({ ...c, pages, fileName: f.name });
+    } catch (err) {
+      setPdfErr("Parse failed: " + (err && err.message ? err.message : String(err)));
+    } finally { setPdfBusy(false); }
+  };
+
+  const tuningArr = TUNINGS[tuningName];
+  const parsed = useMemo(() => parseTab(tab), [tab]);
+  const blocks = parsed.blocks;
+  const safeIdx = Math.min(blockIdx, Math.max(0, blocks.length - 1));
+  const manualBlock = blocks[safeIdx];
+
+  const displayNotes = useMemo(() => {
+    if (mode === "pdf" && selFrets) {
+      const notes = Object.entries(selFrets).map(([si, fret]) => ({ stringIndex: +si, fret }));
+      return fretToMidi({ notes }, TUNINGS.Standard, 0, useSharp);
+    }
+    return manualBlock ? fretToMidi(manualBlock, tuningArr, capo, useSharp) : [];
+  }, [mode, selFrets, manualBlock, tuningArr, capo, useSharp]);
+
+  const norm = useMemo(() => normalise(displayNotes), [displayNotes]);
+  const result = useMemo(() => recognise(norm.chroma, norm.chordMask, norm.bassPc), [norm]);
+
+  const chartView = useMemo(() => {
+    if (!chart) return null;
+    return chart.measures.map((m) => {
+      const syms = m.columns.map((c) => symbolForFrets(c.frets, useSharp));
+      const collapsed = syms.filter((s, i) => i === 0 || s !== syms[i - 1]);
+      return { number: m.number, collapsed, columns: m.columns };
+    });
+  }, [chart, useSharp]);
+
+  const names = useSharp ? NOTE_SHARP : NOTE_FLAT;
+  const symbol = symbolOf(result, useSharp);
+  const best = result && !result.single ? result.best : null;
+  const conf = best ? best.confidence : 0;
+  const confColor = conf >= 0.999 ? "#98c379" : conf >= 0.7 ? "#57d1d6" : "#e9a24b";
+  const applyPreset = (p) => { setTuningName(p.tuning); setTab(p.tab); setBlockIdx(0); };
+
+  const C = { bg: "#0b0e10", panel: "#14181b", raised: "#1b2024", border: "#2a3036",
+    text: "#e6e1d7", dim: "#8a8f8c", amber: "#e9a24b", cyan: "#57d1d6", red: "#e06c75", green: "#98c379" };
+
+  return (
+    <div style={{ background: C.bg, color: C.text, minHeight: "100%", fontFamily: "'IBM Plex Mono', ui-monospace, monospace" }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap');
+        @keyframes glowpulse {0%{transform:scale(.97);opacity:0;}100%{transform:scale(1);opacity:1;}}
+        @keyframes rise {from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
+        .panel-rise{animation:rise .5s cubic-bezier(.2,.7,.2,1) both;}
+        .chord-pop{animation:glowpulse .35s ease-out;}
+        .led{transition:background .18s ease,box-shadow .18s ease,color .18s ease;}
+        .tdp-scroll::-webkit-scrollbar{width:8px;height:8px;}
+        .tdp-scroll::-webkit-scrollbar-thumb{background:#2a3036;border-radius:8px;}
+        textarea::placeholder{color:#5a605d;}
+        .meas:hover{border-color:#e9a24b88!important;}
+      `}</style>
+
+      <div style={{ position: "relative", maxWidth: 1100, margin: "0 auto", padding: "20px 16px 40px" }}>
+        <div style={{ position: "absolute", inset: 0, pointerEvents: "none", background: "radial-gradient(120% 60% at 50% -10%, rgba(233,162,75,.10), transparent 60%)" }} />
+        <div style={{ position: "absolute", inset: 0, pointerEvents: "none", opacity: .35, backgroundImage: "repeating-linear-gradient(0deg, rgba(255,255,255,.015) 0 1px, transparent 1px 3px)" }} />
+
+        <header className="panel-rise" style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12, marginBottom: 16 }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
+            <span style={{ fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: 22, letterSpacing: 1 }}>TAB<span style={{ color: C.amber }}>·</span>DECODER</span>
+            <span style={{ color: C.dim, fontSize: 12, letterSpacing: 3 }}>TABTRANSLATOR PRO</span>
+          </div>
+          <div style={{ display: "flex", gap: 6 }}>
+            {["manual", "pdf"].map((m) => (
+              <button key={m} onClick={() => setMode(m)} style={{ ...toggle(C), padding: "6px 14px", flex: "none", ...(mode === m ? activeToggle(C) : {}) }}>
+                {m === "manual" ? "Manual" : "PDF Chart"}
+              </button>
+            ))}
+          </div>
+        </header>
+
+        <div style={{ position: "relative", display: "grid", gridTemplateColumns: mode === "pdf" ? "minmax(0,1.25fr) minmax(0,1fr)" : "minmax(0,1fr) minmax(0,1fr)", gap: 16 }}>
+          <section className="panel-rise" style={{ animationDelay: ".05s", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
+            {mode === "manual" ? (
+              <>
+                <SectionLabel C={C}>INPUT · TAB SOURCE</SectionLabel>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
+                  {PRESETS.map((p) => (
+                    <button key={p.label} onClick={() => applyPreset(p)} style={{ ...chip(C), borderColor: tab === p.tab ? C.amber : C.border, color: tab === p.tab ? C.amber : C.dim }}>{p.label}</button>
+                  ))}
+                </div>
+                <textarea value={tab} onChange={(e) => { setTab(e.target.value); setBlockIdx(0); }} spellCheck={false} className="tdp-scroll"
+                  placeholder={"e|-0-|\nB|-1-|\nG|-0-|\nD|-2-|\nA|-3-|\nE|-x-|"}
+                  style={{ width: "100%", height: 150, resize: "vertical", background: C.bg, color: C.text, border: `1px solid ${C.border}`, borderRadius: 8, padding: 12, fontSize: 14, lineHeight: 1.5, fontFamily: "'IBM Plex Mono', monospace", outline: "none", boxSizing: "border-box" }} />
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 14 }}>
+                  <Control C={C} label="TUNING">
+                    <div style={{ display: "flex", gap: 6 }}>
+                      {Object.keys(TUNINGS).map((t) => (<button key={t} onClick={() => setTuningName(t)} style={{ ...toggle(C), ...(tuningName === t ? activeToggle(C) : {}) }}>{t}</button>))}
+                    </div>
+                  </Control>
+                  <Control C={C} label="SPELLING">
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button onClick={() => setUseSharp(true)} style={{ ...toggle(C), ...(useSharp ? activeToggle(C) : {}) }}>Sharps ♯</button>
+                      <button onClick={() => setUseSharp(false)} style={{ ...toggle(C), ...(!useSharp ? activeToggle(C) : {}) }}>Flats ♭</button>
+                    </div>
+                  </Control>
+                  <Control C={C} label={`CAPO · fret ${capo}`}>
+                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                      <button onClick={() => setCapo((c) => Math.max(0, c - 1))} style={stepper(C)}>−</button>
+                      <div style={{ flex: 1, textAlign: "center", color: capo ? C.amber : C.dim, fontSize: 14 }}>{capo}</div>
+                      <button onClick={() => setCapo((c) => Math.min(12, c + 1))} style={stepper(C)}>+</button>
+                    </div>
+                  </Control>
+                  <Control C={C} label={`CHORD BLOCK · ${blocks.length} found`}>
+                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                      <button disabled={blocks.length < 2} onClick={() => setBlockIdx((i) => Math.max(0, i - 1))} style={stepper(C)}>◀</button>
+                      <div style={{ flex: 1, textAlign: "center", fontSize: 13 }}>{blocks.length ? `${safeIdx + 1} / ${blocks.length}` : "—"}</div>
+                      <button disabled={blocks.length < 2} onClick={() => setBlockIdx((i) => Math.min(blocks.length - 1, i + 1))} style={stepper(C)}>▶</button>
+                    </div>
+                  </Control>
+                </div>
+                <SectionLabel C={C} style={{ marginTop: 16 }}>PITCH BREAKDOWN</SectionLabel>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  {displayNotes.length === 0 && <span style={{ color: C.dim, fontSize: 13 }}>No fretted notes in this block.</span>}
+                  {displayNotes.slice().reverse().map((nN, i) => (
+                    <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, padding: "4px 10px" }}>
+                      <span style={{ color: C.dim }}>str {nN.stringIndex} · fret {nN.fret}</span>
+                      <span style={{ color: nN.midi === norm.bassMidi ? C.red : C.text }}>{nN.name}{nN.midi === norm.bassMidi ? "  ← bass" : ""} <span style={{ color: C.dim }}>· midi {nN.midi}</span></span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <>
+                <SectionLabel C={C}>PATH A · DIGITAL TAB PDF → CHORD CHART</SectionLabel>
+                <input ref={fileRef} type="file" accept="application/pdf" onChange={onFile} style={{ display: "none" }} />
+                <button onClick={() => fileRef.current && fileRef.current.click()} disabled={!pdfReady || pdfBusy}
+                  style={{ width: "100%", background: C.bg, border: `1px dashed ${C.border}`, color: pdfReady ? C.amber : C.dim, borderRadius: 10, padding: "22px 12px", fontSize: 14, cursor: pdfReady ? "pointer" : "default", fontFamily: "'IBM Plex Mono', monospace" }}>
+                  {!pdfReady ? "loading PDF.js…" : pdfBusy ? "parsing…" : "⬆  Upload a tab PDF  (tap to choose)"}
+                </button>
+                <div style={{ fontSize: 11, color: C.dim, marginTop: 8, lineHeight: 1.6 }}>
+                  For digital tab PDFs (alphaTab / chord-sheet-maker-pro exports). Assumes standard tuning. One symbol per bar; harmony changes inside a bar appear as a sequence.
+                </div>
+                {pdfErr && <div style={{ marginTop: 10, color: C.red, fontSize: 12 }}>{pdfErr}</div>}
+
+                {chartView && (
+                  <>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: C.dim, margin: "14px 0 10px" }}>
+                      <span style={{ color: C.text }}>{chart.fileName}</span>
+                      <span>{chartView.length} bars · {chart.systemsFound} systems · {chart.pages} pp</span>
+                    </div>
+                    <div className="tdp-scroll" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(74px, 1fr))", gap: 6, maxHeight: 460, overflow: "auto", paddingRight: 4 }}>
+                      {chartView.map((m) => {
+                        const k = `${m.number}`;
+                        const isSel = selKey === k;
+                        return (
+                          <button key={k} className="meas" onClick={() => { setSelFrets(m.columns[0] ? m.columns[0].frets : null); setSelKey(k); }}
+                            style={{ position: "relative", background: C.bg, border: `1px solid ${isSel ? C.amber : C.border}`, borderRadius: 8, padding: "10px 4px 8px", cursor: "pointer", minHeight: 56, textAlign: "center" }}>
+                            <span style={{ position: "absolute", top: 3, left: 6, fontSize: 9, color: C.dim }}>{m.number}</span>
+                            <div style={{ marginTop: 6, fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: m.collapsed.join(" ").length > 6 ? 13 : 17, color: C.cyan, lineHeight: 1.15 }}>
+                              {m.collapsed.join(" ")}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <div style={{ fontSize: 11, color: C.dim, marginTop: 8 }}>Tap any bar to inspect its voicing in the readout →</div>
+                  </>
+                )}
+              </>
+            )}
+          </section>
+
+          <section className="panel-rise" style={{ animationDelay: ".1s", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
+            <SectionLabel C={C}>{mode === "pdf" && selFrets ? "BAR READOUT" : "LIVE READOUT"}</SectionLabel>
+            <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: "22px 16px", textAlign: "center", marginBottom: 14 }}>
+              <div key={symbol} className="chord-pop" style={{ fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: 54, lineHeight: 1, color: C.cyan, textShadow: `0 0 26px ${C.cyan}55` }}>{symbol}</div>
+              {result && result.isSlash && <div style={{ marginTop: 8, fontSize: 11, letterSpacing: 2, color: C.red }}>SLASH CHORD · BASS ≠ ROOT</div>}
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
+              <Field C={C} k="ROOT" v={best ? names[best.root] : "—"} color={C.amber} />
+              <Field C={C} k="QUALITY" v={best ? best.quality.name : "—"} />
+              <Field C={C} k="BASS" v={norm.bassPc !== null ? names[norm.bassPc] : "—"} color={result && result.isSlash ? C.red : C.text} />
+              <Field C={C} k="SUFFIX" v={best ? (best.quality.suffix || "(none)") : "—"} />
+            </div>
+
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, letterSpacing: 2, color: C.dim, marginBottom: 5 }}>
+                <span>CONFIDENCE</span><span style={{ color: confColor }}>{best ? `${Math.round(conf * 100)}%` : "—"}{best && best.missing > 0 ? ` · missing ${best.missing}` : ""}{best && best.extra > 0 ? ` · +${best.extra} extra` : ""}</span>
+              </div>
+              <div style={{ height: 8, background: C.bg, borderRadius: 8, border: `1px solid ${C.border}`, overflow: "hidden" }}>
+                <div style={{ width: `${conf * 100}%`, height: "100%", background: confColor, transition: "width .25s ease, background .25s ease" }} />
+              </div>
+            </div>
+
+            <SectionLabel C={C}>CHROMA BITMASK · absolute (bit i = pitch-class i)</SectionLabel>
+            <div style={{ fontSize: 13, color: C.dim, marginBottom: 6 }}>
+              <span style={{ color: C.text }}>0b{toBinary12(norm.chordMask)}</span><span style={{ marginLeft: 8 }}>= {norm.chordMask}</span><span style={{ marginLeft: 8, fontSize: 11 }}>(MSB B → LSB C)</span>
+            </div>
+            <LedRow mask={norm.chordMask} labels={NOTE_SHARP} C={C} litColor={C.cyan} />
+
+            {best && (
+              <>
+                <SectionLabel C={C} style={{ marginTop: 14 }}>ROOT-RELATIVE · matched intervals</SectionLabel>
+                <div style={{ fontSize: 13, color: C.dim, marginBottom: 6 }}>
+                  <span style={{ color: C.text }}>0b{toBinary12(best.transposed)}</span><span style={{ marginLeft: 8 }}>vs DB 0b{toBinary12(best.quality.mask)}</span>
+                </div>
+                <LedRow mask={best.transposed} labels={INTERVAL_LABELS} C={C} litColor={C.amber} dbMask={best.quality.mask} />
+              </>
+            )}
+
+            {result && !result.single && (
+              <>
+                <SectionLabel C={C} style={{ marginTop: 16 }}>CANDIDATES</SectionLabel>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  {result.candidates.map((c, i) => (
+                    <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, background: C.bg, border: `1px solid ${i === 0 ? C.amber + "66" : C.border}`, borderRadius: 6, padding: "5px 10px" }}>
+                      <span style={{ color: i === 0 ? C.text : C.dim }}>{names[c.root]}{c.quality.suffix}  <span style={{ color: C.dim }}>· {c.quality.name}</span></span>
+                      <span style={{ color: C.dim }}>score {c.score.toFixed(2)} · {Math.round(c.confidence * 100)}%</span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </section>
+        </div>
+
+        <footer style={{ position: "relative", marginTop: 18, fontSize: 11, color: C.dim, lineHeight: 1.6 }}>
+          Engine: pure JS · masks derived via makeMask() · rotateRight() for root candidates · ranking score (−0.8·extra, −1.2·missing), Jaccard confidence ·
+          Path A: PDF.js text-position reconstruction (string / column / measure geometry) → same engine → one-chord-per-bar collapse.
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+/* ---- presentational helpers ---------------------------------------------- */
+function SectionLabel({ children, C, style }) { return <div style={{ fontSize: 10, letterSpacing: 2.5, color: C.dim, margin: "0 0 8px", ...style }}>{children}</div>; }
+function Control({ label, children, C }) { return (<div><div style={{ fontSize: 10, letterSpacing: 2, color: C.dim, marginBottom: 5 }}>{label}</div>{children}</div>); }
+function Field({ k, v, C, color }) {
+  return (<div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, padding: "8px 10px" }}>
+    <div style={{ fontSize: 9, letterSpacing: 2, color: C.dim }}>{k}</div>
+    <div style={{ fontSize: 18, color: color || C.text, marginTop: 2 }}>{v}</div></div>);
+}
+function LedRow({ mask, labels, C, litColor, dbMask }) {
+  return (<div style={{ display: "grid", gridTemplateColumns: "repeat(12,1fr)", gap: 4 }}>
+    {Array.from({ length: 12 }).map((_, i) => {
+      const lit = (mask >> i) & 1;
+      const inDb = dbMask !== undefined ? (dbMask >> i) & 1 : null;
+      const missing = inDb && !lit, extra = inDb === 0 && lit;
+      const bg = lit ? litColor : missing ? "transparent" : C.bg;
+      const border = missing ? `1px dashed ${C.red}` : extra ? `1px solid ${C.red}` : `1px solid ${C.border}`;
+      return (<div key={i} className="led" style={{ textAlign: "center" }}>
+        <div style={{ height: 22, borderRadius: 4, background: bg, border, boxShadow: lit ? `0 0 10px ${litColor}88` : "none" }} />
+        <div style={{ fontSize: 9, color: lit ? litColor : missing ? C.red : C.dim, marginTop: 3 }}>{labels[i]}</div></div>);
+    })}
+  </div>);
+}
+
+/* ---- inline style atoms --------------------------------------------------- */
+const chip = (C) => ({ background: C.bg, border: `1px solid ${C.border}`, color: C.dim, borderRadius: 999, padding: "4px 10px", fontSize: 11, cursor: "pointer", fontFamily: "'IBM Plex Mono', monospace" });
+const toggle = (C) => ({ flex: 1, background: C.bg, border: `1px solid ${C.border}`, color: C.dim, borderRadius: 6, padding: "7px 4px", fontSize: 12, cursor: "pointer", fontFamily: "'IBM Plex Mono', monospace" });
+const activeToggle = (C) => ({ borderColor: C.amber, color: C.amber, boxShadow: `inset 0 0 12px ${C.amber}22` });
+const stepper = (C) => ({ width: 30, background: C.bg, border: `1px solid ${C.border}`, color: C.text, borderRadius: 6, padding: "6px 0", fontSize: 14, cursor: "pointer", fontFamily: "'IBM Plex Mono', monospace" });
