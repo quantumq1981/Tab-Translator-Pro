@@ -1,0 +1,14 @@
+{
+  "name": "tab-decoder-tests",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Headless harness for the Path A PDF pipeline. Not part of the app — the app (TabDecoderPro.tsx) stays zero-dependency.",
+  "scripts": {
+    "test": "node path-a-smoke.mjs",
+    "tokens": "node path-a-smoke.mjs --log-tokens"
+  },
+  "devDependencies": {
+    "pdfjs-dist": "3.11.174"
+  }
+}

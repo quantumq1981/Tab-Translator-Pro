@@ -125,12 +125,30 @@ separate if Path B is ever built.
 ## The one untested link
 
 The recognition engine and the Path A algorithm are both **validated** (see
-below). The single piece that could not be unit-tested headlessly is the
+below). The single piece that could not be unit-tested headlessly was the
 **in-browser PDF.js extraction** in `extractTokens` — loading PDF.js from the
 CDN and reading the uploaded file in a real browser. The algorithm it feeds is
 proven against the real file via the Python reference; the browser glue is the
 part to smoke-test first on real hardware. If a real PDF yields odd bars, log
 the raw token stream out of `extractTokens` and compare against the reference.
+
+**Update (2026-06-08 session):** the extraction *algorithm and coordinate math*
+are now covered headlessly — see `tests/` (`npm test`). The harness reproduces
+`extractTokens` with `pdfjs-dist@3.11.174` (the exact version the app loads from
+the CDN; `getTextContent` item `.str` + `.transform` is identical across the CDN
+and npm builds) and loads the real engine/parser out of `TabDecoderPro.tsx`
+(no copy → no drift). Against the committed `Blue Sky` PDF it reconstructs all
+**165 bars** with the correct progression (verse `E A A E E A A E`, the `B` at
+section turns, `C#m`/`F#m7` bridge), and the tempo-`100` spike token is correctly
+dropped. `npm run tokens` dumps the raw stream for the diff above.
+
+What that harness still does **not** reach (genuinely browser-only, smoke-test on
+real hardware): loading `pdf.min.js` from cdnjs + setting `workerSrc`; the
+`<input type=file>` → `File.arrayBuffer()` read; and the PDF.js **web-worker**
+path (the harness runs on the main thread).
+
+Note: the source file is `TabDecoderPro.tsx` (this doc historically said `.jsx`);
+a `.txt` mirror of the same source also sits in the repo root.
 
 PDF.js is loaded from cdnjs (`pdf.min.js` 3.11.174 + matching worker). If you
 move to a bundler, switch to the npm `pdfjs-dist` package and set `workerSrc`
@@ -146,7 +164,10 @@ accordingly.
 - **Path A**: the Python reference parser reconstructs **all 165 measures** of
   Blue Sky with the correct progression — verse I–IV (`E | A | A | E …`), the V
   chord (`B`) at section turns, and a bridge with `C#m` / `F#m7`. If a parser
-  change drops the bar count or mangles the progression, it regressed.
+  change drops the bar count or mangles the progression, it regressed. This same
+  check now runs headlessly in JS over the real PDF: `cd tests && npm test`
+  (asserts the bar count, verse, V chord, and bridge; exits non-zero on
+  regression).
 
 ## Session conventions
 
