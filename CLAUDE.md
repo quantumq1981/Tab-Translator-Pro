@@ -137,6 +137,60 @@ The PDF panel has a **Chart / Grid** toggle: *Chart* is the lead sheet (chords o
 their beat, barlines, tap a chord to inspect its voicing); *Grid* is the original
 compact one-symbol-per-bar card grid. Both feed the same engine.
 
+## Path C — MusicXML import (`parseMusicXML`)
+
+**Why this exists / the time-signature story.** PDF time-signature auto-detection
+is *not possible* from the alphaTab text layer: the meter (and clef) glyphs are
+in a music-notation font whose characters have **no Unicode mapping**, so
+`getTextContent()` returns them as empty strings — only the fret/measure digits
+are real text. (Verified on the Blue Sky PDF: meter font `g_d0_f4`, ~1677 glyphs,
+all empty `.str`.) Reading meter would require OMR on glyph shapes = Path B. The
+honest fix is to ingest a format that *states* the meter: **MusicXML**.
+
+`parseMusicXML(xml, useSharp)` reads `<time>` (meter), `<staff-tuning>` (tuning)
+and every note's `<duration>`/`<pitch>`/`<string>`+`<fret>` — so **meter, tuning
+and beat placement are EXACT**; only the chord *symbol* is inferred, by running
+each onset's simultaneous MIDI pitches through the same engine
+(`symbolForMidis`). Guitar Pro files aren't parsed natively (binary/zip → would
+need alphaTab, a dep we don't take); instead users export GP → MusicXML.
+
+Key parser facts (don't regress):
+- Uses the browser's built-in **`DOMParser`** → zero new app deps. Iterate
+  `measure.childNodes` **in document order** (not `getElementsByTagName` per tag)
+  so note/`<backup>`/`<forward>` timing interleaves correctly.
+- Onset model: a note advances `cursor` by its `<duration>`; a `<chord/>` note
+  shares the previous note's onset and does **not** advance. `divisions` is
+  divisions-per-quarter; `beat = round(onset / (divisions·4/beatType))`.
+- MIDI from `<pitch>`: `(octave+1)·12 + step + alter` (E2 = 40, matches `TUNINGS`).
+  Fret-only fallback: `<string>` numbering is **1 = highest string** (engIdx =
+  `6 − string`), whereas `<staff-tuning line>` is **1 = bottom = lowest string**
+  (engIdx = `line − 1`). Two different conventions on purpose — both map to the
+  engine's 0 = low E.
+- Output is the **same score shape** as `buildScore`
+  (`{ timeSig, bars:[{ number, timeSig, events:[{symbol,beat,durBeats,midis,frets}] }] }`),
+  but with **per-bar `timeSig`** so a mid-tune meter change renders correctly.
+
+## Shared ChartPanel — editing, transpose, export
+
+Both chart modes feed one `ChartPanel`. Anything that reads/writes a score does so
+through the shared shape, so these work identically for Path A and Path C:
+- **Editable chords**: tap-to-relabel in *Edit* mode writes an `overrides` map
+  (`"<bar>.<beat>" → symbol`), lifted to the parent so it survives view/transpose
+  switches and flows into export. Blank reverts to the detected symbol; edits are
+  marked `*`.
+- **Transpose** (`transposeScore(score, n, useSharp)`): shifts every event's MIDI
+  by `n` and lets the engine **re-name** the chord (spelling follows the ♯/♭
+  toggle for free). Frets are dropped (position-specific); readouts fall back to
+  the transposed pitches. `n === 0` is a passthrough.
+- **Export**: `scoreToChordPro` (grid) and `scoreToABC`. ABC emits the actual
+  chord tones as notes **plus** the symbol as a guitar-chord annotation, so the
+  output is real, *playable* music (validated by playing it). Both honour
+  `overrides` and the current transpose. ABC handles mid-tune meter via `[M:n/m]`.
+
+`midiToAbc`/`abcDur` invariants: middle C (C4 = 60) is ABC `C`, C5 is `c`; ABC
+duration is a reduced fraction of `L:1/4` (`durBeats·4/beatType`), so simple
+meters stay integers and 6/8-style beats become `/2`.
+
 ## Path B (scans / photos) — OUT OF SCOPE
 
 Raster tab (a photo or scanned page) has no text layer and needs an OMR/Vision
@@ -197,6 +251,18 @@ accordingly.
   beats, per-bar durations summing to 4, and the bridge turn (bar 126 =
   `B C#m A`) landing as three chords on rising beats. Bar 26 (`B C#m`) places
   `B` on beats 1–2 and `C#m` on beats 3–4.
+- **Path C (MusicXML)**: `npm test` parses `tests/fixtures/sample.musicxml` and
+  asserts Standard tuning (from `<staff-tuning>`), 3 bars `C G | Am | F`, beats
+  (C beat 1 / G beat 3 in 4/4), the **mid-tune 3/4 change** in bar 3, real MIDI
+  carried through (`[48,52,55]`), and the pitch-less fret-only note resolving via
+  the tuning. The headless harness installs `@xmldom/xmldom` as a **test-only**
+  `DOMParser` (the app uses the browser's) so the exact source runs — the app
+  stays zero-dependency.
+- **Export / transpose**: `npm test` asserts `scoreToChordPro` / `scoreToABC`
+  reflect an edit override (`{"2.0":"A7"}`), the ABC header + `[M:3/4]` change +
+  `[C,E,G,]` voicing, and `transposeScore(+2)` re-recognising `C G | Am | F` →
+  `D A | Bm | G` (and `n=0` passthrough). The ABC was additionally confirmed
+  *playable* via the play-sheet-music tool.
 
 ## Session conventions
 

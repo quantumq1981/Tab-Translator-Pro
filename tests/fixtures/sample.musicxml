@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 3.1 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">
+<!--
+  Tab Decoder · Path C fixture. Hand-written, deliberately small:
+    bar 1 (4/4): C major (half) then G major (half)
+    bar 2 (4/4): A minor (whole)
+    bar 3 (3/4): F major (dotted half)  <- exercises a mid-tune meter change
+  Standard-tuning staff-tuning is declared. Two notes carry only <technical>
+  string/fret (no <pitch>) to exercise the fret->midi fallback.
+-->
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Guitar</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>4</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <clef><sign>TAB</sign><line>5</line></clef>
+        <staff-details>
+          <staff-tuning line="1"><tuning-step>E</tuning-step><tuning-octave>2</tuning-octave></staff-tuning>
+          <staff-tuning line="2"><tuning-step>A</tuning-step><tuning-octave>2</tuning-octave></staff-tuning>
+          <staff-tuning line="3"><tuning-step>D</tuning-step><tuning-octave>3</tuning-octave></staff-tuning>
+          <staff-tuning line="4"><tuning-step>G</tuning-step><tuning-octave>3</tuning-octave></staff-tuning>
+          <staff-tuning line="5"><tuning-step>B</tuning-step><tuning-octave>3</tuning-octave></staff-tuning>
+          <staff-tuning line="6"><tuning-step>E</tuning-step><tuning-octave>4</tuning-octave></staff-tuning>
+        </staff-details>
+      </attributes>
+      <note>
+        <pitch><step>C</step><octave>3</octave></pitch>
+        <duration>8</duration><type>half</type>
+        <notations><technical><string>5</string><fret>3</fret></technical></notations>
+      </note>
+      <note>
+        <chord/>
+        <duration>8</duration><type>half</type>
+        <notations><technical><string>4</string><fret>2</fret></technical></notations>
+      </note>
+      <note>
+        <chord/>
+        <pitch><step>G</step><octave>3</octave></pitch>
+        <duration>8</duration><type>half</type>
+        <notations><technical><string>3</string><fret>0</fret></technical></notations>
+      </note>
+      <note>
+        <pitch><step>G</step><octave>3</octave></pitch>
+        <duration>8</duration><type>half</type>
+      </note>
+      <note>
+        <chord/>
+        <pitch><step>B</step><octave>3</octave></pitch>
+        <duration>8</duration><type>half</type>
+      </note>
+      <note>
+        <chord/>
+        <pitch><step>D</step><octave>4</octave></pitch>
+        <duration>8</duration><type>half</type>
+      </note>
+    </measure>
+    <measure number="2">
+      <note>
+        <pitch><step>A</step><octave>2</octave></pitch>
+        <duration>16</duration><type>whole</type>
+      </note>
+      <note>
+        <chord/>
+        <pitch><step>C</step><octave>3</octave></pitch>
+        <duration>16</duration><type>whole</type>
+      </note>
+      <note>
+        <chord/>
+        <pitch><step>E</step><octave>3</octave></pitch>
+        <duration>16</duration><type>whole</type>
+      </note>
+      <note>
+        <chord/>
+        <pitch><step>A</step><octave>3</octave></pitch>
+        <duration>16</duration><type>whole</type>
+      </note>
+    </measure>
+    <measure number="3">
+      <attributes>
+        <time><beats>3</beats><beat-type>4</beat-type></time>
+      </attributes>
+      <note>
+        <pitch><step>F</step><octave>3</octave></pitch>
+        <duration>12</duration><type>half</type><dot/>
+      </note>
+      <note>
+        <chord/>
+        <pitch><step>A</step><octave>3</octave></pitch>
+        <duration>12</duration><type>half</type><dot/>
+      </note>
+      <note>
+        <chord/>
+        <pitch><step>C</step><octave>4</octave></pitch>
+        <duration>12</duration><type>half</type><dot/>
+      </note>
+    </measure>
+  </part>
+</score-partwise>
