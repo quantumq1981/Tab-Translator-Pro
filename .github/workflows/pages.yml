@@ -32,7 +32,12 @@ jobs:
           cp index.html _site/
           cp TabDecoderPro.tsx _site/
 
+      # enablement: true turns Pages on (source = GitHub Actions) using the
+      # workflow's `pages: write` permission, so no manual Settings toggle is
+      # needed for the first deploy.
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
