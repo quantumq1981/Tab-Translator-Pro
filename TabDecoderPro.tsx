@@ -221,6 +221,18 @@ function buildChart(tokens) {
       for (const d of staffNotes) { if (cc.length && d.x - cc[cc.length - 1].x > colGap) { cols.push(cc); cc = []; } cc.push(d); }
       if (cc.length) cols.push(cc);
 
+      // Horizontal extent of each bar in this system: from its measure-number
+      // mark to the next mark (last bar runs to the system's right edge). Used
+      // downstream to quantise chord onsets onto beats; purely additive.
+      const sysRightX = staffNotes.length ? staffNotes[staffNotes.length - 1].x : null;
+      const markExt = new Map();
+      marks.forEach((mk, i) => {
+        const startX = mk.x;
+        const endX = i + 1 < marks.length ? marks[i + 1].x
+          : (sysRightX != null ? sysRightX + colGap : startX + colGap * 4);
+        markExt.set(mk.num, { startX, endX });
+      });
+
       cols.forEach((col) => {
         const cx = Math.min(...col.map((d) => d.x));
         const frets = {};
@@ -236,7 +248,11 @@ function buildChart(tokens) {
         if (meas == null) return;
         columnsFound++;
         if (!measures.has(meas)) measures.set(meas, { number: meas, columns: [] });
-        measures.get(meas).columns.push({ x: cx, frets });
+        const mo = measures.get(meas);
+        mo.columns.push({ x: cx, frets });
+        if (mo.startX === undefined && markExt.has(meas)) {
+          const e = markExt.get(meas); mo.startX = e.startX; mo.endX = e.endX;
+        }
       });
     });
   });
@@ -244,6 +260,38 @@ function buildChart(tokens) {
   const list = [...measures.values()].sort((a, b) => a.number - b.number);
   list.forEach((m) => m.columns.sort((a, b) => a.x - b.x));
   return { measures: list, systemsFound, columnsFound };
+}
+
+/* ---- score model: chords placed on beats within each bar -----------------
+ * Turns the geometric chart into a lead-sheet-shaped score. Consecutive
+ * identical symbols collapse to one event (the chord's onset). Each onset's x
+ * is quantised onto a beat using the bar's horizontal extent (Invariant: the
+ * bar's FIRST chord is the downbeat). 4/4 is assumed — time-signature detection
+ * from the PDF is a clean future task. Durations fill to the next onset.
+ * ------------------------------------------------------------------------- */
+function buildScore(chart, useSharp, beatsPerBar = 4) {
+  const bars = chart.measures.map((m) => {
+    const events = [];
+    m.columns.forEach((c) => {
+      const symbol = symbolForFrets(c.frets, useSharp);
+      const last = events[events.length - 1];
+      if (!last || last.symbol !== symbol) events.push({ symbol, frets: c.frets, x: c.x });
+    });
+    const haveExt = typeof m.startX === "number" && typeof m.endX === "number" && m.endX > m.startX;
+    const width = haveExt ? m.endX - m.startX : 0;
+    events.forEach((e, i) => {
+      let b = i === 0 ? 0                                   // bar's first chord = downbeat
+        : haveExt ? Math.round(((e.x - m.startX) / width) * beatsPerBar)
+        : i;                                               // no geometry → just sequence
+      e.beat = Math.max(0, Math.min(beatsPerBar - 1, b));
+    });
+    for (let i = 1; i < events.length; i++)                // keep beats strictly increasing
+      if (events[i].beat <= events[i - 1].beat)
+        events[i].beat = Math.min(beatsPerBar - 1, events[i - 1].beat + 1);
+    events.forEach((e, i) => { e.durBeats = (i + 1 < events.length ? events[i + 1].beat : beatsPerBar) - e.beat; });
+    return { number: m.number, events: events.map(({ x, ...e }) => e) };
+  });
+  return { timeSig: [beatsPerBar, 4], bars };
 }
 async function extractTokens(buf) {
   const pdfjsLib = window.pdfjsLib;
@@ -280,6 +328,7 @@ export default function TabDecoderPro() {
   const [chart, setChart] = useState(null);
   const [selFrets, setSelFrets] = useState(null);
   const [selKey, setSelKey] = useState("");
+  const [pdfView, setPdfView] = useState("chart"); // "chart" = lead sheet, "grid" = compact cards
   const fileRef = useRef(null);
 
   useEffect(() => {
@@ -331,6 +380,8 @@ export default function TabDecoderPro() {
       return { number: m.number, collapsed, columns: m.columns };
     });
   }, [chart, useSharp]);
+
+  const scoreView = useMemo(() => (chart ? buildScore(chart, useSharp) : null), [chart, useSharp]);
 
   const names = useSharp ? NOTE_SHARP : NOTE_FLAT;
   const symbol = symbolOf(result, useSharp);
@@ -441,26 +492,62 @@ export default function TabDecoderPro() {
 
                 {chartView && (
                   <>
-                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: C.dim, margin: "14px 0 10px" }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, fontSize: 11, color: C.dim, margin: "14px 0 10px" }}>
                       <span style={{ color: C.text }}>{chart.fileName}</span>
-                      <span>{chartView.length} bars · {chart.systemsFound} systems · {chart.pages} pp</span>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span>{chartView.length} bars · {chart.systemsFound} systems · {chart.pages} pp</span>
+                        <div style={{ display: "flex", gap: 4 }}>
+                          {[["chart", "Chart"], ["grid", "Grid"]].map(([v, lbl]) => (
+                            <button key={v} onClick={() => setPdfView(v)}
+                              style={{ ...chip(C), padding: "3px 9px", borderColor: pdfView === v ? C.amber : C.border, color: pdfView === v ? C.amber : C.dim }}>{lbl}</button>
+                          ))}
+                        </div>
+                      </div>
                     </div>
-                    <div className="tdp-scroll" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(74px, 1fr))", gap: 6, maxHeight: 460, overflow: "auto", paddingRight: 4 }}>
-                      {chartView.map((m) => {
-                        const k = `${m.number}`;
-                        const isSel = selKey === k;
-                        return (
-                          <button key={k} className="meas" onClick={() => { setSelFrets(m.columns[0] ? m.columns[0].frets : null); setSelKey(k); }}
-                            style={{ position: "relative", background: C.bg, border: `1px solid ${isSel ? C.amber : C.border}`, borderRadius: 8, padding: "10px 4px 8px", cursor: "pointer", minHeight: 56, textAlign: "center" }}>
-                            <span style={{ position: "absolute", top: 3, left: 6, fontSize: 9, color: C.dim }}>{m.number}</span>
-                            <div style={{ marginTop: 6, fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: m.collapsed.join(" ").length > 6 ? 13 : 17, color: C.cyan, lineHeight: 1.15 }}>
-                              {m.collapsed.join(" ")}
+
+                    {pdfView === "chart" ? (
+                      <>
+                        <div className="tdp-scroll" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(146px, 1fr))", gap: "10px 0", maxHeight: 460, overflow: "auto", paddingRight: 4 }}>
+                          {scoreView.bars.map((bar) => (
+                            <div key={bar.number} style={{ position: "relative", borderLeft: `2px solid ${C.border}`, padding: "16px 8px 6px 10px", minHeight: 44 }}>
+                              <span style={{ position: "absolute", top: 2, left: 10, fontSize: 9, color: C.dim }}>{bar.number}</span>
+                              <div style={{ display: "grid", gridTemplateColumns: `repeat(${scoreView.timeSig[0]}, 1fr)`, alignItems: "center", columnGap: 2, minHeight: 24 }}>
+                                {bar.events.map((e, i) => {
+                                  const k = `${bar.number}.${e.beat}`;
+                                  const isSel = selKey === k;
+                                  return (
+                                    <button key={i} onClick={() => { setSelFrets(e.frets); setSelKey(k); }} title={`beat ${e.beat + 1}`}
+                                      style={{ gridColumn: `${e.beat + 1} / span ${Math.max(1, e.durBeats)}`, justifySelf: "start", background: "transparent", border: "none", borderBottom: isSel ? `2px solid ${C.amber}` : "2px solid transparent", padding: "0 2px", cursor: "pointer", color: isSel ? C.amber : C.cyan, fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: e.symbol.length > 4 ? 13 : 16, lineHeight: 1.2 }}>
+                                      {e.symbol}
+                                    </button>
+                                  );
+                                })}
+                              </div>
                             </div>
-                          </button>
-                        );
-                      })}
-                    </div>
-                    <div style={{ fontSize: 11, color: C.dim, marginTop: 8 }}>Tap any bar to inspect its voicing in the readout →</div>
+                          ))}
+                        </div>
+                        <div style={{ fontSize: 11, color: C.dim, marginTop: 8 }}>Lead sheet · 4/4 assumed · chords sit on the beat they change. Tap a chord to inspect its voicing →</div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="tdp-scroll" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(74px, 1fr))", gap: 6, maxHeight: 460, overflow: "auto", paddingRight: 4 }}>
+                          {chartView.map((m) => {
+                            const k = `${m.number}`;
+                            const isSel = selKey === k;
+                            return (
+                              <button key={k} className="meas" onClick={() => { setSelFrets(m.columns[0] ? m.columns[0].frets : null); setSelKey(k); }}
+                                style={{ position: "relative", background: C.bg, border: `1px solid ${isSel ? C.amber : C.border}`, borderRadius: 8, padding: "10px 4px 8px", cursor: "pointer", minHeight: 56, textAlign: "center" }}>
+                                <span style={{ position: "absolute", top: 3, left: 6, fontSize: 9, color: C.dim }}>{m.number}</span>
+                                <div style={{ marginTop: 6, fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: m.collapsed.join(" ").length > 6 ? 13 : 17, color: C.cyan, lineHeight: 1.15 }}>
+                                  {m.collapsed.join(" ")}
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <div style={{ fontSize: 11, color: C.dim, marginTop: 8 }}>Tap any bar to inspect its voicing in the readout →</div>
+                      </>
+                    )}
                   </>
                 )}
               </>
