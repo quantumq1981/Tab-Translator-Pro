@@ -11,6 +11,7 @@ component (`TabDecoderPro.tsx`) and transpiles it in the browser, with
 dependencies loaded from a CDN at runtime (the same pattern the PDF mode already
 uses for PDF.js). Pushes to `main` redeploy via `.github/workflows/pages.yml`.
 
-**One-time setup:** in the repo's **Settings → Pages → Build and deployment**,
-set **Source** to **GitHub Actions**. The workflow handles every deploy after
-that.
+The workflow enables Pages itself (`configure-pages` with `enablement: true`),
+so no manual Settings toggle is required. If your org/repo policy blocks that,
+set **Settings → Pages → Build and deployment → Source** to **GitHub Actions**
+once and re-run the workflow.
