@@ -4,12 +4,20 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
  *  TAB DECODER · TabTranslator Pro  —  functional prototype  (v0.2)
  *  Single-file React component. Pure-JS recognition engine, zero build step.
  *
- *  Two input modes:
+ *  Three input modes (one shared recognition engine):
  *   • MANUAL  — paste / pick an ASCII tab slice, analyse one chord block.
  *   • PDF CHART (Path A) — upload a *digital* (alphaTab-rendered) tab PDF; the
  *     parser reconstructs string/column geometry from text positions, runs every
- *     chord column through the SAME engine, and renders a one-chord-per-bar chart
- *     (consecutive identical symbols inside a bar are collapsed).
+ *     chord column through the SAME engine, and renders a lead-sheet / grid chart
+ *     (consecutive identical symbols inside a bar are collapsed). 4/4 + standard
+ *     tuning are ASSUMED — the PDF text layer carries no meter/tuning we can read.
+ *   • MUSICXML (Path C) — upload a MusicXML score; meter, tuning and rhythm are
+ *     read *exactly* from the file (no geometry guessing), only chord *symbols*
+ *     are inferred via the same engine. Guitar Pro / MuseScore export MusicXML.
+ *
+ *  Both chart modes share one ChartPanel: lead-sheet / grid views, inline chord
+ *  re-labelling (overrides), whole-chart transpose, and ChordPro / ABC export
+ *  (ABC emits real playable notes + chord symbols).
  *
  *  Path A is for PDFs whose fret numbers are real text (e.g. anything exported
  *  from chord-sheet-maker-pro / alphaTab). Scanned/photographed tab (raster) is
@@ -157,6 +165,21 @@ function symbolForFrets(fretsByEng, useSharp) {
   const norm = normalise(midi);
   return symbolOf(recognise(norm.chroma, norm.chordMask, norm.bassPc), useSharp);
 }
+// a set of absolute MIDI notes → chord symbol (used by the MusicXML path, where
+// pitch is explicit so no tuning/fret round-trip is needed)
+function symbolForMidis(midis, useSharp) {
+  const notes = [...new Set(midis)].sort((a, b) => a - b).map((m) => ({ midi: m }));
+  const norm = normalise(notes);
+  return symbolOf(recognise(norm.chroma, norm.chordMask, norm.bassPc), useSharp);
+}
+// frets (engine-keyed, standard tuning) → absolute MIDI list. Lets the PDF path
+// carry real pitches into export/playback the same way the MusicXML path does.
+function fretsToMidis(fretsByEng) {
+  return Object.entries(fretsByEng)
+    .map(([si, fret]) => { const open = TUNINGS.Standard[+si]; return open === undefined ? null : open + fret; })
+    .filter((m) => m != null)
+    .sort((a, b) => a - b);
+}
 
 /* ============================================================================
  *  PATH A — digital PDF parser (PDF.js text positions → chord chart)
@@ -275,7 +298,7 @@ function buildScore(chart, useSharp, beatsPerBar = 4) {
     m.columns.forEach((c) => {
       const symbol = symbolForFrets(c.frets, useSharp);
       const last = events[events.length - 1];
-      if (!last || last.symbol !== symbol) events.push({ symbol, frets: c.frets, x: c.x });
+      if (!last || last.symbol !== symbol) events.push({ symbol, frets: c.frets, midis: fretsToMidis(c.frets), x: c.x });
     });
     const haveExt = typeof m.startX === "number" && typeof m.endX === "number" && m.endX > m.startX;
     const width = haveExt ? m.endX - m.startX : 0;
@@ -293,6 +316,179 @@ function buildScore(chart, useSharp, beatsPerBar = 4) {
   });
   return { timeSig: [beatsPerBar, 4], bars };
 }
+
+/* ============================================================================
+ *  PATH C — MusicXML import  (explicit meter + tuning + rhythm, no recognition
+ *  of geometry needed). MusicXML encodes <time>, <staff-tuning> and every
+ *  note's <duration>/<pitch>/<string>+<fret>, so meter, tuning and beat
+ *  placement are EXACT — only the chord *symbol* is inferred, by running each
+ *  onset's simultaneous pitches through the same engine. Guitar Pro files can
+ *  be exported to MusicXML, so this covers them too. Uses the browser's built-in
+ *  DOMParser — zero new app dependencies.
+ *
+ *  Output is the SAME score shape buildScore produces:
+ *    { source, timeSig:[beats,beatType], tuning, bars:[{ number, timeSig,
+ *      events:[{ symbol, beat, durBeats, midis, frets }] }] }
+ *  so the lead-sheet / grid renderer and the exporters are shared across paths.
+ * ==========================================================================*/
+const STEP_SEMI = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+const _xEls = (parent, tag) => (parent ? Array.from(parent.getElementsByTagName(tag)) : []);
+const _xFirst = (parent, tag) => { const e = _xEls(parent, tag); return e.length ? e[0] : null; };
+const _xText = (el) => (el && el.textContent != null ? String(el.textContent).trim() : "");
+const _xChildText = (parent, tag) => _xText(_xFirst(parent, tag));
+function _pitchToMidi(p) {
+  const step = _xChildText(p, "step");
+  const alter = parseInt(_xChildText(p, "alter") || "0", 10) || 0;
+  const oct = parseInt(_xChildText(p, "octave") || "4", 10);
+  if (!(step in STEP_SEMI)) return null;
+  return (oct + 1) * 12 + STEP_SEMI[step] + alter;
+}
+function _parseTuning(staffTunings) {
+  const arr = [];
+  staffTunings.forEach((st) => {
+    const line = parseInt(st.getAttribute("line") || "0", 10); // line 1 = bottom = low string
+    const step = _xChildText(st, "tuning-step");
+    const oct = parseInt(_xChildText(st, "tuning-octave") || "0", 10);
+    const alter = parseInt(_xChildText(st, "tuning-alter") || "0", 10) || 0;
+    if (line >= 1 && line <= 6 && step in STEP_SEMI) arr[line - 1] = (oct + 1) * 12 + STEP_SEMI[step] + alter;
+  });
+  return arr.length === 6 && arr.every((v) => typeof v === "number") ? arr : null;
+}
+function _tuningName(arr) {
+  if (!arr) return "Standard";
+  for (const [n, t] of Object.entries(TUNINGS)) if (t.every((v, i) => v === arr[i])) return n;
+  return "Custom";
+}
+function parseMusicXML(xml, useSharp = true) {
+  const doc = new DOMParser().parseFromString(xml, "text/xml");
+  if (_xEls(doc, "parsererror").length) throw new Error("Not valid XML.");
+  const part = _xFirst(doc, "part");
+  if (!part) throw new Error("No <part> found — is this a MusicXML score?");
+
+  let divisions = 1, beats = 4, beatType = 4, tuning = null;
+  const bars = [];
+  _xEls(part, "measure").forEach((measure, mi) => {
+    let cursor = 0, lastOnset = 0;
+    const onsets = new Map(); // onset(div) -> { midis:[], frets:{} }
+    for (let node = measure.firstChild; node; node = node.nextSibling) {
+      if (node.nodeType !== 1) continue;
+      const tag = node.nodeName;
+      if (tag === "attributes") {
+        const d = _xChildText(node, "divisions"); if (d) divisions = parseInt(d, 10) || divisions;
+        const t = _xFirst(node, "time");
+        if (t) { const b = _xChildText(t, "beats"), bt = _xChildText(t, "beat-type"); if (b) beats = parseInt(b, 10) || beats; if (bt) beatType = parseInt(bt, 10) || beatType; }
+        const sts = _xEls(node, "staff-tuning"); if (sts.length) { const tu = _parseTuning(sts); if (tu) tuning = tu; }
+      } else if (tag === "note") {
+        if (_xFirst(node, "grace")) continue;
+        const dur = parseInt(_xChildText(node, "duration") || "0", 10) || 0;
+        const isChord = !!_xFirst(node, "chord");
+        const isRest = !!_xFirst(node, "rest");
+        const onset = isChord ? lastOnset : cursor;
+        if (!isChord) { lastOnset = cursor; cursor += dur; }
+        if (isRest) continue;
+        let midi = null, eng = null, fret = null;
+        const p = _xFirst(node, "pitch"); if (p) midi = _pitchToMidi(p);
+        const tech = _xFirst(node, "technical");
+        if (tech) {
+          const sNum = parseInt(_xChildText(tech, "string"), 10);
+          const f = parseInt(_xChildText(tech, "fret"), 10);
+          if (!isNaN(sNum) && !isNaN(f)) { eng = 6 - sNum; fret = f; if (midi == null) { const open = (tuning || TUNINGS.Standard)[eng]; if (open != null) midi = open + f; } }
+        }
+        if (midi == null) continue;
+        if (!onsets.has(onset)) onsets.set(onset, { midis: [], frets: {} });
+        const o = onsets.get(onset); o.midis.push(midi); if (eng != null && o.frets[eng] === undefined) o.frets[eng] = fret;
+      } else if (tag === "backup") { cursor -= parseInt(_xChildText(node, "duration") || "0", 10) || 0; }
+      else if (tag === "forward") { cursor += parseInt(_xChildText(node, "duration") || "0", 10) || 0; }
+    }
+    const divPerBeat = (divisions * 4) / beatType || divisions;
+    const raw = [...onsets.entries()].sort((a, b2) => a[0] - b2[0]).map(([onset, o]) => ({
+      symbol: symbolForMidis(o.midis, useSharp), midis: [...o.midis].sort((a, b2) => a - b2), frets: o.frets, onset,
+    }));
+    const events = [];
+    raw.forEach((e) => { const last = events[events.length - 1]; if (!last || last.symbol !== e.symbol) events.push(e); });
+    events.forEach((e) => { e.beat = Math.max(0, Math.min(beats - 1, Math.round(e.onset / divPerBeat))); });
+    for (let i = 1; i < events.length; i++) if (events[i].beat <= events[i - 1].beat) events[i].beat = Math.min(beats - 1, events[i - 1].beat + 1);
+    events.forEach((e, i) => { e.durBeats = (i + 1 < events.length ? events[i + 1].beat : beats) - e.beat; });
+    const number = parseInt(measure.getAttribute("number") || String(mi + 1), 10);
+    bars.push({ number, timeSig: [beats, beatType], events: events.map(({ onset, ...e }) => e) });
+  });
+  return { source: "musicxml", timeSig: bars.length ? bars[0].timeSig : [beats, beatType], tuning: _tuningName(tuning), bars };
+}
+
+/* ---- exporters: a score → ChordPro grid / ABC (chords + playable notes) ----
+ * Both accept an `overrides` map ({ "<bar>.<beat>": "Symbol" }) so user edits
+ * flow straight into the exported text. ABC emits the actual chord tones as
+ * notes (with the symbol as a guitar-chord annotation) so the result is real,
+ * playable music — that's what the in-app preview / play-sheet-music consume.
+ * ------------------------------------------------------------------------- */
+const _ovSym = (bar, e, ov) => (ov && ov[`${bar.number}.${e.beat}`] != null ? ov[`${bar.number}.${e.beat}`] : e.symbol);
+const _ABC_LTR = ["C", "C", "D", "D", "E", "F", "F", "G", "G", "A", "A", "B"];
+const _ABC_ACC = ["", "^", "", "^", "", "", "^", "", "^", "", "^", ""];
+function midiToAbc(m) {
+  const pc = ((m % 12) + 12) % 12, oct = Math.floor(m / 12) - 1;
+  let note = _ABC_LTR[pc];
+  if (oct >= 5) { note = note.toLowerCase(); for (let o = 6; o <= oct; o++) note += "'"; }
+  else { for (let o = oct; o < 4; o++) note += ","; }
+  return _ABC_ACC[pc] + note;
+}
+const _gcd = (a, b) => { a = Math.abs(a); b = Math.abs(b); while (b) { const t = b; b = a % b; a = t; } return a || 1; };
+function abcDur(durBeats, beatType) {
+  let num = durBeats * 4, den = beatType; const g = _gcd(num, den); num /= g; den /= g;
+  if (den === 1) return num === 1 ? "" : String(num);
+  return (num === 1 ? "" : String(num)) + "/" + den;
+}
+const _abcChordName = (s) => s.replace(/♭/g, "b").replace(/♯/g, "#").replace(/"/g, "");
+function scoreToABC(score, opts = {}) {
+  const ov = opts.overrides || {};
+  const [b0, bt0] = score.timeSig;
+  const out = ["X:1", `T:${opts.title || "Tab Decoder chart"}`, `M:${b0}/${bt0}`, "L:1/4", "K:C"];
+  let curSig = `${b0}/${bt0}`, body = "";
+  score.bars.forEach((bar, bi) => {
+    const [bb, bt] = bar.timeSig || score.timeSig;
+    const sig = `${bb}/${bt}`;
+    let cell = "";
+    if (sig !== curSig) { cell += `[M:${sig}]`; curSig = sig; }
+    bar.events.forEach((e) => {
+      const dur = abcDur(e.durBeats, bt);
+      const inner = e.midis && e.midis.length ? `[${e.midis.map(midiToAbc).join("")}]${dur}` : `z${dur}`;
+      cell += `"${_abcChordName(_ovSym(bar, e, ov))}"${inner} `;
+    });
+    body += cell.trim() + " |";
+    body += (bi + 1) % 4 === 0 ? "\n" : " ";
+  });
+  out.push(body.trim());
+  return out.join("\n") + "\n";
+}
+function scoreToChordPro(score, opts = {}) {
+  const ov = opts.overrides || {};
+  const [b, bt] = score.timeSig;
+  const out = [`{title: ${opts.title || "Tab Decoder chart"}}`, `{time: ${b}/${bt}}`, "{start_of_grid}"];
+  let row = [];
+  score.bars.forEach((bar, bi) => {
+    row.push(bar.events.map((e) => _ovSym(bar, e, ov)).join(" "));
+    if ((bi + 1) % 4 === 0) { out.push("| " + row.join(" | ") + " |"); row = []; }
+  });
+  if (row.length) out.push("| " + row.join(" | ") + " |");
+  out.push("{end_of_grid}");
+  return out.join("\n") + "\n";
+}
+
+/* Transpose a whole score by n semitones. Shifts every event's MIDI and lets the
+ * engine re-name the chord (so spelling follows the sharp/flat setting for free).
+ * Frets are dropped — they're tuning/position-specific — so downstream readouts
+ * fall back to the transposed pitches. n === 0 is a no-op passthrough. */
+function transposeScore(score, n, useSharp) {
+  if (!n) return score;
+  const bars = score.bars.map((b) => ({
+    ...b,
+    events: b.events.map((e) => {
+      const midis = (e.midis || []).map((m) => m + n);
+      return { ...e, midis, frets: undefined, symbol: midis.length ? symbolForMidis(midis, useSharp) : e.symbol };
+    }),
+  }));
+  return { ...score, bars, transposedBy: n };
+}
+
 async function extractTokens(buf) {
   const pdfjsLib = window.pdfjsLib;
   const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
@@ -327,9 +523,14 @@ export default function TabDecoderPro() {
   const [pdfBusy, setPdfBusy] = useState(false);
   const [chart, setChart] = useState(null);
   const [selFrets, setSelFrets] = useState(null);
+  const [selMidis, setSelMidis] = useState(null);
   const [selKey, setSelKey] = useState("");
-  const [pdfView, setPdfView] = useState("chart"); // "chart" = lead sheet, "grid" = compact cards
+  const [overrides, setOverrides] = useState({}); // "<bar>.<beat>" -> user-edited symbol
+  const [xmlScore, setXmlScore] = useState(null);
+  const [xmlErr, setXmlErr] = useState("");
+  const [xmlName, setXmlName] = useState("");
   const fileRef = useRef(null);
+  const xmlRef = useRef(null);
 
   useEffect(() => {
     if (window.pdfjsLib) { setPdfReady(true); return; }
@@ -340,10 +541,12 @@ export default function TabDecoderPro() {
     document.body.appendChild(s);
   }, []);
 
+  const clearSel = () => { setSelFrets(null); setSelMidis(null); setSelKey(""); setOverrides({}); };
+
   const onFile = async (e) => {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
-    setPdfErr(""); setPdfBusy(true); setChart(null); setSelFrets(null); setSelKey("");
+    setPdfErr(""); setPdfBusy(true); setChart(null); clearSel();
     try {
       const buf = await f.arrayBuffer();
       const { tokens, pages } = await extractTokens(buf);
@@ -355,6 +558,27 @@ export default function TabDecoderPro() {
     } finally { setPdfBusy(false); }
   };
 
+  const onXml = async (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    setXmlErr(""); setXmlScore(null); clearSel();
+    try {
+      const text = await f.text();
+      const sc = parseMusicXML(text, useSharp); sc._xml = text;
+      if (!sc.bars.length) setXmlErr("No measures found. Is this a MusicXML score (.musicxml / .xml)?");
+      setXmlScore(sc); setXmlName(f.name);
+    } catch (err) {
+      setXmlErr("Parse failed: " + (err && err.message ? err.message : String(err)));
+    }
+  };
+
+  // re-recognise MusicXML symbols when the sharp/flat spelling flips
+  useEffect(() => {
+    setXmlScore((prev) => { if (!prev || !prev._xml) return prev; const next = parseMusicXML(prev._xml, useSharp); next._xml = prev._xml; return next; });
+  }, [useSharp]);
+
+  const pickChord = (key, e) => { setSelKey(key); setSelFrets(e.frets || null); setSelMidis(e.midis || null); };
+
   const tuningArr = TUNINGS[tuningName];
   const parsed = useMemo(() => parseTab(tab), [tab]);
   const blocks = parsed.blocks;
@@ -362,24 +586,20 @@ export default function TabDecoderPro() {
   const manualBlock = blocks[safeIdx];
 
   const displayNotes = useMemo(() => {
-    if (mode === "pdf" && selFrets) {
+    const useFrets = mode === "pdf" && selFrets && Object.keys(selFrets).length;
+    if (useFrets) {
       const notes = Object.entries(selFrets).map(([si, fret]) => ({ stringIndex: +si, fret }));
       return fretToMidi({ notes }, TUNINGS.Standard, 0, useSharp);
     }
+    if (mode !== "manual" && selMidis) {
+      const nm = useSharp ? NOTE_SHARP : NOTE_FLAT;
+      return [...selMidis].sort((a, b) => a - b).map((m) => ({ midi: m, name: nm[m % 12] }));
+    }
     return manualBlock ? fretToMidi(manualBlock, tuningArr, capo, useSharp) : [];
-  }, [mode, selFrets, manualBlock, tuningArr, capo, useSharp]);
+  }, [mode, selFrets, selMidis, manualBlock, tuningArr, capo, useSharp]);
 
   const norm = useMemo(() => normalise(displayNotes), [displayNotes]);
   const result = useMemo(() => recognise(norm.chroma, norm.chordMask, norm.bassPc), [norm]);
-
-  const chartView = useMemo(() => {
-    if (!chart) return null;
-    return chart.measures.map((m) => {
-      const syms = m.columns.map((c) => symbolForFrets(c.frets, useSharp));
-      const collapsed = syms.filter((s, i) => i === 0 || s !== syms[i - 1]);
-      return { number: m.number, collapsed, columns: m.columns };
-    });
-  }, [chart, useSharp]);
 
   const scoreView = useMemo(() => (chart ? buildScore(chart, useSharp) : null), [chart, useSharp]);
 
@@ -418,15 +638,15 @@ export default function TabDecoderPro() {
             <span style={{ color: C.dim, fontSize: 12, letterSpacing: 3 }}>TABTRANSLATOR PRO</span>
           </div>
           <div style={{ display: "flex", gap: 6 }}>
-            {["manual", "pdf"].map((m) => (
-              <button key={m} onClick={() => setMode(m)} style={{ ...toggle(C), padding: "6px 14px", flex: "none", ...(mode === m ? activeToggle(C) : {}) }}>
-                {m === "manual" ? "Manual" : "PDF Chart"}
+            {[["manual", "Manual"], ["pdf", "PDF Chart"], ["xml", "MusicXML"]].map(([m, lbl]) => (
+              <button key={m} onClick={() => { setMode(m); clearSel(); }} style={{ ...toggle(C), padding: "6px 14px", flex: "none", ...(mode === m ? activeToggle(C) : {}) }}>
+                {lbl}
               </button>
             ))}
           </div>
         </header>
 
-        <div style={{ position: "relative", display: "grid", gridTemplateColumns: mode === "pdf" ? "minmax(0,1.25fr) minmax(0,1fr)" : "minmax(0,1fr) minmax(0,1fr)", gap: 16 }}>
+        <div style={{ position: "relative", display: "grid", gridTemplateColumns: mode !== "manual" ? "minmax(0,1.25fr) minmax(0,1fr)" : "minmax(0,1fr) minmax(0,1fr)", gap: 16 }}>
           <section className="panel-rise" style={{ animationDelay: ".05s", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
             {mode === "manual" ? (
               <>
@@ -471,13 +691,13 @@ export default function TabDecoderPro() {
                   {displayNotes.length === 0 && <span style={{ color: C.dim, fontSize: 13 }}>No fretted notes in this block.</span>}
                   {displayNotes.slice().reverse().map((nN, i) => (
                     <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, padding: "4px 10px" }}>
-                      <span style={{ color: C.dim }}>str {nN.stringIndex} · fret {nN.fret}</span>
+                      <span style={{ color: C.dim }}>{nN.stringIndex !== undefined ? `str ${nN.stringIndex} · fret ${nN.fret}` : "note"}</span>
                       <span style={{ color: nN.midi === norm.bassMidi ? C.red : C.text }}>{nN.name}{nN.midi === norm.bassMidi ? "  ← bass" : ""} <span style={{ color: C.dim }}>· midi {nN.midi}</span></span>
                     </div>
                   ))}
                 </div>
               </>
-            ) : (
+            ) : mode === "pdf" ? (
               <>
                 <SectionLabel C={C}>PATH A · DIGITAL TAB PDF → CHORD CHART</SectionLabel>
                 <input ref={fileRef} type="file" accept="application/pdf" onChange={onFile} style={{ display: "none" }} />
@@ -486,76 +706,38 @@ export default function TabDecoderPro() {
                   {!pdfReady ? "loading PDF.js…" : pdfBusy ? "parsing…" : "⬆  Upload a tab PDF  (tap to choose)"}
                 </button>
                 <div style={{ fontSize: 11, color: C.dim, marginTop: 8, lineHeight: 1.6 }}>
-                  For digital tab PDFs (alphaTab / chord-sheet-maker-pro exports). Assumes standard tuning. One symbol per bar; harmony changes inside a bar appear as a sequence.
+                  For digital tab PDFs (alphaTab / chord-sheet-maker-pro exports). Standard tuning &amp; 4/4 assumed. For exact meter &amp; tuning, use the MusicXML tab.
                 </div>
                 {pdfErr && <div style={{ marginTop: 10, color: C.red, fontSize: 12 }}>{pdfErr}</div>}
-
-                {chartView && (
-                  <>
-                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, fontSize: 11, color: C.dim, margin: "14px 0 10px" }}>
-                      <span style={{ color: C.text }}>{chart.fileName}</span>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <span>{chartView.length} bars · {chart.systemsFound} systems · {chart.pages} pp</span>
-                        <div style={{ display: "flex", gap: 4 }}>
-                          {[["chart", "Chart"], ["grid", "Grid"]].map(([v, lbl]) => (
-                            <button key={v} onClick={() => setPdfView(v)}
-                              style={{ ...chip(C), padding: "3px 9px", borderColor: pdfView === v ? C.amber : C.border, color: pdfView === v ? C.amber : C.dim }}>{lbl}</button>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-
-                    {pdfView === "chart" ? (
-                      <>
-                        <div className="tdp-scroll" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(146px, 1fr))", gap: "10px 0", maxHeight: 460, overflow: "auto", paddingRight: 4 }}>
-                          {scoreView.bars.map((bar) => (
-                            <div key={bar.number} style={{ position: "relative", borderLeft: `2px solid ${C.border}`, padding: "16px 8px 6px 10px", minHeight: 44 }}>
-                              <span style={{ position: "absolute", top: 2, left: 10, fontSize: 9, color: C.dim }}>{bar.number}</span>
-                              <div style={{ display: "grid", gridTemplateColumns: `repeat(${scoreView.timeSig[0]}, 1fr)`, alignItems: "center", columnGap: 2, minHeight: 24 }}>
-                                {bar.events.map((e, i) => {
-                                  const k = `${bar.number}.${e.beat}`;
-                                  const isSel = selKey === k;
-                                  return (
-                                    <button key={i} onClick={() => { setSelFrets(e.frets); setSelKey(k); }} title={`beat ${e.beat + 1}`}
-                                      style={{ gridColumn: `${e.beat + 1} / span ${Math.max(1, e.durBeats)}`, justifySelf: "start", background: "transparent", border: "none", borderBottom: isSel ? `2px solid ${C.amber}` : "2px solid transparent", padding: "0 2px", cursor: "pointer", color: isSel ? C.amber : C.cyan, fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: e.symbol.length > 4 ? 13 : 16, lineHeight: 1.2 }}>
-                                      {e.symbol}
-                                    </button>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                        <div style={{ fontSize: 11, color: C.dim, marginTop: 8 }}>Lead sheet · 4/4 assumed · chords sit on the beat they change. Tap a chord to inspect its voicing →</div>
-                      </>
-                    ) : (
-                      <>
-                        <div className="tdp-scroll" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(74px, 1fr))", gap: 6, maxHeight: 460, overflow: "auto", paddingRight: 4 }}>
-                          {chartView.map((m) => {
-                            const k = `${m.number}`;
-                            const isSel = selKey === k;
-                            return (
-                              <button key={k} className="meas" onClick={() => { setSelFrets(m.columns[0] ? m.columns[0].frets : null); setSelKey(k); }}
-                                style={{ position: "relative", background: C.bg, border: `1px solid ${isSel ? C.amber : C.border}`, borderRadius: 8, padding: "10px 4px 8px", cursor: "pointer", minHeight: 56, textAlign: "center" }}>
-                                <span style={{ position: "absolute", top: 3, left: 6, fontSize: 9, color: C.dim }}>{m.number}</span>
-                                <div style={{ marginTop: 6, fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: m.collapsed.join(" ").length > 6 ? 13 : 17, color: C.cyan, lineHeight: 1.15 }}>
-                                  {m.collapsed.join(" ")}
-                                </div>
-                              </button>
-                            );
-                          })}
-                        </div>
-                        <div style={{ fontSize: 11, color: C.dim, marginTop: 8 }}>Tap any bar to inspect its voicing in the readout →</div>
-                      </>
-                    )}
-                  </>
+                {scoreView && (
+                  <ChartPanel score={scoreView} title={chart.fileName}
+                    meta={`${scoreView.bars.length} bars · ${chart.systemsFound} systems · ${chart.pages} pp · 4/4 assumed`}
+                    C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey={selKey} onPick={pickChord} />
+                )}
+              </>
+            ) : (
+              <>
+                <SectionLabel C={C}>PATH C · MUSICXML → CHORD CHART</SectionLabel>
+                <input ref={xmlRef} type="file" accept=".xml,.musicxml,application/xml,text/xml" onChange={onXml} style={{ display: "none" }} />
+                <button onClick={() => xmlRef.current && xmlRef.current.click()}
+                  style={{ width: "100%", background: C.bg, border: `1px dashed ${C.border}`, color: C.amber, borderRadius: 10, padding: "22px 12px", fontSize: 14, cursor: "pointer", fontFamily: "'IBM Plex Mono', monospace" }}>
+                  ⬆  Upload a MusicXML file  (.musicxml / .xml)
+                </button>
+                <div style={{ fontSize: 11, color: C.dim, marginTop: 8, lineHeight: 1.6 }}>
+                  Reads <b>real</b> time signature, tuning &amp; rhythm straight from the file — no geometry guessing. Guitar Pro / MuseScore can export MusicXML (File → Export).
+                </div>
+                {xmlErr && <div style={{ marginTop: 10, color: C.red, fontSize: 12 }}>{xmlErr}</div>}
+                {xmlScore && (
+                  <ChartPanel score={xmlScore} title={xmlName}
+                    meta={`${xmlScore.bars.length} bars · ${xmlScore.tuning} tuning · ${xmlScore.timeSig.join("/")}`}
+                    C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey={selKey} onPick={pickChord} />
                 )}
               </>
             )}
           </section>
 
           <section className="panel-rise" style={{ animationDelay: ".1s", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
-            <SectionLabel C={C}>{mode === "pdf" && selFrets ? "BAR READOUT" : "LIVE READOUT"}</SectionLabel>
+            <SectionLabel C={C}>{mode !== "manual" && (selFrets || selMidis) ? "CHORD READOUT" : "LIVE READOUT"}</SectionLabel>
             <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: "22px 16px", textAlign: "center", marginBottom: 14 }}>
               <div key={symbol} className="chord-pop" style={{ fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: 54, lineHeight: 1, color: C.cyan, textShadow: `0 0 26px ${C.cyan}55` }}>{symbol}</div>
               {result && result.isSlash && <div style={{ marginTop: 8, fontSize: 11, letterSpacing: 2, color: C.red }}>SLASH CHORD · BASS ≠ ROOT</div>}
@@ -615,6 +797,134 @@ export default function TabDecoderPro() {
         </footer>
       </div>
     </div>
+  );
+}
+
+/* ---- chart panel: lead sheet / grid + inline editing + transpose + export --
+ * Shared by the PDF (Path A) and MusicXML (Path C) modes — both pass a score of
+ * the same shape, so the renderer, editor and exporters are identical. Edits are
+ * lifted to the parent as an `overrides` map ("<bar>.<beat>" -> symbol) so they
+ * survive view/transpose changes and feed straight into export. */
+function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, selKey, onPick }) {
+  const [view, setView] = useState("chart");
+  const [editMode, setEditMode] = useState(false);
+  const [editKey, setEditKey] = useState("");
+  const [draft, setDraft] = useState("");
+  const [semis, setSemis] = useState(0);
+  const [exp, setExp] = useState(null); // null | { fmt, text }
+  const [copied, setCopied] = useState(false);
+
+  const tscore = useMemo(() => transposeScore(score, semis, useSharp), [score, semis, useSharp]);
+  const symOf = (bar, e) => { const v = overrides[`${bar.number}.${e.beat}`]; return v != null ? v : e.symbol; };
+  const doExport = (fmt) => {
+    const text = fmt === "abc" ? scoreToABC(tscore, { overrides, title }) : scoreToChordPro(tscore, { overrides, title });
+    setExp({ fmt, text }); setCopied(false);
+  };
+  const copy = () => { try { navigator.clipboard.writeText(exp.text); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch (_) {} };
+  const bump = (d) => setSemis((s) => Math.max(-11, Math.min(11, s + d)));
+
+  let prevSig = null;
+  return (
+    <>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, fontSize: 11, color: C.dim, margin: "14px 0 6px" }}>
+        <span style={{ color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 220 }}>{title}</span>
+        <span>{meta}{semis ? ` · ${semis > 0 ? "+" : ""}${semis} st` : ""}</span>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+        {[["chart", "Chart"], ["grid", "Grid"]].map(([v, lbl]) => (
+          <button key={v} onClick={() => setView(v)} style={{ ...chip(C), padding: "3px 9px", borderColor: view === v ? C.amber : C.border, color: view === v ? C.amber : C.dim }}>{lbl}</button>
+        ))}
+        <button onClick={() => { setEditMode((m) => !m); setEditKey(""); }} disabled={view !== "chart"}
+          style={{ ...chip(C), padding: "3px 9px", opacity: view !== "chart" ? 0.4 : 1, borderColor: editMode ? C.green : C.border, color: editMode ? C.green : C.dim }}>{editMode ? "✓ Editing" : "✎ Edit"}</button>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 4, marginLeft: 2 }}>
+          <button onClick={() => bump(-1)} style={{ ...chip(C), padding: "3px 8px" }}>−</button>
+          <span style={{ fontSize: 11, minWidth: 44, textAlign: "center", color: semis ? C.amber : C.dim }}>transpose</span>
+          <button onClick={() => bump(1)} style={{ ...chip(C), padding: "3px 8px" }}>+</button>
+          {semis !== 0 && <button onClick={() => setSemis(0)} style={{ ...chip(C), padding: "3px 8px" }}>0</button>}
+        </span>
+        <span style={{ marginLeft: "auto", display: "inline-flex", gap: 4 }}>
+          <button onClick={() => doExport("chordpro")} style={{ ...chip(C), padding: "3px 9px", borderColor: exp && exp.fmt === "chordpro" ? C.cyan : C.border, color: exp && exp.fmt === "chordpro" ? C.cyan : C.dim }}>ChordPro</button>
+          <button onClick={() => doExport("abc")} style={{ ...chip(C), padding: "3px 9px", borderColor: exp && exp.fmt === "abc" ? C.cyan : C.border, color: exp && exp.fmt === "abc" ? C.cyan : C.dim }}>ABC</button>
+        </span>
+      </div>
+
+      {view === "chart" ? (
+        <>
+          <div className="tdp-scroll" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(146px, 1fr))", gap: "10px 0", maxHeight: 420, overflow: "auto", paddingRight: 4 }}>
+            {tscore.bars.map((bar) => {
+              const sig = bar.timeSig || tscore.timeSig;
+              const sigChanged = !prevSig || prevSig[0] !== sig[0] || prevSig[1] !== sig[1];
+              prevSig = sig;
+              return (
+                <div key={bar.number} style={{ position: "relative", borderLeft: `2px solid ${C.border}`, padding: "16px 8px 6px 10px", minHeight: 44 }}>
+                  <span style={{ position: "absolute", top: 2, left: 10, fontSize: 9, color: C.dim }}>{bar.number}</span>
+                  {sigChanged && <span style={{ position: "absolute", top: 2, right: 6, fontSize: 9, color: C.amber }}>{sig.join("/")}</span>}
+                  <div style={{ display: "grid", gridTemplateColumns: `repeat(${sig[0]}, 1fr)`, alignItems: "center", columnGap: 2, minHeight: 24 }}>
+                    {bar.events.map((e, i) => {
+                      const k = `${bar.number}.${e.beat}`;
+                      const cur = symOf(bar, e);
+                      const edited = overrides[k] != null;
+                      const gridCol = `${e.beat + 1} / span ${Math.max(1, e.durBeats)}`;
+                      if (editMode && editKey === k) {
+                        const commit = () => { const v = draft.trim(); setOverrides((o) => { const n = { ...o }; if (!v || v === e.symbol) delete n[k]; else n[k] = v; return n; }); setEditKey(""); };
+                        return (
+                          <input key={i} autoFocus value={draft} onChange={(ev) => setDraft(ev.target.value)} onBlur={commit}
+                            onKeyDown={(ev) => { if (ev.key === "Enter") commit(); if (ev.key === "Escape") setEditKey(""); }}
+                            style={{ gridColumn: gridCol, width: "100%", boxSizing: "border-box", background: C.bg, color: C.amber, border: `1px solid ${C.amber}`, borderRadius: 4, padding: "1px 3px", font: "700 14px 'Space Mono', monospace" }} />
+                        );
+                      }
+                      const isSel = selKey === k;
+                      return (
+                        <button key={i} onClick={() => (editMode ? (setEditKey(k), setDraft(cur)) : onPick(k, e))} title={editMode ? "click to re-label" : `beat ${e.beat + 1}`}
+                          style={{ gridColumn: gridCol, justifySelf: "start", background: "transparent", border: "none", borderBottom: isSel ? `2px solid ${C.amber}` : "2px solid transparent", padding: "0 2px", cursor: "pointer", color: edited ? C.green : isSel ? C.amber : C.cyan, fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: cur.length > 4 ? 13 : 16, lineHeight: 1.2 }}>
+                          {cur}{edited ? "*" : ""}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ fontSize: 11, color: C.dim, marginTop: 8 }}>
+            {editMode ? "Edit mode · click a chord to re-label it (blank = revert to detected). * marks edits." : "Lead sheet · chords sit on the beat they change. Tap a chord to inspect its voicing →"}
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="tdp-scroll" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(74px, 1fr))", gap: 6, maxHeight: 420, overflow: "auto", paddingRight: 4 }}>
+            {tscore.bars.map((bar) => {
+              const collapsed = bar.events.map((e) => symOf(bar, e));
+              const k = `${bar.number}`;
+              const isSel = selKey === k;
+              return (
+                <button key={k} className="meas" onClick={() => onPick(k, bar.events[0] || {})}
+                  style={{ position: "relative", background: C.bg, border: `1px solid ${isSel ? C.amber : C.border}`, borderRadius: 8, padding: "10px 4px 8px", cursor: "pointer", minHeight: 56, textAlign: "center" }}>
+                  <span style={{ position: "absolute", top: 3, left: 6, fontSize: 9, color: C.dim }}>{bar.number}</span>
+                  <div style={{ marginTop: 6, fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: collapsed.join(" ").length > 6 ? 13 : 17, color: C.cyan, lineHeight: 1.15 }}>{collapsed.join(" ")}</div>
+                </button>
+              );
+            })}
+          </div>
+          <div style={{ fontSize: 11, color: C.dim, marginTop: 8 }}>Tap any bar to inspect its voicing in the readout →</div>
+        </>
+      )}
+
+      {exp && (
+        <div style={{ marginTop: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+            <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim }}>EXPORT · {exp.fmt === "abc" ? "ABC NOTATION" : "CHORDPRO"}</span>
+            <span style={{ display: "inline-flex", gap: 6 }}>
+              <button onClick={copy} style={{ ...chip(C), padding: "3px 9px", borderColor: copied ? C.green : C.border, color: copied ? C.green : C.dim }}>{copied ? "copied ✓" : "copy"}</button>
+              <button onClick={() => setExp(null)} style={{ ...chip(C), padding: "3px 9px" }}>close</button>
+            </span>
+          </div>
+          <textarea readOnly value={exp.text} spellCheck={false} className="tdp-scroll"
+            style={{ width: "100%", height: 120, resize: "vertical", boxSizing: "border-box", background: C.bg, color: C.text, border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, fontSize: 12, lineHeight: 1.5, fontFamily: "'IBM Plex Mono', monospace", outline: "none" }} />
+          {exp.fmt === "abc" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>Real, playable notes + chord symbols — paste into any ABC player (e.g. abcjs / editor at abcnotation.com) to hear it.</div>}
+        </div>
+      )}
+    </>
   );
 }
 

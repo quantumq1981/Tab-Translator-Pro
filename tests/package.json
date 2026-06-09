@@ -9,6 +9,7 @@
     "tokens": "node path-a-smoke.mjs --log-tokens"
   },
   "devDependencies": {
-    "pdfjs-dist": "3.11.174"
+    "pdfjs-dist": "3.11.174",
+    "@xmldom/xmldom": "^0.8.10"
   }
 }
