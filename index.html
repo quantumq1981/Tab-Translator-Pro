@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Tab Decoder · TabTranslator Pro</title>
+  <meta name="description" content="Turn guitar tablature into chord symbols. Paste ASCII tab or upload a digital tab PDF." />
+  <meta name="color-scheme" content="dark" />
+
+  <!--
+    Zero-build static host. Mirrors the app's existing pattern of loading deps
+    from a CDN at runtime (PDF.js already loads this way). No bundler, no repo
+    deps: we fetch the single-file React component (TabDecoderPro.tsx), transpile
+    it in-browser with Babel standalone, and resolve bare `react` imports via the
+    importmap below. Keep this faithful to the "zero build step" project ethos.
+  -->
+  <script src="https://unpkg.com/@babel/standalone@7.25.6/babel.min.js" crossorigin></script>
+  <script type="importmap">
+  {
+    "imports": {
+      "react": "https://esm.sh/react@18.3.1",
+      "react-dom/client": "https://esm.sh/react-dom@18.3.1/client?external=react"
+    }
+  }
+  </script>
+
+  <style>
+    html, body { margin: 0; height: 100%; background: #0b0e10; }
+    #root { min-height: 100%; }
+    #boot {
+      position: fixed; inset: 0; display: grid; place-items: center;
+      color: #8a8f8c; background: #0b0e10;
+      font: 14px/1.6 ui-monospace, "IBM Plex Mono", monospace;
+      text-align: center; padding: 24px;
+    }
+    #boot b { color: #e9a24b; font-weight: 600; }
+    #boot code { color: #e06c75; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <div id="boot"><div><b>TAB·DECODER</b><br/>loading engine…</div></div>
+
+  <script type="module">
+    const boot = document.getElementById("root");
+    const splash = document.getElementById("boot");
+    const fail = (msg, detail) => {
+      splash.innerHTML =
+        '<div><b>TAB·DECODER</b><br/>could not start<br/><br/>' +
+        msg + (detail ? '<br/><code>' + String(detail).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])) + '</code>' : '') +
+        '<br/><br/>This page transpiles in-browser and needs network access to ' +
+        'unpkg.com / esm.sh on first load.</div>';
+    };
+
+    try {
+      if (!window.Babel) throw new Error("Babel standalone failed to load from unpkg.com");
+
+      // 1. fetch the single-file component source
+      const res = await fetch("./TabDecoderPro.tsx", { cache: "no-cache" });
+      if (!res.ok) throw new Error("fetch TabDecoderPro.tsx → HTTP " + res.status);
+      const source = await res.text();
+
+      // 2. transpile TSX → JS in-browser (strip TS, transform JSX); keep ESM so
+      //    the `import ... from "react"` resolves via the importmap.
+      const { code } = window.Babel.transform(source, {
+        filename: "TabDecoderPro.tsx",
+        presets: [
+          ["typescript", { allExtensions: true, isTSX: true, onlyRemoveTypeImports: true }],
+          ["react"],
+        ],
+      });
+
+      // 3. load the transpiled module + React, mount.
+      const url = URL.createObjectURL(new Blob([code], { type: "text/javascript" }));
+      const [{ default: TabDecoderPro }, React, { createRoot }] = await Promise.all([
+        import(url),
+        import("react"),
+        import("react-dom/client"),
+      ]);
+      URL.revokeObjectURL(url);
+
+      createRoot(boot).render(React.createElement(TabDecoderPro));
+      splash.remove();
+    } catch (err) {
+      console.error(err);
+      fail("startup error:", err && err.message ? err.message : err);
+    }
+  </script>
+</body>
+</html>
