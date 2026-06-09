@@ -113,6 +113,30 @@ tab carries no tuning we read yet — adding tuning detection is a clean future
 task). One chord per bar unless the harmony changes mid-bar, in which case the
 bar shows the sequence (e.g. `E A`).
 
+## Score model — chords placed on beats (`buildScore`)
+
+`buildChart` is geometry (where chords are on the page). `buildScore(chart,
+useSharp)` turns that into a **lead-sheet-shaped score**: per bar, a list of
+`{ symbol, beat, durBeats, frets }` events. This is what the in-app **Chart**
+view (lead sheet) renders, and the foundation for any future export
+(MusicXML / ABC / ChordPro).
+
+How beats are derived (the keystone that makes "place chords over a measure"
+work): `buildChart` now also records each bar's **horizontal extent**
+(`startX` = its measure-number mark x, `endX` = next mark's x, last bar → system
+right edge). `buildScore` collapses consecutive identical symbols to onsets,
+then quantises each onset: `beat = round((x − startX) / (endX − startX) ·
+beatsPerBar)`. **Invariants:** the bar's first chord is the downbeat (beat 0);
+beats are forced strictly increasing so two chords never collide; durations fill
+to the next onset and **sum to `beatsPerBar`**. `beatsPerBar` is **4 (4/4
+assumed)** — time-signature detection from the PDF is the clean next task, same
+flavour as tuning detection. The `startX`/`endX` fields are purely additive; the
+existing per-bar recognition path is unchanged.
+
+The PDF panel has a **Chart / Grid** toggle: *Chart* is the lead sheet (chords on
+their beat, barlines, tap a chord to inspect its voicing); *Grid* is the original
+compact one-symbol-per-bar card grid. Both feed the same engine.
+
 ## Path B (scans / photos) — OUT OF SCOPE
 
 Raster tab (a photo or scanned page) has no text layer and needs an OMR/Vision
@@ -168,6 +192,11 @@ accordingly.
   check now runs headlessly in JS over the real PDF: `cd tests && npm test`
   (asserts the bar count, verse, V chord, and bridge; exits non-zero on
   regression).
+- **Score model**: the same `npm test` also asserts `buildScore` over Blue Sky —
+  165 scored bars, every bar's first chord on the downbeat, strictly-increasing
+  beats, per-bar durations summing to 4, and the bridge turn (bar 126 =
+  `B C#m A`) landing as three chords on rising beats. Bar 26 (`B C#m`) places
+  `B` on beats 1–2 and `C#m` on beats 3–4.
 
 ## Session conventions
 

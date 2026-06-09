@@ -35,7 +35,7 @@ const end = src.indexOf("async function extractTokens"); // browser-only; reprod
 if (start < 0 || end < 0) throw new Error("source markers not found in TabDecoderPro.tsx");
 const engineSrc =
   src.slice(start, end) +
-  "\nexport { buildChart, symbolForFrets };\n";
+  "\nexport { buildChart, buildScore, symbolForFrets };\n";
 const enginePath = path.join(here, ".engine.generated.mjs");
 fs.writeFileSync(enginePath, engineSrc);
 const eng = await import(enginePath + "?t=" + Date.now());
@@ -88,11 +88,43 @@ expect(bars.some((b) => b.bar.split(" ").includes("B")), "expected a V chord (B)
 expect(bars.some((b) => /\bC#m\b/.test(b.bar)), "expected a C#m in the bridge");
 expect(bars.some((b) => /\bF#m7\b/.test(b.bar)), "expected an F#m7 in the bridge");
 
+/* ---- score model: chords placed on beats (assume 4/4) -------------------- */
+const score = eng.buildScore(chart, true);
+expect(score.timeSig[0] === 4 && score.timeSig[1] === 4, `expected 4/4, got ${score.timeSig.join("/")}`);
+expect(score.bars.length === 165, `expected 165 scored bars, got ${score.bars.length}`);
+
+for (const b of score.bars) {
+  const ev = b.events;
+  if (!ev.length) { fails.push(`bar ${b.number} has no chord events`); continue; }
+  if (ev[0].beat !== 0) fails.push(`bar ${b.number}: first chord not on the downbeat (beat ${ev[0].beat})`);
+  for (let i = 0; i < ev.length; i++) {
+    if (ev[i].beat < 0 || ev[i].beat > 3) fails.push(`bar ${b.number}: beat ${ev[i].beat} out of 0..3`);
+    if (i > 0 && ev[i].beat <= ev[i - 1].beat) fails.push(`bar ${b.number}: beats not strictly increasing`);
+  }
+  const sum = ev.reduce((s, e) => s + e.durBeats, 0);
+  if (sum !== 4) fails.push(`bar ${b.number}: durations sum to ${sum}, expected 4`);
+}
+
+// at least one bar must place multiple chords on distinct beats
+const multi = score.bars.filter((b) => b.events.length >= 2);
+expect(multi.length > 0, "expected at least one multi-chord bar with beat placement");
+
+// the bridge turn (bar 126 = "B C#m A") should be three chords in order on rising beats
+const b126 = score.bars.find((b) => b.number === 126);
+if (b126) {
+  const syms = b126.events.map((e) => e.symbol);
+  expect(JSON.stringify(syms) === JSON.stringify(["B", "C#m", "A"]),
+    `bar 126 events expected [B, C#m, A], got [${syms.join(", ")}]`);
+}
+
 /* ---- report -------------------------------------------------------------- */
 console.log(`PDF.js ${pdfjsLib.version} · ${pages} pages · ${tokens.length} tokens`);
 console.log(`systemsFound=${chart.systemsFound} columnsFound=${chart.columnsFound} bars=${bars.length}`);
 console.log(`verse 1-8: ${verse}`);
 console.log(`progression: ${bars.map((b) => b.bar).join(" | ")}`);
+const sampleMulti = (typeof score !== "undefined" && score.bars.find((b) => b.events.length >= 2)) || null;
+if (sampleMulti) console.log(`sample multi-chord bar ${sampleMulti.number}: ` +
+  sampleMulti.events.map((e) => `${e.symbol}@b${e.beat + 1}(${e.durBeats})`).join(" "));
 
 if (fails.length) {
   console.error("\nFAIL:\n  " + fails.join("\n  "));
