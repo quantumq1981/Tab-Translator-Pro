@@ -1575,7 +1575,11 @@ export default function TabDecoderPro() {
             ) : (
               <>
                 <SectionLabel C={C}>PATH C/D/E · MUSICXML or GUITAR PRO → CHORD CHART</SectionLabel>
-                <input ref={xmlRef} type="file" accept=".xml,.musicxml,.gp,.gp3,.gp4,.gp5,.gpx,application/xml,text/xml" onChange={onXml} style={{ display: "none" }} />
+                {/* No `accept` filter on purpose: iOS maps `accept` extensions to UTIs, and
+                    .gp/.gpx/.gp3/.gp4/.gp5/.ptb have no registered UTI, so iOS greys them out
+                    (unselectable). Leaving it unset lets every file be picked on all platforms.
+                    Do NOT re-add an extension allowlist here — it breaks Guitar Pro upload on iOS. */}
+                <input ref={xmlRef} type="file" onChange={onXml} style={{ display: "none" }} />
                 <button onClick={() => xmlRef.current && xmlRef.current.click()}
                   style={{ width: "100%", background: C.bg, border: `1px dashed ${C.border}`, color: C.amber, borderRadius: 10, padding: "22px 12px", fontSize: 14, cursor: "pointer", fontFamily: "'IBM Plex Mono', monospace" }}>
                   ⬆  Upload a MusicXML or Guitar Pro file  (.musicxml / .xml / .gp / .gpx / .gp3 / .gp4 / .gp5)
