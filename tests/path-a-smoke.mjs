@@ -35,7 +35,7 @@ const end = src.indexOf("async function extractTokens"); // browser-only; reprod
 if (start < 0 || end < 0) throw new Error("source markers not found in TabDecoderPro.tsx");
 const engineSrc =
   src.slice(start, end) +
-  "\nexport { buildChart, buildScore, symbolForFrets, parseMusicXML, scoreToABC, scoreToChordPro, scoreToMusicXML, transposeScore, scoreEventTimes, analyzeKey, romanFor, keyName };\n";
+  "\nexport { buildChart, buildScore, simplifyScore, symbolForFrets, parseMusicXML, scoreToABC, scoreToChordPro, scoreToMusicXML, transposeScore, scoreEventTimes, analyzeKey, romanFor, keyName };\n";
 
 /* parseMusicXML uses the browser's global DOMParser; the app loads it natively.
  * Headlessly we install @xmldom/xmldom (a TEST-only dep) as that global so the
@@ -121,6 +121,13 @@ if (b126) {
   expect(JSON.stringify(syms) === JSON.stringify(["B", "C#m", "A"]),
     `bar 126 events expected [B, C#m, A], got [${syms.join(", ")}]`);
 }
+
+/* ---- simplify: aggregate each bar to one chord (dense-transcription mode) -- */
+const simp = eng.simplifyScore(score, true);
+expect(simp.bars.length === 165 && simp.bars.every((b) => b.events.length <= 1), "simplify → at most one chord per bar");
+const sv = simp.bars.slice(0, 8).map((b) => (b.events[0] ? b.events[0].symbol : "-")).join(" ");
+expect(sv === "E A A E E A A E", `simplified verse expected "E A A E E A A E", got "${sv}"`);
+expect(simp.bars[0].events[0].beat === 0 && simp.bars[0].events[0].durBeats === 4, "simplified bar = one downbeat chord filling the bar");
 
 /* ---- Path C: MusicXML import (explicit meter + tuning + rhythm) ----------- */
 const xml = fs.readFileSync(path.join(here, "fixtures", "sample.musicxml"), "utf8");

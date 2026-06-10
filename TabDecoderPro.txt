@@ -317,6 +317,40 @@ function buildScore(chart, useSharp, beatsPerBar = 4) {
   return { timeSig: [beatsPerBar, 4], bars };
 }
 
+/* ---- simplify: aggregate each bar's notes into one best-fit chord ----------
+ * For dense transcriptions (melody + harmony) the per-onset chart is noise. This
+ * collapses every bar to a single chord by weighting each pitch class by the
+ * total duration it sounds (so sustained/structural tones beat brief passing
+ * notes) and keeping the strong ones, then running that chroma + the bar's bass
+ * through the same engine. Output is the same score shape (one event/bar), so it
+ * flows through render / transpose / playback / export unchanged. Opt-in — the
+ * detailed per-onset path is untouched (Blue Sky stays as-is). ---------------- */
+function simplifyScore(score, useSharp) {
+  const bars = score.bars.map((bar) => {
+    const sig = bar.timeSig || score.timeSig;
+    const pcW = new Array(12).fill(0);
+    let bassMidi = Infinity, any = false;
+    for (const e of bar.events) {
+      const w = Math.max(0.25, e.durBeats || 1);
+      for (const m of e.midis || []) { pcW[m % 12] += w; if (m < bassMidi) bassMidi = m; any = true; }
+    }
+    if (!any) return { number: bar.number, timeSig: bar.timeSig, events: [] };
+    const maxW = Math.max(...pcW);
+    const chroma = [];
+    for (let pc = 0; pc < 12; pc++) if (pcW[pc] >= maxW * 0.2) chroma.push(pc); // drop weak passing tones
+    const result = recognise(chroma, makeMask(chroma), bassMidi % 12);
+    const symbol = symbolOf(result, useSharp);
+    let midis;                                            // clean voicing for playback/export
+    if (result && !result.single && result.best) {
+      const rootMidi = 48 + result.best.root;
+      midis = result.best.quality.intervals.map((i) => rootMidi + i);
+      if (result.isSlash) midis = [36 + result.bassPc, ...midis];
+    } else midis = bassMidi === Infinity ? [] : [bassMidi];
+    return { number: bar.number, timeSig: bar.timeSig, events: [{ symbol, beat: 0, durBeats: sig[0], midis, frets: undefined }] };
+  });
+  return { ...score, bars, simplified: true };
+}
+
 /* ============================================================================
  *  PATH C — MusicXML import  (explicit meter + tuning + rhythm, no recognition
  *  of geometry needed). MusicXML encodes <time>, <staff-tuning> and every
@@ -1042,8 +1076,10 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   const player = useRef(null);
 
   const [showRoman, setShowRoman] = useState(false);
+  const [simplify, setSimplify] = useState(false);
 
-  const tscore = useMemo(() => transposeScore(score, semis, useSharp), [score, semis, useSharp]);
+  const base = useMemo(() => (simplify ? simplifyScore(score, useSharp) : score), [simplify, score, useSharp]);
+  const tscore = useMemo(() => transposeScore(base, semis, useSharp), [base, semis, useSharp]);
   const key = useMemo(() => analyzeKey(tscore), [tscore]);
 
   useEffect(() => { setBpm(score.tempo || 100); }, [score.tempo]);
@@ -1081,6 +1117,8 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
           style={{ ...chip(C), padding: "3px 9px", opacity: view !== "chart" ? 0.4 : 1, borderColor: editMode ? C.green : C.border, color: editMode ? C.green : C.dim }}>{editMode ? "✓ Editing" : "✎ Edit"}</button>
         <button onClick={() => setShowRoman((r) => !r)} title={key ? `key of ${keyName(key, useSharp)}` : "key analysis"}
           style={{ ...chip(C), padding: "3px 9px", borderColor: showRoman ? C.cyan : C.border, color: showRoman ? C.cyan : C.dim }}>{showRoman ? "I·V·vi ✓" : "I·V·vi"}</button>
+        <button onClick={() => setSimplify((s) => !s)} title="aggregate each bar's notes into one chord (for dense transcriptions)"
+          style={{ ...chip(C), padding: "3px 9px", borderColor: simplify ? C.green : C.border, color: simplify ? C.green : C.dim }}>{simplify ? "1 chord/bar ✓" : "Simplify"}</button>
         <span style={{ display: "inline-flex", alignItems: "center", gap: 4, marginLeft: 2 }}>
           <button onClick={() => bump(-1)} style={{ ...chip(C), padding: "3px 8px" }}>−</button>
           <span style={{ fontSize: 11, minWidth: 44, textAlign: "center", color: semis ? C.amber : C.dim }}>transpose</span>
