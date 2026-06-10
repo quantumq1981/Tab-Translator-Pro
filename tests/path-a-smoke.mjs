@@ -293,6 +293,19 @@ expect(anth5Bars === "Gm7/A# G7 | Cm7 F7 | Gm7/A# Gm7 | C7 F7", `GP5 Anthropolog
 const auPriv5 = eng.parseGP345(new Uint8Array(fs.readFileSync(path.join(repo, "Charlie Parker - Au Privave.gp5"))), true, 0);
 expect(auPriv5.bars.length === 14 && auPriv5.tempo === 220 && auPriv5.tuning === "Standard", `GP5 v5.10 Au Privave expected 14 bars / tempo 220 / Standard, got ${auPriv5.bars.length} / ${auPriv5.tempo} / ${auPriv5.tuning}`);
 
+/* ---- ABC export of a DENSE melodic line must never emit a 0 duration --------
+ * Anthropology's track-0 head is straight eighths: ~8 onsets per 4/4 bar. The
+ * integer beat/durBeats keep the chart grid happy, but the ABC exporter must use
+ * the TRUE per-note duration (e.qdur) so eighths render as "/2", not an invalid
+ * "0" multiplier (which collapses layout / drops notes in ABC renderers). */
+const anthMelody = eng.parseGP345(new Uint8Array(fs.readFileSync(path.join(repo, "Charlie Parker - Anthropology.gp5"))), true, 0);
+const anthAbc = eng.scoreToABC(anthMelody, { title: "Anthropology", tempo: anthMelody.tempo, useSharp: true });
+const zeroDur = /(?:\]|[a-gA-G][,'^_=]*)0(?=[\s|]|$)/.test(anthAbc); // a note/chord followed by a bare 0 length
+expect(!zeroDur, "ABC export of a dense melody must not contain any 0-duration multiplier (invalid ABC)");
+expect(anthAbc.includes("/2"), "ABC export of an eighth-note line should render eighths as /2");
+// every event's true duration is strictly positive
+expect(anthMelody.bars.every((b) => b.events.every((e) => (e.qdur ?? e.durBeats) > 0)), "every event must have a strictly-positive true duration (qdur)");
+
 /* ---- Path F: Guitar Pro 6 (.gpx) — BCFZ/BCFS container → gpif → parseGPIF.
  *      PyGuitarPro can't read GPX, so we validate that the bit-level decompressor
  *      + sector filesystem yield a coherent score: a single decompression error

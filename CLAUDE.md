@@ -401,6 +401,24 @@ through the shared shape, so these work identically for Path A and Path C:
 duration is a reduced fraction of `L:1/4` (`durBeats·4/beatType`), so simple
 meters stay integers and 6/8-style beats become `/2`.
 
+### Two duration fields: integer `beat/durBeats` (chart) vs true `qbeat/qdur` (ABC/playback)
+
+Every event carries **both** an integer `beat`/`durBeats` AND a fractional
+`qbeat`/`qdur` (`_fillTrueDur`, set in all parsers + `buildScore`). This is
+load-bearing, from a real bug: the lead-sheet **Chart view places events with CSS
+grid** (`gridColumn: ${beat+1} / span ${durBeats}`), which *requires integers* —
+so beats are quantised and clamped to `0..beatsPerBar-1`. But a **dense melodic
+line** (e.g. Anthropology's straight-eighth head — ~8 onsets per 4/4 bar) has more
+onsets than integer beats, so several round to the same beat and
+`durBeats = nextBeat − thisBeat` becomes **0**. Feeding that to `abcDur` emitted a
+literal `0` length — **invalid ABC** (Tunebook/abcjs drop the note or fail). So
+`qbeat = onset / unitsPerBeat` (unclamped) and `qdur` (gap to the next onset,
+always > 0) carry the *true* timing. **`scoreToABC` and `scoreEventTimes` use
+`e.qdur ?? e.durBeats` / `e.qbeat ?? e.beat`; the Chart grid keeps the integers.**
+`abcDur` additionally scales by 12 (eighths/sixteenths/triplets stay integer) and
+floors the numerator at 1, so a 0 can never be emitted. Don't "simplify" the two
+fields back into one — the chart and the exporters genuinely need different things.
+
 ## Path B (scans / photos) — OUT OF SCOPE
 
 Raster tab (a photo or scanned page) has no text layer and needs an OMR/Vision
