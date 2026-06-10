@@ -304,8 +304,8 @@ their own note reader (a duration-percent `f64` under `0x01`, an always-present
 second flags byte) and a trailing `int16` beat-display flags word.
 
 The dispatcher `parseGuitarProOrXML` routes by file head (`PK`→GP7/8,
-`FICHIER GUITAR PRO`→GP3/4/5, else MusicXML). `.gpx` (GP6 `BCFZ` binary FS) and
-Power Tab still route through MuseScore/TuxGuitar → MusicXML.
+`BCFZ`/`BCFS`→GP6 `.gpx`, `FICHIER GUITAR PRO`→GP3/4/5, else MusicXML). Power Tab
+still routes through MuseScore/TuxGuitar → MusicXML.
 
 **Validation** (`npm test`): `parseGP345` reproduces the **Blue Sky gp3** verse
 `E A A E E A A E`, decodes **Kid Charlemagne**'s Rhythm-Guitar bars 27–28 to the
@@ -317,6 +317,35 @@ and **Au Privave** (v5.10). A dev-time PyGuitarPro cross-check matched **2445/24
 measures** across the GP3/4 files and **4806/4806** across six GP5 files (v5.00 and
 v5.10, single- and multi-track) — the lone GP3/4 diff is one passing tone in a
 bebop bar, not a byte-alignment error (alignment survives past it).
+
+## Path F — Guitar Pro 6 (`.gpx`) import (`parseGPX`)
+
+A `.gpx` is **GP6's container**: a `BCFZ`-compressed (or raw `BCFS`) **sector
+filesystem** whose `Content/score.gpif` is the **same GPIF XML GP7/8 use** — so
+once unpacked, **`parseGPIF` does the rest** and the whole chart/export/transpose/
+playback/part-picker stack is shared. Zero deps: a bit-reader + the documented
+BCFZ LZ scheme + the 0x1000-sector filesystem, ported from alphaTab's
+`GpxFileSystem` (`_gpxBitReader`/`_gpxDecompress`/`_gpxReadFS`/`parseGPX`, re-parse
+from a stored `_gpxbuf`). Decompress facts: a 1-bit flag selects back-reference
+(`readBits(4)` word size, then `readBitsReversed` offset+size, copy `min(offset,
+size)` from the end) vs raw (`readBitsReversed(2)` count of literal bytes); bits
+are **MSB-first per byte**. The inner `BCFS` header is skipped, sector 0 is the
+empty pad, file entries (type `2`) carry a 127-byte name, a size at `+0x8c`, and a
+zero-terminated list of absolute sector indices at `+0x94`.
+
+**GP6 note encodings differ from GP7/8**, so `parseGPIF` gained two fallbacks
+(additive, harmless to GP7/8): GP6 tab notes carry **only `String`+`Fret`** (no
+`<Midi>`), resolved via `tuning[String] + Fret` (String 0 = low E, verified by The
+Weight reading clean A-major chords); and GP6 **piano/concert parts** encode pitch
+as `Tone(<Step> = chromatic 0–11)` + `Octave(<Number>)` → `octave·12 + step`.
+
+**Validation** (`npm test`): PyGuitarPro **cannot read GPX**, so correctness rests
+on the decompressor producing a coherent score (a single bit error in the LZ
+back-references cascades into garbage). `parseGPX` decodes **Yardbird Suite**'s
+`simple chords` track to `Em7 | Am6/F# D#aug/B | Em7 | C#aug/A | Dm7 | …`, **The
+Weight** to its key-of-A guitar chords (`C#m`/`F#m` in bar 1, via String+Fret), and
+**My Favorite Things**' McCoy-Tyner piano part to 48 populated bars (via the
+Tone+Octave encoding) — across 5 diverse `.gpx` files (32–736 KB gpif).
 
 ## Shared ChartPanel — editing, transpose, export
 

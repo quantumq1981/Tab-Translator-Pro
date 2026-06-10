@@ -35,7 +35,7 @@ const end = src.indexOf("async function extractTokens"); // browser-only; reprod
 if (start < 0 || end < 0) throw new Error("source markers not found in TabDecoderPro.tsx");
 const engineSrc =
   src.slice(start, end) +
-  "\nexport { buildChart, buildScore, simplifyScore, symbolForFrets, parseMusicXML, parseGP, parseGPIF, gpUnzip, parseGP345, scoreToABC, scoreToChordPro, scoreToMusicXML, transposeScore, scoreEventTimes, analyzeKey, romanFor, keyName };\n";
+  "\nexport { buildChart, buildScore, simplifyScore, symbolForFrets, parseMusicXML, parseGP, parseGPIF, gpUnzip, parseGP345, parseGPX, scoreToABC, scoreToChordPro, scoreToMusicXML, transposeScore, scoreEventTimes, analyzeKey, romanFor, keyName };\n";
 
 /* parseMusicXML uses the browser's global DOMParser; the app loads it natively.
  * Headlessly we install @xmldom/xmldom (a TEST-only dep) as that global so the
@@ -293,6 +293,26 @@ expect(anth5Bars === "Gm7/A# G7 | Cm7 F7 | Gm7/A# Gm7 | C7 F7", `GP5 Anthropolog
 const auPriv5 = eng.parseGP345(new Uint8Array(fs.readFileSync(path.join(repo, "Charlie Parker - Au Privave.gp5"))), true, 0);
 expect(auPriv5.bars.length === 14 && auPriv5.tempo === 220 && auPriv5.tuning === "Standard", `GP5 v5.10 Au Privave expected 14 bars / tempo 220 / Standard, got ${auPriv5.bars.length} / ${auPriv5.tempo} / ${auPriv5.tuning}`);
 
+/* ---- Path F: Guitar Pro 6 (.gpx) — BCFZ/BCFS container → gpif → parseGPIF.
+ *      PyGuitarPro can't read GPX, so we validate that the bit-level decompressor
+ *      + sector filesystem yield a coherent score: a single decompression error
+ *      cascades into garbage, so recognizable chords across encodings is a strong
+ *      check. Covers all three GP6 note encodings: String+Fret, and Tone+Octave. */
+const yard6 = await eng.parseGPX(new Uint8Array(fs.readFileSync(path.join(repo, "Charlie Parker - Yardbird Suite.gpx"))), true, 1);
+expect(yard6.source === "gp" && yard6.tempo === 224 && yard6.tuning === "Standard", `GP6 Yardbird expected tempo 224 / Standard, got ${yard6.tempo} / ${yard6.tuning}`);
+expect(yard6.bars.length === 17, `GP6 Yardbird expected 17 bars, got ${yard6.bars.length}`);
+const yard6Bars = yard6.bars.slice(1, 7).map((b) => [...new Set(b.events.map((e) => e.symbol))].join(" ")).join(" | ");
+expect(yard6Bars === "Em7 | Am6/F# D#aug/B | Em7 | C#aug/A | Dm7 | Gm6/E C#aug/A", `GP6 Yardbird "simple chords" (String+Fret) unexpected: "${yard6Bars}"`);
+// The Weight — String+Fret guitar, key of A (recognizable chords)
+const weight6 = await eng.parseGPX(new Uint8Array(fs.readFileSync(path.join(repo, "band-the_weight.gpx"))), true, 0);
+expect(weight6.bars[0].events.some((e) => e.symbol === "C#m") && weight6.bars[0].events.some((e) => e.symbol === "F#m"), `GP6 The Weight bar 1 expected C#m + F#m, got ${weight6.bars[0].events.map((e) => e.symbol).join(" ")}`);
+// My Favorite Things — piano part, Tone+Octave pitch encoding (no String/Fret)
+const mft6 = await eng.parseGPX(new Uint8Array(fs.readFileSync(path.join(repo, "John Coltrane - My Favorite Things.gpx"))), true, 0);
+const mft6NonEmpty = mft6.bars.filter((b) => b.events.length).length;
+expect(mft6.parts[0].name.includes("Piano") && mft6NonEmpty > 30, `GP6 My Favorite Things (Tone+Octave) expected a populated piano part, got ${mft6NonEmpty} bars on "${mft6.parts[0].name}"`);
+// decompression integrity: every scored bar maps to a real MasterBar (no truncation)
+expect(yard6.bars.length === 17 && weight6.bars.length === 63, `GP6 bar counts should match MasterBars (Yardbird 17, Weight 63), got ${yard6.bars.length} / ${weight6.bars.length}`);
+
 /* ---- report -------------------------------------------------------------- */
 console.log(`PDF.js ${pdfjsLib.version} · ${pages} pages · ${tokens.length} tokens`);
 console.log(`systemsFound=${chart.systemsFound} columnsFound=${chart.columnsFound} bars=${bars.length}`);
@@ -306,6 +326,7 @@ console.log(`Key: fixture ${eng.keyName(mxKey, true)} (${mxRomans}) · Blue Sky 
 console.log(`GP (.gp): ${gp.parts.length} tracks, ${gp.bars.length} bars, ${gp.tuning}, tempo ${gp.tempo}, bar1 ${gp.bars[0].timeSig.join("/")} · verse ${gpVerse}`);
 console.log(`GP3/4 (.gp3/.gp4): Blue Sky verse ${bs3Verse} · Kid Charlemagne bars 27-28 ${kc27} ${kc28} (PDF mis-read as Fm7) · Peg ${peg4Bars}`);
 console.log(`GP5 (.gp5): Anthropology v5.00 "${anth5.parts[1].name}" ${anth5Bars} · Au Privave v5.10 ${auPriv5.bars.length} bars tempo ${auPriv5.tempo}`);
+console.log(`GP6 (.gpx): Yardbird "${yard6.parts[1].name}" ${yard6Bars} · The Weight key-of-A chords · My Favorite Things ${mft6NonEmpty} piano bars`);
 console.log(`ABC: ${abc.trim().split("\n").pop()}`);
 
 if (fails.length) {
