@@ -14,8 +14,9 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
  *   • MUSICXML / GP (Path C/D) — upload a MusicXML score or a Guitar Pro 7/8
  *     `.gp` file; meter, tuning and rhythm are read *exactly* from the file (no
  *     geometry guessing), only chord *symbols* are inferred via the same engine.
- *     `.gp` is a ZIP+XML, unzipped in-browser with zero new deps; older binary
- *     GP3/4/5/GPX and Power Tab route through MuseScore/TuxGuitar → MusicXML.
+ *     Guitar Pro 3/4/5/6/7/8 all import natively in-browser with zero new deps
+ *     (`.gp` ZIP+XML, `.gpx` BCFZ filesystem, `.gp3/4/5` binary); Power Tab
+ *     routes through MuseScore/TuxGuitar → MusicXML.
  *
  *  Both chart modes share one ChartPanel: lead-sheet / grid views, inline chord
  *  re-labelling (overrides), whole-chart transpose, and ChordPro / ABC export
@@ -509,6 +510,9 @@ function _gpNoteMidi(note) {
   const pe = _gpProp(note, "ConcertPitch") || _gpProp(note, "TransposedPitch");
   const p = pe && _xFirst(pe, "Pitch");
   if (p) { const step = _xChildText(p, "Step"); const acc = _xChildText(p, "Accidental"); const oct = parseInt(_xChildText(p, "Octave") || "0", 10); if (step in STEP_SEMI) return oct * 12 + STEP_SEMI[step] + (acc === "#" ? 1 : acc === "b" ? -1 : 0); }
+  // GP6 piano/concert parts encode pitch as Tone(<Step> = chromatic 0–11) + Octave(<Number>)
+  const toneEl = _gpProp(note, "Tone"), octEl = _gpProp(note, "Octave");
+  if (toneEl && octEl) { const step = parseInt(_xChildText(toneEl, "Step"), 10), oct = parseInt(_xChildText(octEl, "Number"), 10); if (!isNaN(step) && !isNaN(oct)) return oct * 12 + step; }
   return null;
 }
 function parseGPIF(xml, useSharp = true, partIndex = 0) {
@@ -547,10 +551,16 @@ function parseGPIF(xml, useSharp = true, partIndex = 0) {
             const o = onsets.get(cursor);
             noteIds.forEach((nId) => {
               const note = noteMap.get(nId); if (!note) return;
-              const midi = _gpNoteMidi(note); if (midi == null) return;
-              o.midis.push(midi);
               const sEl = _gpProp(note, "String"), fEl = _gpProp(note, "Fret");
-              if (sEl && fEl) { const s = parseInt(_xChildText(sEl, "String"), 10), f = parseInt(_xChildText(fEl, "Fret"), 10); if (!isNaN(s) && !isNaN(f) && s >= 0 && s <= 5 && o.frets[s] === undefined) o.frets[s] = f; } // gpif String 0 = low E = engine index
+              let s = null, f = null;
+              if (sEl && fEl) { s = parseInt(_xChildText(sEl, "String"), 10), f = parseInt(_xChildText(fEl, "Fret"), 10); if (isNaN(s) || isNaN(f)) s = f = null; }
+              // GP7/8 carry a direct <Midi>; GP6 gpif carries only String+Fret, so
+              // fall back to tuning+fret (String 0 = low E, tuning low→high).
+              let midi = _gpNoteMidi(note);
+              if (midi == null && s != null) { const tun = tuning || TUNINGS.Standard; if (s >= 0 && s < tun.length) midi = tun[s] + f; }
+              if (midi == null) return;
+              o.midis.push(midi);
+              if (s != null && s >= 0 && s <= 5 && o.frets[s] === undefined) o.frets[s] = f;
             });
           }
           cursor += q;
@@ -973,11 +983,77 @@ function parseGP5(u8, version, useSharp = true, partIndex = 0) {
   return _gpBuildScore(tracks, tempo, version, useSharp, partIndex);
 }
 
+/* ===========================================================================
+ *  PATH F — Guitar Pro 6 (`.gpx`)
+ *  --------------------------------------------------------------------------
+ *  A `.gpx` is a `BCFZ`-compressed `BCFS` filesystem (Guitar Pro 6's container)
+ *  whose `score.gpif` is the SAME GPIF XML that GP7/8 use — so once the
+ *  container is unpacked, parseGPIF does the rest (with the String+Fret
+ *  fallback above, since GP6 notes carry no direct <Midi>). Zero deps: a
+ *  bit-reader + the documented BCFZ LZ scheme + the sector filesystem, ported
+ *  from alphaTab's GpxFileSystem. `BCFS` (uncompressed) is handled too.
+ * ==========================================================================*/
+function _gpxBitReader(u8) {
+  let pos = 0, bit = 0;
+  function readBit() { if (pos >= u8.length) throw { __gpxEof: true }; const v = (u8[pos] >> (7 - bit)) & 1; if (++bit === 8) { bit = 0; pos++; } return v; }
+  function readBits(n) { let v = 0; for (let i = n - 1; i >= 0; i--) v |= readBit() << i; return v; }            // MSB-first
+  function readBitsRev(n) { let v = 0; for (let i = 0; i < n; i++) v |= readBit() << i; return v; }              // LSB-first
+  const readByte = () => readBits(8);
+  const readBytes = (n) => { const a = new Uint8Array(n); for (let i = 0; i < n; i++) a[i] = readByte(); return a; };
+  return { readBits, readBitsRev, readByte, readBytes };
+}
+const _gpxLE32 = (d, o) => ((d[o + 3] << 24) | (d[o + 2] << 16) | (d[o + 1] << 8) | d[o]) >>> 0;
+function _gpxDecompress(br, skipHeader) {                                                                        // BCFZ → raw bytes
+  const expected = _gpxLE32(br.readBytes(4), 0);
+  const out = [];
+  try {
+    while (out.length < expected) {
+      if (br.readBits(1) === 1) {                                                                                // back-reference
+        const wordSize = br.readBits(4);
+        const offset = br.readBitsRev(wordSize), size = br.readBitsRev(wordSize);
+        const sp = out.length - offset, toRead = Math.min(offset, size);
+        for (let i = 0; i < toRead; i++) out.push(out[sp + i]);
+      } else { const size = br.readBitsRev(2); for (let i = 0; i < size; i++) out.push(br.readByte()); }         // raw bytes
+    }
+  } catch (e) { if (!(e && e.__gpxEof)) throw e; }
+  const u = new Uint8Array(out);
+  return skipHeader ? u.subarray(4) : u;
+}
+function _gpxReadFS(data) {                                                                                       // BCFS sector filesystem
+  const SS = 0x1000, files = [];
+  let offset = SS;
+  while (offset + 3 < data.length) {
+    if (_gpxLE32(data, offset) === 2) {                                                                          // file entry
+      let name = ""; for (let i = 0; i < 127; i++) { const c = data[offset + 4 + i]; if (c === 0) break; name += String.fromCharCode(c); }
+      const fileSize = _gpxLE32(data, offset + 0x8c);
+      const dpo = offset + 0x94; let sc = 0; const chunks = [];
+      for (;;) { const sector = _gpxLE32(data, dpo + 4 * sc++); if (sector === 0) break; offset = sector * SS; chunks.push(data.subarray(offset, offset + SS)); }
+      let total = 0; chunks.forEach((c) => (total += c.length));
+      const buf = new Uint8Array(total); let p = 0; chunks.forEach((c) => { buf.set(c, p); p += c.length; });
+      files.push({ name, data: buf.subarray(0, Math.min(fileSize, buf.length)) });
+    }
+    offset += SS;
+  }
+  return files;
+}
+function parseGPX(u8, useSharp = true, partIndex = 0) {
+  const br = _gpxBitReader(u8);
+  const header = String.fromCharCode(...br.readBytes(4));
+  let fs;
+  if (header === "BCFZ") fs = _gpxReadFS(_gpxDecompress(br, true));
+  else if (header === "BCFS") fs = _gpxReadFS(u8.subarray(4));
+  else throw new Error("Not a GP6 .gpx file.");
+  const score = fs.find((f) => /score\.gpif$/i.test(f.name)) || fs.find((f) => /\.gpif$/i.test(f.name));
+  if (!score) throw new Error("No score.gpif inside the .gpx.");
+  return parseGPIF(new TextDecoder("utf-8").decode(score.data), useSharp, partIndex);
+}
+
 /* Detect format from the file head and dispatch to the right parser. */
 async function parseGuitarProOrXML(buf, fileName, useSharp = true, partIndex = 0) {
   const u8 = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
   const head = new TextDecoder("latin1").decode(u8.subarray(0, 32));
   if (u8[0] === 0x50 && u8[1] === 0x4b) { const xml = await gpUnzip(u8); const sc = parseGPIF(xml, useSharp, partIndex); sc._xml = xml; return sc; }        // GP7/8
+  if (head.startsWith("BCFZ") || head.startsWith("BCFS")) { const sc = parseGPX(u8, useSharp, partIndex); sc._gpxbuf = u8; return sc; }                      // GP6 .gpx
   if (head.includes("FICHIER GUITAR PRO")) { const sc = parseGP345(u8, useSharp, partIndex); sc._gpbuf = u8; return sc; }                                  // GP3/4/5
   const xml = new TextDecoder("utf-8").decode(u8); const sc = parseMusicXML(xml, useSharp, partIndex); sc._xml = xml; return sc;                            // MusicXML
 }
@@ -1328,10 +1404,11 @@ export default function TabDecoderPro() {
   const _reparseScore = (prev, sharp, idx) => {
     if (!prev) return prev;
     let next;
-    if (prev._gpbuf) next = parseGP345(prev._gpbuf, sharp, idx);                 // GP3/4/5 binary
+    if (prev._gpxbuf) next = parseGPX(prev._gpxbuf, sharp, idx);                 // GP6 .gpx
+    else if (prev._gpbuf) next = parseGP345(prev._gpbuf, sharp, idx);            // GP3/4/5 binary
     else if (prev._xml) next = prev.source === "gp" ? parseGPIF(prev._xml, sharp, idx) : parseMusicXML(prev._xml, sharp, idx);
     else return prev;
-    next._gpbuf = prev._gpbuf; next._xml = prev._xml; return next;
+    next._gpbuf = prev._gpbuf; next._xml = prev._xml; next._gpxbuf = prev._gpxbuf; return next;
   };
 
   const onXml = async (e) => {
@@ -1498,13 +1575,13 @@ export default function TabDecoderPro() {
             ) : (
               <>
                 <SectionLabel C={C}>PATH C/D/E · MUSICXML or GUITAR PRO → CHORD CHART</SectionLabel>
-                <input ref={xmlRef} type="file" accept=".xml,.musicxml,.gp,.gp3,.gp4,.gp5,application/xml,text/xml" onChange={onXml} style={{ display: "none" }} />
+                <input ref={xmlRef} type="file" accept=".xml,.musicxml,.gp,.gp3,.gp4,.gp5,.gpx,application/xml,text/xml" onChange={onXml} style={{ display: "none" }} />
                 <button onClick={() => xmlRef.current && xmlRef.current.click()}
                   style={{ width: "100%", background: C.bg, border: `1px dashed ${C.border}`, color: C.amber, borderRadius: 10, padding: "22px 12px", fontSize: 14, cursor: "pointer", fontFamily: "'IBM Plex Mono', monospace" }}>
-                  ⬆  Upload a MusicXML or Guitar Pro file  (.musicxml / .xml / .gp / .gp3 / .gp4 / .gp5)
+                  ⬆  Upload a MusicXML or Guitar Pro file  (.musicxml / .xml / .gp / .gpx / .gp3 / .gp4 / .gp5)
                 </button>
                 <div style={{ fontSize: 11, color: C.dim, marginTop: 8, lineHeight: 1.6 }}>
-                  Reads <b>real</b> time signature, tuning &amp; rhythm straight from the file — no geometry guessing. Native Guitar Pro: <b>.gp</b> (7/8), <b>.gp3 / .gp4</b> (legacy binary). For <b>.gpx</b> (GP6) or Power Tab, open in TuxGuitar / MuseScore and export MusicXML.
+                  Reads <b>real</b> time signature, tuning &amp; rhythm straight from the file — no geometry guessing. Native Guitar Pro: <b>.gp</b> (7/8), <b>.gpx</b> (6), <b>.gp3 / .gp4 / .gp5</b> (legacy binary). For Power Tab, open in TuxGuitar / MuseScore and export MusicXML.
                 </div>
                 {xmlErr && <div style={{ marginTop: 10, color: C.red, fontSize: 12 }}>{xmlErr}</div>}
                 {xmlScore && xmlScore.parts && xmlScore.parts.length > 1 && (
