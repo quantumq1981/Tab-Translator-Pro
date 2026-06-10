@@ -221,7 +221,11 @@ function buildChart(tokens) {
     const groups = []; let cur = [lines[0]];
     for (let i = 1; i < lines.length; i++) { if (lines[i] - cur[cur.length - 1] <= sysGap) cur.push(lines[i]); else { groups.push(cur); cur = [lines[i]]; } }
     groups.push(cur);
-    const staves = groups.filter((g) => g.length >= 4).map((g) => ({ topY: Math.min(...g), botY: Math.max(...g) }));
+    // A staff system = a run of evenly-spaced string lines. Sparse systems (a
+    // melodic line that only touches a few strings) can show as few as 3 lines,
+    // so accept >=3; header/measure-number rows are single lines (excluded) and
+    // sit in their own group (split by sysGap), so they don't slip through.
+    const staves = groups.filter((g) => g.length >= 3).map((g) => ({ topY: Math.min(...g), botY: Math.max(...g) }));
 
     staves.forEach((st, si) => {
       systemsFound++;
@@ -329,15 +333,19 @@ function simplifyScore(score, useSharp) {
   const bars = score.bars.map((bar) => {
     const sig = bar.timeSig || score.timeSig;
     const pcW = new Array(12).fill(0);
-    let bassMidi = Infinity, any = false;
+    let any = false;
     for (const e of bar.events) {
       const w = Math.max(0.25, e.durBeats || 1);
-      for (const m of e.midis || []) { pcW[m % 12] += w; if (m < bassMidi) bassMidi = m; any = true; }
+      for (const m of e.midis || []) { pcW[m % 12] += w; any = true; }
     }
     if (!any) return { number: bar.number, timeSig: bar.timeSig, events: [] };
     const maxW = Math.max(...pcW);
     const chroma = [];
     for (let pc = 0; pc < 12; pc++) if (pcW[pc] >= maxW * 0.2) chroma.push(pc); // drop weak passing tones
+    // bass = lowest note that is a *structural* tone (kept pc), so a brief low
+    // melody/passing note doesn't manufacture a spurious slash chord.
+    let bassMidi = Infinity;
+    for (const e of bar.events) for (const m of e.midis || []) if (pcW[m % 12] >= maxW * 0.2 && m < bassMidi) bassMidi = m;
     const result = recognise(chroma, makeMask(chroma), bassMidi % 12);
     const symbol = symbolOf(result, useSharp);
     let midis;                                            // clean voicing for playback/export

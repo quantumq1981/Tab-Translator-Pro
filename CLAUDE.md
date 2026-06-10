@@ -100,7 +100,9 @@ Pipeline (`buildChart`):
 
 1. Extract integer text tokens with `(x, top-down y)`.
    (PDF.js gives y-up; we convert via `viewport.height − transform[5]`.)
-1. Cluster y → string lines; group lines → staff systems (a run of ≥4 lines).
+1. Cluster y → string lines; group lines → staff systems (a run of **≥3 lines** —
+   sparse melodic systems may only touch 3 strings; header/measure rows are single
+   lines in their own group, so they don't slip through).
 1. Per system, assign each note to a string (Invariant 2).
 1. Cluster x → chord columns; map each column to a measure via the nearest
    measure-number row above. Spike-removal drops stray tokens (e.g. a tempo
@@ -178,6 +180,15 @@ Key parser facts (don't regress):
 
 Both chart modes feed one `ChartPanel`. Anything that reads/writes a score does so
 through the shared shape, so these work identically for Path A and Path C:
+- **Simplify** (`simplifyScore(score, useSharp)`): opt-in "1 chord/bar" mode for
+  dense transcriptions (melody + harmony), where the per-onset chart is noise. It
+  weights each pitch class by the total duration it sounds, keeps the strong ones
+  (drops passing tones), takes the bass from the **structural** tones (so a brief
+  low melody note can't fake a slash), and runs that chroma through the engine →
+  one chord per bar. Default OFF (Blue Sky / clean charts stay per-onset). Honest
+  limits: rootless/altered jazz voicings (e.g. Steely Dan) and `7♭9`/`7♯9` chords
+  the `QUALITIES` table doesn't model won't always match a lead sheet — Edit +
+  Transpose cover the gaps, and MusicXML import is the high-fidelity route.
 - **Editable chords**: tap-to-relabel in *Edit* mode writes an `overrides` map
   (`"<bar>.<beat>" → symbol`), lifted to the parent so it survives view/transpose
   switches and flows into export. Blank reverts to the detected symbol; edits are
