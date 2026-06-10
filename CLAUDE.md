@@ -186,6 +186,14 @@ through the shared shape, so these work identically for Path A and Path C:
   chord tones as notes **plus** the symbol as a guitar-chord annotation, so the
   output is real, *playable* music (validated by playing it). Both honour
   `overrides` and the current transpose. ABC handles mid-tune meter via `[M:n/m]`.
+- **Key + roman numerals** (`analyzeKey`, `romanFor`, `keyName`): scores all 24
+  keys — each chord adds its duration when diatonic (×0.3 if only its root fits =
+  a borrowed quality), plus a small cadential bonus for the last/first chord being
+  the tonic — and picks the best. The `I·V·vi` toggle captions each chord with its
+  function relative to that key (non-diatonic → absolute symbol); the detected key
+  shows in the meta row and flows into export (`K:` line for ABC, `{key:}` for
+  ChordPro). Chord class is parsed from the symbol suffix (`_classOf`); minor keys
+  accept a major/dominant V (harmonic) and a leading-tone vii°.
 - **Playback** (▶ Play, ♩=BPM): in-browser **Web Audio** synth, no deps. Pure
   `scoreEventTimes(score, bpm)` flattens the score into timed chord events in
   **seconds** (a "beat" = one `1/beatType` note → `4/beatType` quarters, same
@@ -277,6 +285,9 @@ accordingly.
   and asserts `scoreEventTimes` lays the 4 events at 0/1/2/4 s with durations
   1/1/2/1.5 s (the 3/4 bar 3 starting at 4.0 s), total 5.5 s, MIDI carried
   through. The Web Audio synth (`playScore`) is the browser-only glue on top.
+- **Key / roman numerals**: `npm test` asserts `analyzeKey` → **C major** for the
+  fixture (`I V vi IV`) and **E major** for Blue Sky (E/A/B = I/IV/V, C#m = vi,
+  F#m7 = ii7), and that the key reaches the exporters (`K:C`, `{key: C}`).
 
 ## Session conventions
 

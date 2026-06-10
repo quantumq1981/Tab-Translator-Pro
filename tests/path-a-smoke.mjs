@@ -35,7 +35,7 @@ const end = src.indexOf("async function extractTokens"); // browser-only; reprod
 if (start < 0 || end < 0) throw new Error("source markers not found in TabDecoderPro.tsx");
 const engineSrc =
   src.slice(start, end) +
-  "\nexport { buildChart, buildScore, symbolForFrets, parseMusicXML, scoreToABC, scoreToChordPro, transposeScore, scoreEventTimes };\n";
+  "\nexport { buildChart, buildScore, symbolForFrets, parseMusicXML, scoreToABC, scoreToChordPro, transposeScore, scoreEventTimes, analyzeKey, romanFor, keyName };\n";
 
 /* parseMusicXML uses the browser's global DOMParser; the app loads it natively.
  * Headlessly we install @xmldom/xmldom (a TEST-only dep) as that global so the
@@ -178,6 +178,25 @@ expect(Math.abs(ev[3].start - 4) < 1e-9 && Math.abs(ev[3].dur - 1.5) < 1e-9, `F:
 expect(Math.abs(sched.duration - 5.5) < 1e-9, `total expected 5.5s (4+4+3 quarters @0.5), got ${sched.duration}`);
 expect(JSON.stringify(ev[0].midis) === JSON.stringify([48, 52, 55]), `C event should carry MIDI [48,52,55], got [${ev[0].midis}]`);
 
+/* ---- key + roman-numeral analysis ---------------------------------------- */
+const mxKey = eng.analyzeKey(mx); // C G | Am | F  ->  C major
+expect(mxKey && eng.keyName(mxKey, true) === "C", `expected key of C major, got ${mxKey && eng.keyName(mxKey, true)}`);
+const mxRomans = mx.bars.flatMap((b) => b.events.map((e) => eng.romanFor(e.symbol, mxKey))).join(" ");
+expect(mxRomans === "I V vi IV", `expected "I V vi IV", got "${mxRomans}"`);
+
+const bsKey = eng.analyzeKey(score); // Blue Sky verse E A … -> E major
+expect(bsKey && eng.keyName(bsKey, true) === "E", `expected Blue Sky key of E major, got ${bsKey && eng.keyName(bsKey, true)}`);
+expect(eng.romanFor("E", bsKey) === "I" && eng.romanFor("A", bsKey) === "IV" && eng.romanFor("B", bsKey) === "V",
+  `E/A/B should be I/IV/V, got ${eng.romanFor("E", bsKey)}/${eng.romanFor("A", bsKey)}/${eng.romanFor("B", bsKey)}`);
+expect(eng.romanFor("C#m", bsKey) === "vi", `C#m should be vi in E, got ${eng.romanFor("C#m", bsKey)}`);
+expect(eng.romanFor("F#m7", bsKey) === "ii7", `F#m7 should be ii7 in E, got ${eng.romanFor("F#m7", bsKey)}`);
+
+// detected key flows into exports (K: line / {key:} directive)
+const abcK = eng.scoreToABC(mx, { key: mxKey, useSharp: true });
+expect(/^K:C$/m.test(abcK), `ABC should carry K:C, got header:\n${abcK.split("\n").slice(0, 5).join("\n")}`);
+const cpK = eng.scoreToChordPro(mx, { key: mxKey, useSharp: true });
+expect(/\{key: C\}/.test(cpK), "ChordPro should carry {key: C}");
+
 /* ---- report -------------------------------------------------------------- */
 console.log(`PDF.js ${pdfjsLib.version} · ${pages} pages · ${tokens.length} tokens`);
 console.log(`systemsFound=${chart.systemsFound} columnsFound=${chart.columnsFound} bars=${bars.length}`);
@@ -187,6 +206,7 @@ const sampleMulti = (typeof score !== "undefined" && score.bars.find((b) => b.ev
 if (sampleMulti) console.log(`sample multi-chord bar ${sampleMulti.number}: ` +
   sampleMulti.events.map((e) => `${e.symbol}@b${e.beat + 1}(${e.durBeats})`).join(" "));
 console.log(`MusicXML: ${mx.bars.length} bars, ${mx.tuning} tuning, bar3 ${mx.bars[2].timeSig.join("/")} · ${mxSyms.join(" | ")}`);
+console.log(`Key: fixture ${eng.keyName(mxKey, true)} (${mxRomans}) · Blue Sky ${eng.keyName(bsKey, true)}`);
 console.log(`ABC: ${abc.trim().split("\n").pop()}`);
 
 if (fails.length) {
