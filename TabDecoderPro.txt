@@ -800,7 +800,7 @@ function parseGP345(u8, useSharp = true, partIndex = 0) {
       const beatCount = r.i32();
       const beats = [];
       for (let b = 0; b < beatCount; b++) beats.push(_gpReadBeat(r, v, tr.stringCount, tr.tuning, state[t]));
-      tr.measures.push({ timeSig: headers[m], beats });
+      tr.measures.push({ timeSig: headers[m], voices: [beats] });
     }
   }
   return _gpBuildScore(tracks, tempo, version, useSharp, partIndex);
@@ -811,10 +811,13 @@ function _gpBuildScore(tracks, tempo, version, useSharp, partIndex) {
   const parts = tracks.map((t, i) => ({ index: i, id: String(i), name: (t.name || "").trim() || `Track ${i + 1}` }));
   const bars = tr.measures.map((m, mi) => {
     const [bts, btype] = m.timeSig;
-    const onsets = new Map(); let cursor = 0;
-    m.beats.forEach((b) => {
-      if (b.midis.length) { if (!onsets.has(cursor)) onsets.set(cursor, { midis: [], frets: {} }); const o = onsets.get(cursor); b.midis.forEach((x) => o.midis.push(x)); Object.keys(b.frets).forEach((k) => { if (o.frets[k] === undefined) o.frets[k] = b.frets[k]; }); }
-      cursor += b.durQuarters;
+    const onsets = new Map();
+    m.voices.forEach((beats) => {                                     // GP5 has 2 voices; each restarts at beat 0
+      let cursor = 0;
+      beats.forEach((b) => {
+        if (b.midis.length) { if (!onsets.has(cursor)) onsets.set(cursor, { midis: [], frets: {} }); const o = onsets.get(cursor); b.midis.forEach((x) => o.midis.push(x)); Object.keys(b.frets).forEach((k) => { if (o.frets[k] === undefined) o.frets[k] = b.frets[k]; }); }
+        cursor += b.durQuarters;
+      });
     });
     const qPerBeat = 4 / btype;
     const raw = [...onsets.entries()].filter(([, o]) => o.midis.length).sort((a, b) => a[0] - b[0])
@@ -828,7 +831,147 @@ function _gpBuildScore(tracks, tempo, version, useSharp, partIndex) {
   });
   return { source: "gp", timeSig: bars.length ? bars[0].timeSig : [4, 4], tuning: _tuningName(tr.tuning ? [...tr.tuning].reverse() : null), tempo, bars, parts, partIndex: idx };
 }
-function parseGP5() { throw new Error("Guitar Pro 5 (.gp5) parsing is coming next — for now open it in TuxGuitar/MuseScore and export MusicXML."); }
+/* ---- GP5: a separate reader (different container: RSE, page setup, directions,
+ * 2 voices/measure, wider headers/tracks/notes). gt500 = format > 5.0.0 (v5.10),
+ * which adds the RSE master effect, hide-tempo, track EQ and instrument-effect
+ * names. Effect/chord/beat blocks reuse the GP4 helpers where identical. */
+function _gp5RSEInstrument(r, gt500) { r.i32(); r.i32(); r.i32(); if (gt500) r.i32(); else { r.i16(); r.skip(1); } }
+function _gp5Grace(r) { r.u8(); r.u8(); r.u8(); r.u8(); r.u8(); }
+function _gp5Harmonic(r) { const t = r.i8(); if (t === 2) { r.u8(); r.i8(); r.u8(); } else if (t === 3) r.u8(); }
+function _gp5NoteEffects(r) {
+  const f1 = r.u8(), f2 = r.u8();
+  if (f1 & 0x01) _gpReadBend(r);
+  if (f1 & 0x10) _gp5Grace(r);
+  if (f2 & 0x04) r.i8();                                              // tremolo picking
+  if (f2 & 0x08) r.u8();                                              // slide flags
+  if (f2 & 0x10) _gp5Harmonic(r);
+  if (f2 & 0x20) { r.i8(); r.i8(); }                                  // trill
+}
+function _gp5MixTable(r, gt500) {
+  const instrument = r.i8();
+  _gp5RSEInstrument(r, gt500);
+  if (!gt500) r.skip(1);
+  const vals = [r.i8(), r.i8(), r.i8(), r.i8(), r.i8(), r.i8()];      // volume,balance,chorus,reverb,phaser,tremolo
+  r.intByteString();                                                 // tempo name
+  const tempo = r.i32();
+  for (let i = 0; i < 6; i++) if (vals[i] >= 0) r.i8();              // durations
+  if (tempo >= 0) { r.i8(); if (gt500) r.bool(); }
+  r.i8();                                                            // mix-table flags
+  r.i8();                                                            // wah
+  if (gt500) { r.intByteString(); r.intByteString(); }              // RSE instrument effect name/category
+}
+function _gp5Note(r, stringNumber, tuning, state) {
+  const flags = r.u8();
+  let type = 1;
+  if (flags & 0x20) type = r.u8();
+  if (flags & 0x10) r.i8();                                          // dynamic
+  let fret = null;
+  if (flags & 0x20) fret = r.i8();
+  if (flags & 0x80) { r.i8(); r.i8(); }                              // fingering
+  if (flags & 0x01) r.skip(8);                                       // duration percent (f64)
+  r.u8();                                                            // flags2 (always)
+  if (flags & 0x08) _gp5NoteEffects(r);
+  if (type === 2) { fret = state.lastFret[stringNumber]; if (fret == null) return null; }
+  else if (type === 3) return null;
+  if (fret == null) return null;
+  fret = Math.min(Math.max(fret, 0), 99);
+  state.lastFret[stringNumber] = fret;
+  return { fret, midi: tuning[stringNumber - 1] + fret };
+}
+function _gp5Beat(r, stringCount, tuning, state, gt500) {
+  const flags = r.u8();
+  let empty = false;
+  if (flags & 0x40) { const st = r.u8(); empty = st === 0; }
+  const durQuarters = _gpReadDuration(r, flags);
+  if (flags & 0x02) _gpReadChord(r, 4, stringCount);                 // GP4-format chord
+  if (flags & 0x04) r.intByteString();
+  if (flags & 0x08) _gpReadBeatEffects(r, 4);                        // GP4-format beat effects
+  if (flags & 0x10) _gp5MixTable(r, gt500);
+  const stringFlags = r.u8();
+  const midis = [], frets = {};
+  for (let s = 1; s <= stringCount; s++) {
+    if (stringFlags & (1 << (7 - s))) { const note = _gp5Note(r, s, tuning, state); if (note) { midis.push(note.midi); frets[6 - s] = note.fret; } }
+  }
+  const f2 = r.i16();
+  if (f2 & 0x0800) r.u8();                                           // break-secondary-beams count
+  return { durQuarters: empty ? 0 : durQuarters, midis, frets };
+}
+function parseGP5(u8, version, useSharp = true, partIndex = 0) {
+  const r = _gpReader(u8);
+  r.version();                                                       // re-read 30-byte version
+  const gt500 = !/v5\.00/.test(version);                             // 5.10+ has extra blocks
+  for (let i = 0; i < 9; i++) r.intByteString();                     // info: 9 strings (GP5 splits words/music)
+  const noticeLines = r.i32(); for (let i = 0; i < noticeLines; i++) r.intByteString();
+  r.i32(); for (let i = 0; i < 5; i++) { r.i32(); r.intString(); }   // lyrics
+  if (gt500) { r.i32(); r.i32(); for (let i = 0; i < 11; i++) r.i8(); } // RSE master effect (vol + reserved + EQ-11)
+  r.skip(8 + 16 + 4); r.i16();                                       // page setup: size, margins, proportion, header/footer
+  for (let i = 0; i < 10; i++) r.intByteString();                    // page-setup placeholder strings
+  r.intByteString();                                                 // tempo name
+  const tempo = r.i32();
+  if (gt500) r.bool();                                               // hide tempo
+  r.i8();                                                            // key
+  r.i32();                                                           // octave
+  for (let i = 0; i < 64; i++) { r.i32(); r.skip(8); }               // 64 MIDI channels
+  r.skip(38);                                                        // directions: 19 shorts
+  r.i32();                                                           // master reverb
+  const measureCount = r.i32();
+  const trackCount = r.i32();
+  // --- measure headers ---
+  const headers = []; let num = 4, den = 4;
+  for (let m = 0; m < measureCount; m++) {
+    if (m > 0) r.skip(1);
+    const flags = r.u8();
+    if (flags & 0x01) num = r.i8();
+    if (flags & 0x02) den = r.i8();
+    if (flags & 0x08) r.i8();                                        // repeat close
+    if (flags & 0x20) { r.intByteString(); r.skip(4); }             // marker
+    if (flags & 0x40) { r.i8(); r.i8(); }                           // key sig
+    if (flags & 0x10) r.u8();                                        // alt ending
+    if (flags & 0x03) r.skip(4);                                     // time-sig beams
+    if (!(flags & 0x10)) r.skip(1);
+    r.u8();                                                          // triplet feel
+    headers.push([num, den]);
+  }
+  // --- tracks ---
+  const tracks = [];
+  for (let t = 0; t < trackCount; t++) {
+    if (t === 0 || !gt500) r.skip(1);
+    r.u8();                                                          // flags1
+    const name = r.byteString(40);
+    const stringCount = r.i32();
+    const tuning = [];
+    for (let i = 0; i < 7; i++) { const tu = r.i32(); if (i < stringCount) tuning.push(tu); }
+    r.i32();                                                         // port
+    r.i32(); r.i32();                                                // channel
+    r.i32(); r.i32();                                                // fret count, capo
+    r.skip(4);                                                       // colour
+    r.i16();                                                         // flags2
+    r.u8(); r.u8(); r.u8();                                          // auto-accent, bank, humanize
+    r.i32(); r.i32(); r.i32();                                       // clef transpose ×2 + unknown
+    r.skip(12);
+    _gp5RSEInstrument(r, gt500);
+    if (gt500) { for (let i = 0; i < 4; i++) r.i8(); r.intByteString(); r.intByteString(); } // track EQ-4 + RSE effect names
+    tracks.push({ name, stringCount, tuning, measures: [] });
+  }
+  r.skip(gt500 ? 1 : 2);                                             // blank byte(s) after all tracks
+  // --- measures (measure-major, then track; 2 voices each + line break) ---
+  const state = tracks.map(() => ({ lastFret: {} }));
+  for (let m = 0; m < measureCount; m++) {
+    for (let t = 0; t < trackCount; t++) {
+      const tr = tracks[t];
+      const voices = [];
+      for (let vi = 0; vi < 2; vi++) {
+        const beatCount = r.i32();
+        const beats = [];
+        for (let b = 0; b < beatCount; b++) beats.push(_gp5Beat(r, tr.stringCount, tr.tuning, state[t], gt500));
+        voices.push(beats);
+      }
+      if (r.pos < u8.length) r.u8();                                 // line break (absent on a final measure — PyGuitarPro reads default 0)
+      tr.measures.push({ timeSig: headers[m], voices });
+    }
+  }
+  return _gpBuildScore(tracks, tempo, version, useSharp, partIndex);
+}
 
 /* Detect format from the file head and dispatch to the right parser. */
 async function parseGuitarProOrXML(buf, fileName, useSharp = true, partIndex = 0) {

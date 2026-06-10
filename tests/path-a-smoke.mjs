@@ -284,6 +284,15 @@ expect(peg4.parts[3].name === "Rhythm guitar", `Peg gp4 track 3 expected "Rhythm
 const peg4Bars = peg4.bars.slice(0, 5).map((b) => [...new Set(b.events.map((e) => e.symbol))].join(" ")).join(" | ");
 expect(peg4Bars === "Gmaj7 | F#7 | Fmaj7 | E7 | D#maj7", `Peg gp4 bars 1-5 expected jazz changes, got "${peg4Bars}"`);
 
+// GP5 — both sub-formats: Anthropology (v5.00, 2 tracks, part picker) + Au Privave (v5.10)
+const anth5 = eng.parseGP345(new Uint8Array(fs.readFileSync(path.join(repo, "Charlie Parker - Anthropology.gp5"))), true, 1);
+expect(anth5.source === "gp" && anth5.tempo === 184 && anth5.tuning === "Standard", `GP5 v5.00 expected tempo 184 / Standard, got ${anth5.tempo} / ${anth5.tuning}`);
+expect(anth5.parts.length === 2 && anth5.parts[1].name === "Chords", `GP5 expected 2 parts incl. "Chords", got ${anth5.parts.map((p) => p.name).join(", ")}`);
+const anth5Bars = anth5.bars.slice(0, 4).map((b) => [...new Set(b.events.map((e) => e.symbol))].join(" ")).join(" | ");
+expect(anth5Bars === "Gm7/A# G7 | Cm7 F7 | Gm7/A# Gm7 | C7 F7", `GP5 Anthropology "Chords" bars 1-4 expected rhythm changes, got "${anth5Bars}"`);
+const auPriv5 = eng.parseGP345(new Uint8Array(fs.readFileSync(path.join(repo, "Charlie Parker - Au Privave.gp5"))), true, 0);
+expect(auPriv5.bars.length === 14 && auPriv5.tempo === 220 && auPriv5.tuning === "Standard", `GP5 v5.10 Au Privave expected 14 bars / tempo 220 / Standard, got ${auPriv5.bars.length} / ${auPriv5.tempo} / ${auPriv5.tuning}`);
+
 /* ---- report -------------------------------------------------------------- */
 console.log(`PDF.js ${pdfjsLib.version} · ${pages} pages · ${tokens.length} tokens`);
 console.log(`systemsFound=${chart.systemsFound} columnsFound=${chart.columnsFound} bars=${bars.length}`);
@@ -296,6 +305,7 @@ console.log(`MusicXML: ${mx.bars.length} bars, ${mx.tuning} tuning, bar3 ${mx.ba
 console.log(`Key: fixture ${eng.keyName(mxKey, true)} (${mxRomans}) · Blue Sky ${eng.keyName(bsKey, true)}`);
 console.log(`GP (.gp): ${gp.parts.length} tracks, ${gp.bars.length} bars, ${gp.tuning}, tempo ${gp.tempo}, bar1 ${gp.bars[0].timeSig.join("/")} · verse ${gpVerse}`);
 console.log(`GP3/4 (.gp3/.gp4): Blue Sky verse ${bs3Verse} · Kid Charlemagne bars 27-28 ${kc27} ${kc28} (PDF mis-read as Fm7) · Peg ${peg4Bars}`);
+console.log(`GP5 (.gp5): Anthropology v5.00 "${anth5.parts[1].name}" ${anth5Bars} · Au Privave v5.10 ${auPriv5.bars.length} bars tempo ${auPriv5.tempo}`);
 console.log(`ABC: ${abc.trim().split("\n").pop()}`);
 
 if (fails.length) {

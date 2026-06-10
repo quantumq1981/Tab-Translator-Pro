@@ -292,19 +292,31 @@ Format facts that bite (all verified against the corpus):
   note-effects. `_gpReadBeatEffects`/`_gpReadNoteEffects`/`_gpReadChord`/
   `_gpReadMixTableChange` branch on `v`.
 
-`parseGP5` is a stub for now (GP5's container — directory, RSE, 2 voices — is
-different enough to warrant its own reader); the dispatcher `parseGuitarProOrXML`
-routes by file head (`PK`→GP7/8, `FICHIER GUITAR PRO`→GP3/4/5, else MusicXML).
-`.gpx` (GP6 `BCFZ` binary FS) and Power Tab still route through MuseScore/TuxGuitar
-→ MusicXML.
+**GP5** has its own reader (`parseGP5`) because the container differs materially:
+an RSE master effect, page-setup block, 19 jump directions, much wider track
+records (RSE instrument, EQ, clef transpose) and **two voices per measure** with a
+trailing line-break byte. `gt500` (= v5.10) gates the extra RSE/EQ/hide-tempo/
+effect-name fields. Gotchas that cost real debugging: a **blank byte after *all*
+tracks** (`skip(1)` v5.10 / `skip(2)` v5.00), and the **final measure's line-break
+byte is often absent** — PyGuitarPro reads it with `default=0`, so we read it only
+when `pos < length`. GP5 beats reuse the GP4 chord/beat-effect helpers but have
+their own note reader (a duration-percent `f64` under `0x01`, an always-present
+second flags byte) and a trailing `int16` beat-display flags word.
+
+The dispatcher `parseGuitarProOrXML` routes by file head (`PK`→GP7/8,
+`FICHIER GUITAR PRO`→GP3/4/5, else MusicXML). `.gpx` (GP6 `BCFZ` binary FS) and
+Power Tab still route through MuseScore/TuxGuitar → MusicXML.
 
 **Validation** (`npm test`): `parseGP345` reproduces the **Blue Sky gp3** verse
 `E A A E E A A E`, decodes **Kid Charlemagne**'s Rhythm-Guitar bars 27–28 to the
 correct **`C7`** (the very bars the PDF path mis-anchored to `Fm7` — three
-importers now agree on the geometry-defeating case), and reads **Peg.gp4**'s jazz
-changes `Gmaj7 | F#7 | Fmaj7 | E7 | D#maj7`. A dev-time PyGuitarPro cross-check
-matched **2445/2446 measures** across 4 files (the lone diff is one passing tone
-in a bebop bar, not a byte-alignment error — alignment survives past it).
+importers now agree on the geometry-defeating case), reads **Peg.gp4**'s jazz
+changes `Gmaj7 | F#7 | Fmaj7 | E7 | D#maj7`, and decodes **GP5** both ways:
+**Anthropology** (v5.00) `Chords` track → `Gm7/A# G7 | Cm7 F7 | …` rhythm changes
+and **Au Privave** (v5.10). A dev-time PyGuitarPro cross-check matched **2445/2446
+measures** across the GP3/4 files and **4806/4806** across six GP5 files (v5.00 and
+v5.10, single- and multi-track) — the lone GP3/4 diff is one passing tone in a
+bebop bar, not a byte-alignment error (alignment survives past it).
 
 ## Shared ChartPanel — editing, transpose, export
 
