@@ -412,7 +412,13 @@ function parseMusicXML(xml, useSharp = true) {
     const number = parseInt(measure.getAttribute("number") || String(mi + 1), 10);
     bars.push({ number, timeSig: [beats, beatType], events: events.map(({ onset, ...e }) => e) });
   });
-  return { source: "musicxml", timeSig: bars.length ? bars[0].timeSig : [beats, beatType], tuning: _tuningName(tuning), bars };
+  // tempo: <sound tempo="…"> if present, else a <metronome> per-minute (assume
+  // it's a quarter-note BPM). null → callers default (e.g. 100 for playback).
+  let tempo = null;
+  const sound = _xEls(doc, "sound").find((s) => s.getAttribute("tempo"));
+  if (sound) { const v = parseFloat(sound.getAttribute("tempo")); if (!isNaN(v)) tempo = v; }
+  if (tempo == null) { const pm = _xFirst(doc, "per-minute"); if (pm) { const v = parseFloat(_xText(pm)); if (!isNaN(v)) tempo = v; } }
+  return { source: "musicxml", timeSig: bars.length ? bars[0].timeSig : [beats, beatType], tuning: _tuningName(tuning), tempo, bars };
 }
 
 /* ---- exporters: a score → ChordPro grid / ABC (chords + playable notes) ----
@@ -487,6 +493,53 @@ function transposeScore(score, n, useSharp) {
     }),
   }));
   return { ...score, bars, transposedBy: n };
+}
+
+/* ---- playback: schedule a score on a wall-clock, then synth it ------------
+ * scoreEventTimes is PURE (testable headlessly): it flattens the score into
+ * timed chord events in SECONDS at `bpm` (a quarter-note BPM). A "beat" in our
+ * model is one (1/beatType) note, so its length in quarters is `4/beatType` —
+ * the same conversion the ABC exporter uses. Per-bar timeSig is honoured, so a
+ * mid-tune meter change keeps the clock correct. ------------------------------ */
+function scoreEventTimes(score, bpm) {
+  const secPerQuarter = 60 / bpm;
+  let tQ = 0; const events = [];
+  for (const bar of score.bars) {
+    const [bb, bt] = bar.timeSig || score.timeSig;
+    const q = (v) => (v * 4) / bt; // beats → quarters
+    bar.events.forEach((e) => {
+      events.push({
+        key: `${bar.number}.${e.beat}`, bar: bar.number, midis: e.midis || [],
+        start: (tQ + q(e.beat)) * secPerQuarter, dur: Math.max(0.05, q(e.durBeats) * secPerQuarter),
+      });
+    });
+    tQ += q(bb);
+  }
+  return { events, duration: tQ * secPerQuarter };
+}
+// Web Audio synth (browser only; no deps). Returns a controller with stop().
+function playScore(score, bpm, { onEvent, onEnd } = {}) {
+  const AC = typeof window !== "undefined" && (window.AudioContext || window.webkitAudioContext);
+  if (!AC) return null;
+  const ctx = new AC();
+  const { events, duration } = scoreEventTimes(score, bpm);
+  const master = ctx.createGain(); master.gain.value = 0.9; master.connect(ctx.destination);
+  const t0 = ctx.currentTime + 0.08;
+  const timers = [];
+  events.forEach((ev) => {
+    const st = t0 + ev.start, en = st + ev.dur, vol = 0.22 / Math.max(1, ev.midis.length);
+    ev.midis.forEach((m) => {
+      const o = ctx.createOscillator(); o.type = "triangle"; o.frequency.value = 440 * Math.pow(2, (m - 69) / 12);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, st); g.gain.linearRampToValueAtTime(vol, st + 0.012);
+      g.gain.setValueAtTime(vol, Math.max(st + 0.012, en - 0.06)); g.gain.linearRampToValueAtTime(0.0001, en);
+      o.connect(g); g.connect(master); o.start(st); o.stop(en + 0.03);
+    });
+    if (onEvent) timers.push(setTimeout(() => onEvent(ev.key), ev.start * 1000 + 80));
+  });
+  let done = false;
+  const endTimer = setTimeout(() => { done = true; if (onEnd) onEnd(); try { ctx.close(); } catch (_) {} }, duration * 1000 + 300);
+  return { stop() { timers.forEach(clearTimeout); clearTimeout(endTimer); try { ctx.close(); } catch (_) {} if (!done && onEnd) onEnd(); } };
 }
 
 async function extractTokens(buf) {
@@ -813,8 +866,24 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   const [semis, setSemis] = useState(0);
   const [exp, setExp] = useState(null); // null | { fmt, text }
   const [copied, setCopied] = useState(false);
+  const [bpm, setBpm] = useState(score.tempo || 100);
+  const [playing, setPlaying] = useState(false);
+  const [playKey, setPlayKey] = useState("");
+  const player = useRef(null);
 
   const tscore = useMemo(() => transposeScore(score, semis, useSharp), [score, semis, useSharp]);
+
+  useEffect(() => { setBpm(score.tempo || 100); }, [score.tempo]);
+  const stopPlay = () => { if (player.current) { player.current.stop(); player.current = null; } setPlaying(false); setPlayKey(""); };
+  useEffect(() => stopPlay, []); // stop on unmount
+  useEffect(() => { stopPlay(); }, [score, semis]); // stop if the music changes underneath playback
+  const togglePlay = () => {
+    if (playing) { stopPlay(); return; }
+    const ctl = playScore(tscore, bpm, { onEvent: setPlayKey, onEnd: () => { setPlaying(false); setPlayKey(""); player.current = null; } });
+    if (!ctl) return; // no Web Audio
+    player.current = ctl; setPlaying(true);
+  };
+  const bumpBpm = (d) => setBpm((b) => Math.max(40, Math.min(240, b + d)));
   const symOf = (bar, e) => { const v = overrides[`${bar.number}.${e.beat}`]; return v != null ? v : e.symbol; };
   const doExport = (fmt) => {
     const text = fmt === "abc" ? scoreToABC(tscore, { overrides, title }) : scoreToChordPro(tscore, { overrides, title });
@@ -841,6 +910,13 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
           <span style={{ fontSize: 11, minWidth: 44, textAlign: "center", color: semis ? C.amber : C.dim }}>transpose</span>
           <button onClick={() => bump(1)} style={{ ...chip(C), padding: "3px 8px" }}>+</button>
           {semis !== 0 && <button onClick={() => setSemis(0)} style={{ ...chip(C), padding: "3px 8px" }}>0</button>}
+        </span>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 4, marginLeft: 2 }}>
+          <button onClick={togglePlay} title={playing ? "stop" : "play the chart"}
+            style={{ ...chip(C), padding: "3px 10px", borderColor: playing ? C.green : C.border, color: playing ? C.green : C.amber }}>{playing ? "■ Stop" : "▶ Play"}</button>
+          <button onClick={() => bumpBpm(-5)} style={{ ...chip(C), padding: "3px 8px" }}>−</button>
+          <span style={{ fontSize: 11, minWidth: 46, textAlign: "center", color: C.dim }}>♩={bpm}</span>
+          <button onClick={() => bumpBpm(5)} style={{ ...chip(C), padding: "3px 8px" }}>+</button>
         </span>
         <span style={{ marginLeft: "auto", display: "inline-flex", gap: 4 }}>
           <button onClick={() => doExport("chordpro")} style={{ ...chip(C), padding: "3px 9px", borderColor: exp && exp.fmt === "chordpro" ? C.cyan : C.border, color: exp && exp.fmt === "chordpro" ? C.cyan : C.dim }}>ChordPro</button>
@@ -874,9 +950,10 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
                         );
                       }
                       const isSel = selKey === k;
+                      const isPlaying = playKey === k;
                       return (
                         <button key={i} onClick={() => (editMode ? (setEditKey(k), setDraft(cur)) : onPick(k, e))} title={editMode ? "click to re-label" : `beat ${e.beat + 1}`}
-                          style={{ gridColumn: gridCol, justifySelf: "start", background: "transparent", border: "none", borderBottom: isSel ? `2px solid ${C.amber}` : "2px solid transparent", padding: "0 2px", cursor: "pointer", color: edited ? C.green : isSel ? C.amber : C.cyan, fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: cur.length > 4 ? 13 : 16, lineHeight: 1.2 }}>
+                          style={{ gridColumn: gridCol, justifySelf: "start", background: isPlaying ? `${C.green}22` : "transparent", borderRadius: 4, border: "none", borderBottom: isSel ? `2px solid ${C.amber}` : "2px solid transparent", padding: "0 2px", cursor: "pointer", color: isPlaying ? C.green : edited ? C.green : isSel ? C.amber : C.cyan, fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: cur.length > 4 ? 13 : 16, lineHeight: 1.2, transition: "background .1s, color .1s" }}>
                           {cur}{edited ? "*" : ""}
                         </button>
                       );
