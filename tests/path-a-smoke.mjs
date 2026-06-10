@@ -158,6 +158,17 @@ expect(/"A7"/.test(abc), "ABC should carry the A7 override as a chord annotation
 // C3-E3-G3 → ABC [C,E,G,] (C4/middle-C is "C", so C3 is "C,"), half note = 2 L-units
 expect(/"C"\[C,E,G,\]2/.test(abc), `ABC should voice C3 major as [C,E,G,] half-note, got:\n${abc}`);
 
+/* ---- multi-part: the part picker selects which instrument to chart -------- */
+const mpXml = fs.readFileSync(path.join(here, "fixtures", "sample-multipart.musicxml"), "utf8");
+const p0 = eng.parseMusicXML(mpXml, true, 0);
+expect(p0.parts.length === 2 && p0.parts.map((p) => p.name).join(",") === "Guitar,Rhythm",
+  `expected 2 parts [Guitar,Rhythm], got [${p0.parts.map((p) => p.name)}]`);
+expect(p0.partIndex === 0 && p0.bars[0].events[0].symbol === "C", `part 0 (Guitar) should chart C, got ${p0.bars[0].events[0].symbol}`);
+const p1 = eng.parseMusicXML(mpXml, true, 1);
+expect(p1.partIndex === 1 && p1.bars[0].events[0].symbol === "G", `part 1 (Rhythm) should chart G, got ${p1.bars[0].events[0].symbol}`);
+// single-part files still report one part (no picker shown)
+expect(mx.parts.length === 1, `single-part file should report 1 part, got ${mx.parts.length}`);
+
 /* ---- transpose: re-recognise from shifted MIDI --------------------------- */
 const up2 = eng.transposeScore(mx, 2, true); // C G | Am | F  ->  D A | Bm | G
 expect(up2.bars[0].events.map((e) => e.symbol).join(" ") === "D A", `+2 st bar1 expected "D A", got "${up2.bars[0].events.map((e) => e.symbol).join(" ")}"`);

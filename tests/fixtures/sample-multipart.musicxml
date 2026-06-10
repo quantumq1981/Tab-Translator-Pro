@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Tab Decoder · Path C multi-part fixture. Two parts so the part picker has
+  something to choose: "Guitar" plays a C major bar, "Rhythm" plays a G major
+  bar. parseMusicXML(xml, useSharp, partIndex) should chart whichever is picked.
+-->
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Guitar</part-name></score-part>
+    <score-part id="P2"><part-name>Rhythm</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>4</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+      </attributes>
+      <note><pitch><step>C</step><octave>3</octave></pitch><duration>16</duration><type>whole</type></note>
+      <note><chord/><pitch><step>E</step><octave>3</octave></pitch><duration>16</duration><type>whole</type></note>
+      <note><chord/><pitch><step>G</step><octave>3</octave></pitch><duration>16</duration><type>whole</type></note>
+    </measure>
+  </part>
+  <part id="P2">
+    <measure number="1">
+      <attributes>
+        <divisions>4</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+      </attributes>
+      <note><pitch><step>G</step><octave>2</octave></pitch><duration>16</duration><type>whole</type></note>
+      <note><chord/><pitch><step>B</step><octave>2</octave></pitch><duration>16</duration><type>whole</type></note>
+      <note><chord/><pitch><step>D</step><octave>3</octave></pitch><duration>16</duration><type>whole</type></note>
+    </measure>
+  </part>
+</score-partwise>

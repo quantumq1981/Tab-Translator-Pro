@@ -169,6 +169,10 @@ Key parser facts (don't regress):
 - Output is the **same score shape** as `buildScore`
   (`{ timeSig, bars:[{ number, timeSig, events:[{symbol,beat,durBeats,midis,frets}] }] }`),
   but with **per-bar `timeSig`** so a mid-tune meter change renders correctly.
+- **Multi-part**: `parseMusicXML(xml, useSharp, partIndex)` reads instrument names
+  from `<part-list>` and charts the chosen `<part>` (default 0), returning
+  `parts:[{index,id,name}]` + `partIndex`. The XML panel shows a **part picker**
+  when `parts.length > 1`; tempo is global (whole-doc), so it's part-independent.
 
 ## Shared ChartPanel — editing, transpose, export
 
@@ -299,6 +303,9 @@ accordingly.
   and tempo survive; an `A7` override surfaces as a `<kind>dominant</kind>`
   harmony; and the **full Blue Sky score** round-trips to 165 bars with the verse
   intact.
+- **Multi-part picker**: `npm test` parses `tests/fixtures/sample-multipart.musicxml`
+  and asserts two parts (`Guitar`, `Rhythm`), `partIndex 0 → C` and `1 → G`, and
+  that the single-part fixture reports exactly one part.
 
 ## Session conventions
 
