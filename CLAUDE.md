@@ -347,6 +347,60 @@ Weight** to its key-of-A guitar chords (`C#m`/`F#m` in bar 1, via String+Fret), 
 **My Favorite Things**' McCoy-Tyner piano part to 48 populated bars (via the
 Tone+Octave encoding) — across 5 diverse `.gpx` files (32–736 KB gpif).
 
+## Path G — Power Tab (`.ptb`) import (`parsePowerTab`)
+
+Power Tab Editor's `.ptb` is an **MFC-`CArchive`-style binary serialization**
+(Brad Larsen's format) — a different lineage from Guitar Pro. `parsePowerTab` is a
+faithful, **zero-dependency** port of the documented `Deserialize` order from the
+open-source **powertabeditor** repo (`source/formats/powertab_old/powertabdocument`,
+fetched at dev time — never shipped). Nothing is length-prefixed, so the MFC object
+layer (`_ptbReader.classInfo`: `0xFFFF`=new class → schema+name; `0x8000` bit =
+seen class; else object back-ref) must consume **every** object exactly — even
+effects/diagrams/dynamics we discard — or the cursor desyncs. **Clean EOF across
+the corpus is the validation** (no PyGuitarPro-style oracle exists; reaching the
+file end with zero leftover bytes is the alignment proof — verified on 395/400
+random files from a 3056-`.ptb` archive; the 5 misses are corrupt all-zero headers
+the parser rejects cleanly).
+
+Layout facts (all from the powertabdocument sources):
+- All little-endian. **MFC string** = 1 length byte (`0xFF`→`u16`→`u32` escalation)
+  then the chars. **ReadCount** = `u16` (`0xFFFF`→`u32`). **ReadVector** = count +
+  per-item `classInfo` + `Deserialize`. **ReadSmallVector** = `u8` count + count·
+  `sizeof(elem)` raw bytes (note/position complex-symbol arrays are 4-byte elems).
+- File = header → **Guitar Score** + **Bass Score** (each: guitars, chord diagrams,
+  floating text, guitar-ins, tempo markers, dynamics, alt endings, **systems**) →
+  3 document fonts → spacing/fade. We expose both scores' guitars as the **part
+  picker**; `_reparseScore` re-runs `parsePowerTab` from a stored `_ptbbuf`.
+- **Note** packs string+fret in ONE byte: **top 3 bits = string (0 = high E),
+  bottom 5 = fret**; tuning's `noteArray` is high→low, so `midi = tuning[string] +
+  fret` and the engine index is `(stringCount-1) - string`. **Position** duration =
+  `(m_data >> 24)` (1=whole…64=64th) with dotted/double-dotted in the low bits.
+- A **System** is a staff line holding several measures delimited by **barlines**
+  (`startBar` at position 0 + a barline vector); we segment positions by barline
+  position into measures. **Time signature** lives on each barline's `m_data`:
+  common=4/4, cut=2/2, else `beats=((d>>27)&0x1f)+1`, `beatType=1<<((d>>24)&7)`,
+  shown when `d&0x100000` (we inherit the last shown meter otherwise). Tempo is the
+  low word of the first tempo marker's `SystemSymbol` data.
+- Targets the ubiquitous **v1.7 (=4)** files; the modern object path also covers
+  **v1.5 (=3)**. v1.0/1.0.2 (pre-release, effectively nonexistent) use older
+  system/barline/chord-name layouts and aren't handled. The dispatcher routes a
+  `ptab` file head → `parsePowerTab`; the upload panel accepts `.ptb`.
+
+**Validation** (`npm test`, fixtures `tune.ptb` + `house-of-the-rising-sun.ptb`):
+the open-string file reconstructs `E B G D A E` (proves string+fret+tuning), and
+**House of the Rising Sun** parses to the recognizable **6/8** Am arpeggio
+(`A E A C E C G`) with its Am/C/D/F changes across the opening bars (proves the
+barline→measure segmentation and meter).
+
+### iOS upload note (don't re-add an `accept` filter)
+
+The MusicXML/GP/Power Tab `<input type=file>` has **no `accept` attribute on
+purpose**. iOS maps `accept` extensions to UTIs, and `.gp/.gpx/.gp3/.gp4/.gp5/.ptb`
+have no registered UTI, so iOS **greys them out** (unselectable). Format detection
+is by magic bytes in `parseGuitarProOrXML` (`PK`→GP7/8, `BCFZ`/`BCFS`→GP6,
+`FICHIER GUITAR PRO`→GP3/4/5, `ptab`→Power Tab, else MusicXML), so the extension
+filter is unnecessary — and adding one back breaks Guitar Pro upload on iPhone/iPad.
+
 ## Shared ChartPanel — editing, transpose, export
 
 Both chart modes feed one `ChartPanel`. Anything that reads/writes a score does so
