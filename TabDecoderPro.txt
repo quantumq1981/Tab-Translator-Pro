@@ -421,6 +421,85 @@ function parseMusicXML(xml, useSharp = true) {
   return { source: "musicxml", timeSig: bars.length ? bars[0].timeSig : [beats, beatType], tuning: _tuningName(tuning), tempo, bars };
 }
 
+/* ---- key + roman-numeral analysis ----------------------------------------
+ * Infers the most likely major/minor key by scoring all 24 keys: each chord
+ * adds its duration if it's diatonic to that key (a reduced amount if only its
+ * root fits — a borrowed quality), with a small cadential bonus for the last/
+ * first chord being the tonic. `romanFor` then labels a chord relative to that
+ * key; non-diatonic chords fall back to their absolute symbol. Pure + testable.
+ * ------------------------------------------------------------------------- */
+const _PC_BY_NAME = (() => { const m = {}; NOTE_SHARP.forEach((n, i) => (m[n] = i)); NOTE_FLAT.forEach((n, i) => (m[n] = i)); return m; })();
+const _MAJ = { 0: 0, 2: 1, 4: 2, 5: 3, 7: 4, 9: 5, 11: 6 };
+const _MIN = { 0: 0, 2: 1, 3: 2, 5: 3, 7: 4, 8: 5, 10: 6, 11: 6 }; // 11 = leading-tone vii°
+const _MAJ_Q = { 0: "maj", 2: "min", 4: "min", 5: "maj", 7: "maj", 9: "min", 11: "dim" };
+const _MIN_Q = { 0: "min", 2: "dim", 3: "maj", 5: "min", 7: "min", 8: "maj", 10: "maj", 11: "dim" };
+const _ROMAN = ["I", "II", "III", "IV", "V", "VI", "VII"];
+function _classOf(suf) {
+  if (suf === "5") return "power";
+  if (suf === "m7♭5" || suf === "m7b5") return "dim";
+  if (suf === "dim" || suf === "dim7") return "dim";
+  if (suf === "aug") return "aug";
+  if (/^m(?!aj)/.test(suf)) return "min";        // m, m7, m6 — but not maj7
+  if (suf === "7" || suf === "9" || suf === "13" || suf === "7sus4") return "dom";
+  if (suf.startsWith("sus")) return "sus";
+  return "maj";                                   // "", 6, maj7
+}
+function _parseSym(symbol) {
+  if (!symbol) return { pc: null };
+  const head = String(symbol).split("/")[0];
+  const mm = head.match(/^([A-G][#b♯♭]?)(.*)$/);
+  if (!mm) return { pc: null };
+  const root = mm[1].replace("♯", "#").replace("♭", "b");
+  const pc = _PC_BY_NAME[root];
+  if (pc === undefined) return { pc: null };
+  return { pc, suffix: mm[2], cls: _classOf(mm[2]) };
+}
+function qualCompatible(mode, rel, cls) {
+  const exp = (mode === "major" ? _MAJ_Q : _MIN_Q)[rel];
+  if (exp === undefined) return false;
+  if (cls === "power" || cls === "sus") return true;          // no 3rd → fits either
+  if (exp === "maj") return cls === "maj" || cls === "dom";
+  if (exp === "min") return cls === "min" || (mode === "minor" && rel === 7 && (cls === "maj" || cls === "dom")); // harmonic V
+  if (exp === "dim") return cls === "dim";
+  return false;
+}
+function analyzeKey(score) {
+  const parsed = [];
+  for (const b of score.bars) for (const e of b.events) { const p = _parseSym(e.symbol); if (p.pc != null) parsed.push({ ...p, dur: Math.max(0.5, e.durBeats || 1) }); }
+  if (!parsed.length) return null;
+  const total = parsed.reduce((s, p) => s + p.dur, 0);
+  const first = parsed[0].pc, last = parsed[parsed.length - 1].pc;
+  let best = null;
+  for (let tonic = 0; tonic < 12; tonic++) for (const mode of ["major", "minor"]) {
+    const idx = mode === "major" ? _MAJ : _MIN;
+    let sc = 0;
+    for (const p of parsed) { const rel = (p.pc - tonic + 12) % 12; if (rel in idx) sc += qualCompatible(mode, rel, p.cls) ? p.dur : p.dur * 0.3; }
+    if (last === tonic) sc += total * 0.08;
+    if (first === tonic) sc += total * 0.04;
+    if (!best || sc > best.sc) best = { tonic, mode, sc };
+  }
+  return { tonic: best.tonic, mode: best.mode, confidence: best.sc / (total || 1) };
+}
+const _romanExt = (suf) => ({ "7": "7", m7: "7", dim7: "7", maj7: "maj7", "6": "6", m6: "6", sus2: "sus2", sus4: "sus4", "7sus4": "7sus4" }[suf] || "");
+function romanFor(symbol, key) {
+  const p = _parseSym(symbol);
+  if (p.pc == null || !key) return symbol;
+  const rel = (p.pc - key.tonic + 12) % 12;
+  const idx = (key.mode === "major" ? _MAJ : _MIN)[rel];
+  if (idx === undefined) return symbol;            // non-diatonic → absolute symbol
+  const base = _ROMAN[idx];
+  let num;
+  if (p.cls === "dim") num = base.toLowerCase() + (p.suffix === "m7♭5" || p.suffix === "m7b5" ? "ø" : "°");
+  else if (p.cls === "min") num = base.toLowerCase();
+  else if (p.cls === "aug") num = base + "+";
+  else num = base;
+  return num + _romanExt(p.suffix);
+}
+function keyName(key, useSharp) {
+  if (!key) return null;
+  return (useSharp ? NOTE_SHARP : NOTE_FLAT)[key.tonic] + (key.mode === "minor" ? "m" : "");
+}
+
 /* ---- exporters: a score → ChordPro grid / ABC (chords + playable notes) ----
  * Both accept an `overrides` map ({ "<bar>.<beat>": "Symbol" }) so user edits
  * flow straight into the exported text. ABC emits the actual chord tones as
@@ -447,7 +526,7 @@ const _abcChordName = (s) => s.replace(/♭/g, "b").replace(/♯/g, "#").replace
 function scoreToABC(score, opts = {}) {
   const ov = opts.overrides || {};
   const [b0, bt0] = score.timeSig;
-  const out = ["X:1", `T:${opts.title || "Tab Decoder chart"}`, `M:${b0}/${bt0}`, "L:1/4", "K:C"];
+  const out = ["X:1", `T:${opts.title || "Tab Decoder chart"}`, `M:${b0}/${bt0}`, "L:1/4", `K:${keyName(opts.key, opts.useSharp !== false) || "C"}`];
   let curSig = `${b0}/${bt0}`, body = "";
   score.bars.forEach((bar, bi) => {
     const [bb, bt] = bar.timeSig || score.timeSig;
@@ -468,7 +547,9 @@ function scoreToABC(score, opts = {}) {
 function scoreToChordPro(score, opts = {}) {
   const ov = opts.overrides || {};
   const [b, bt] = score.timeSig;
-  const out = [`{title: ${opts.title || "Tab Decoder chart"}}`, `{time: ${b}/${bt}}`, "{start_of_grid}"];
+  const out = [`{title: ${opts.title || "Tab Decoder chart"}}`, `{time: ${b}/${bt}}`];
+  if (opts.key) out.push(`{key: ${keyName(opts.key, opts.useSharp !== false)}}`);
+  out.push("{start_of_grid}");
   let row = [];
   score.bars.forEach((bar, bi) => {
     row.push(bar.events.map((e) => _ovSym(bar, e, ov)).join(" "));
@@ -871,7 +952,10 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   const [playKey, setPlayKey] = useState("");
   const player = useRef(null);
 
+  const [showRoman, setShowRoman] = useState(false);
+
   const tscore = useMemo(() => transposeScore(score, semis, useSharp), [score, semis, useSharp]);
+  const key = useMemo(() => analyzeKey(tscore), [tscore]);
 
   useEffect(() => { setBpm(score.tempo || 100); }, [score.tempo]);
   const stopPlay = () => { if (player.current) { player.current.stop(); player.current = null; } setPlaying(false); setPlayKey(""); };
@@ -886,7 +970,8 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   const bumpBpm = (d) => setBpm((b) => Math.max(40, Math.min(240, b + d)));
   const symOf = (bar, e) => { const v = overrides[`${bar.number}.${e.beat}`]; return v != null ? v : e.symbol; };
   const doExport = (fmt) => {
-    const text = fmt === "abc" ? scoreToABC(tscore, { overrides, title }) : scoreToChordPro(tscore, { overrides, title });
+    const opts = { overrides, title, key, useSharp };
+    const text = fmt === "abc" ? scoreToABC(tscore, opts) : scoreToChordPro(tscore, opts);
     setExp({ fmt, text }); setCopied(false);
   };
   const copy = () => { try { navigator.clipboard.writeText(exp.text); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch (_) {} };
@@ -897,7 +982,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
     <>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, fontSize: 11, color: C.dim, margin: "14px 0 6px" }}>
         <span style={{ color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 220 }}>{title}</span>
-        <span>{meta}{semis ? ` · ${semis > 0 ? "+" : ""}${semis} st` : ""}</span>
+        <span>{meta}{semis ? ` · ${semis > 0 ? "+" : ""}${semis} st` : ""}{key ? ` · key ${keyName(key, useSharp)}` : ""}</span>
       </div>
       <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
         {[["chart", "Chart"], ["grid", "Grid"]].map(([v, lbl]) => (
@@ -905,6 +990,8 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
         ))}
         <button onClick={() => { setEditMode((m) => !m); setEditKey(""); }} disabled={view !== "chart"}
           style={{ ...chip(C), padding: "3px 9px", opacity: view !== "chart" ? 0.4 : 1, borderColor: editMode ? C.green : C.border, color: editMode ? C.green : C.dim }}>{editMode ? "✓ Editing" : "✎ Edit"}</button>
+        <button onClick={() => setShowRoman((r) => !r)} title={key ? `key of ${keyName(key, useSharp)}` : "key analysis"}
+          style={{ ...chip(C), padding: "3px 9px", borderColor: showRoman ? C.cyan : C.border, color: showRoman ? C.cyan : C.dim }}>{showRoman ? "I·V·vi ✓" : "I·V·vi"}</button>
         <span style={{ display: "inline-flex", alignItems: "center", gap: 4, marginLeft: 2 }}>
           <button onClick={() => bump(-1)} style={{ ...chip(C), padding: "3px 8px" }}>−</button>
           <span style={{ fontSize: 11, minWidth: 44, textAlign: "center", color: semis ? C.amber : C.dim }}>transpose</span>
@@ -953,8 +1040,9 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
                       const isPlaying = playKey === k;
                       return (
                         <button key={i} onClick={() => (editMode ? (setEditKey(k), setDraft(cur)) : onPick(k, e))} title={editMode ? "click to re-label" : `beat ${e.beat + 1}`}
-                          style={{ gridColumn: gridCol, justifySelf: "start", background: isPlaying ? `${C.green}22` : "transparent", borderRadius: 4, border: "none", borderBottom: isSel ? `2px solid ${C.amber}` : "2px solid transparent", padding: "0 2px", cursor: "pointer", color: isPlaying ? C.green : edited ? C.green : isSel ? C.amber : C.cyan, fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: cur.length > 4 ? 13 : 16, lineHeight: 1.2, transition: "background .1s, color .1s" }}>
-                          {cur}{edited ? "*" : ""}
+                          style={{ gridColumn: gridCol, justifySelf: "start", textAlign: "left", background: isPlaying ? `${C.green}22` : "transparent", borderRadius: 4, border: "none", borderBottom: isSel ? `2px solid ${C.amber}` : "2px solid transparent", padding: "0 2px", cursor: "pointer", color: isPlaying ? C.green : edited ? C.green : isSel ? C.amber : C.cyan, fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: cur.length > 4 ? 13 : 16, lineHeight: 1.2, transition: "background .1s, color .1s" }}>
+                          <span style={{ display: "block" }}>{cur}{edited ? "*" : ""}</span>
+                          {showRoman && key && <span style={{ display: "block", fontSize: 9, fontWeight: 400, color: C.dim, marginTop: 1 }}>{romanFor(cur, key)}</span>}
                         </button>
                       );
                     })}
