@@ -1184,9 +1184,12 @@ function parsePowerTab(u8, useSharp = true, partIndex = 0) {
       const raw = [...onsets.entries()].sort((a, b) => a[0] - b[0]).map(([onset, o]) => ({ symbol: symbolForMidis(o.midis, useSharp), midis: [...o.midis].sort((a, b) => a - b), frets: o.frets, onset }));
       const events = [];
       raw.forEach((e) => { const last = events[events.length - 1]; if (!last || last.symbol !== e.symbol) events.push(e); });
-      events.forEach((e) => { e.beat = Math.max(0, Math.min(bts - 1, Math.round(e.onset / qPerBeat))); });
+      events.forEach((e) => { e.qbeat = e.onset / qPerBeat; e.beat = Math.max(0, Math.min(bts - 1, Math.round(e.qbeat))); });
       for (let k = 1; k < events.length; k++) if (events[k].beat <= events[k - 1].beat) events[k].beat = Math.min(bts - 1, events[k - 1].beat + 1);
       events.forEach((e, k) => { e.durBeats = (k + 1 < events.length ? events[k + 1].beat : bts) - e.beat; });
+      // TRUE (un-quantised) duration for ABC export & playback (never 0); see the
+      // qbeat/qdur note in CLAUDE.md. (Inlined here; main has the _fillTrueDur helper.)
+      events.forEach((e, k) => { e.qdur = Math.max(1e-4, (k + 1 < events.length ? events[k + 1].qbeat : bts) - e.qbeat); });
       bars.push({ number: barNum++, timeSig: [bts, btype], events: events.map(({ onset, ...e }) => e) });
     }
   }
