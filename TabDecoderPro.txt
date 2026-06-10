@@ -359,11 +359,17 @@ function _tuningName(arr) {
   for (const [n, t] of Object.entries(TUNINGS)) if (t.every((v, i) => v === arr[i])) return n;
   return "Custom";
 }
-function parseMusicXML(xml, useSharp = true) {
+function parseMusicXML(xml, useSharp = true, partIndex = 0) {
   const doc = new DOMParser().parseFromString(xml, "text/xml");
   if (_xEls(doc, "parsererror").length) throw new Error("Not valid XML.");
-  const part = _xFirst(doc, "part");
-  if (!part) throw new Error("No <part> found — is this a MusicXML score?");
+  const partEls = _xEls(doc, "part");
+  if (!partEls.length) throw new Error("No <part> found — is this a MusicXML score?");
+  // instrument names from <part-list>, in document order, for the part picker
+  const nameById = {};
+  _xEls(doc, "score-part").forEach((sp) => { nameById[sp.getAttribute("id")] = _xChildText(sp, "part-name") || sp.getAttribute("id"); });
+  const parts = partEls.map((pe, i) => ({ index: i, id: pe.getAttribute("id"), name: nameById[pe.getAttribute("id")] || `Part ${i + 1}` }));
+  const idx = Math.max(0, Math.min(partEls.length - 1, partIndex | 0));
+  const part = partEls[idx];
 
   let divisions = 1, beats = 4, beatType = 4, tuning = null;
   const bars = [];
@@ -418,7 +424,7 @@ function parseMusicXML(xml, useSharp = true) {
   const sound = _xEls(doc, "sound").find((s) => s.getAttribute("tempo"));
   if (sound) { const v = parseFloat(sound.getAttribute("tempo")); if (!isNaN(v)) tempo = v; }
   if (tempo == null) { const pm = _xFirst(doc, "per-minute"); if (pm) { const v = parseFloat(_xText(pm)); if (!isNaN(v)) tempo = v; } }
-  return { source: "musicxml", timeSig: bars.length ? bars[0].timeSig : [beats, beatType], tuning: _tuningName(tuning), tempo, bars };
+  return { source: "musicxml", timeSig: bars.length ? bars[0].timeSig : [beats, beatType], tuning: _tuningName(tuning), tempo, bars, parts, partIndex: idx };
 }
 
 /* ---- key + roman-numeral analysis ----------------------------------------
@@ -775,10 +781,15 @@ export default function TabDecoderPro() {
     }
   };
 
-  // re-recognise MusicXML symbols when the sharp/flat spelling flips
+  // re-recognise MusicXML symbols when the sharp/flat spelling flips (keep part)
   useEffect(() => {
-    setXmlScore((prev) => { if (!prev || !prev._xml) return prev; const next = parseMusicXML(prev._xml, useSharp); next._xml = prev._xml; return next; });
+    setXmlScore((prev) => { if (!prev || !prev._xml) return prev; const next = parseMusicXML(prev._xml, useSharp, prev.partIndex); next._xml = prev._xml; return next; });
   }, [useSharp]);
+
+  const selectPart = (idx) => {
+    setXmlScore((prev) => { if (!prev || !prev._xml) return prev; const next = parseMusicXML(prev._xml, useSharp, idx); next._xml = prev._xml; return next; });
+    clearSel();
+  };
 
   const pickChord = (key, e) => { setSelKey(key); setSelFrets(e.frets || null); setSelMidis(e.midis || null); };
 
@@ -930,6 +941,15 @@ export default function TabDecoderPro() {
                   Reads <b>real</b> time signature, tuning &amp; rhythm straight from the file — no geometry guessing. Guitar Pro / MuseScore can export MusicXML (File → Export).
                 </div>
                 {xmlErr && <div style={{ marginTop: 10, color: C.red, fontSize: 12 }}>{xmlErr}</div>}
+                {xmlScore && xmlScore.parts && xmlScore.parts.length > 1 && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginTop: 12 }}>
+                    <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim }}>PART</span>
+                    {xmlScore.parts.map((p) => (
+                      <button key={p.index} onClick={() => selectPart(p.index)} title={`chart the "${p.name}" part`}
+                        style={{ ...chip(C), padding: "3px 9px", borderColor: xmlScore.partIndex === p.index ? C.amber : C.border, color: xmlScore.partIndex === p.index ? C.amber : C.dim }}>{p.name}</button>
+                    ))}
+                  </div>
+                )}
                 {xmlScore && (
                   <ChartPanel score={xmlScore} title={xmlName}
                     meta={`${xmlScore.bars.length} bars · ${xmlScore.tuning} tuning · ${xmlScore.timeSig.join("/")}`}
