@@ -11,9 +11,11 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
  *     chord column through the SAME engine, and renders a lead-sheet / grid chart
  *     (consecutive identical symbols inside a bar are collapsed). 4/4 + standard
  *     tuning are ASSUMED — the PDF text layer carries no meter/tuning we can read.
- *   • MUSICXML (Path C) — upload a MusicXML score; meter, tuning and rhythm are
- *     read *exactly* from the file (no geometry guessing), only chord *symbols*
- *     are inferred via the same engine. Guitar Pro / MuseScore export MusicXML.
+ *   • MUSICXML / GP (Path C/D) — upload a MusicXML score or a Guitar Pro 7/8
+ *     `.gp` file; meter, tuning and rhythm are read *exactly* from the file (no
+ *     geometry guessing), only chord *symbols* are inferred via the same engine.
+ *     `.gp` is a ZIP+XML, unzipped in-browser with zero new deps; older binary
+ *     GP3/4/5/GPX and Power Tab route through MuseScore/TuxGuitar → MusicXML.
  *
  *  Both chart modes share one ChartPanel: lead-sheet / grid views, inline chord
  *  re-labelling (overrides), whole-chart transpose, and ChordPro / ABC export
@@ -469,6 +471,139 @@ function parseMusicXML(xml, useSharp = true, partIndex = 0) {
   return { source: "musicxml", timeSig: bars.length ? bars[0].timeSig : [beats, beatType], tuning: _tuningName(tuning), tempo, bars, parts, partIndex: idx };
 }
 
+/* ===========================================================================
+ *  PATH D — Guitar Pro (GP7 / GP8 `.gp`) import
+ *  --------------------------------------------------------------------------
+ *  A `.gp` file is a plain ZIP whose `Content/score.gpif` is an XML document —
+ *  so this is parseable with ZERO new dependencies: the ZIP is inflated with
+ *  the platform's native `DecompressionStream('deflate-raw')` (present in the
+ *  browser and Node ≥18) and the XML read with the same `DOMParser` Path C uses.
+ *
+ *  gpif is a flat list of elements joined by id references, not nested like
+ *  MusicXML:  MasterBar.Bars[track] → Bar.Voices → Voice.Beats → Beat
+ *  → { Rhythm ref, Notes ids } ; Note carries a direct
+ *  `<Property name="Midi"><Number>` (so no pitch math) plus String/Fret. We
+ *  resolve the id graph, accumulate each voice's onsets from a Rhythm-derived
+ *  duration, run each onset's MIDI through the same engine, and emit the SAME
+ *  score shape as buildScore / parseMusicXML — so the chart, exporters,
+ *  transpose, key analysis and playback are all shared for free.
+ *
+ *  Older formats (GP3/4/5 binary, GPX binary filesystem, Power Tab) are NOT
+ *  parsed here — they need binary readers / a dependency; the honest route for
+ *  those stays "open in TuxGuitar/MuseScore → export MusicXML" (Path C).
+ * ==========================================================================*/
+const _GP_NV = { Whole: 4, Half: 2, Quarter: 1, Eighth: 0.5, "16th": 0.25, "32nd": 0.125, "64th": 0.0625, "128th": 0.03125 };
+const _gpProp = (el, name) => _xEls(el, "Property").find((p) => p.getAttribute("name") === name) || null;
+const _gpById = (doc, tag) => { const m = new Map(); _xEls(doc, tag).forEach((e) => { const id = e.getAttribute("id"); if (id != null) m.set(id, e); }); return m; };
+const _gpIds = (txt) => (txt || "").trim().split(/\s+/).filter((s) => s.length);
+function _gpRhythmQuarters(r) {
+  if (!r) return 1;
+  let q = _GP_NV[_xChildText(r, "NoteValue")]; if (q == null) q = 1;
+  const dot = _xFirst(r, "AugmentationDot"); if (dot) { const c = parseInt(dot.getAttribute("count") || "1", 10); q *= c >= 2 ? 1.75 : 1.5; }
+  const tup = _xFirst(r, "PrimaryTuplet"); if (tup) { const n = parseInt(tup.getAttribute("num") || "0", 10), d = parseInt(tup.getAttribute("den") || "0", 10); if (n > 0 && d > 0) q *= d / n; }
+  return q;
+}
+function _gpNoteMidi(note) {
+  const me = _gpProp(note, "Midi"); const n = me ? parseInt(_xChildText(me, "Number"), 10) : NaN;
+  if (!isNaN(n)) return n;
+  const pe = _gpProp(note, "ConcertPitch") || _gpProp(note, "TransposedPitch");
+  const p = pe && _xFirst(pe, "Pitch");
+  if (p) { const step = _xChildText(p, "Step"); const acc = _xChildText(p, "Accidental"); const oct = parseInt(_xChildText(p, "Octave") || "0", 10); if (step in STEP_SEMI) return oct * 12 + STEP_SEMI[step] + (acc === "#" ? 1 : acc === "b" ? -1 : 0); }
+  return null;
+}
+function parseGPIF(xml, useSharp = true, partIndex = 0) {
+  const doc = new DOMParser().parseFromString(xml, "text/xml");
+  if (_xEls(doc, "parsererror").length) throw new Error("Not valid gpif XML.");
+  const tracks = _xEls(doc, "Track").filter((t) => t.getAttribute("id") != null);
+  if (!tracks.length) throw new Error("No <Track> found — is this a GP7/8 .gp file?");
+  const parts = tracks.map((t, i) => ({ index: i, id: t.getAttribute("id"), name: (_xChildText(t, "Name") || `Track ${i + 1}`).trim() || `Track ${i + 1}` }));
+  const idx = Math.max(0, Math.min(tracks.length - 1, partIndex | 0));
+
+  const barMap = _gpById(doc, "Bar"), voiceMap = _gpById(doc, "Voice"), beatMap = _gpById(doc, "Beat"), noteMap = _gpById(doc, "Note"), rhythmMap = _gpById(doc, "Rhythm");
+  // tuning of the chosen track (display only — MIDI is read directly per note)
+  let tuning = null;
+  const tunProp = _gpProp(tracks[idx], "Tuning") || (_xFirst(tracks[idx], "Staff") && _gpProp(_xFirst(tracks[idx], "Staff"), "Tuning"));
+  if (tunProp) { const pit = _gpIds(_xChildText(tunProp, "Pitches")).map(Number); if (pit.length === 6 && pit.every((v) => !isNaN(v))) tuning = pit; } // gpif lists low→high (String 0 = low E)
+
+  const bars = [];
+  let lastSig = [4, 4];
+  _xEls(doc, "MasterBar").forEach((mb, mi) => {
+    const tt = _xChildText(mb, "Time");
+    if (tt && /^\d+\/\d+$/.test(tt)) lastSig = tt.split("/").map((n) => parseInt(n, 10));
+    const [bts, btype] = lastSig;
+    const barIds = _gpIds(_xChildText(mb, "Bars"));
+    const bar = barMap.get(barIds[idx]);
+    const onsets = new Map(); // onsetQuarters -> { midis:[], frets:{} }
+    if (bar) {
+      _gpIds(_xChildText(bar, "Voices")).filter((v) => v !== "-1").forEach((vId) => {
+        const voice = voiceMap.get(vId); if (!voice) return;
+        let cursor = 0;
+        _gpIds(_xChildText(voice, "Beats")).forEach((beatId) => {
+          const beat = beatMap.get(beatId); if (!beat) return;
+          const rRef = _xFirst(beat, "Rhythm"); const q = _gpRhythmQuarters(rRef && rhythmMap.get(rRef.getAttribute("ref")));
+          const noteIds = _gpIds(_xText(_xFirst(beat, "Notes")));
+          if (noteIds.length) {
+            if (!onsets.has(cursor)) onsets.set(cursor, { midis: [], frets: {} });
+            const o = onsets.get(cursor);
+            noteIds.forEach((nId) => {
+              const note = noteMap.get(nId); if (!note) return;
+              const midi = _gpNoteMidi(note); if (midi == null) return;
+              o.midis.push(midi);
+              const sEl = _gpProp(note, "String"), fEl = _gpProp(note, "Fret");
+              if (sEl && fEl) { const s = parseInt(_xChildText(sEl, "String"), 10), f = parseInt(_xChildText(fEl, "Fret"), 10); if (!isNaN(s) && !isNaN(f) && s >= 0 && s <= 5 && o.frets[s] === undefined) o.frets[s] = f; } // gpif String 0 = low E = engine index
+            });
+          }
+          cursor += q;
+        });
+      });
+    }
+    const qPerBeat = 4 / btype; // a "beat" = one 1/beatType note
+    const raw = [...onsets.entries()].filter(([, o]) => o.midis.length).sort((a, b) => a[0] - b[0])
+      .map(([onset, o]) => ({ symbol: symbolForMidis(o.midis, useSharp), midis: [...o.midis].sort((a, b) => a - b), frets: o.frets, onset }));
+    const events = [];
+    raw.forEach((e) => { const last = events[events.length - 1]; if (!last || last.symbol !== e.symbol) events.push(e); });
+    events.forEach((e) => { e.beat = Math.max(0, Math.min(bts - 1, Math.round(e.onset / qPerBeat))); });
+    for (let i = 1; i < events.length; i++) if (events[i].beat <= events[i - 1].beat) events[i].beat = Math.min(bts - 1, events[i - 1].beat + 1);
+    events.forEach((e, i) => { e.durBeats = (i + 1 < events.length ? events[i + 1].beat : bts) - e.beat; });
+    bars.push({ number: mi + 1, timeSig: [bts, btype], events: events.map(({ onset, ...e }) => e) });
+  });
+
+  // tempo: first <Automation><Type>Tempo</Type> … <Value>BPM ref</Value>
+  let tempo = null;
+  const tAuto = _xEls(doc, "Automation").find((a) => _xChildText(a, "Type") === "Tempo");
+  if (tAuto) { const v = parseFloat((_xChildText(tAuto, "Value") || "").split(/\s+/)[0]); if (!isNaN(v)) tempo = v; }
+  return { source: "gp", timeSig: bars.length ? bars[0].timeSig : lastSig, tuning: _tuningName(tuning), tempo, bars, parts, partIndex: idx };
+}
+
+/* Inflate a `.gp` (GP7/8) ZIP and return its Content/score.gpif XML text.
+ * Minimal central-directory ZIP reader + native deflate-raw — zero deps. */
+async function gpUnzip(buf) {
+  const u8 = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  let eo = -1;
+  for (let i = u8.length - 22; i >= 0 && i >= u8.length - 22 - 65536; i--) if (dv.getUint32(i, true) === 0x06054b50) { eo = i; break; }
+  if (eo < 0) throw new Error("Not a .gp file (no ZIP directory).");
+  const cdOff = dv.getUint32(eo + 16, true), cdCount = dv.getUint16(eo + 10, true);
+  let p = cdOff, target = null;
+  for (let n = 0; n < cdCount && dv.getUint32(p, true) === 0x02014b50; n++) {
+    const method = dv.getUint16(p + 10, true), compSize = dv.getUint32(p + 20, true);
+    const nameLen = dv.getUint16(p + 28, true), extraLen = dv.getUint16(p + 30, true), commentLen = dv.getUint16(p + 32, true);
+    const lhOff = dv.getUint32(p + 42, true);
+    const name = new TextDecoder().decode(u8.subarray(p + 46, p + 46 + nameLen));
+    if (name.endsWith("score.gpif")) { target = { method, compSize, lhOff }; break; }
+    p += 46 + nameLen + extraLen + commentLen;
+  }
+  if (!target) throw new Error("No score.gpif inside — is this a GP7/8 .gp file? (Older .gp3/4/5/.gpx are binary; export MusicXML instead.)");
+  const lh = target.lhOff;
+  if (dv.getUint32(lh, true) !== 0x04034b50) throw new Error("Corrupt .gp (bad local header).");
+  const dataStart = lh + 30 + dv.getUint16(lh + 26, true) + dv.getUint16(lh + 28, true);
+  const comp = u8.subarray(dataStart, dataStart + target.compSize);
+  if (target.method === 0) return new TextDecoder("utf-8").decode(comp);
+  const stream = new Response(comp).body.pipeThrough(new DecompressionStream("deflate-raw"));
+  return new TextDecoder("utf-8").decode(new Uint8Array(await new Response(stream).arrayBuffer()));
+}
+async function parseGP(buf, useSharp = true, partIndex = 0) { return parseGPIF(await gpUnzip(buf), useSharp, partIndex); }
+
 /* ---- key + roman-numeral analysis ----------------------------------------
  * Infers the most likely major/minor key by scoring all 24 keys: each chord
  * adds its duration if it's diatonic to that key (a reduced amount if only its
@@ -809,27 +944,39 @@ export default function TabDecoderPro() {
     } finally { setPdfBusy(false); }
   };
 
+  // Re-run the right parser for a stored score (MusicXML text or gpif XML).
+  // Both store their source XML in _xml and produce the same score shape, so the
+  // ♯/♭ re-spell and part-switch are identical for Path C and Path D.
+  const _reparseScore = (prev, sharp, idx) => {
+    if (!prev || !prev._xml) return prev;
+    const next = prev.source === "gp" ? parseGPIF(prev._xml, sharp, idx) : parseMusicXML(prev._xml, sharp, idx);
+    next._xml = prev._xml; return next;
+  };
+
   const onXml = async (e) => {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
     setXmlErr(""); setXmlScore(null); clearSel();
     try {
-      const text = await f.text();
-      const sc = parseMusicXML(text, useSharp); sc._xml = text;
-      if (!sc.bars.length) setXmlErr("No measures found. Is this a MusicXML score (.musicxml / .xml)?");
+      const isGP = /\.gp$/i.test(f.name);
+      let sc, xml;
+      if (isGP) { xml = await gpUnzip(await f.arrayBuffer()); sc = parseGPIF(xml, useSharp); }
+      else { xml = await f.text(); sc = parseMusicXML(xml, useSharp); }
+      sc._xml = xml;
+      if (!sc.bars.length) setXmlErr("No measures found. Is this a MusicXML score or a GP7/8 .gp file?");
       setXmlScore(sc); setXmlName(f.name);
     } catch (err) {
       setXmlErr("Parse failed: " + (err && err.message ? err.message : String(err)));
     }
   };
 
-  // re-recognise MusicXML symbols when the sharp/flat spelling flips (keep part)
+  // re-recognise symbols when the sharp/flat spelling flips (keep part)
   useEffect(() => {
-    setXmlScore((prev) => { if (!prev || !prev._xml) return prev; const next = parseMusicXML(prev._xml, useSharp, prev.partIndex); next._xml = prev._xml; return next; });
+    setXmlScore((prev) => _reparseScore(prev, useSharp, prev ? prev.partIndex : 0));
   }, [useSharp]);
 
   const selectPart = (idx) => {
-    setXmlScore((prev) => { if (!prev || !prev._xml) return prev; const next = parseMusicXML(prev._xml, useSharp, idx); next._xml = prev._xml; return next; });
+    setXmlScore((prev) => _reparseScore(prev, useSharp, idx));
     clearSel();
   };
 
@@ -894,7 +1041,7 @@ export default function TabDecoderPro() {
             <span style={{ color: C.dim, fontSize: 12, letterSpacing: 3 }}>TABTRANSLATOR PRO</span>
           </div>
           <div style={{ display: "flex", gap: 6 }}>
-            {[["manual", "Manual"], ["pdf", "PDF Chart"], ["xml", "MusicXML"]].map(([m, lbl]) => (
+            {[["manual", "Manual"], ["pdf", "PDF Chart"], ["xml", "MusicXML / GP"]].map(([m, lbl]) => (
               <button key={m} onClick={() => { setMode(m); clearSel(); }} style={{ ...toggle(C), padding: "6px 14px", flex: "none", ...(mode === m ? activeToggle(C) : {}) }}>
                 {lbl}
               </button>
@@ -973,14 +1120,14 @@ export default function TabDecoderPro() {
               </>
             ) : (
               <>
-                <SectionLabel C={C}>PATH C · MUSICXML → CHORD CHART</SectionLabel>
-                <input ref={xmlRef} type="file" accept=".xml,.musicxml,application/xml,text/xml" onChange={onXml} style={{ display: "none" }} />
+                <SectionLabel C={C}>PATH C/D · MUSICXML or GUITAR PRO → CHORD CHART</SectionLabel>
+                <input ref={xmlRef} type="file" accept=".xml,.musicxml,.gp,application/xml,text/xml" onChange={onXml} style={{ display: "none" }} />
                 <button onClick={() => xmlRef.current && xmlRef.current.click()}
                   style={{ width: "100%", background: C.bg, border: `1px dashed ${C.border}`, color: C.amber, borderRadius: 10, padding: "22px 12px", fontSize: 14, cursor: "pointer", fontFamily: "'IBM Plex Mono', monospace" }}>
-                  ⬆  Upload a MusicXML file  (.musicxml / .xml)
+                  ⬆  Upload a MusicXML or Guitar Pro file  (.musicxml / .xml / .gp)
                 </button>
                 <div style={{ fontSize: 11, color: C.dim, marginTop: 8, lineHeight: 1.6 }}>
-                  Reads <b>real</b> time signature, tuning &amp; rhythm straight from the file — no geometry guessing. Guitar Pro / MuseScore can export MusicXML (File → Export).
+                  Reads <b>real</b> time signature, tuning &amp; rhythm straight from the file — no geometry guessing. <b>.gp</b> is Guitar Pro 7/8 (native, parsed in-browser). For older <b>.gp3/4/5</b> or <b>.gpx</b> / Power Tab, open in TuxGuitar / MuseScore and export MusicXML.
                 </div>
                 {xmlErr && <div style={{ marginTop: 10, color: C.red, fontSize: 12 }}>{xmlErr}</div>}
                 {xmlScore && xmlScore.parts && xmlScore.parts.length > 1 && (

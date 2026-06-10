@@ -35,7 +35,7 @@ const end = src.indexOf("async function extractTokens"); // browser-only; reprod
 if (start < 0 || end < 0) throw new Error("source markers not found in TabDecoderPro.tsx");
 const engineSrc =
   src.slice(start, end) +
-  "\nexport { buildChart, buildScore, simplifyScore, symbolForFrets, parseMusicXML, scoreToABC, scoreToChordPro, scoreToMusicXML, transposeScore, scoreEventTimes, analyzeKey, romanFor, keyName };\n";
+  "\nexport { buildChart, buildScore, simplifyScore, symbolForFrets, parseMusicXML, parseGP, parseGPIF, gpUnzip, scoreToABC, scoreToChordPro, scoreToMusicXML, transposeScore, scoreEventTimes, analyzeKey, romanFor, keyName };\n";
 
 /* parseMusicXML uses the browser's global DOMParser; the app loads it natively.
  * Headlessly we install @xmldom/xmldom (a TEST-only dep) as that global so the
@@ -236,6 +236,33 @@ expect(/^K:C$/m.test(abcK), `ABC should carry K:C, got header:\n${abcK.split("\n
 const cpK = eng.scoreToChordPro(mx, { key: mxKey, useSharp: true });
 expect(/\{key: C\}/.test(cpK), "ChordPro should carry {key: C}");
 
+/* ---- Path D: Guitar Pro (GP7/8 .gp) import — cross-validates against the
+ *      same Blue Sky ground truth the PDF path asserts, straight from the .gp
+ *      ZIP (native unzip + gpif XML, no geometry). Rhythm-guitar track = #1.  */
+const gpBuf = new Uint8Array(fs.readFileSync(path.join(repo, "blue-sky.gp")));
+const gpXml = await eng.gpUnzip(gpBuf);
+expect(/score\.gpif|<GPIF/.test(gpXml) || gpXml.includes("<MasterBar"), "gpUnzip should yield gpif XML");
+const gp = await eng.parseGP(gpBuf, true, 1); // track 1 = Acoustic Guitar (the chord part)
+expect(gp.source === "gp", "GP score should be tagged source=gp");
+expect(gp.parts.length === 3, `expected 3 tracks, got ${gp.parts.length}`);
+expect(gp.tuning === "Standard", `expected Standard tuning, got ${gp.tuning}`);
+expect(gp.tempo === 100, `expected tempo 100, got ${gp.tempo}`);
+expect(gp.bars.length === 165, `expected 165 bars, got ${gp.bars.length}`);
+const gpBars = gp.bars.map((b) => [...new Set(b.events.map((e) => e.symbol))].join(" "));
+const gpVerse = gpBars.slice(0, 8).join(" ");
+expect(gpVerse === "E A A E E A A E", `GP verse expected "E A A E E A A E", got "${gpVerse}"`);
+expect(gpBars[25] === "B C#m", `GP bar 26 expected "B C#m", got "${gpBars[25]}"`); // the bridge turn
+// frets reconstruct exactly (fret + standard-tuning open string === the MIDI)
+const STD = [40, 45, 50, 55, 59, 64];
+let gpFretOk = true;
+gp.bars.forEach((b) => b.events.forEach((e) => { if (e.frets) for (const [eng2, f] of Object.entries(e.frets)) if (!e.midis.includes(STD[+eng2] + f)) gpFretOk = false; }));
+expect(gpFretOk, "GP frets should reconstruct their MIDI via standard tuning (String 0 = low E)");
+// per-bar meter read straight from the file (Blue Sky opens 2/4)
+expect(JSON.stringify(gp.bars[0].timeSig) === JSON.stringify([2, 4]), `GP bar1 meter expected 2/4, got ${gp.bars[0].timeSig.join("/")}`);
+// ♯/♭ re-spell keeps the same part; export round-trips through MusicXML
+const gpFlat = eng.parseGPIF(gpXml, false, 1);
+expect(gpFlat.partIndex === 1 && gpFlat.bars.length === 165, "GP re-parse (flats) keeps part 1 and bar count");
+
 /* ---- report -------------------------------------------------------------- */
 console.log(`PDF.js ${pdfjsLib.version} · ${pages} pages · ${tokens.length} tokens`);
 console.log(`systemsFound=${chart.systemsFound} columnsFound=${chart.columnsFound} bars=${bars.length}`);
@@ -246,6 +273,7 @@ if (sampleMulti) console.log(`sample multi-chord bar ${sampleMulti.number}: ` +
   sampleMulti.events.map((e) => `${e.symbol}@b${e.beat + 1}(${e.durBeats})`).join(" "));
 console.log(`MusicXML: ${mx.bars.length} bars, ${mx.tuning} tuning, bar3 ${mx.bars[2].timeSig.join("/")} · ${mxSyms.join(" | ")}`);
 console.log(`Key: fixture ${eng.keyName(mxKey, true)} (${mxRomans}) · Blue Sky ${eng.keyName(bsKey, true)}`);
+console.log(`GP (.gp): ${gp.parts.length} tracks, ${gp.bars.length} bars, ${gp.tuning}, tempo ${gp.tempo}, bar1 ${gp.bars[0].timeSig.join("/")} · verse ${gpVerse}`);
 console.log(`ABC: ${abc.trim().split("\n").pop()}`);
 
 if (fails.length) {

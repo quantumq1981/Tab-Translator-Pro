@@ -208,6 +208,48 @@ Key parser facts (don't regress):
   `parts:[{index,id,name}]` + `partIndex`. The XML panel shows a **part picker**
   when `parts.length > 1`; tempo is global (whole-doc), so it's part-independent.
 
+## Path D — Guitar Pro 7/8 import (`parseGP` / `parseGPIF` / `gpUnzip`)
+
+**Why native, and only `.gp`.** A `.gp` (Guitar Pro 7/8) file is a plain **ZIP**
+whose `Content/score.gpif` is **XML** — so it parses with **zero new deps**: the
+ZIP is inflated by the platform-native `DecompressionStream('deflate-raw')`
+(present in the browser *and* Node ≥18, so the headless test runs the exact same
+`gpUnzip`), and the XML is read with the same `DOMParser` Path C uses. Older
+formats are deliberately **not** parsed here — GP3/4/5 are monolithic binary
+(`…FICHIER GUITAR PRO v3/4/5`), GPX (GP6) is a `BCFZ` binary filesystem, and
+Power Tab `.ptb` is its own binary — all would need a binary reader or a
+dependency (alphaTab). The honest route for those stays **open in TuxGuitar /
+MuseScore → export MusicXML** (Path C). The MusicXML/GP upload panel accepts
+`.gp` alongside `.xml`/`.musicxml`; `onXml` branches on the extension.
+
+**gpif is a flat id-graph, not nested like MusicXML.** The traversal is
+`MasterBar.Bars[trackIndex]` → `Bar.Voices` → `Voice.Beats` → `Beat`
+(`{ Rhythm ref, Notes ids }`) → `Note`. `parseGPIF` builds id→element maps
+(`_gpById`) for Bar/Voice/Beat/Note/Rhythm and resolves the refs. Key facts:
+- A `<Note>` carries a **direct `<Property name="Midi"><Number>`** — so MIDI goes
+  straight into `symbolForMidis`, no pitch math (a `ConcertPitch` fallback
+  exists). `<String>`/`<Fret>` are also read for the readout: **gpif `String` is
+  0-indexed from the low E**, so `eng = String` directly and the **tuning
+  `<Pitches>` list is low→high** (no reverse) — verified: String 1 + fret 7 =
+  A2+7 = MIDI 52, and the test asserts `fret + standardOpen === midi` for every
+  fretted note in Blue Sky.
+- Duration comes from the referenced `<Rhythm>` (`NoteValue` Whole…128th, ×1.5/
+  ×1.75 per `AugmentationDot count`, × `den/num` per `PrimaryTuplet`), accumulated
+  per voice from 0; **all voices in a bar are merged** onto shared onsets (like
+  the MusicXML backup/forward handling) so chord voicings across voices combine.
+- Per-bar `<Time>` gives **exact meter** (Blue Sky opens **2/4**); tempo is the
+  first `<Automation><Type>Tempo</Type>` `Value`; tracks → the **part picker**.
+- Output is the **same score shape** as `parseMusicXML` (`source:"gp"`), so the
+  chart, exporters, transpose, key analysis, playback and the ♯/♭ re-spell /
+  part-switch (`_reparseScore` branches on `score.source`) are all shared.
+
+**Validation** (`npm test`, fixture `blue-sky.gp`): `parseGP` reconstructs the
+**same Blue Sky ground truth as the PDF path** straight from the `.gp` — 3 tracks,
+165 bars, Standard tuning, tempo 100, bar-1 meter 2/4, the rhythm-guitar track
+(#1) verse `E A A E E A A E`, the bar-26 bridge turn `B C#m`, and every fret
+reconstructing its MIDI through standard tuning. This is the cleanest cross-check
+in the repo: two independent importers (geometry vs. exact file) agree.
+
 ## Shared ChartPanel — editing, transpose, export
 
 Both chart modes feed one `ChartPanel`. Anything that reads/writes a score does so
