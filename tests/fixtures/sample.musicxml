@@ -27,6 +27,7 @@
           <staff-tuning line="6"><tuning-step>E</tuning-step><tuning-octave>4</tuning-octave></staff-tuning>
         </staff-details>
       </attributes>
+      <sound tempo="120"/>
       <note>
         <pitch><step>C</step><octave>3</octave></pitch>
         <duration>8</duration><type>half</type>

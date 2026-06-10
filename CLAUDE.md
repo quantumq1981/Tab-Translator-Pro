@@ -186,6 +186,16 @@ through the shared shape, so these work identically for Path A and Path C:
   chord tones as notes **plus** the symbol as a guitar-chord annotation, so the
   output is real, *playable* music (validated by playing it). Both honour
   `overrides` and the current transpose. ABC handles mid-tune meter via `[M:n/m]`.
+- **Playback** (▶ Play, ♩=BPM): in-browser **Web Audio** synth, no deps. Pure
+  `scoreEventTimes(score, bpm)` flattens the score into timed chord events in
+  **seconds** (a "beat" = one `1/beatType` note → `4/beatType` quarters, same
+  conversion as ABC; per-bar timeSig keeps the clock right through meter changes);
+  `playScore` schedules triangle-osc voices with a short envelope and lights a
+  **playhead** (`onEvent` → highlighted chord). Tempo comes from MusicXML
+  (`<sound tempo>` / `<metronome>`), defaulting to **100** (PDF has none). Plays
+  the *transposed* score, so what you hear matches what's shown. The scheduler is
+  unit-tested; the Web Audio glue itself is browser-only (smoke-test on hardware,
+  same category as the PDF.js worker).
 
 `midiToAbc`/`abcDur` invariants: middle C (C4 = 60) is ABC `C`, C5 is `c`; ABC
 duration is a reduced fraction of `L:1/4` (`durBeats·4/beatType`), so simple
@@ -263,6 +273,10 @@ accordingly.
   `[C,E,G,]` voicing, and `transposeScore(+2)` re-recognising `C G | Am | F` →
   `D A | Bm | G` (and `n=0` passthrough). The ABC was additionally confirmed
   *playable* via the play-sheet-music tool.
+- **Playback scheduling**: `npm test` reads the fixture's `<sound tempo="120">`
+  and asserts `scoreEventTimes` lays the 4 events at 0/1/2/4 s with durations
+  1/1/2/1.5 s (the 3/4 bar 3 starting at 4.0 s), total 5.5 s, MIDI carried
+  through. The Web Audio synth (`playScore`) is the browser-only glue on top.
 
 ## Session conventions
 
