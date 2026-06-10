@@ -526,7 +526,9 @@ const _abcChordName = (s) => s.replace(/♭/g, "b").replace(/♯/g, "#").replace
 function scoreToABC(score, opts = {}) {
   const ov = opts.overrides || {};
   const [b0, bt0] = score.timeSig;
-  const out = ["X:1", `T:${opts.title || "Tab Decoder chart"}`, `M:${b0}/${bt0}`, "L:1/4", `K:${keyName(opts.key, opts.useSharp !== false) || "C"}`];
+  const out = ["X:1", `T:${opts.title || "Tab Decoder chart"}`, `M:${b0}/${bt0}`, "L:1/4"];
+  if (opts.tempo) out.push(`Q:1/4=${Math.round(opts.tempo)}`);
+  out.push(`K:${keyName(opts.key, opts.useSharp !== false) || "C"}`);
   let curSig = `${b0}/${bt0}`, body = "";
   score.bars.forEach((bar, bi) => {
     const [bb, bt] = bar.timeSig || score.timeSig;
@@ -558,6 +560,73 @@ function scoreToChordPro(score, opts = {}) {
   if (row.length) out.push("| " + row.join(" | ") + " |");
   out.push("{end_of_grid}");
   return out.join("\n") + "\n";
+}
+
+/* ---- MusicXML export: a proper round-trippable chord chart -----------------
+ * Emits both a <harmony> (chord symbol, so MuseScore / Guitar Pro show it above
+ * the staff) AND the voiced <note> pitches (so the staff is real music). Because
+ * the notes are present, re-importing through parseMusicXML reconstructs the same
+ * symbols — the export/import round-trip is itself a test. Honours overrides +
+ * transpose (the score is already transposed by the caller) and per-bar meter. */
+const _STEP_ALTER_SHARP = [["C", 0], ["C", 1], ["D", 0], ["D", 1], ["E", 0], ["F", 0], ["F", 1], ["G", 0], ["G", 1], ["A", 0], ["A", 1], ["B", 0]];
+const _STEP_ALTER_FLAT = [["C", 0], ["D", -1], ["D", 0], ["E", -1], ["E", 0], ["F", 0], ["G", -1], ["G", 0], ["A", -1], ["A", 0], ["B", -1], ["B", 0]];
+const _pcStepAlter = (pc, useSharp) => (useSharp ? _STEP_ALTER_SHARP : _STEP_ALTER_FLAT)[((pc % 12) + 12) % 12];
+const _XML_KIND = { "": "major", m: "minor", "7": "dominant", maj7: "major-seventh", m7: "minor-seventh", m6: "minor-sixth", "6": "major-sixth", dim: "diminished", dim7: "diminished-seventh", "m7♭5": "half-diminished", m7b5: "half-diminished", aug: "augmented", sus2: "suspended-second", sus4: "suspended-fourth", "7sus4": "dominant", "5": "power" };
+function _midiToPitchXML(m, useSharp) {
+  const [step, alter] = _pcStepAlter(((m % 12) + 12) % 12, useSharp);
+  return { step, alter, oct: Math.floor(m / 12) - 1 };
+}
+function _typeForQuarters(q) {
+  const T = { 4: ["whole", 0], 2: ["half", 0], 1: ["quarter", 0], 0.5: ["eighth", 0], 0.25: ["16th", 0], 6: ["whole", 1], 3: ["half", 1], 1.5: ["quarter", 1], 0.75: ["eighth", 1] };
+  return T[q] ? { type: T[q][0], dot: T[q][1] } : null;
+}
+function _harmonyXML(sym, useSharp) {
+  const p = _parseSym(sym);
+  if (p.pc == null) return "";
+  const [rs, ra] = _pcStepAlter(p.pc, useSharp);
+  let s = `      <harmony>\n        <root><root-step>${rs}</root-step>${ra ? `<root-alter>${ra}</root-alter>` : ""}</root>\n        <kind>${_XML_KIND[p.suffix] !== undefined ? _XML_KIND[p.suffix] : "major"}</kind>\n`;
+  const slash = String(sym).split("/")[1];
+  if (slash) { const bp = _PC_BY_NAME[slash.replace("♯", "#").replace("♭", "b")]; if (bp !== undefined) { const [bs, ba] = _pcStepAlter(bp, useSharp); s += `        <bass><bass-step>${bs}</bass-step>${ba ? `<bass-alter>${ba}</bass-alter>` : ""}</bass>\n`; } }
+  return s + "      </harmony>";
+}
+function scoreToMusicXML(score, opts = {}) {
+  const ov = opts.overrides || {}, useSharp = opts.useSharp !== false, div = 4;
+  const L = ['<?xml version="1.0" encoding="UTF-8"?>', '<score-partwise version="3.1">',
+    "  <part-list><score-part id=\"P1\"><part-name>Chords</part-name></score-part></part-list>", '  <part id="P1">'];
+  let prevSig = null, wroteDiv = false;
+  score.bars.forEach((bar, bi) => {
+    const [bb, bt] = bar.timeSig || score.timeSig;
+    L.push(`    <measure number="${bar.number}">`);
+    const sigChanged = !prevSig || prevSig[0] !== bb || prevSig[1] !== bt;
+    if (!wroteDiv || sigChanged) {
+      L.push("      <attributes>");
+      if (!wroteDiv) { L.push(`        <divisions>${div}</divisions>`); wroteDiv = true; }
+      if (sigChanged) L.push(`        <time><beats>${bb}</beats><beat-type>${bt}</beat-type></time>`);
+      L.push("      </attributes>");
+    }
+    prevSig = [bb, bt];
+    if (bi === 0 && opts.tempo) L.push(`      <sound tempo="${opts.tempo}"/>`);
+    bar.events.forEach((e) => {
+      const sym = ov[`${bar.number}.${e.beat}`] != null ? ov[`${bar.number}.${e.beat}`] : e.symbol;
+      const durDiv = Math.max(1, Math.round((e.durBeats * div * 4) / bt));
+      const h = _harmonyXML(sym, useSharp); if (h) L.push(h);
+      const midis = e.midis && e.midis.length ? e.midis : [];
+      if (!midis.length) { L.push(`      <note><rest/><duration>${durDiv}</duration></note>`); return; }
+      const ty = _typeForQuarters(durDiv / div);
+      midis.forEach((m, ci) => {
+        const p = _midiToPitchXML(m, useSharp);
+        L.push("      <note>");
+        if (ci > 0) L.push("        <chord/>");
+        L.push(`        <pitch><step>${p.step}</step>${p.alter ? `<alter>${p.alter}</alter>` : ""}<octave>${p.oct}</octave></pitch>`);
+        L.push(`        <duration>${durDiv}</duration>`);
+        if (ty) { L.push(`        <type>${ty.type}</type>`); if (ty.dot) L.push("        <dot/>"); }
+        L.push("      </note>");
+      });
+    });
+    L.push("    </measure>");
+  });
+  L.push("  </part>", "</score-partwise>", "");
+  return L.join("\n");
 }
 
 /* Transpose a whole score by n semitones. Shifts every event's MIDI and lets the
@@ -970,8 +1039,8 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   const bumpBpm = (d) => setBpm((b) => Math.max(40, Math.min(240, b + d)));
   const symOf = (bar, e) => { const v = overrides[`${bar.number}.${e.beat}`]; return v != null ? v : e.symbol; };
   const doExport = (fmt) => {
-    const opts = { overrides, title, key, useSharp };
-    const text = fmt === "abc" ? scoreToABC(tscore, opts) : scoreToChordPro(tscore, opts);
+    const opts = { overrides, title, key, useSharp, tempo: bpm };
+    const text = fmt === "abc" ? scoreToABC(tscore, opts) : fmt === "musicxml" ? scoreToMusicXML(tscore, opts) : scoreToChordPro(tscore, opts);
     setExp({ fmt, text }); setCopied(false);
   };
   const copy = () => { try { navigator.clipboard.writeText(exp.text); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch (_) {} };
@@ -1006,8 +1075,9 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
           <button onClick={() => bumpBpm(5)} style={{ ...chip(C), padding: "3px 8px" }}>+</button>
         </span>
         <span style={{ marginLeft: "auto", display: "inline-flex", gap: 4 }}>
-          <button onClick={() => doExport("chordpro")} style={{ ...chip(C), padding: "3px 9px", borderColor: exp && exp.fmt === "chordpro" ? C.cyan : C.border, color: exp && exp.fmt === "chordpro" ? C.cyan : C.dim }}>ChordPro</button>
-          <button onClick={() => doExport("abc")} style={{ ...chip(C), padding: "3px 9px", borderColor: exp && exp.fmt === "abc" ? C.cyan : C.border, color: exp && exp.fmt === "abc" ? C.cyan : C.dim }}>ABC</button>
+          {[["chordpro", "ChordPro"], ["abc", "ABC"], ["musicxml", "MusicXML"]].map(([f, lbl]) => (
+            <button key={f} onClick={() => doExport(f)} style={{ ...chip(C), padding: "3px 9px", borderColor: exp && exp.fmt === f ? C.cyan : C.border, color: exp && exp.fmt === f ? C.cyan : C.dim }}>{lbl}</button>
+          ))}
         </span>
       </div>
 
@@ -1078,7 +1148,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
       {exp && (
         <div style={{ marginTop: 12 }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-            <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim }}>EXPORT · {exp.fmt === "abc" ? "ABC NOTATION" : "CHORDPRO"}</span>
+            <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim }}>EXPORT · {exp.fmt === "abc" ? "ABC NOTATION" : exp.fmt === "musicxml" ? "MUSICXML" : "CHORDPRO"}</span>
             <span style={{ display: "inline-flex", gap: 6 }}>
               <button onClick={copy} style={{ ...chip(C), padding: "3px 9px", borderColor: copied ? C.green : C.border, color: copied ? C.green : C.dim }}>{copied ? "copied ✓" : "copy"}</button>
               <button onClick={() => setExp(null)} style={{ ...chip(C), padding: "3px 9px" }}>close</button>
@@ -1087,6 +1157,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
           <textarea readOnly value={exp.text} spellCheck={false} className="tdp-scroll"
             style={{ width: "100%", height: 120, resize: "vertical", boxSizing: "border-box", background: C.bg, color: C.text, border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, fontSize: 12, lineHeight: 1.5, fontFamily: "'IBM Plex Mono', monospace", outline: "none" }} />
           {exp.fmt === "abc" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>Real, playable notes + chord symbols — paste into any ABC player (e.g. abcjs / editor at abcnotation.com) to hear it.</div>}
+          {exp.fmt === "musicxml" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>Save as <b>.musicxml</b> and open in MuseScore / Guitar Pro — carries chord symbols + notes + meter. Round-trips back into this app.</div>}
         </div>
       )}
     </>

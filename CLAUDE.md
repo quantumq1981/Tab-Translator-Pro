@@ -182,10 +182,16 @@ through the shared shape, so these work identically for Path A and Path C:
   by `n` and lets the engine **re-name** the chord (spelling follows the ♯/♭
   toggle for free). Frets are dropped (position-specific); readouts fall back to
   the transposed pitches. `n === 0` is a passthrough.
-- **Export**: `scoreToChordPro` (grid) and `scoreToABC`. ABC emits the actual
-  chord tones as notes **plus** the symbol as a guitar-chord annotation, so the
-  output is real, *playable* music (validated by playing it). Both honour
-  `overrides` and the current transpose. ABC handles mid-tune meter via `[M:n/m]`.
+- **Export**: `scoreToChordPro` (grid), `scoreToABC`, and `scoreToMusicXML`. ABC
+  emits the actual chord tones as notes **plus** the symbol as a guitar-chord
+  annotation, so the output is real, *playable* music (validated by playing it);
+  it carries `Q:` tempo, the detected `K:` key, and mid-tune meter via `[M:n/m]`.
+  **MusicXML export** writes both a `<harmony>` (chord symbol → MuseScore/Guitar
+  Pro show it above the staff) AND the voiced `<note>` pitches, so it re-imports
+  as real music *and* **round-trips through `parseMusicXML`** (the notes
+  reconstruct the same symbols — that round-trip is a test, incl. the full 165-bar
+  Blue Sky score). All exporters honour `overrides` and the current transpose;
+  ChordPro/ABC/MusicXML all carry the detected key.
 - **Key + roman numerals** (`analyzeKey`, `romanFor`, `keyName`): scores all 24
   keys — each chord adds its duration when diatonic (×0.3 if only its root fits =
   a borrowed quality), plus a small cadential bonus for the last/first chord being
@@ -288,6 +294,11 @@ accordingly.
 - **Key / roman numerals**: `npm test` asserts `analyzeKey` → **C major** for the
   fixture (`I V vi IV`) and **E major** for Blue Sky (E/A/B = I/IV/V, C#m = vi,
   F#m7 = ii7), and that the key reaches the exporters (`K:C`, `{key: C}`).
+- **MusicXML export round-trip**: `npm test` exports the fixture (with `<harmony>`
+  + `<sound tempo>`), re-parses it, and asserts identical chords, the 3/4 change
+  and tempo survive; an `A7` override surfaces as a `<kind>dominant</kind>`
+  harmony; and the **full Blue Sky score** round-trips to 165 bars with the verse
+  intact.
 
 ## Session conventions
 
