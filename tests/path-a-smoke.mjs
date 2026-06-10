@@ -35,7 +35,7 @@ const end = src.indexOf("async function extractTokens"); // browser-only; reprod
 if (start < 0 || end < 0) throw new Error("source markers not found in TabDecoderPro.tsx");
 const engineSrc =
   src.slice(start, end) +
-  "\nexport { buildChart, buildScore, simplifyScore, symbolForFrets, parseMusicXML, parseGP, parseGPIF, gpUnzip, scoreToABC, scoreToChordPro, scoreToMusicXML, transposeScore, scoreEventTimes, analyzeKey, romanFor, keyName };\n";
+  "\nexport { buildChart, buildScore, simplifyScore, symbolForFrets, parseMusicXML, parseGP, parseGPIF, gpUnzip, parseGP345, scoreToABC, scoreToChordPro, scoreToMusicXML, transposeScore, scoreEventTimes, analyzeKey, romanFor, keyName };\n";
 
 /* parseMusicXML uses the browser's global DOMParser; the app loads it natively.
  * Headlessly we install @xmldom/xmldom (a TEST-only dep) as that global so the
@@ -263,6 +263,27 @@ expect(JSON.stringify(gp.bars[0].timeSig) === JSON.stringify([2, 4]), `GP bar1 m
 const gpFlat = eng.parseGPIF(gpXml, false, 1);
 expect(gpFlat.partIndex === 1 && gpFlat.bars.length === 165, "GP re-parse (flats) keeps part 1 and bar count");
 
+/* ---- Path E: Guitar Pro 3/4/5 legacy BINARY import (parseGP345) ----------
+ *      Cross-validates the binary reader against the SAME ground truth: Blue
+ *      Sky gp3 reproduces the verse, Kid Charlemagne gp3 resolves the bars the
+ *      PDF mis-anchored to the correct C7, and Peg gp4 reads Steely Dan jazz. */
+const bs3 = eng.parseGP345(new Uint8Array(fs.readFileSync(path.join(repo, "the-allman-brothers-band-blue_sky.gp3"))), true, 2);
+expect(bs3.source === "gp", "GP3 score tagged source=gp");
+expect(bs3.tempo === 100 && bs3.tuning === "Standard", `GP3 expected tempo 100 / Standard, got ${bs3.tempo} / ${bs3.tuning}`);
+const bs3Verse = bs3.bars.slice(0, 8).map((b) => [...new Set(b.events.map((e) => e.symbol))].join(" ")).join(" ");
+expect(bs3Verse === "E A A E E A A E", `GP3 Blue Sky (track 3) verse expected "E A A E E A A E", got "${bs3Verse}"`);
+
+const kc3 = eng.parseGP345(new Uint8Array(fs.readFileSync(path.join(repo, "steely-dan-kid_charlemegne.gp3"))), true, 0);
+expect(kc3.parts[0].name === "Rhythm Guitar", `KC track 0 expected "Rhythm Guitar", got "${kc3.parts[0].name}"`);
+const kc27 = [...new Set(kc3.bars[26].events.map((e) => e.symbol))].join(" ");
+const kc28 = [...new Set(kc3.bars[27].events.map((e) => e.symbol))].join(" ");
+expect(kc27 === "C7" && kc28 === "C7", `KC bars 27-28 expected C7/C7 (the PDF mis-read these as Fm7), got ${kc27}/${kc28}`);
+
+const peg4 = eng.parseGP345(new Uint8Array(fs.readFileSync(path.join(repo, "Steely Dan - Peg.gp4"))), true, 3);
+expect(peg4.parts[3].name === "Rhythm guitar", `Peg gp4 track 3 expected "Rhythm guitar", got "${peg4.parts[3].name}"`);
+const peg4Bars = peg4.bars.slice(0, 5).map((b) => [...new Set(b.events.map((e) => e.symbol))].join(" ")).join(" | ");
+expect(peg4Bars === "Gmaj7 | F#7 | Fmaj7 | E7 | D#maj7", `Peg gp4 bars 1-5 expected jazz changes, got "${peg4Bars}"`);
+
 /* ---- report -------------------------------------------------------------- */
 console.log(`PDF.js ${pdfjsLib.version} · ${pages} pages · ${tokens.length} tokens`);
 console.log(`systemsFound=${chart.systemsFound} columnsFound=${chart.columnsFound} bars=${bars.length}`);
@@ -274,6 +295,7 @@ if (sampleMulti) console.log(`sample multi-chord bar ${sampleMulti.number}: ` +
 console.log(`MusicXML: ${mx.bars.length} bars, ${mx.tuning} tuning, bar3 ${mx.bars[2].timeSig.join("/")} · ${mxSyms.join(" | ")}`);
 console.log(`Key: fixture ${eng.keyName(mxKey, true)} (${mxRomans}) · Blue Sky ${eng.keyName(bsKey, true)}`);
 console.log(`GP (.gp): ${gp.parts.length} tracks, ${gp.bars.length} bars, ${gp.tuning}, tempo ${gp.tempo}, bar1 ${gp.bars[0].timeSig.join("/")} · verse ${gpVerse}`);
+console.log(`GP3/4 (.gp3/.gp4): Blue Sky verse ${bs3Verse} · Kid Charlemagne bars 27-28 ${kc27} ${kc28} (PDF mis-read as Fm7) · Peg ${peg4Bars}`);
 console.log(`ABC: ${abc.trim().split("\n").pop()}`);
 
 if (fails.length) {

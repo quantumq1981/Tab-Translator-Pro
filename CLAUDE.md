@@ -250,6 +250,62 @@ MuseScore → export MusicXML** (Path C). The MusicXML/GP upload panel accepts
 reconstructing its MIDI through standard tuning. This is the cleanest cross-check
 in the repo: two independent importers (geometry vs. exact file) agree.
 
+## Path E — Guitar Pro 3/4/5 legacy BINARY import (`parseGP345`)
+
+Unlike GP7/8 (Path D = ZIP of XML), **GP3/4/5 are monolithic little-endian
+binary**. `parseGP345` is a faithful, **zero-dependency** port of the documented
+read order (cross-checked against **PyGuitarPro**, a dev-time oracle only — never
+shipped). The hard rule: **every block must be fully consumed to stay aligned**,
+even effects/chord-diagrams/mix-tables we don't keep — a single wrong skip
+cascades. We keep only each beat's duration and its notes (string+fret → MIDI via
+the track tuning), then emit the SAME `source:"gp"` score shape, so chart/export/
+transpose/playback/part-switch are shared (the `_reparseScore` helper re-runs
+`parseGP345` from a stored `_gpbuf` for the ♯/♭ + part re-parse).
+
+Format facts that bite (all verified against the corpus):
+- Read primitives mirror PyGuitarPro's `iobase`: `byteSizeString(n)` = 1 size byte
+  then **n** bytes (slice to size); `intByteSizeString` = int count then
+  `byteSizeString(count-1)`; version = `byteSizeString(30)`. Strings decode as
+  latin1 (names don't affect recognition).
+- Song header order: 8 info strings + notice lines, triplet-feel bool, **(GP4+
+  only) lyrics** (trackChoice + 5×(int + intString)), tempo, key, **(GP4+) octave
+  byte**, 64 MIDI channels (`int instrument + 6 bytes + 2 blank` = 12 each),
+  measureCount, trackCount.
+- Measure header flags: `0x01/0x02` num/den (else inherit previous — this is how
+  meter carries), `0x08` repeat-close byte, `0x10` alt-ending byte, `0x20` marker
+  (intByteString + 4-byte colour), `0x40` key-sig 2 bytes.
+- Track: flags, `byteSizeString(40)` name, stringCount int, **7** tuning ints
+  (first stringCount used, stored **high→low** so `tuning[string-1]` is the open
+  pitch, `string 1 = high e`), port, 2 channel ints, fretCount, capo, 4-byte colour.
+- Measures are **measure-major then track**; GP3/4 have **one voice** per measure
+  (GP5 has two). Beat: flags, optional status byte (`0x40`; 0=empty/2=rest),
+  duration (`1<<(i8+2)` → value, `0x01` dotted, `0x20` tuplet int), then chord/
+  text/beatEffects/mixTable blocks, then a string-mask byte and a note per set bit
+  (`1<<(7-stringNumber)`).
+- Note: flags, `0x20` type byte **then later** `0x20` fret byte (both under the
+  same flag, read in order), `0x01` 2 bytes, `0x10` dynamic, `0x80` 2 fingering
+  bytes, `0x08` note-effects. **Tie** (type 2) → reuse that string's previous fret
+  (`state.lastFret`); **dead** (type 3) → no pitch (dropped, like a muted strum).
+- Version deltas: GP4 uses 2 effect-flag bytes (vs GP3's 1), a different
+  new-chord layout (`u8` roots, 7 frets, 5-barre arrays, 7 fingerings + show),
+  a mix-table all-tracks flags byte, and slide/harmonic/trill/tremolo-pick
+  note-effects. `_gpReadBeatEffects`/`_gpReadNoteEffects`/`_gpReadChord`/
+  `_gpReadMixTableChange` branch on `v`.
+
+`parseGP5` is a stub for now (GP5's container — directory, RSE, 2 voices — is
+different enough to warrant its own reader); the dispatcher `parseGuitarProOrXML`
+routes by file head (`PK`→GP7/8, `FICHIER GUITAR PRO`→GP3/4/5, else MusicXML).
+`.gpx` (GP6 `BCFZ` binary FS) and Power Tab still route through MuseScore/TuxGuitar
+→ MusicXML.
+
+**Validation** (`npm test`): `parseGP345` reproduces the **Blue Sky gp3** verse
+`E A A E E A A E`, decodes **Kid Charlemagne**'s Rhythm-Guitar bars 27–28 to the
+correct **`C7`** (the very bars the PDF path mis-anchored to `Fm7` — three
+importers now agree on the geometry-defeating case), and reads **Peg.gp4**'s jazz
+changes `Gmaj7 | F#7 | Fmaj7 | E7 | D#maj7`. A dev-time PyGuitarPro cross-check
+matched **2445/2446 measures** across 4 files (the lone diff is one passing tone
+in a bebop bar, not a byte-alignment error — alignment survives past it).
+
 ## Shared ChartPanel — editing, transpose, export
 
 Both chart modes feed one `ChartPanel`. Anything that reads/writes a score does so
