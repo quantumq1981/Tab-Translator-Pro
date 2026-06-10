@@ -221,7 +221,11 @@ function buildChart(tokens) {
     const groups = []; let cur = [lines[0]];
     for (let i = 1; i < lines.length; i++) { if (lines[i] - cur[cur.length - 1] <= sysGap) cur.push(lines[i]); else { groups.push(cur); cur = [lines[i]]; } }
     groups.push(cur);
-    const staves = groups.filter((g) => g.length >= 4).map((g) => ({ topY: Math.min(...g), botY: Math.max(...g) }));
+    // A staff system = a run of evenly-spaced string lines. Sparse systems (a
+    // melodic line that only touches a few strings) can show as few as 3 lines,
+    // so accept >=3; header/measure-number rows are single lines (excluded) and
+    // sit in their own group (split by sysGap), so they don't slip through.
+    const staves = groups.filter((g) => g.length >= 3).map((g) => ({ topY: Math.min(...g), botY: Math.max(...g) }));
 
     staves.forEach((st, si) => {
       systemsFound++;
@@ -317,6 +321,44 @@ function buildScore(chart, useSharp, beatsPerBar = 4) {
   return { timeSig: [beatsPerBar, 4], bars };
 }
 
+/* ---- simplify: aggregate each bar's notes into one best-fit chord ----------
+ * For dense transcriptions (melody + harmony) the per-onset chart is noise. This
+ * collapses every bar to a single chord by weighting each pitch class by the
+ * total duration it sounds (so sustained/structural tones beat brief passing
+ * notes) and keeping the strong ones, then running that chroma + the bar's bass
+ * through the same engine. Output is the same score shape (one event/bar), so it
+ * flows through render / transpose / playback / export unchanged. Opt-in — the
+ * detailed per-onset path is untouched (Blue Sky stays as-is). ---------------- */
+function simplifyScore(score, useSharp) {
+  const bars = score.bars.map((bar) => {
+    const sig = bar.timeSig || score.timeSig;
+    const pcW = new Array(12).fill(0);
+    let any = false;
+    for (const e of bar.events) {
+      const w = Math.max(0.25, e.durBeats || 1);
+      for (const m of e.midis || []) { pcW[m % 12] += w; any = true; }
+    }
+    if (!any) return { number: bar.number, timeSig: bar.timeSig, events: [] };
+    const maxW = Math.max(...pcW);
+    const chroma = [];
+    for (let pc = 0; pc < 12; pc++) if (pcW[pc] >= maxW * 0.2) chroma.push(pc); // drop weak passing tones
+    // bass = lowest note that is a *structural* tone (kept pc), so a brief low
+    // melody/passing note doesn't manufacture a spurious slash chord.
+    let bassMidi = Infinity;
+    for (const e of bar.events) for (const m of e.midis || []) if (pcW[m % 12] >= maxW * 0.2 && m < bassMidi) bassMidi = m;
+    const result = recognise(chroma, makeMask(chroma), bassMidi % 12);
+    const symbol = symbolOf(result, useSharp);
+    let midis;                                            // clean voicing for playback/export
+    if (result && !result.single && result.best) {
+      const rootMidi = 48 + result.best.root;
+      midis = result.best.quality.intervals.map((i) => rootMidi + i);
+      if (result.isSlash) midis = [36 + result.bassPc, ...midis];
+    } else midis = bassMidi === Infinity ? [] : [bassMidi];
+    return { number: bar.number, timeSig: bar.timeSig, events: [{ symbol, beat: 0, durBeats: sig[0], midis, frets: undefined }] };
+  });
+  return { ...score, bars, simplified: true };
+}
+
 /* ============================================================================
  *  PATH C — MusicXML import  (explicit meter + tuning + rhythm, no recognition
  *  of geometry needed). MusicXML encodes <time>, <staff-tuning> and every
@@ -359,11 +401,17 @@ function _tuningName(arr) {
   for (const [n, t] of Object.entries(TUNINGS)) if (t.every((v, i) => v === arr[i])) return n;
   return "Custom";
 }
-function parseMusicXML(xml, useSharp = true) {
+function parseMusicXML(xml, useSharp = true, partIndex = 0) {
   const doc = new DOMParser().parseFromString(xml, "text/xml");
   if (_xEls(doc, "parsererror").length) throw new Error("Not valid XML.");
-  const part = _xFirst(doc, "part");
-  if (!part) throw new Error("No <part> found — is this a MusicXML score?");
+  const partEls = _xEls(doc, "part");
+  if (!partEls.length) throw new Error("No <part> found — is this a MusicXML score?");
+  // instrument names from <part-list>, in document order, for the part picker
+  const nameById = {};
+  _xEls(doc, "score-part").forEach((sp) => { nameById[sp.getAttribute("id")] = _xChildText(sp, "part-name") || sp.getAttribute("id"); });
+  const parts = partEls.map((pe, i) => ({ index: i, id: pe.getAttribute("id"), name: nameById[pe.getAttribute("id")] || `Part ${i + 1}` }));
+  const idx = Math.max(0, Math.min(partEls.length - 1, partIndex | 0));
+  const part = partEls[idx];
 
   let divisions = 1, beats = 4, beatType = 4, tuning = null;
   const bars = [];
@@ -418,7 +466,86 @@ function parseMusicXML(xml, useSharp = true) {
   const sound = _xEls(doc, "sound").find((s) => s.getAttribute("tempo"));
   if (sound) { const v = parseFloat(sound.getAttribute("tempo")); if (!isNaN(v)) tempo = v; }
   if (tempo == null) { const pm = _xFirst(doc, "per-minute"); if (pm) { const v = parseFloat(_xText(pm)); if (!isNaN(v)) tempo = v; } }
-  return { source: "musicxml", timeSig: bars.length ? bars[0].timeSig : [beats, beatType], tuning: _tuningName(tuning), tempo, bars };
+  return { source: "musicxml", timeSig: bars.length ? bars[0].timeSig : [beats, beatType], tuning: _tuningName(tuning), tempo, bars, parts, partIndex: idx };
+}
+
+/* ---- key + roman-numeral analysis ----------------------------------------
+ * Infers the most likely major/minor key by scoring all 24 keys: each chord
+ * adds its duration if it's diatonic to that key (a reduced amount if only its
+ * root fits — a borrowed quality), with a small cadential bonus for the last/
+ * first chord being the tonic. `romanFor` then labels a chord relative to that
+ * key; non-diatonic chords fall back to their absolute symbol. Pure + testable.
+ * ------------------------------------------------------------------------- */
+const _PC_BY_NAME = (() => { const m = {}; NOTE_SHARP.forEach((n, i) => (m[n] = i)); NOTE_FLAT.forEach((n, i) => (m[n] = i)); return m; })();
+const _MAJ = { 0: 0, 2: 1, 4: 2, 5: 3, 7: 4, 9: 5, 11: 6 };
+const _MIN = { 0: 0, 2: 1, 3: 2, 5: 3, 7: 4, 8: 5, 10: 6, 11: 6 }; // 11 = leading-tone vii°
+const _MAJ_Q = { 0: "maj", 2: "min", 4: "min", 5: "maj", 7: "maj", 9: "min", 11: "dim" };
+const _MIN_Q = { 0: "min", 2: "dim", 3: "maj", 5: "min", 7: "min", 8: "maj", 10: "maj", 11: "dim" };
+const _ROMAN = ["I", "II", "III", "IV", "V", "VI", "VII"];
+function _classOf(suf) {
+  if (suf === "5") return "power";
+  if (suf === "m7♭5" || suf === "m7b5") return "dim";
+  if (suf === "dim" || suf === "dim7") return "dim";
+  if (suf === "aug") return "aug";
+  if (/^m(?!aj)/.test(suf)) return "min";        // m, m7, m6 — but not maj7
+  if (suf === "7" || suf === "9" || suf === "13" || suf === "7sus4") return "dom";
+  if (suf.startsWith("sus")) return "sus";
+  return "maj";                                   // "", 6, maj7
+}
+function _parseSym(symbol) {
+  if (!symbol) return { pc: null };
+  const head = String(symbol).split("/")[0];
+  const mm = head.match(/^([A-G][#b♯♭]?)(.*)$/);
+  if (!mm) return { pc: null };
+  const root = mm[1].replace("♯", "#").replace("♭", "b");
+  const pc = _PC_BY_NAME[root];
+  if (pc === undefined) return { pc: null };
+  return { pc, suffix: mm[2], cls: _classOf(mm[2]) };
+}
+function qualCompatible(mode, rel, cls) {
+  const exp = (mode === "major" ? _MAJ_Q : _MIN_Q)[rel];
+  if (exp === undefined) return false;
+  if (cls === "power" || cls === "sus") return true;          // no 3rd → fits either
+  if (exp === "maj") return cls === "maj" || cls === "dom";
+  if (exp === "min") return cls === "min" || (mode === "minor" && rel === 7 && (cls === "maj" || cls === "dom")); // harmonic V
+  if (exp === "dim") return cls === "dim";
+  return false;
+}
+function analyzeKey(score) {
+  const parsed = [];
+  for (const b of score.bars) for (const e of b.events) { const p = _parseSym(e.symbol); if (p.pc != null) parsed.push({ ...p, dur: Math.max(0.5, e.durBeats || 1) }); }
+  if (!parsed.length) return null;
+  const total = parsed.reduce((s, p) => s + p.dur, 0);
+  const first = parsed[0].pc, last = parsed[parsed.length - 1].pc;
+  let best = null;
+  for (let tonic = 0; tonic < 12; tonic++) for (const mode of ["major", "minor"]) {
+    const idx = mode === "major" ? _MAJ : _MIN;
+    let sc = 0;
+    for (const p of parsed) { const rel = (p.pc - tonic + 12) % 12; if (rel in idx) sc += qualCompatible(mode, rel, p.cls) ? p.dur : p.dur * 0.3; }
+    if (last === tonic) sc += total * 0.08;
+    if (first === tonic) sc += total * 0.04;
+    if (!best || sc > best.sc) best = { tonic, mode, sc };
+  }
+  return { tonic: best.tonic, mode: best.mode, confidence: best.sc / (total || 1) };
+}
+const _romanExt = (suf) => ({ "7": "7", m7: "7", dim7: "7", maj7: "maj7", "6": "6", m6: "6", sus2: "sus2", sus4: "sus4", "7sus4": "7sus4" }[suf] || "");
+function romanFor(symbol, key) {
+  const p = _parseSym(symbol);
+  if (p.pc == null || !key) return symbol;
+  const rel = (p.pc - key.tonic + 12) % 12;
+  const idx = (key.mode === "major" ? _MAJ : _MIN)[rel];
+  if (idx === undefined) return symbol;            // non-diatonic → absolute symbol
+  const base = _ROMAN[idx];
+  let num;
+  if (p.cls === "dim") num = base.toLowerCase() + (p.suffix === "m7♭5" || p.suffix === "m7b5" ? "ø" : "°");
+  else if (p.cls === "min") num = base.toLowerCase();
+  else if (p.cls === "aug") num = base + "+";
+  else num = base;
+  return num + _romanExt(p.suffix);
+}
+function keyName(key, useSharp) {
+  if (!key) return null;
+  return (useSharp ? NOTE_SHARP : NOTE_FLAT)[key.tonic] + (key.mode === "minor" ? "m" : "");
 }
 
 /* ---- exporters: a score → ChordPro grid / ABC (chords + playable notes) ----
@@ -447,7 +574,9 @@ const _abcChordName = (s) => s.replace(/♭/g, "b").replace(/♯/g, "#").replace
 function scoreToABC(score, opts = {}) {
   const ov = opts.overrides || {};
   const [b0, bt0] = score.timeSig;
-  const out = ["X:1", `T:${opts.title || "Tab Decoder chart"}`, `M:${b0}/${bt0}`, "L:1/4", "K:C"];
+  const out = ["X:1", `T:${opts.title || "Tab Decoder chart"}`, `M:${b0}/${bt0}`, "L:1/4"];
+  if (opts.tempo) out.push(`Q:1/4=${Math.round(opts.tempo)}`);
+  out.push(`K:${keyName(opts.key, opts.useSharp !== false) || "C"}`);
   let curSig = `${b0}/${bt0}`, body = "";
   score.bars.forEach((bar, bi) => {
     const [bb, bt] = bar.timeSig || score.timeSig;
@@ -468,7 +597,9 @@ function scoreToABC(score, opts = {}) {
 function scoreToChordPro(score, opts = {}) {
   const ov = opts.overrides || {};
   const [b, bt] = score.timeSig;
-  const out = [`{title: ${opts.title || "Tab Decoder chart"}}`, `{time: ${b}/${bt}}`, "{start_of_grid}"];
+  const out = [`{title: ${opts.title || "Tab Decoder chart"}}`, `{time: ${b}/${bt}}`];
+  if (opts.key) out.push(`{key: ${keyName(opts.key, opts.useSharp !== false)}}`);
+  out.push("{start_of_grid}");
   let row = [];
   score.bars.forEach((bar, bi) => {
     row.push(bar.events.map((e) => _ovSym(bar, e, ov)).join(" "));
@@ -477,6 +608,73 @@ function scoreToChordPro(score, opts = {}) {
   if (row.length) out.push("| " + row.join(" | ") + " |");
   out.push("{end_of_grid}");
   return out.join("\n") + "\n";
+}
+
+/* ---- MusicXML export: a proper round-trippable chord chart -----------------
+ * Emits both a <harmony> (chord symbol, so MuseScore / Guitar Pro show it above
+ * the staff) AND the voiced <note> pitches (so the staff is real music). Because
+ * the notes are present, re-importing through parseMusicXML reconstructs the same
+ * symbols — the export/import round-trip is itself a test. Honours overrides +
+ * transpose (the score is already transposed by the caller) and per-bar meter. */
+const _STEP_ALTER_SHARP = [["C", 0], ["C", 1], ["D", 0], ["D", 1], ["E", 0], ["F", 0], ["F", 1], ["G", 0], ["G", 1], ["A", 0], ["A", 1], ["B", 0]];
+const _STEP_ALTER_FLAT = [["C", 0], ["D", -1], ["D", 0], ["E", -1], ["E", 0], ["F", 0], ["G", -1], ["G", 0], ["A", -1], ["A", 0], ["B", -1], ["B", 0]];
+const _pcStepAlter = (pc, useSharp) => (useSharp ? _STEP_ALTER_SHARP : _STEP_ALTER_FLAT)[((pc % 12) + 12) % 12];
+const _XML_KIND = { "": "major", m: "minor", "7": "dominant", maj7: "major-seventh", m7: "minor-seventh", m6: "minor-sixth", "6": "major-sixth", dim: "diminished", dim7: "diminished-seventh", "m7♭5": "half-diminished", m7b5: "half-diminished", aug: "augmented", sus2: "suspended-second", sus4: "suspended-fourth", "7sus4": "dominant", "5": "power" };
+function _midiToPitchXML(m, useSharp) {
+  const [step, alter] = _pcStepAlter(((m % 12) + 12) % 12, useSharp);
+  return { step, alter, oct: Math.floor(m / 12) - 1 };
+}
+function _typeForQuarters(q) {
+  const T = { 4: ["whole", 0], 2: ["half", 0], 1: ["quarter", 0], 0.5: ["eighth", 0], 0.25: ["16th", 0], 6: ["whole", 1], 3: ["half", 1], 1.5: ["quarter", 1], 0.75: ["eighth", 1] };
+  return T[q] ? { type: T[q][0], dot: T[q][1] } : null;
+}
+function _harmonyXML(sym, useSharp) {
+  const p = _parseSym(sym);
+  if (p.pc == null) return "";
+  const [rs, ra] = _pcStepAlter(p.pc, useSharp);
+  let s = `      <harmony>\n        <root><root-step>${rs}</root-step>${ra ? `<root-alter>${ra}</root-alter>` : ""}</root>\n        <kind>${_XML_KIND[p.suffix] !== undefined ? _XML_KIND[p.suffix] : "major"}</kind>\n`;
+  const slash = String(sym).split("/")[1];
+  if (slash) { const bp = _PC_BY_NAME[slash.replace("♯", "#").replace("♭", "b")]; if (bp !== undefined) { const [bs, ba] = _pcStepAlter(bp, useSharp); s += `        <bass><bass-step>${bs}</bass-step>${ba ? `<bass-alter>${ba}</bass-alter>` : ""}</bass>\n`; } }
+  return s + "      </harmony>";
+}
+function scoreToMusicXML(score, opts = {}) {
+  const ov = opts.overrides || {}, useSharp = opts.useSharp !== false, div = 4;
+  const L = ['<?xml version="1.0" encoding="UTF-8"?>', '<score-partwise version="3.1">',
+    "  <part-list><score-part id=\"P1\"><part-name>Chords</part-name></score-part></part-list>", '  <part id="P1">'];
+  let prevSig = null, wroteDiv = false;
+  score.bars.forEach((bar, bi) => {
+    const [bb, bt] = bar.timeSig || score.timeSig;
+    L.push(`    <measure number="${bar.number}">`);
+    const sigChanged = !prevSig || prevSig[0] !== bb || prevSig[1] !== bt;
+    if (!wroteDiv || sigChanged) {
+      L.push("      <attributes>");
+      if (!wroteDiv) { L.push(`        <divisions>${div}</divisions>`); wroteDiv = true; }
+      if (sigChanged) L.push(`        <time><beats>${bb}</beats><beat-type>${bt}</beat-type></time>`);
+      L.push("      </attributes>");
+    }
+    prevSig = [bb, bt];
+    if (bi === 0 && opts.tempo) L.push(`      <sound tempo="${opts.tempo}"/>`);
+    bar.events.forEach((e) => {
+      const sym = ov[`${bar.number}.${e.beat}`] != null ? ov[`${bar.number}.${e.beat}`] : e.symbol;
+      const durDiv = Math.max(1, Math.round((e.durBeats * div * 4) / bt));
+      const h = _harmonyXML(sym, useSharp); if (h) L.push(h);
+      const midis = e.midis && e.midis.length ? e.midis : [];
+      if (!midis.length) { L.push(`      <note><rest/><duration>${durDiv}</duration></note>`); return; }
+      const ty = _typeForQuarters(durDiv / div);
+      midis.forEach((m, ci) => {
+        const p = _midiToPitchXML(m, useSharp);
+        L.push("      <note>");
+        if (ci > 0) L.push("        <chord/>");
+        L.push(`        <pitch><step>${p.step}</step>${p.alter ? `<alter>${p.alter}</alter>` : ""}<octave>${p.oct}</octave></pitch>`);
+        L.push(`        <duration>${durDiv}</duration>`);
+        if (ty) { L.push(`        <type>${ty.type}</type>`); if (ty.dot) L.push("        <dot/>"); }
+        L.push("      </note>");
+      });
+    });
+    L.push("    </measure>");
+  });
+  L.push("  </part>", "</score-partwise>", "");
+  return L.join("\n");
 }
 
 /* Transpose a whole score by n semitones. Shifts every event's MIDI and lets the
@@ -625,10 +823,15 @@ export default function TabDecoderPro() {
     }
   };
 
-  // re-recognise MusicXML symbols when the sharp/flat spelling flips
+  // re-recognise MusicXML symbols when the sharp/flat spelling flips (keep part)
   useEffect(() => {
-    setXmlScore((prev) => { if (!prev || !prev._xml) return prev; const next = parseMusicXML(prev._xml, useSharp); next._xml = prev._xml; return next; });
+    setXmlScore((prev) => { if (!prev || !prev._xml) return prev; const next = parseMusicXML(prev._xml, useSharp, prev.partIndex); next._xml = prev._xml; return next; });
   }, [useSharp]);
+
+  const selectPart = (idx) => {
+    setXmlScore((prev) => { if (!prev || !prev._xml) return prev; const next = parseMusicXML(prev._xml, useSharp, idx); next._xml = prev._xml; return next; });
+    clearSel();
+  };
 
   const pickChord = (key, e) => { setSelKey(key); setSelFrets(e.frets || null); setSelMidis(e.midis || null); };
 
@@ -780,6 +983,15 @@ export default function TabDecoderPro() {
                   Reads <b>real</b> time signature, tuning &amp; rhythm straight from the file — no geometry guessing. Guitar Pro / MuseScore can export MusicXML (File → Export).
                 </div>
                 {xmlErr && <div style={{ marginTop: 10, color: C.red, fontSize: 12 }}>{xmlErr}</div>}
+                {xmlScore && xmlScore.parts && xmlScore.parts.length > 1 && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginTop: 12 }}>
+                    <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim }}>PART</span>
+                    {xmlScore.parts.map((p) => (
+                      <button key={p.index} onClick={() => selectPart(p.index)} title={`chart the "${p.name}" part`}
+                        style={{ ...chip(C), padding: "3px 9px", borderColor: xmlScore.partIndex === p.index ? C.amber : C.border, color: xmlScore.partIndex === p.index ? C.amber : C.dim }}>{p.name}</button>
+                    ))}
+                  </div>
+                )}
                 {xmlScore && (
                   <ChartPanel score={xmlScore} title={xmlName}
                     meta={`${xmlScore.bars.length} bars · ${xmlScore.tuning} tuning · ${xmlScore.timeSig.join("/")}`}
@@ -871,7 +1083,12 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   const [playKey, setPlayKey] = useState("");
   const player = useRef(null);
 
-  const tscore = useMemo(() => transposeScore(score, semis, useSharp), [score, semis, useSharp]);
+  const [showRoman, setShowRoman] = useState(false);
+  const [simplify, setSimplify] = useState(false);
+
+  const base = useMemo(() => (simplify ? simplifyScore(score, useSharp) : score), [simplify, score, useSharp]);
+  const tscore = useMemo(() => transposeScore(base, semis, useSharp), [base, semis, useSharp]);
+  const key = useMemo(() => analyzeKey(tscore), [tscore]);
 
   useEffect(() => { setBpm(score.tempo || 100); }, [score.tempo]);
   const stopPlay = () => { if (player.current) { player.current.stop(); player.current = null; } setPlaying(false); setPlayKey(""); };
@@ -886,7 +1103,8 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   const bumpBpm = (d) => setBpm((b) => Math.max(40, Math.min(240, b + d)));
   const symOf = (bar, e) => { const v = overrides[`${bar.number}.${e.beat}`]; return v != null ? v : e.symbol; };
   const doExport = (fmt) => {
-    const text = fmt === "abc" ? scoreToABC(tscore, { overrides, title }) : scoreToChordPro(tscore, { overrides, title });
+    const opts = { overrides, title, key, useSharp, tempo: bpm };
+    const text = fmt === "abc" ? scoreToABC(tscore, opts) : fmt === "musicxml" ? scoreToMusicXML(tscore, opts) : scoreToChordPro(tscore, opts);
     setExp({ fmt, text }); setCopied(false);
   };
   const copy = () => { try { navigator.clipboard.writeText(exp.text); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch (_) {} };
@@ -897,7 +1115,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
     <>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, fontSize: 11, color: C.dim, margin: "14px 0 6px" }}>
         <span style={{ color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 220 }}>{title}</span>
-        <span>{meta}{semis ? ` · ${semis > 0 ? "+" : ""}${semis} st` : ""}</span>
+        <span>{meta}{semis ? ` · ${semis > 0 ? "+" : ""}${semis} st` : ""}{key ? ` · key ${keyName(key, useSharp)}` : ""}</span>
       </div>
       <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
         {[["chart", "Chart"], ["grid", "Grid"]].map(([v, lbl]) => (
@@ -905,6 +1123,10 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
         ))}
         <button onClick={() => { setEditMode((m) => !m); setEditKey(""); }} disabled={view !== "chart"}
           style={{ ...chip(C), padding: "3px 9px", opacity: view !== "chart" ? 0.4 : 1, borderColor: editMode ? C.green : C.border, color: editMode ? C.green : C.dim }}>{editMode ? "✓ Editing" : "✎ Edit"}</button>
+        <button onClick={() => setShowRoman((r) => !r)} title={key ? `key of ${keyName(key, useSharp)}` : "key analysis"}
+          style={{ ...chip(C), padding: "3px 9px", borderColor: showRoman ? C.cyan : C.border, color: showRoman ? C.cyan : C.dim }}>{showRoman ? "I·V·vi ✓" : "I·V·vi"}</button>
+        <button onClick={() => setSimplify((s) => !s)} title="aggregate each bar's notes into one chord (for dense transcriptions)"
+          style={{ ...chip(C), padding: "3px 9px", borderColor: simplify ? C.green : C.border, color: simplify ? C.green : C.dim }}>{simplify ? "1 chord/bar ✓" : "Simplify"}</button>
         <span style={{ display: "inline-flex", alignItems: "center", gap: 4, marginLeft: 2 }}>
           <button onClick={() => bump(-1)} style={{ ...chip(C), padding: "3px 8px" }}>−</button>
           <span style={{ fontSize: 11, minWidth: 44, textAlign: "center", color: semis ? C.amber : C.dim }}>transpose</span>
@@ -919,8 +1141,9 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
           <button onClick={() => bumpBpm(5)} style={{ ...chip(C), padding: "3px 8px" }}>+</button>
         </span>
         <span style={{ marginLeft: "auto", display: "inline-flex", gap: 4 }}>
-          <button onClick={() => doExport("chordpro")} style={{ ...chip(C), padding: "3px 9px", borderColor: exp && exp.fmt === "chordpro" ? C.cyan : C.border, color: exp && exp.fmt === "chordpro" ? C.cyan : C.dim }}>ChordPro</button>
-          <button onClick={() => doExport("abc")} style={{ ...chip(C), padding: "3px 9px", borderColor: exp && exp.fmt === "abc" ? C.cyan : C.border, color: exp && exp.fmt === "abc" ? C.cyan : C.dim }}>ABC</button>
+          {[["chordpro", "ChordPro"], ["abc", "ABC"], ["musicxml", "MusicXML"]].map(([f, lbl]) => (
+            <button key={f} onClick={() => doExport(f)} style={{ ...chip(C), padding: "3px 9px", borderColor: exp && exp.fmt === f ? C.cyan : C.border, color: exp && exp.fmt === f ? C.cyan : C.dim }}>{lbl}</button>
+          ))}
         </span>
       </div>
 
@@ -953,8 +1176,9 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
                       const isPlaying = playKey === k;
                       return (
                         <button key={i} onClick={() => (editMode ? (setEditKey(k), setDraft(cur)) : onPick(k, e))} title={editMode ? "click to re-label" : `beat ${e.beat + 1}`}
-                          style={{ gridColumn: gridCol, justifySelf: "start", background: isPlaying ? `${C.green}22` : "transparent", borderRadius: 4, border: "none", borderBottom: isSel ? `2px solid ${C.amber}` : "2px solid transparent", padding: "0 2px", cursor: "pointer", color: isPlaying ? C.green : edited ? C.green : isSel ? C.amber : C.cyan, fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: cur.length > 4 ? 13 : 16, lineHeight: 1.2, transition: "background .1s, color .1s" }}>
-                          {cur}{edited ? "*" : ""}
+                          style={{ gridColumn: gridCol, justifySelf: "start", textAlign: "left", background: isPlaying ? `${C.green}22` : "transparent", borderRadius: 4, border: "none", borderBottom: isSel ? `2px solid ${C.amber}` : "2px solid transparent", padding: "0 2px", cursor: "pointer", color: isPlaying ? C.green : edited ? C.green : isSel ? C.amber : C.cyan, fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: cur.length > 4 ? 13 : 16, lineHeight: 1.2, transition: "background .1s, color .1s" }}>
+                          <span style={{ display: "block" }}>{cur}{edited ? "*" : ""}</span>
+                          {showRoman && key && <span style={{ display: "block", fontSize: 9, fontWeight: 400, color: C.dim, marginTop: 1 }}>{romanFor(cur, key)}</span>}
                         </button>
                       );
                     })}
@@ -990,7 +1214,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
       {exp && (
         <div style={{ marginTop: 12 }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-            <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim }}>EXPORT · {exp.fmt === "abc" ? "ABC NOTATION" : "CHORDPRO"}</span>
+            <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim }}>EXPORT · {exp.fmt === "abc" ? "ABC NOTATION" : exp.fmt === "musicxml" ? "MUSICXML" : "CHORDPRO"}</span>
             <span style={{ display: "inline-flex", gap: 6 }}>
               <button onClick={copy} style={{ ...chip(C), padding: "3px 9px", borderColor: copied ? C.green : C.border, color: copied ? C.green : C.dim }}>{copied ? "copied ✓" : "copy"}</button>
               <button onClick={() => setExp(null)} style={{ ...chip(C), padding: "3px 9px" }}>close</button>
@@ -999,6 +1223,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
           <textarea readOnly value={exp.text} spellCheck={false} className="tdp-scroll"
             style={{ width: "100%", height: 120, resize: "vertical", boxSizing: "border-box", background: C.bg, color: C.text, border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, fontSize: 12, lineHeight: 1.5, fontFamily: "'IBM Plex Mono', monospace", outline: "none" }} />
           {exp.fmt === "abc" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>Real, playable notes + chord symbols — paste into any ABC player (e.g. abcjs / editor at abcnotation.com) to hear it.</div>}
+          {exp.fmt === "musicxml" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>Save as <b>.musicxml</b> and open in MuseScore / Guitar Pro — carries chord symbols + notes + meter. Round-trips back into this app.</div>}
         </div>
       )}
     </>

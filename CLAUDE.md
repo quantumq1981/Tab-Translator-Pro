@@ -100,7 +100,9 @@ Pipeline (`buildChart`):
 
 1. Extract integer text tokens with `(x, top-down y)`.
    (PDF.js gives y-up; we convert via `viewport.height − transform[5]`.)
-1. Cluster y → string lines; group lines → staff systems (a run of ≥4 lines).
+1. Cluster y → string lines; group lines → staff systems (a run of **≥3 lines** —
+   sparse melodic systems may only touch 3 strings; header/measure rows are single
+   lines in their own group, so they don't slip through).
 1. Per system, assign each note to a string (Invariant 2).
 1. Cluster x → chord columns; map each column to a measure via the nearest
    measure-number row above. Spike-removal drops stray tokens (e.g. a tempo
@@ -169,11 +171,24 @@ Key parser facts (don't regress):
 - Output is the **same score shape** as `buildScore`
   (`{ timeSig, bars:[{ number, timeSig, events:[{symbol,beat,durBeats,midis,frets}] }] }`),
   but with **per-bar `timeSig`** so a mid-tune meter change renders correctly.
+- **Multi-part**: `parseMusicXML(xml, useSharp, partIndex)` reads instrument names
+  from `<part-list>` and charts the chosen `<part>` (default 0), returning
+  `parts:[{index,id,name}]` + `partIndex`. The XML panel shows a **part picker**
+  when `parts.length > 1`; tempo is global (whole-doc), so it's part-independent.
 
 ## Shared ChartPanel — editing, transpose, export
 
 Both chart modes feed one `ChartPanel`. Anything that reads/writes a score does so
 through the shared shape, so these work identically for Path A and Path C:
+- **Simplify** (`simplifyScore(score, useSharp)`): opt-in "1 chord/bar" mode for
+  dense transcriptions (melody + harmony), where the per-onset chart is noise. It
+  weights each pitch class by the total duration it sounds, keeps the strong ones
+  (drops passing tones), takes the bass from the **structural** tones (so a brief
+  low melody note can't fake a slash), and runs that chroma through the engine →
+  one chord per bar. Default OFF (Blue Sky / clean charts stay per-onset). Honest
+  limits: rootless/altered jazz voicings (e.g. Steely Dan) and `7♭9`/`7♯9` chords
+  the `QUALITIES` table doesn't model won't always match a lead sheet — Edit +
+  Transpose cover the gaps, and MusicXML import is the high-fidelity route.
 - **Editable chords**: tap-to-relabel in *Edit* mode writes an `overrides` map
   (`"<bar>.<beat>" → symbol`), lifted to the parent so it survives view/transpose
   switches and flows into export. Blank reverts to the detected symbol; edits are
@@ -182,10 +197,24 @@ through the shared shape, so these work identically for Path A and Path C:
   by `n` and lets the engine **re-name** the chord (spelling follows the ♯/♭
   toggle for free). Frets are dropped (position-specific); readouts fall back to
   the transposed pitches. `n === 0` is a passthrough.
-- **Export**: `scoreToChordPro` (grid) and `scoreToABC`. ABC emits the actual
-  chord tones as notes **plus** the symbol as a guitar-chord annotation, so the
-  output is real, *playable* music (validated by playing it). Both honour
-  `overrides` and the current transpose. ABC handles mid-tune meter via `[M:n/m]`.
+- **Export**: `scoreToChordPro` (grid), `scoreToABC`, and `scoreToMusicXML`. ABC
+  emits the actual chord tones as notes **plus** the symbol as a guitar-chord
+  annotation, so the output is real, *playable* music (validated by playing it);
+  it carries `Q:` tempo, the detected `K:` key, and mid-tune meter via `[M:n/m]`.
+  **MusicXML export** writes both a `<harmony>` (chord symbol → MuseScore/Guitar
+  Pro show it above the staff) AND the voiced `<note>` pitches, so it re-imports
+  as real music *and* **round-trips through `parseMusicXML`** (the notes
+  reconstruct the same symbols — that round-trip is a test, incl. the full 165-bar
+  Blue Sky score). All exporters honour `overrides` and the current transpose;
+  ChordPro/ABC/MusicXML all carry the detected key.
+- **Key + roman numerals** (`analyzeKey`, `romanFor`, `keyName`): scores all 24
+  keys — each chord adds its duration when diatonic (×0.3 if only its root fits =
+  a borrowed quality), plus a small cadential bonus for the last/first chord being
+  the tonic — and picks the best. The `I·V·vi` toggle captions each chord with its
+  function relative to that key (non-diatonic → absolute symbol); the detected key
+  shows in the meta row and flows into export (`K:` line for ABC, `{key:}` for
+  ChordPro). Chord class is parsed from the symbol suffix (`_classOf`); minor keys
+  accept a major/dominant V (harmonic) and a leading-tone vii°.
 - **Playback** (▶ Play, ♩=BPM): in-browser **Web Audio** synth, no deps. Pure
   `scoreEventTimes(score, bpm)` flattens the score into timed chord events in
   **seconds** (a "beat" = one `1/beatType` note → `4/beatType` quarters, same
@@ -277,6 +306,17 @@ accordingly.
   and asserts `scoreEventTimes` lays the 4 events at 0/1/2/4 s with durations
   1/1/2/1.5 s (the 3/4 bar 3 starting at 4.0 s), total 5.5 s, MIDI carried
   through. The Web Audio synth (`playScore`) is the browser-only glue on top.
+- **Key / roman numerals**: `npm test` asserts `analyzeKey` → **C major** for the
+  fixture (`I V vi IV`) and **E major** for Blue Sky (E/A/B = I/IV/V, C#m = vi,
+  F#m7 = ii7), and that the key reaches the exporters (`K:C`, `{key: C}`).
+- **MusicXML export round-trip**: `npm test` exports the fixture (with `<harmony>`
+  + `<sound tempo>`), re-parses it, and asserts identical chords, the 3/4 change
+  and tempo survive; an `A7` override surfaces as a `<kind>dominant</kind>`
+  harmony; and the **full Blue Sky score** round-trips to 165 bars with the verse
+  intact.
+- **Multi-part picker**: `npm test` parses `tests/fixtures/sample-multipart.musicxml`
+  and asserts two parts (`Guitar`, `Rhythm`), `partIndex 0 → C` and `1 → G`, and
+  that the single-part fixture reports exactly one part.
 
 ## Session conventions
 

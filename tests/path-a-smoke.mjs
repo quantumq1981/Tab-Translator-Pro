@@ -35,7 +35,7 @@ const end = src.indexOf("async function extractTokens"); // browser-only; reprod
 if (start < 0 || end < 0) throw new Error("source markers not found in TabDecoderPro.tsx");
 const engineSrc =
   src.slice(start, end) +
-  "\nexport { buildChart, buildScore, symbolForFrets, parseMusicXML, scoreToABC, scoreToChordPro, transposeScore, scoreEventTimes };\n";
+  "\nexport { buildChart, buildScore, simplifyScore, symbolForFrets, parseMusicXML, scoreToABC, scoreToChordPro, scoreToMusicXML, transposeScore, scoreEventTimes, analyzeKey, romanFor, keyName };\n";
 
 /* parseMusicXML uses the browser's global DOMParser; the app loads it natively.
  * Headlessly we install @xmldom/xmldom (a TEST-only dep) as that global so the
@@ -122,6 +122,13 @@ if (b126) {
     `bar 126 events expected [B, C#m, A], got [${syms.join(", ")}]`);
 }
 
+/* ---- simplify: aggregate each bar to one chord (dense-transcription mode) -- */
+const simp = eng.simplifyScore(score, true);
+expect(simp.bars.length === 165 && simp.bars.every((b) => b.events.length <= 1), "simplify → at most one chord per bar");
+const sv = simp.bars.slice(0, 8).map((b) => (b.events[0] ? b.events[0].symbol : "-")).join(" ");
+expect(sv === "E A A E E A A E", `simplified verse expected "E A A E E A A E", got "${sv}"`);
+expect(simp.bars[0].events[0].beat === 0 && simp.bars[0].events[0].durBeats === 4, "simplified bar = one downbeat chord filling the bar");
+
 /* ---- Path C: MusicXML import (explicit meter + tuning + rhythm) ----------- */
 const xml = fs.readFileSync(path.join(here, "fixtures", "sample.musicxml"), "utf8");
 const mx = eng.parseMusicXML(xml, true);
@@ -158,6 +165,17 @@ expect(/"A7"/.test(abc), "ABC should carry the A7 override as a chord annotation
 // C3-E3-G3 → ABC [C,E,G,] (C4/middle-C is "C", so C3 is "C,"), half note = 2 L-units
 expect(/"C"\[C,E,G,\]2/.test(abc), `ABC should voice C3 major as [C,E,G,] half-note, got:\n${abc}`);
 
+/* ---- multi-part: the part picker selects which instrument to chart -------- */
+const mpXml = fs.readFileSync(path.join(here, "fixtures", "sample-multipart.musicxml"), "utf8");
+const p0 = eng.parseMusicXML(mpXml, true, 0);
+expect(p0.parts.length === 2 && p0.parts.map((p) => p.name).join(",") === "Guitar,Rhythm",
+  `expected 2 parts [Guitar,Rhythm], got [${p0.parts.map((p) => p.name)}]`);
+expect(p0.partIndex === 0 && p0.bars[0].events[0].symbol === "C", `part 0 (Guitar) should chart C, got ${p0.bars[0].events[0].symbol}`);
+const p1 = eng.parseMusicXML(mpXml, true, 1);
+expect(p1.partIndex === 1 && p1.bars[0].events[0].symbol === "G", `part 1 (Rhythm) should chart G, got ${p1.bars[0].events[0].symbol}`);
+// single-part files still report one part (no picker shown)
+expect(mx.parts.length === 1, `single-part file should report 1 part, got ${mx.parts.length}`);
+
 /* ---- transpose: re-recognise from shifted MIDI --------------------------- */
 const up2 = eng.transposeScore(mx, 2, true); // C G | Am | F  ->  D A | Bm | G
 expect(up2.bars[0].events.map((e) => e.symbol).join(" ") === "D A", `+2 st bar1 expected "D A", got "${up2.bars[0].events.map((e) => e.symbol).join(" ")}"`);
@@ -178,6 +196,46 @@ expect(Math.abs(ev[3].start - 4) < 1e-9 && Math.abs(ev[3].dur - 1.5) < 1e-9, `F:
 expect(Math.abs(sched.duration - 5.5) < 1e-9, `total expected 5.5s (4+4+3 quarters @0.5), got ${sched.duration}`);
 expect(JSON.stringify(ev[0].midis) === JSON.stringify([48, 52, 55]), `C event should carry MIDI [48,52,55], got [${ev[0].midis}]`);
 
+/* ---- MusicXML export round-trip (export → re-parse → identical) ---------- */
+const xmlOut = eng.scoreToMusicXML(mx, { tempo: 120, useSharp: true });
+expect(/<score-partwise/.test(xmlOut) && /<harmony>/.test(xmlOut), "MusicXML export should be score-partwise with <harmony> chord symbols");
+expect(/<sound tempo="120"\/>/.test(xmlOut), "MusicXML export should carry the tempo");
+const rt = eng.parseMusicXML(xmlOut, true);
+expect(rt.bars.length === mx.bars.length, `round-trip bar count ${rt.bars.length} != ${mx.bars.length}`);
+const rtSyms = rt.bars.map((b) => b.events.map((e) => e.symbol).join(" "));
+expect(JSON.stringify(rtSyms) === JSON.stringify(mxSyms), `round-trip chords drifted: ${rtSyms.join(" | ")} vs ${mxSyms.join(" | ")}`);
+expect(JSON.stringify(rt.bars[2].timeSig) === JSON.stringify([3, 4]), `round-trip should preserve the 3/4 change, got ${rt.bars[2].timeSig.join("/")}`);
+expect(rt.tempo === 120, `round-trip tempo expected 120, got ${rt.tempo}`);
+// an edit override flows into the <harmony> symbol (the notes stay the original
+// voicing, so a notes-based re-parse still reads Am — that's expected)
+const xmlEdit = eng.scoreToMusicXML(mx, { overrides: { "2.0": "A7" } });
+expect(/<kind>dominant<\/kind>/.test(xmlEdit), "override A7 should appear as a dominant <harmony> in MusicXML");
+expect(!/<kind>dominant<\/kind>/.test(xmlOut), "baseline export (C G | Am | F) has no dominant chord");
+// scale check: round-trip the full Blue Sky score through MusicXML
+const bsRt = eng.parseMusicXML(eng.scoreToMusicXML(score, { useSharp: true }), true);
+expect(bsRt.bars.length === 165, `Blue Sky MusicXML round-trip expected 165 bars, got ${bsRt.bars.length}`);
+const bsVerse = bsRt.bars.slice(0, 8).map((b) => b.events.map((e) => e.symbol).join(" ")).join(" ");
+expect(bsVerse === "E A A E E A A E", `Blue Sky round-trip verse drifted: "${bsVerse}"`);
+
+/* ---- key + roman-numeral analysis ---------------------------------------- */
+const mxKey = eng.analyzeKey(mx); // C G | Am | F  ->  C major
+expect(mxKey && eng.keyName(mxKey, true) === "C", `expected key of C major, got ${mxKey && eng.keyName(mxKey, true)}`);
+const mxRomans = mx.bars.flatMap((b) => b.events.map((e) => eng.romanFor(e.symbol, mxKey))).join(" ");
+expect(mxRomans === "I V vi IV", `expected "I V vi IV", got "${mxRomans}"`);
+
+const bsKey = eng.analyzeKey(score); // Blue Sky verse E A … -> E major
+expect(bsKey && eng.keyName(bsKey, true) === "E", `expected Blue Sky key of E major, got ${bsKey && eng.keyName(bsKey, true)}`);
+expect(eng.romanFor("E", bsKey) === "I" && eng.romanFor("A", bsKey) === "IV" && eng.romanFor("B", bsKey) === "V",
+  `E/A/B should be I/IV/V, got ${eng.romanFor("E", bsKey)}/${eng.romanFor("A", bsKey)}/${eng.romanFor("B", bsKey)}`);
+expect(eng.romanFor("C#m", bsKey) === "vi", `C#m should be vi in E, got ${eng.romanFor("C#m", bsKey)}`);
+expect(eng.romanFor("F#m7", bsKey) === "ii7", `F#m7 should be ii7 in E, got ${eng.romanFor("F#m7", bsKey)}`);
+
+// detected key flows into exports (K: line / {key:} directive)
+const abcK = eng.scoreToABC(mx, { key: mxKey, useSharp: true });
+expect(/^K:C$/m.test(abcK), `ABC should carry K:C, got header:\n${abcK.split("\n").slice(0, 5).join("\n")}`);
+const cpK = eng.scoreToChordPro(mx, { key: mxKey, useSharp: true });
+expect(/\{key: C\}/.test(cpK), "ChordPro should carry {key: C}");
+
 /* ---- report -------------------------------------------------------------- */
 console.log(`PDF.js ${pdfjsLib.version} · ${pages} pages · ${tokens.length} tokens`);
 console.log(`systemsFound=${chart.systemsFound} columnsFound=${chart.columnsFound} bars=${bars.length}`);
@@ -187,6 +245,7 @@ const sampleMulti = (typeof score !== "undefined" && score.bars.find((b) => b.ev
 if (sampleMulti) console.log(`sample multi-chord bar ${sampleMulti.number}: ` +
   sampleMulti.events.map((e) => `${e.symbol}@b${e.beat + 1}(${e.durBeats})`).join(" "));
 console.log(`MusicXML: ${mx.bars.length} bars, ${mx.tuning} tuning, bar3 ${mx.bars[2].timeSig.join("/")} · ${mxSyms.join(" | ")}`);
+console.log(`Key: fixture ${eng.keyName(mxKey, true)} (${mxRomans}) · Blue Sky ${eng.keyName(bsKey, true)}`);
 console.log(`ABC: ${abc.trim().split("\n").pop()}`);
 
 if (fails.length) {
