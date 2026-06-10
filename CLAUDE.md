@@ -115,6 +115,38 @@ tab carries no tuning we read yet — adding tuning detection is a clean future
 task). One chord per bar unless the harmony changes mid-bar, in which case the
 bar shows the sequence (e.g. `E A`).
 
+### Known limit — string anchoring fails when a system never plays the high e
+
+`topY` (the high-e line) is anchored to the **highest digit row** in a system.
+That is correct *only when the system actually plays the high-e string*. When a
+sparse system leaves the top string(s) silent, `topY` latches onto a lower
+string and **every note shifts up by one (or more) strings**, so the chords for
+that system come out wrong.
+
+This was investigated exhaustively against the **Kid Charlemagne** Rhythm-Guitar
+PDF (2026-06-10 session). Ground truth, read off a high-zoom render of the staff:
+bars 26–32 (a system that doesn't play the high e) should be **C7** (`{B♭,E,C}`,
+the dominant) but the parser emits **Fm7** — off by exactly one string. It is a
+real bug, but it is **not reliably auto-fixable from the PDF layers**, and here is
+the concrete proof so nobody re-derives it: the first system (bars 1–7, *correctly*
+anchored, shift 0) and the bars 26–32 system (shift 1) have **near-identical
+geometric signatures** — notation→digit offsets of 52.6pt vs 53.3pt. Any rule that
+shifts the second would also shift the first, turning *correct* chords wrong. The
+system-pitch grid has ±5pt residuals (enough to spuriously flip a string), the
+notation→tab offset is not constant across systems, and the actual TAB staff
+lines (filled rects via `getOperatorList`) extract inconsistently (drawn per
+measure, top lines often dropped). The only signal that disambiguates sys0 from
+sys5 is **visually counting the rendered staff lines = OMR = Path B (out of
+scope)**. Do not bolt an anchor-guesser onto this parser — it risks regressing the
+validated Blue Sky output for no reliable gain. The honest fixes are **MusicXML
+import** (exact `<string>`/`<staff-tuning>`, no geometry) or in-app **Edit**.
+
+Related: the captured chords for a sparse rhythm-guitar part are inherently
+*partial* (e.g. a 3-string strum `5,5,5` on e/B/G reads as `Am/C`) — that is
+faithful to what's notated, not a bug. And measures where the part rests carry no
+fret tokens, so they are correctly omitted from the chart (the chart shows only
+bars where this one instrument plays — it is **not** a full-song chord chart).
+
 ## Score model — chords placed on beats (`buildScore`)
 
 `buildChart` is geometry (where chords are on the page). `buildScore(chart,
@@ -175,6 +207,116 @@ Key parser facts (don't regress):
   from `<part-list>` and charts the chosen `<part>` (default 0), returning
   `parts:[{index,id,name}]` + `partIndex`. The XML panel shows a **part picker**
   when `parts.length > 1`; tempo is global (whole-doc), so it's part-independent.
+
+## Path D — Guitar Pro 7/8 import (`parseGP` / `parseGPIF` / `gpUnzip`)
+
+**Why native, and only `.gp`.** A `.gp` (Guitar Pro 7/8) file is a plain **ZIP**
+whose `Content/score.gpif` is **XML** — so it parses with **zero new deps**: the
+ZIP is inflated by the platform-native `DecompressionStream('deflate-raw')`
+(present in the browser *and* Node ≥18, so the headless test runs the exact same
+`gpUnzip`), and the XML is read with the same `DOMParser` Path C uses. Older
+formats are deliberately **not** parsed here — GP3/4/5 are monolithic binary
+(`…FICHIER GUITAR PRO v3/4/5`), GPX (GP6) is a `BCFZ` binary filesystem, and
+Power Tab `.ptb` is its own binary — all would need a binary reader or a
+dependency (alphaTab). The honest route for those stays **open in TuxGuitar /
+MuseScore → export MusicXML** (Path C). The MusicXML/GP upload panel accepts
+`.gp` alongside `.xml`/`.musicxml`; `onXml` branches on the extension.
+
+**gpif is a flat id-graph, not nested like MusicXML.** The traversal is
+`MasterBar.Bars[trackIndex]` → `Bar.Voices` → `Voice.Beats` → `Beat`
+(`{ Rhythm ref, Notes ids }`) → `Note`. `parseGPIF` builds id→element maps
+(`_gpById`) for Bar/Voice/Beat/Note/Rhythm and resolves the refs. Key facts:
+- A `<Note>` carries a **direct `<Property name="Midi"><Number>`** — so MIDI goes
+  straight into `symbolForMidis`, no pitch math (a `ConcertPitch` fallback
+  exists). `<String>`/`<Fret>` are also read for the readout: **gpif `String` is
+  0-indexed from the low E**, so `eng = String` directly and the **tuning
+  `<Pitches>` list is low→high** (no reverse) — verified: String 1 + fret 7 =
+  A2+7 = MIDI 52, and the test asserts `fret + standardOpen === midi` for every
+  fretted note in Blue Sky.
+- Duration comes from the referenced `<Rhythm>` (`NoteValue` Whole…128th, ×1.5/
+  ×1.75 per `AugmentationDot count`, × `den/num` per `PrimaryTuplet`), accumulated
+  per voice from 0; **all voices in a bar are merged** onto shared onsets (like
+  the MusicXML backup/forward handling) so chord voicings across voices combine.
+- Per-bar `<Time>` gives **exact meter** (Blue Sky opens **2/4**); tempo is the
+  first `<Automation><Type>Tempo</Type>` `Value`; tracks → the **part picker**.
+- Output is the **same score shape** as `parseMusicXML` (`source:"gp"`), so the
+  chart, exporters, transpose, key analysis, playback and the ♯/♭ re-spell /
+  part-switch (`_reparseScore` branches on `score.source`) are all shared.
+
+**Validation** (`npm test`, fixture `blue-sky.gp`): `parseGP` reconstructs the
+**same Blue Sky ground truth as the PDF path** straight from the `.gp` — 3 tracks,
+165 bars, Standard tuning, tempo 100, bar-1 meter 2/4, the rhythm-guitar track
+(#1) verse `E A A E E A A E`, the bar-26 bridge turn `B C#m`, and every fret
+reconstructing its MIDI through standard tuning. This is the cleanest cross-check
+in the repo: two independent importers (geometry vs. exact file) agree.
+
+## Path E — Guitar Pro 3/4/5 legacy BINARY import (`parseGP345`)
+
+Unlike GP7/8 (Path D = ZIP of XML), **GP3/4/5 are monolithic little-endian
+binary**. `parseGP345` is a faithful, **zero-dependency** port of the documented
+read order (cross-checked against **PyGuitarPro**, a dev-time oracle only — never
+shipped). The hard rule: **every block must be fully consumed to stay aligned**,
+even effects/chord-diagrams/mix-tables we don't keep — a single wrong skip
+cascades. We keep only each beat's duration and its notes (string+fret → MIDI via
+the track tuning), then emit the SAME `source:"gp"` score shape, so chart/export/
+transpose/playback/part-switch are shared (the `_reparseScore` helper re-runs
+`parseGP345` from a stored `_gpbuf` for the ♯/♭ + part re-parse).
+
+Format facts that bite (all verified against the corpus):
+- Read primitives mirror PyGuitarPro's `iobase`: `byteSizeString(n)` = 1 size byte
+  then **n** bytes (slice to size); `intByteSizeString` = int count then
+  `byteSizeString(count-1)`; version = `byteSizeString(30)`. Strings decode as
+  latin1 (names don't affect recognition).
+- Song header order: 8 info strings + notice lines, triplet-feel bool, **(GP4+
+  only) lyrics** (trackChoice + 5×(int + intString)), tempo, key, **(GP4+) octave
+  byte**, 64 MIDI channels (`int instrument + 6 bytes + 2 blank` = 12 each),
+  measureCount, trackCount.
+- Measure header flags: `0x01/0x02` num/den (else inherit previous — this is how
+  meter carries), `0x08` repeat-close byte, `0x10` alt-ending byte, `0x20` marker
+  (intByteString + 4-byte colour), `0x40` key-sig 2 bytes.
+- Track: flags, `byteSizeString(40)` name, stringCount int, **7** tuning ints
+  (first stringCount used, stored **high→low** so `tuning[string-1]` is the open
+  pitch, `string 1 = high e`), port, 2 channel ints, fretCount, capo, 4-byte colour.
+- Measures are **measure-major then track**; GP3/4 have **one voice** per measure
+  (GP5 has two). Beat: flags, optional status byte (`0x40`; 0=empty/2=rest),
+  duration (`1<<(i8+2)` → value, `0x01` dotted, `0x20` tuplet int), then chord/
+  text/beatEffects/mixTable blocks, then a string-mask byte and a note per set bit
+  (`1<<(7-stringNumber)`).
+- Note: flags, `0x20` type byte **then later** `0x20` fret byte (both under the
+  same flag, read in order), `0x01` 2 bytes, `0x10` dynamic, `0x80` 2 fingering
+  bytes, `0x08` note-effects. **Tie** (type 2) → reuse that string's previous fret
+  (`state.lastFret`); **dead** (type 3) → no pitch (dropped, like a muted strum).
+- Version deltas: GP4 uses 2 effect-flag bytes (vs GP3's 1), a different
+  new-chord layout (`u8` roots, 7 frets, 5-barre arrays, 7 fingerings + show),
+  a mix-table all-tracks flags byte, and slide/harmonic/trill/tremolo-pick
+  note-effects. `_gpReadBeatEffects`/`_gpReadNoteEffects`/`_gpReadChord`/
+  `_gpReadMixTableChange` branch on `v`.
+
+**GP5** has its own reader (`parseGP5`) because the container differs materially:
+an RSE master effect, page-setup block, 19 jump directions, much wider track
+records (RSE instrument, EQ, clef transpose) and **two voices per measure** with a
+trailing line-break byte. `gt500` (= v5.10) gates the extra RSE/EQ/hide-tempo/
+effect-name fields. Gotchas that cost real debugging: a **blank byte after *all*
+tracks** (`skip(1)` v5.10 / `skip(2)` v5.00), and the **final measure's line-break
+byte is often absent** — PyGuitarPro reads it with `default=0`, so we read it only
+when `pos < length`. GP5 beats reuse the GP4 chord/beat-effect helpers but have
+their own note reader (a duration-percent `f64` under `0x01`, an always-present
+second flags byte) and a trailing `int16` beat-display flags word.
+
+The dispatcher `parseGuitarProOrXML` routes by file head (`PK`→GP7/8,
+`FICHIER GUITAR PRO`→GP3/4/5, else MusicXML). `.gpx` (GP6 `BCFZ` binary FS) and
+Power Tab still route through MuseScore/TuxGuitar → MusicXML.
+
+**Validation** (`npm test`): `parseGP345` reproduces the **Blue Sky gp3** verse
+`E A A E E A A E`, decodes **Kid Charlemagne**'s Rhythm-Guitar bars 27–28 to the
+correct **`C7`** (the very bars the PDF path mis-anchored to `Fm7` — three
+importers now agree on the geometry-defeating case), reads **Peg.gp4**'s jazz
+changes `Gmaj7 | F#7 | Fmaj7 | E7 | D#maj7`, and decodes **GP5** both ways:
+**Anthropology** (v5.00) `Chords` track → `Gm7/A# G7 | Cm7 F7 | …` rhythm changes
+and **Au Privave** (v5.10). A dev-time PyGuitarPro cross-check matched **2445/2446
+measures** across the GP3/4 files and **4806/4806** across six GP5 files (v5.00 and
+v5.10, single- and multi-track) — the lone GP3/4 diff is one passing tone in a
+bebop bar, not a byte-alignment error (alignment survives past it).
 
 ## Shared ChartPanel — editing, transpose, export
 

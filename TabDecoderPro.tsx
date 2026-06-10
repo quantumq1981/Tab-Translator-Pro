@@ -11,9 +11,11 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
  *     chord column through the SAME engine, and renders a lead-sheet / grid chart
  *     (consecutive identical symbols inside a bar are collapsed). 4/4 + standard
  *     tuning are ASSUMED — the PDF text layer carries no meter/tuning we can read.
- *   • MUSICXML (Path C) — upload a MusicXML score; meter, tuning and rhythm are
- *     read *exactly* from the file (no geometry guessing), only chord *symbols*
- *     are inferred via the same engine. Guitar Pro / MuseScore export MusicXML.
+ *   • MUSICXML / GP (Path C/D) — upload a MusicXML score or a Guitar Pro 7/8
+ *     `.gp` file; meter, tuning and rhythm are read *exactly* from the file (no
+ *     geometry guessing), only chord *symbols* are inferred via the same engine.
+ *     `.gp` is a ZIP+XML, unzipped in-browser with zero new deps; older binary
+ *     GP3/4/5/GPX and Power Tab route through MuseScore/TuxGuitar → MusicXML.
  *
  *  Both chart modes share one ChartPanel: lead-sheet / grid views, inline chord
  *  re-labelling (overrides), whole-chart transpose, and ChordPro / ABC export
@@ -469,6 +471,517 @@ function parseMusicXML(xml, useSharp = true, partIndex = 0) {
   return { source: "musicxml", timeSig: bars.length ? bars[0].timeSig : [beats, beatType], tuning: _tuningName(tuning), tempo, bars, parts, partIndex: idx };
 }
 
+/* ===========================================================================
+ *  PATH D — Guitar Pro (GP7 / GP8 `.gp`) import
+ *  --------------------------------------------------------------------------
+ *  A `.gp` file is a plain ZIP whose `Content/score.gpif` is an XML document —
+ *  so this is parseable with ZERO new dependencies: the ZIP is inflated with
+ *  the platform's native `DecompressionStream('deflate-raw')` (present in the
+ *  browser and Node ≥18) and the XML read with the same `DOMParser` Path C uses.
+ *
+ *  gpif is a flat list of elements joined by id references, not nested like
+ *  MusicXML:  MasterBar.Bars[track] → Bar.Voices → Voice.Beats → Beat
+ *  → { Rhythm ref, Notes ids } ; Note carries a direct
+ *  `<Property name="Midi"><Number>` (so no pitch math) plus String/Fret. We
+ *  resolve the id graph, accumulate each voice's onsets from a Rhythm-derived
+ *  duration, run each onset's MIDI through the same engine, and emit the SAME
+ *  score shape as buildScore / parseMusicXML — so the chart, exporters,
+ *  transpose, key analysis and playback are all shared for free.
+ *
+ *  Older formats (GP3/4/5 binary, GPX binary filesystem, Power Tab) are NOT
+ *  parsed here — they need binary readers / a dependency; the honest route for
+ *  those stays "open in TuxGuitar/MuseScore → export MusicXML" (Path C).
+ * ==========================================================================*/
+const _GP_NV = { Whole: 4, Half: 2, Quarter: 1, Eighth: 0.5, "16th": 0.25, "32nd": 0.125, "64th": 0.0625, "128th": 0.03125 };
+const _gpProp = (el, name) => _xEls(el, "Property").find((p) => p.getAttribute("name") === name) || null;
+const _gpById = (doc, tag) => { const m = new Map(); _xEls(doc, tag).forEach((e) => { const id = e.getAttribute("id"); if (id != null) m.set(id, e); }); return m; };
+const _gpIds = (txt) => (txt || "").trim().split(/\s+/).filter((s) => s.length);
+function _gpRhythmQuarters(r) {
+  if (!r) return 1;
+  let q = _GP_NV[_xChildText(r, "NoteValue")]; if (q == null) q = 1;
+  const dot = _xFirst(r, "AugmentationDot"); if (dot) { const c = parseInt(dot.getAttribute("count") || "1", 10); q *= c >= 2 ? 1.75 : 1.5; }
+  const tup = _xFirst(r, "PrimaryTuplet"); if (tup) { const n = parseInt(tup.getAttribute("num") || "0", 10), d = parseInt(tup.getAttribute("den") || "0", 10); if (n > 0 && d > 0) q *= d / n; }
+  return q;
+}
+function _gpNoteMidi(note) {
+  const me = _gpProp(note, "Midi"); const n = me ? parseInt(_xChildText(me, "Number"), 10) : NaN;
+  if (!isNaN(n)) return n;
+  const pe = _gpProp(note, "ConcertPitch") || _gpProp(note, "TransposedPitch");
+  const p = pe && _xFirst(pe, "Pitch");
+  if (p) { const step = _xChildText(p, "Step"); const acc = _xChildText(p, "Accidental"); const oct = parseInt(_xChildText(p, "Octave") || "0", 10); if (step in STEP_SEMI) return oct * 12 + STEP_SEMI[step] + (acc === "#" ? 1 : acc === "b" ? -1 : 0); }
+  return null;
+}
+function parseGPIF(xml, useSharp = true, partIndex = 0) {
+  const doc = new DOMParser().parseFromString(xml, "text/xml");
+  if (_xEls(doc, "parsererror").length) throw new Error("Not valid gpif XML.");
+  const tracks = _xEls(doc, "Track").filter((t) => t.getAttribute("id") != null);
+  if (!tracks.length) throw new Error("No <Track> found — is this a GP7/8 .gp file?");
+  const parts = tracks.map((t, i) => ({ index: i, id: t.getAttribute("id"), name: (_xChildText(t, "Name") || `Track ${i + 1}`).trim() || `Track ${i + 1}` }));
+  const idx = Math.max(0, Math.min(tracks.length - 1, partIndex | 0));
+
+  const barMap = _gpById(doc, "Bar"), voiceMap = _gpById(doc, "Voice"), beatMap = _gpById(doc, "Beat"), noteMap = _gpById(doc, "Note"), rhythmMap = _gpById(doc, "Rhythm");
+  // tuning of the chosen track (display only — MIDI is read directly per note)
+  let tuning = null;
+  const tunProp = _gpProp(tracks[idx], "Tuning") || (_xFirst(tracks[idx], "Staff") && _gpProp(_xFirst(tracks[idx], "Staff"), "Tuning"));
+  if (tunProp) { const pit = _gpIds(_xChildText(tunProp, "Pitches")).map(Number); if (pit.length === 6 && pit.every((v) => !isNaN(v))) tuning = pit; } // gpif lists low→high (String 0 = low E)
+
+  const bars = [];
+  let lastSig = [4, 4];
+  _xEls(doc, "MasterBar").forEach((mb, mi) => {
+    const tt = _xChildText(mb, "Time");
+    if (tt && /^\d+\/\d+$/.test(tt)) lastSig = tt.split("/").map((n) => parseInt(n, 10));
+    const [bts, btype] = lastSig;
+    const barIds = _gpIds(_xChildText(mb, "Bars"));
+    const bar = barMap.get(barIds[idx]);
+    const onsets = new Map(); // onsetQuarters -> { midis:[], frets:{} }
+    if (bar) {
+      _gpIds(_xChildText(bar, "Voices")).filter((v) => v !== "-1").forEach((vId) => {
+        const voice = voiceMap.get(vId); if (!voice) return;
+        let cursor = 0;
+        _gpIds(_xChildText(voice, "Beats")).forEach((beatId) => {
+          const beat = beatMap.get(beatId); if (!beat) return;
+          const rRef = _xFirst(beat, "Rhythm"); const q = _gpRhythmQuarters(rRef && rhythmMap.get(rRef.getAttribute("ref")));
+          const noteIds = _gpIds(_xText(_xFirst(beat, "Notes")));
+          if (noteIds.length) {
+            if (!onsets.has(cursor)) onsets.set(cursor, { midis: [], frets: {} });
+            const o = onsets.get(cursor);
+            noteIds.forEach((nId) => {
+              const note = noteMap.get(nId); if (!note) return;
+              const midi = _gpNoteMidi(note); if (midi == null) return;
+              o.midis.push(midi);
+              const sEl = _gpProp(note, "String"), fEl = _gpProp(note, "Fret");
+              if (sEl && fEl) { const s = parseInt(_xChildText(sEl, "String"), 10), f = parseInt(_xChildText(fEl, "Fret"), 10); if (!isNaN(s) && !isNaN(f) && s >= 0 && s <= 5 && o.frets[s] === undefined) o.frets[s] = f; } // gpif String 0 = low E = engine index
+            });
+          }
+          cursor += q;
+        });
+      });
+    }
+    const qPerBeat = 4 / btype; // a "beat" = one 1/beatType note
+    const raw = [...onsets.entries()].filter(([, o]) => o.midis.length).sort((a, b) => a[0] - b[0])
+      .map(([onset, o]) => ({ symbol: symbolForMidis(o.midis, useSharp), midis: [...o.midis].sort((a, b) => a - b), frets: o.frets, onset }));
+    const events = [];
+    raw.forEach((e) => { const last = events[events.length - 1]; if (!last || last.symbol !== e.symbol) events.push(e); });
+    events.forEach((e) => { e.beat = Math.max(0, Math.min(bts - 1, Math.round(e.onset / qPerBeat))); });
+    for (let i = 1; i < events.length; i++) if (events[i].beat <= events[i - 1].beat) events[i].beat = Math.min(bts - 1, events[i - 1].beat + 1);
+    events.forEach((e, i) => { e.durBeats = (i + 1 < events.length ? events[i + 1].beat : bts) - e.beat; });
+    bars.push({ number: mi + 1, timeSig: [bts, btype], events: events.map(({ onset, ...e }) => e) });
+  });
+
+  // tempo: first <Automation><Type>Tempo</Type> … <Value>BPM ref</Value>
+  let tempo = null;
+  const tAuto = _xEls(doc, "Automation").find((a) => _xChildText(a, "Type") === "Tempo");
+  if (tAuto) { const v = parseFloat((_xChildText(tAuto, "Value") || "").split(/\s+/)[0]); if (!isNaN(v)) tempo = v; }
+  return { source: "gp", timeSig: bars.length ? bars[0].timeSig : lastSig, tuning: _tuningName(tuning), tempo, bars, parts, partIndex: idx };
+}
+
+/* Inflate a `.gp` (GP7/8) ZIP and return its Content/score.gpif XML text.
+ * Minimal central-directory ZIP reader + native deflate-raw — zero deps. */
+async function gpUnzip(buf) {
+  const u8 = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  let eo = -1;
+  for (let i = u8.length - 22; i >= 0 && i >= u8.length - 22 - 65536; i--) if (dv.getUint32(i, true) === 0x06054b50) { eo = i; break; }
+  if (eo < 0) throw new Error("Not a .gp file (no ZIP directory).");
+  const cdOff = dv.getUint32(eo + 16, true), cdCount = dv.getUint16(eo + 10, true);
+  let p = cdOff, target = null;
+  for (let n = 0; n < cdCount && dv.getUint32(p, true) === 0x02014b50; n++) {
+    const method = dv.getUint16(p + 10, true), compSize = dv.getUint32(p + 20, true);
+    const nameLen = dv.getUint16(p + 28, true), extraLen = dv.getUint16(p + 30, true), commentLen = dv.getUint16(p + 32, true);
+    const lhOff = dv.getUint32(p + 42, true);
+    const name = new TextDecoder().decode(u8.subarray(p + 46, p + 46 + nameLen));
+    if (name.endsWith("score.gpif")) { target = { method, compSize, lhOff }; break; }
+    p += 46 + nameLen + extraLen + commentLen;
+  }
+  if (!target) throw new Error("No score.gpif inside — is this a GP7/8 .gp file? (Older .gp3/4/5/.gpx are binary; export MusicXML instead.)");
+  const lh = target.lhOff;
+  if (dv.getUint32(lh, true) !== 0x04034b50) throw new Error("Corrupt .gp (bad local header).");
+  const dataStart = lh + 30 + dv.getUint16(lh + 26, true) + dv.getUint16(lh + 28, true);
+  const comp = u8.subarray(dataStart, dataStart + target.compSize);
+  if (target.method === 0) return new TextDecoder("utf-8").decode(comp);
+  const stream = new Response(comp).body.pipeThrough(new DecompressionStream("deflate-raw"));
+  return new TextDecoder("utf-8").decode(new Uint8Array(await new Response(stream).arrayBuffer()));
+}
+async function parseGP(buf, useSharp = true, partIndex = 0) { return parseGPIF(await gpUnzip(buf), useSharp, partIndex); }
+
+/* ===========================================================================
+ *  PATH E — Guitar Pro 3 / 4 / 5 (legacy BINARY formats)
+ *  --------------------------------------------------------------------------
+ *  Unlike GP7/8 (Path D, a ZIP of XML), GP3/4/5 are monolithic little-endian
+ *  binary. This is a faithful, zero-dependency port of the documented reading
+ *  order (verified against PyGuitarPro on the real corpus): every effect/chord/
+ *  mix-table block is fully consumed so the byte cursor stays aligned even
+ *  though we only keep each beat's duration and its notes (string+fret → MIDI
+ *  via the track tuning). Output is the SAME score shape as parseGPIF /
+ *  parseMusicXML (`source:"gp"`), so chart/export/transpose/playback are shared.
+ *
+ *  Versions diverge in: an extra octave byte + lyrics block (GP4+), 1- vs
+ *  2-byte effect flags, the new-chord layout, and the mix-table flags byte.
+ *  GP5's container is different enough (directory, RSE, 2 voices) to live in
+ *  its own reader, parseGP5.
+ * ==========================================================================*/
+function _gpReader(u8) {
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  const dec = new TextDecoder("latin1");
+  let pos = 0;
+  const R = {
+    get pos() { return pos; }, set pos(p) { pos = p; },
+    skip(n) { pos += n; },
+    u8() { return dv.getUint8(pos++); },
+    i8() { return dv.getInt8(pos++); },
+    bool() { return dv.getUint8(pos++) !== 0; },
+    i16() { const v = dv.getInt16(pos, true); pos += 2; return v; },
+    i32() { const v = dv.getInt32(pos, true); pos += 4; return v; },
+    byteString(count) { const size = dv.getUint8(pos++); const s = dec.decode(u8.subarray(pos, pos + Math.min(size, count))); pos += count; return s; },
+    intString() { const n = R.i32(); const s = dec.decode(u8.subarray(pos, pos + n)); pos += n; return s; },
+    intByteString() { const n = R.i32(); return R.byteString(n - 1); },
+    version() { return R.byteString(30); },
+  };
+  return R;
+}
+const _GP_TUPLET = { 3: [3, 2], 5: [5, 4], 6: [6, 4], 7: [7, 4], 9: [9, 8], 10: [10, 8], 11: [11, 8], 12: [12, 8], 13: [13, 8] };
+function _gpReadDuration(r, flags) {
+  let q = 4 / (1 << (r.i8() + 2));            // value: -2→whole(4q) … 0→quarter(1q) … 2→16th(.25q)
+  if (flags & 0x01) q *= 1.5;                 // dotted
+  if (flags & 0x20) { const t = _GP_TUPLET[r.i32()]; if (t) q *= t[1] / t[0]; } // tuplet
+  return q;
+}
+function _gpReadBend(r) { r.i8(); r.i32(); const n = r.i32(); for (let i = 0; i < n; i++) { r.i32(); r.i32(); r.bool(); } }
+function _gpReadGrace(r) { r.i8(); r.u8(); r.u8(); r.i8(); }            // fret, velocity, duration, transition
+function _gpReadNoteEffects(r, v) {
+  if (v >= 4) {
+    const f1 = r.u8(), f2 = r.u8();
+    if (f1 & 0x01) _gpReadBend(r);
+    if (f1 & 0x10) _gpReadGrace(r);
+    if (f2 & 0x04) r.i8();                                             // tremolo picking
+    if (f2 & 0x08) r.i8();                                             // slide
+    if (f2 & 0x10) r.i8();                                             // harmonic
+    if (f2 & 0x20) { r.i8(); r.i8(); }                                 // trill
+  } else {
+    const f1 = r.u8();
+    if (f1 & 0x01) _gpReadBend(r);
+    if (f1 & 0x10) _gpReadGrace(r);                                    // 0x04 slide: no bytes in GP3
+  }
+}
+function _gpReadBeatEffects(r, v) {
+  if (v >= 4) {
+    const f1 = r.u8(), f2 = r.u8();
+    if (f1 & 0x20) r.i8();                                             // slap/tap
+    if (f2 & 0x04) _gpReadBend(r);                                     // tremolo bar = bend
+    if (f1 & 0x40) { r.i8(); r.i8(); }                                 // stroke
+    if (f2 & 0x02) r.i8();                                             // pick stroke
+  } else {
+    const f1 = r.u8();
+    if (f1 & 0x20) { const slap = r.u8(); if (slap === 0) r.i32(); else r.i32(); } // tremolo bar / tap value
+    if (f1 & 0x40) { r.i8(); r.i8(); }                                 // stroke
+  }
+}
+function _gpReadMixTableChange(r, v) {
+  const vals = [r.i8(), r.i8(), r.i8(), r.i8(), r.i8(), r.i8(), r.i8()]; // instr,vol,bal,chorus,reverb,phaser,tremolo
+  const tempo = r.i32();
+  // durations follow for each changed param among volume..tremolo (vals[1..6]) then tempo
+  for (let i = 1; i <= 6; i++) if (vals[i] >= 0) r.i8();
+  if (tempo >= 0) r.i8();
+  if (v >= 4) r.i8();                                                  // GP4 all-tracks flags byte
+}
+function _gpReadChord(r, v, stringCount) {
+  const newFormat = r.bool();
+  if (!newFormat) {                                                   // GP3 old chord
+    r.intByteString();                                                // name
+    const firstFret = r.i32();
+    if (firstFret) for (let i = 0; i < 6; i++) r.i32();
+    return;
+  }
+  if (v >= 4) {                                                       // GP4 new chord
+    r.bool(); r.skip(3); r.u8(); r.u8(); r.u8(); r.i32(); r.i32(); r.bool();
+    r.byteString(22); r.u8(); r.u8(); r.u8(); r.i32();
+    for (let i = 0; i < 7; i++) r.i32();                              // frets
+    r.u8();                                                           // barre count
+    for (let i = 0; i < 15; i++) r.u8();                              // 5 frets + 5 starts + 5 ends
+    for (let i = 0; i < 7; i++) r.bool();                            // omissions
+    r.skip(1);
+    for (let i = 0; i < 7; i++) r.i8();                              // fingerings
+    r.bool();                                                         // show
+  } else {                                                            // GP3 new chord
+    r.bool(); r.skip(3); r.i32(); r.i32(); r.i32(); r.i32(); r.i32(); r.bool();
+    r.byteString(22); r.i32(); r.i32(); r.i32(); r.i32();
+    for (let i = 0; i < 6; i++) r.i32();                              // frets
+    r.i32();                                                          // barre count
+    for (let i = 0; i < 6; i++) r.i32();                              // 2 frets + 2 starts + 2 ends
+    for (let i = 0; i < 7; i++) r.bool();                            // omissions
+    r.skip(1);
+  }
+}
+function _gpReadNote(r, v, stringNumber, tuning, state) {
+  const flags = r.u8();
+  let type = 1;
+  if (flags & 0x20) type = r.u8();
+  if (flags & 0x01) { r.i8(); r.i8(); }                               // time-independent duration
+  if (flags & 0x10) r.i8();                                           // dynamic
+  let fret = null;
+  if (flags & 0x20) fret = r.i8();
+  if (flags & 0x80) { r.i8(); r.i8(); }                               // fingering
+  if (flags & 0x08) _gpReadNoteEffects(r, v);
+  if (type === 2) { fret = state.lastFret[stringNumber]; if (fret == null) return null; } // tie → sustain prior pitch
+  else if (type === 3) return null;                                   // dead/muted → no pitch
+  if (fret == null) return null;
+  fret = Math.min(Math.max(fret, 0), 99);
+  state.lastFret[stringNumber] = fret;
+  return { fret, midi: tuning[stringNumber - 1] + fret };
+}
+function _gpReadBeat(r, v, stringCount, tuning, state) {
+  const flags = r.u8();
+  let empty = false;
+  if (flags & 0x40) { const st = r.u8(); empty = st === 0; }          // 0=empty, 2=rest
+  const durQuarters = _gpReadDuration(r, flags);
+  if (flags & 0x02) _gpReadChord(r, v, stringCount);
+  if (flags & 0x04) r.intByteString();                               // text
+  if (flags & 0x08) _gpReadBeatEffects(r, v);
+  if (flags & 0x10) _gpReadMixTableChange(r, v);
+  const stringFlags = r.u8();
+  const midis = [], frets = {};
+  for (let s = 1; s <= stringCount; s++) {
+    if (stringFlags & (1 << (7 - s))) {
+      const note = _gpReadNote(r, v, s, tuning, state);
+      if (note) { midis.push(note.midi); frets[6 - s] = note.fret; }
+    }
+  }
+  return { durQuarters: empty ? 0 : durQuarters, midis, frets };
+}
+function parseGP345(u8, useSharp = true, partIndex = 0) {
+  const r = _gpReader(u8);
+  const version = r.version();
+  const v = /v5/.test(version) ? 5 : /v4/.test(version) ? 4 : /v3/.test(version) ? 3 : 0;
+  if (v === 5) return parseGP5(u8, version, useSharp, partIndex);
+  if (v !== 3 && v !== 4) throw new Error("Unrecognized Guitar Pro version: " + version);
+  // --- song header ---
+  for (let i = 0; i < 8; i++) r.intByteString();                     // title…instructions
+  const noticeLines = r.i32(); for (let i = 0; i < noticeLines; i++) r.intByteString();
+  r.bool();                                                          // triplet feel
+  if (v >= 4) { r.i32(); for (let i = 0; i < 5; i++) { r.i32(); r.intString(); } } // lyrics
+  const tempo = r.i32();
+  r.i32();                                                           // key
+  if (v >= 4) r.i8();                                                // octave
+  for (let i = 0; i < 64; i++) { r.i32(); r.skip(8); }               // 64 MIDI channels (instr + 6 bytes + 2 blank)
+  const measureCount = r.i32();
+  const trackCount = r.i32();
+  // --- measure headers (timeSig, inherited) ---
+  const headers = []; let num = 4, den = 4;
+  for (let m = 0; m < measureCount; m++) {
+    const flags = r.u8();
+    if (flags & 0x01) num = r.i8();
+    if (flags & 0x02) den = r.i8();
+    if (flags & 0x08) r.i8();                                        // repeat close
+    if (flags & 0x10) r.u8();                                        // alternate ending
+    if (flags & 0x20) { r.intByteString(); r.skip(4); }             // marker name + color
+    if (flags & 0x40) { r.i8(); r.i8(); }                           // key sig change
+    headers.push([num, den]);
+  }
+  // --- tracks ---
+  const tracks = [];
+  for (let t = 0; t < trackCount; t++) {
+    r.u8();                                                          // flags
+    const name = r.byteString(40);
+    const stringCount = r.i32();
+    const tuning = [];
+    for (let i = 0; i < 7; i++) { const tu = r.i32(); if (i < stringCount) tuning.push(tu); }
+    r.i32();                                                         // port
+    r.i32(); r.i32();                                                // channel + effect channel
+    r.i32();                                                         // fret count
+    r.i32();                                                         // capo
+    r.skip(4);                                                       // colour
+    tracks.push({ name, stringCount, tuning, measures: [] });
+  }
+  // --- measures (measure-major, then track) ---
+  const state = tracks.map(() => ({ lastFret: {} }));
+  for (let m = 0; m < measureCount; m++) {
+    for (let t = 0; t < trackCount; t++) {
+      const tr = tracks[t];
+      const beatCount = r.i32();
+      const beats = [];
+      for (let b = 0; b < beatCount; b++) beats.push(_gpReadBeat(r, v, tr.stringCount, tr.tuning, state[t]));
+      tr.measures.push({ timeSig: headers[m], voices: [beats] });
+    }
+  }
+  return _gpBuildScore(tracks, tempo, version, useSharp, partIndex);
+}
+function _gpBuildScore(tracks, tempo, version, useSharp, partIndex) {
+  const idx = Math.max(0, Math.min(tracks.length - 1, partIndex | 0));
+  const tr = tracks[idx];
+  const parts = tracks.map((t, i) => ({ index: i, id: String(i), name: (t.name || "").trim() || `Track ${i + 1}` }));
+  const bars = tr.measures.map((m, mi) => {
+    const [bts, btype] = m.timeSig;
+    const onsets = new Map();
+    m.voices.forEach((beats) => {                                     // GP5 has 2 voices; each restarts at beat 0
+      let cursor = 0;
+      beats.forEach((b) => {
+        if (b.midis.length) { if (!onsets.has(cursor)) onsets.set(cursor, { midis: [], frets: {} }); const o = onsets.get(cursor); b.midis.forEach((x) => o.midis.push(x)); Object.keys(b.frets).forEach((k) => { if (o.frets[k] === undefined) o.frets[k] = b.frets[k]; }); }
+        cursor += b.durQuarters;
+      });
+    });
+    const qPerBeat = 4 / btype;
+    const raw = [...onsets.entries()].filter(([, o]) => o.midis.length).sort((a, b) => a[0] - b[0])
+      .map(([onset, o]) => ({ symbol: symbolForMidis(o.midis, useSharp), midis: [...o.midis].sort((a, b) => a - b), frets: o.frets, onset }));
+    const events = [];
+    raw.forEach((e) => { const last = events[events.length - 1]; if (!last || last.symbol !== e.symbol) events.push(e); });
+    events.forEach((e) => { e.beat = Math.max(0, Math.min(bts - 1, Math.round(e.onset / qPerBeat))); });
+    for (let i = 1; i < events.length; i++) if (events[i].beat <= events[i - 1].beat) events[i].beat = Math.min(bts - 1, events[i - 1].beat + 1);
+    events.forEach((e, i) => { e.durBeats = (i + 1 < events.length ? events[i + 1].beat : bts) - e.beat; });
+    return { number: mi + 1, timeSig: [bts, btype], events: events.map(({ onset, ...e }) => e) };
+  });
+  return { source: "gp", timeSig: bars.length ? bars[0].timeSig : [4, 4], tuning: _tuningName(tr.tuning ? [...tr.tuning].reverse() : null), tempo, bars, parts, partIndex: idx };
+}
+/* ---- GP5: a separate reader (different container: RSE, page setup, directions,
+ * 2 voices/measure, wider headers/tracks/notes). gt500 = format > 5.0.0 (v5.10),
+ * which adds the RSE master effect, hide-tempo, track EQ and instrument-effect
+ * names. Effect/chord/beat blocks reuse the GP4 helpers where identical. */
+function _gp5RSEInstrument(r, gt500) { r.i32(); r.i32(); r.i32(); if (gt500) r.i32(); else { r.i16(); r.skip(1); } }
+function _gp5Grace(r) { r.u8(); r.u8(); r.u8(); r.u8(); r.u8(); }
+function _gp5Harmonic(r) { const t = r.i8(); if (t === 2) { r.u8(); r.i8(); r.u8(); } else if (t === 3) r.u8(); }
+function _gp5NoteEffects(r) {
+  const f1 = r.u8(), f2 = r.u8();
+  if (f1 & 0x01) _gpReadBend(r);
+  if (f1 & 0x10) _gp5Grace(r);
+  if (f2 & 0x04) r.i8();                                              // tremolo picking
+  if (f2 & 0x08) r.u8();                                              // slide flags
+  if (f2 & 0x10) _gp5Harmonic(r);
+  if (f2 & 0x20) { r.i8(); r.i8(); }                                  // trill
+}
+function _gp5MixTable(r, gt500) {
+  const instrument = r.i8();
+  _gp5RSEInstrument(r, gt500);
+  if (!gt500) r.skip(1);
+  const vals = [r.i8(), r.i8(), r.i8(), r.i8(), r.i8(), r.i8()];      // volume,balance,chorus,reverb,phaser,tremolo
+  r.intByteString();                                                 // tempo name
+  const tempo = r.i32();
+  for (let i = 0; i < 6; i++) if (vals[i] >= 0) r.i8();              // durations
+  if (tempo >= 0) { r.i8(); if (gt500) r.bool(); }
+  r.i8();                                                            // mix-table flags
+  r.i8();                                                            // wah
+  if (gt500) { r.intByteString(); r.intByteString(); }              // RSE instrument effect name/category
+}
+function _gp5Note(r, stringNumber, tuning, state) {
+  const flags = r.u8();
+  let type = 1;
+  if (flags & 0x20) type = r.u8();
+  if (flags & 0x10) r.i8();                                          // dynamic
+  let fret = null;
+  if (flags & 0x20) fret = r.i8();
+  if (flags & 0x80) { r.i8(); r.i8(); }                              // fingering
+  if (flags & 0x01) r.skip(8);                                       // duration percent (f64)
+  r.u8();                                                            // flags2 (always)
+  if (flags & 0x08) _gp5NoteEffects(r);
+  if (type === 2) { fret = state.lastFret[stringNumber]; if (fret == null) return null; }
+  else if (type === 3) return null;
+  if (fret == null) return null;
+  fret = Math.min(Math.max(fret, 0), 99);
+  state.lastFret[stringNumber] = fret;
+  return { fret, midi: tuning[stringNumber - 1] + fret };
+}
+function _gp5Beat(r, stringCount, tuning, state, gt500) {
+  const flags = r.u8();
+  let empty = false;
+  if (flags & 0x40) { const st = r.u8(); empty = st === 0; }
+  const durQuarters = _gpReadDuration(r, flags);
+  if (flags & 0x02) _gpReadChord(r, 4, stringCount);                 // GP4-format chord
+  if (flags & 0x04) r.intByteString();
+  if (flags & 0x08) _gpReadBeatEffects(r, 4);                        // GP4-format beat effects
+  if (flags & 0x10) _gp5MixTable(r, gt500);
+  const stringFlags = r.u8();
+  const midis = [], frets = {};
+  for (let s = 1; s <= stringCount; s++) {
+    if (stringFlags & (1 << (7 - s))) { const note = _gp5Note(r, s, tuning, state); if (note) { midis.push(note.midi); frets[6 - s] = note.fret; } }
+  }
+  const f2 = r.i16();
+  if (f2 & 0x0800) r.u8();                                           // break-secondary-beams count
+  return { durQuarters: empty ? 0 : durQuarters, midis, frets };
+}
+function parseGP5(u8, version, useSharp = true, partIndex = 0) {
+  const r = _gpReader(u8);
+  r.version();                                                       // re-read 30-byte version
+  const gt500 = !/v5\.00/.test(version);                             // 5.10+ has extra blocks
+  for (let i = 0; i < 9; i++) r.intByteString();                     // info: 9 strings (GP5 splits words/music)
+  const noticeLines = r.i32(); for (let i = 0; i < noticeLines; i++) r.intByteString();
+  r.i32(); for (let i = 0; i < 5; i++) { r.i32(); r.intString(); }   // lyrics
+  if (gt500) { r.i32(); r.i32(); for (let i = 0; i < 11; i++) r.i8(); } // RSE master effect (vol + reserved + EQ-11)
+  r.skip(8 + 16 + 4); r.i16();                                       // page setup: size, margins, proportion, header/footer
+  for (let i = 0; i < 10; i++) r.intByteString();                    // page-setup placeholder strings
+  r.intByteString();                                                 // tempo name
+  const tempo = r.i32();
+  if (gt500) r.bool();                                               // hide tempo
+  r.i8();                                                            // key
+  r.i32();                                                           // octave
+  for (let i = 0; i < 64; i++) { r.i32(); r.skip(8); }               // 64 MIDI channels
+  r.skip(38);                                                        // directions: 19 shorts
+  r.i32();                                                           // master reverb
+  const measureCount = r.i32();
+  const trackCount = r.i32();
+  // --- measure headers ---
+  const headers = []; let num = 4, den = 4;
+  for (let m = 0; m < measureCount; m++) {
+    if (m > 0) r.skip(1);
+    const flags = r.u8();
+    if (flags & 0x01) num = r.i8();
+    if (flags & 0x02) den = r.i8();
+    if (flags & 0x08) r.i8();                                        // repeat close
+    if (flags & 0x20) { r.intByteString(); r.skip(4); }             // marker
+    if (flags & 0x40) { r.i8(); r.i8(); }                           // key sig
+    if (flags & 0x10) r.u8();                                        // alt ending
+    if (flags & 0x03) r.skip(4);                                     // time-sig beams
+    if (!(flags & 0x10)) r.skip(1);
+    r.u8();                                                          // triplet feel
+    headers.push([num, den]);
+  }
+  // --- tracks ---
+  const tracks = [];
+  for (let t = 0; t < trackCount; t++) {
+    if (t === 0 || !gt500) r.skip(1);
+    r.u8();                                                          // flags1
+    const name = r.byteString(40);
+    const stringCount = r.i32();
+    const tuning = [];
+    for (let i = 0; i < 7; i++) { const tu = r.i32(); if (i < stringCount) tuning.push(tu); }
+    r.i32();                                                         // port
+    r.i32(); r.i32();                                                // channel
+    r.i32(); r.i32();                                                // fret count, capo
+    r.skip(4);                                                       // colour
+    r.i16();                                                         // flags2
+    r.u8(); r.u8(); r.u8();                                          // auto-accent, bank, humanize
+    r.i32(); r.i32(); r.i32();                                       // clef transpose ×2 + unknown
+    r.skip(12);
+    _gp5RSEInstrument(r, gt500);
+    if (gt500) { for (let i = 0; i < 4; i++) r.i8(); r.intByteString(); r.intByteString(); } // track EQ-4 + RSE effect names
+    tracks.push({ name, stringCount, tuning, measures: [] });
+  }
+  r.skip(gt500 ? 1 : 2);                                             // blank byte(s) after all tracks
+  // --- measures (measure-major, then track; 2 voices each + line break) ---
+  const state = tracks.map(() => ({ lastFret: {} }));
+  for (let m = 0; m < measureCount; m++) {
+    for (let t = 0; t < trackCount; t++) {
+      const tr = tracks[t];
+      const voices = [];
+      for (let vi = 0; vi < 2; vi++) {
+        const beatCount = r.i32();
+        const beats = [];
+        for (let b = 0; b < beatCount; b++) beats.push(_gp5Beat(r, tr.stringCount, tr.tuning, state[t], gt500));
+        voices.push(beats);
+      }
+      if (r.pos < u8.length) r.u8();                                 // line break (absent on a final measure — PyGuitarPro reads default 0)
+      tr.measures.push({ timeSig: headers[m], voices });
+    }
+  }
+  return _gpBuildScore(tracks, tempo, version, useSharp, partIndex);
+}
+
+/* Detect format from the file head and dispatch to the right parser. */
+async function parseGuitarProOrXML(buf, fileName, useSharp = true, partIndex = 0) {
+  const u8 = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  const head = new TextDecoder("latin1").decode(u8.subarray(0, 32));
+  if (u8[0] === 0x50 && u8[1] === 0x4b) { const xml = await gpUnzip(u8); const sc = parseGPIF(xml, useSharp, partIndex); sc._xml = xml; return sc; }        // GP7/8
+  if (head.includes("FICHIER GUITAR PRO")) { const sc = parseGP345(u8, useSharp, partIndex); sc._gpbuf = u8; return sc; }                                  // GP3/4/5
+  const xml = new TextDecoder("utf-8").decode(u8); const sc = parseMusicXML(xml, useSharp, partIndex); sc._xml = xml; return sc;                            // MusicXML
+}
+
 /* ---- key + roman-numeral analysis ----------------------------------------
  * Infers the most likely major/minor key by scoring all 24 keys: each chord
  * adds its duration if it's diatonic to that key (a reduced amount if only its
@@ -809,27 +1322,38 @@ export default function TabDecoderPro() {
     } finally { setPdfBusy(false); }
   };
 
+  // Re-run the right parser for a stored score (MusicXML text or gpif XML).
+  // Both store their source XML in _xml and produce the same score shape, so the
+  // ♯/♭ re-spell and part-switch are identical for Path C and Path D.
+  const _reparseScore = (prev, sharp, idx) => {
+    if (!prev) return prev;
+    let next;
+    if (prev._gpbuf) next = parseGP345(prev._gpbuf, sharp, idx);                 // GP3/4/5 binary
+    else if (prev._xml) next = prev.source === "gp" ? parseGPIF(prev._xml, sharp, idx) : parseMusicXML(prev._xml, sharp, idx);
+    else return prev;
+    next._gpbuf = prev._gpbuf; next._xml = prev._xml; return next;
+  };
+
   const onXml = async (e) => {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
     setXmlErr(""); setXmlScore(null); clearSel();
     try {
-      const text = await f.text();
-      const sc = parseMusicXML(text, useSharp); sc._xml = text;
-      if (!sc.bars.length) setXmlErr("No measures found. Is this a MusicXML score (.musicxml / .xml)?");
+      const sc = await parseGuitarProOrXML(await f.arrayBuffer(), f.name, useSharp); // MusicXML / GP3-8 auto-detect
+      if (!sc.bars.length) setXmlErr("No measures found. Is this a MusicXML score or a Guitar Pro file?");
       setXmlScore(sc); setXmlName(f.name);
     } catch (err) {
       setXmlErr("Parse failed: " + (err && err.message ? err.message : String(err)));
     }
   };
 
-  // re-recognise MusicXML symbols when the sharp/flat spelling flips (keep part)
+  // re-recognise symbols when the sharp/flat spelling flips (keep part)
   useEffect(() => {
-    setXmlScore((prev) => { if (!prev || !prev._xml) return prev; const next = parseMusicXML(prev._xml, useSharp, prev.partIndex); next._xml = prev._xml; return next; });
+    setXmlScore((prev) => _reparseScore(prev, useSharp, prev ? prev.partIndex : 0));
   }, [useSharp]);
 
   const selectPart = (idx) => {
-    setXmlScore((prev) => { if (!prev || !prev._xml) return prev; const next = parseMusicXML(prev._xml, useSharp, idx); next._xml = prev._xml; return next; });
+    setXmlScore((prev) => _reparseScore(prev, useSharp, idx));
     clearSel();
   };
 
@@ -894,7 +1418,7 @@ export default function TabDecoderPro() {
             <span style={{ color: C.dim, fontSize: 12, letterSpacing: 3 }}>TABTRANSLATOR PRO</span>
           </div>
           <div style={{ display: "flex", gap: 6 }}>
-            {[["manual", "Manual"], ["pdf", "PDF Chart"], ["xml", "MusicXML"]].map(([m, lbl]) => (
+            {[["manual", "Manual"], ["pdf", "PDF Chart"], ["xml", "MusicXML / GP"]].map(([m, lbl]) => (
               <button key={m} onClick={() => { setMode(m); clearSel(); }} style={{ ...toggle(C), padding: "6px 14px", flex: "none", ...(mode === m ? activeToggle(C) : {}) }}>
                 {lbl}
               </button>
@@ -973,14 +1497,14 @@ export default function TabDecoderPro() {
               </>
             ) : (
               <>
-                <SectionLabel C={C}>PATH C · MUSICXML → CHORD CHART</SectionLabel>
-                <input ref={xmlRef} type="file" accept=".xml,.musicxml,application/xml,text/xml" onChange={onXml} style={{ display: "none" }} />
+                <SectionLabel C={C}>PATH C/D/E · MUSICXML or GUITAR PRO → CHORD CHART</SectionLabel>
+                <input ref={xmlRef} type="file" accept=".xml,.musicxml,.gp,.gp3,.gp4,.gp5,application/xml,text/xml" onChange={onXml} style={{ display: "none" }} />
                 <button onClick={() => xmlRef.current && xmlRef.current.click()}
                   style={{ width: "100%", background: C.bg, border: `1px dashed ${C.border}`, color: C.amber, borderRadius: 10, padding: "22px 12px", fontSize: 14, cursor: "pointer", fontFamily: "'IBM Plex Mono', monospace" }}>
-                  ⬆  Upload a MusicXML file  (.musicxml / .xml)
+                  ⬆  Upload a MusicXML or Guitar Pro file  (.musicxml / .xml / .gp / .gp3 / .gp4 / .gp5)
                 </button>
                 <div style={{ fontSize: 11, color: C.dim, marginTop: 8, lineHeight: 1.6 }}>
-                  Reads <b>real</b> time signature, tuning &amp; rhythm straight from the file — no geometry guessing. Guitar Pro / MuseScore can export MusicXML (File → Export).
+                  Reads <b>real</b> time signature, tuning &amp; rhythm straight from the file — no geometry guessing. Native Guitar Pro: <b>.gp</b> (7/8), <b>.gp3 / .gp4</b> (legacy binary). For <b>.gpx</b> (GP6) or Power Tab, open in TuxGuitar / MuseScore and export MusicXML.
                 </div>
                 {xmlErr && <div style={{ marginTop: 10, color: C.red, fontSize: 12 }}>{xmlErr}</div>}
                 {xmlScore && xmlScore.parts && xmlScore.parts.length > 1 && (
