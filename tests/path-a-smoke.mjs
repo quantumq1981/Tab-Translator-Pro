@@ -35,7 +35,7 @@ const end = src.indexOf("async function extractTokens"); // browser-only; reprod
 if (start < 0 || end < 0) throw new Error("source markers not found in TabDecoderPro.tsx");
 const engineSrc =
   src.slice(start, end) +
-  "\nexport { buildChart, buildScore, symbolForFrets, parseMusicXML, scoreToABC, scoreToChordPro, transposeScore, scoreEventTimes, analyzeKey, romanFor, keyName };\n";
+  "\nexport { buildChart, buildScore, symbolForFrets, parseMusicXML, scoreToABC, scoreToChordPro, scoreToMusicXML, transposeScore, scoreEventTimes, analyzeKey, romanFor, keyName };\n";
 
 /* parseMusicXML uses the browser's global DOMParser; the app loads it natively.
  * Headlessly we install @xmldom/xmldom (a TEST-only dep) as that global so the
@@ -177,6 +177,27 @@ expect(Math.abs(ev[2].start - 2) < 1e-9 && Math.abs(ev[2].dur - 2) < 1e-9, `Am: 
 expect(Math.abs(ev[3].start - 4) < 1e-9 && Math.abs(ev[3].dur - 1.5) < 1e-9, `F: expected start4/dur1.5s, got ${ev[3].start}/${ev[3].dur}`);
 expect(Math.abs(sched.duration - 5.5) < 1e-9, `total expected 5.5s (4+4+3 quarters @0.5), got ${sched.duration}`);
 expect(JSON.stringify(ev[0].midis) === JSON.stringify([48, 52, 55]), `C event should carry MIDI [48,52,55], got [${ev[0].midis}]`);
+
+/* ---- MusicXML export round-trip (export → re-parse → identical) ---------- */
+const xmlOut = eng.scoreToMusicXML(mx, { tempo: 120, useSharp: true });
+expect(/<score-partwise/.test(xmlOut) && /<harmony>/.test(xmlOut), "MusicXML export should be score-partwise with <harmony> chord symbols");
+expect(/<sound tempo="120"\/>/.test(xmlOut), "MusicXML export should carry the tempo");
+const rt = eng.parseMusicXML(xmlOut, true);
+expect(rt.bars.length === mx.bars.length, `round-trip bar count ${rt.bars.length} != ${mx.bars.length}`);
+const rtSyms = rt.bars.map((b) => b.events.map((e) => e.symbol).join(" "));
+expect(JSON.stringify(rtSyms) === JSON.stringify(mxSyms), `round-trip chords drifted: ${rtSyms.join(" | ")} vs ${mxSyms.join(" | ")}`);
+expect(JSON.stringify(rt.bars[2].timeSig) === JSON.stringify([3, 4]), `round-trip should preserve the 3/4 change, got ${rt.bars[2].timeSig.join("/")}`);
+expect(rt.tempo === 120, `round-trip tempo expected 120, got ${rt.tempo}`);
+// an edit override flows into the <harmony> symbol (the notes stay the original
+// voicing, so a notes-based re-parse still reads Am — that's expected)
+const xmlEdit = eng.scoreToMusicXML(mx, { overrides: { "2.0": "A7" } });
+expect(/<kind>dominant<\/kind>/.test(xmlEdit), "override A7 should appear as a dominant <harmony> in MusicXML");
+expect(!/<kind>dominant<\/kind>/.test(xmlOut), "baseline export (C G | Am | F) has no dominant chord");
+// scale check: round-trip the full Blue Sky score through MusicXML
+const bsRt = eng.parseMusicXML(eng.scoreToMusicXML(score, { useSharp: true }), true);
+expect(bsRt.bars.length === 165, `Blue Sky MusicXML round-trip expected 165 bars, got ${bsRt.bars.length}`);
+const bsVerse = bsRt.bars.slice(0, 8).map((b) => b.events.map((e) => e.symbol).join(" ")).join(" ");
+expect(bsVerse === "E A A E E A A E", `Blue Sky round-trip verse drifted: "${bsVerse}"`);
 
 /* ---- key + roman-numeral analysis ---------------------------------------- */
 const mxKey = eng.analyzeKey(mx); // C G | Am | F  ->  C major
