@@ -115,6 +115,38 @@ tab carries no tuning we read yet — adding tuning detection is a clean future
 task). One chord per bar unless the harmony changes mid-bar, in which case the
 bar shows the sequence (e.g. `E A`).
 
+### Known limit — string anchoring fails when a system never plays the high e
+
+`topY` (the high-e line) is anchored to the **highest digit row** in a system.
+That is correct *only when the system actually plays the high-e string*. When a
+sparse system leaves the top string(s) silent, `topY` latches onto a lower
+string and **every note shifts up by one (or more) strings**, so the chords for
+that system come out wrong.
+
+This was investigated exhaustively against the **Kid Charlemagne** Rhythm-Guitar
+PDF (2026-06-10 session). Ground truth, read off a high-zoom render of the staff:
+bars 26–32 (a system that doesn't play the high e) should be **C7** (`{B♭,E,C}`,
+the dominant) but the parser emits **Fm7** — off by exactly one string. It is a
+real bug, but it is **not reliably auto-fixable from the PDF layers**, and here is
+the concrete proof so nobody re-derives it: the first system (bars 1–7, *correctly*
+anchored, shift 0) and the bars 26–32 system (shift 1) have **near-identical
+geometric signatures** — notation→digit offsets of 52.6pt vs 53.3pt. Any rule that
+shifts the second would also shift the first, turning *correct* chords wrong. The
+system-pitch grid has ±5pt residuals (enough to spuriously flip a string), the
+notation→tab offset is not constant across systems, and the actual TAB staff
+lines (filled rects via `getOperatorList`) extract inconsistently (drawn per
+measure, top lines often dropped). The only signal that disambiguates sys0 from
+sys5 is **visually counting the rendered staff lines = OMR = Path B (out of
+scope)**. Do not bolt an anchor-guesser onto this parser — it risks regressing the
+validated Blue Sky output for no reliable gain. The honest fixes are **MusicXML
+import** (exact `<string>`/`<staff-tuning>`, no geometry) or in-app **Edit**.
+
+Related: the captured chords for a sparse rhythm-guitar part are inherently
+*partial* (e.g. a 3-string strum `5,5,5` on e/B/G reads as `Am/C`) — that is
+faithful to what's notated, not a bug. And measures where the part rests carry no
+fret tokens, so they are correctly omitted from the chart (the chart shows only
+bars where this one instrument plays — it is **not** a full-song chord chart).
+
 ## Score model — chords placed on beats (`buildScore`)
 
 `buildChart` is geometry (where chords are on the page). `buildScore(chart,
