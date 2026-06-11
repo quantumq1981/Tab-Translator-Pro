@@ -35,39 +35,27 @@ The **→ Chord Sheet Maker Pro** button writes the v1 handoff envelope to
 and navigates to `…/chord-sheet-maker-pro/?import=handoff`. CSMP's existing
 receiver loads it. No file download, no copy/paste, no backend.
 
+### 3. Round-trip the `{tab}` voicing block ✅ (2026-06-11)
+`scoreToCSMPN` now emits a `{tab}` block: one `Chord: f,f,f,f,f,f` line per unique
+chord that has a voicing, ordered **high-e→low-E**, `x` for muted strings
+(`_csmpnVoicing` over `Event.frets`, first-seen wins). CSMP renders the **real
+fingering read off the page** as a TAB staff + chord-diagram grid — not a generic
+shape. Naturally suppressed after transpose (frets are dropped, so a wrong fingering
+is never sent). Opt-out via `opts.tab:false`.
+
+### 4. Scaffold a `{hybrid}` rhythm block from real onsets ✅ (2026-06-11)
+`scoreToCSMPN` now emits a `{hybrid}` block: one `barN:` line per bar, each event
+`pos:dur(chord)` (rests `pos:r dur`) from the decoder's true `qbeat`/`qdur`. Beat
+position is in cumulative-quarter units (mirrors importGuitarPro's `_cumQToHybridPos`);
+duration is floor-mapped to the gap (`_csmpnDurLetter`) so CSMP never drops an
+overlapping event. CSMP's Slash-Rhythm View renders the **actual strum/comp rhythm**
+instead of even slashes. Pairs with item 3 for a full hybrid guitar chart. Opt-out via
+`opts.hybrid:false`. (Tuplet `tN` flags + dotted durations are the obvious next refinement —
+the current floor-map approximates a dotted-half as a half.)
+
 ---
 
 ## Roadmap — ranked
-
-### ★★★ 3. Round-trip the `{tab}` voicing block (high value, low effort)
-Tab Translator **already has exact `frets` per event** (`Event.frets` — a
-`{ engineStringIndex: fret }` map, kept for every non-transposed score). CSMP's
-slash-rhythm engine renders `{tab}` fingering blocks → 6-line TAB staff **and**
-chord-diagram grids (CSMP Sprint 8). So:
-
-- Add a `{tab}` block to `scoreToCSMPN` output: one `Chord: f,f,f,f,f,f` line per
-  *unique* chord that has a full voicing, high-e→low-E, `x` for muted strings.
-- CSMP renders the actual fingering the tab used — not a generic shape. This is
-  the single biggest fidelity win, because the decoder uniquely knows the real
-  voicing (CSMP's GP importer guesses; Tab Translator *read it off the page*).
-- **Hook points:** `scoreToCSMPN` (emit the block); `Event.frets` → CSMP voicing
-  string `(5 - engIdx)`-ordered. Frets are dropped on transpose, so emit `{tab}`
-  only when `semis === 0` (or re-derive from transposed MIDI on a fixed tuning).
-
-### ★★★ 4. Scaffold a `{hybrid}` rhythm block from real onsets (high value, med effort)
-The decoder knows **true rhythm** — every event carries `qbeat`/`qdur` (fractional,
-unclamped). CSMP's Slash-Rhythm View renders `{hybrid}` blocks as *notated* rhythm
-(beamed eighths, accents, rests) instead of even slashes. Today the handoff sends
-even-slash bars; with this it would send the **actual strum/comp rhythm**.
-
-- Map each event to a `beat:dur(chord)` token (`q/e/h/w` from `qdur`, beat from
-  `qbeat`), exactly the CSMP `{hybrid}` grammar (`importPipeline.js`
-  `parseHybridChartFromCSMPN`).
-- Tuplets: the decoder already preserves triplet timing in `qdur`; CSMP supports a
-  `tN` flag. Round 3-based groups cleanly.
-- **Win:** a Guitar Pro rhythm-guitar part lands in CSMP as a *playable, notated
-  rhythm chart*, not a chord grid. Pairs perfectly with item 3 (`{tab}` + rhythm =
-  a full hybrid guitar chart).
 
 ### ★★ 5. Carry `Capo:` + tuning into the CSMPN header (low effort, blocked on a TODO)
 CSMP parses `Capo:` (int or Roman) and renders a capo marker. Tab Translator's

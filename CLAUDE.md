@@ -506,6 +506,31 @@ deliberately does **not** emit ChordPro `{start_of_grid}` directives — CSMPN u
 bare pipe bars. Wired into `doExport` (new `"csmpn"` branch) and the export-button
 row (the **CSMPN** button), with a panel hint.
 
+#### `{tab}` + `{hybrid}` fidelity blocks (the two upgrades, 2026-06-11)
+
+`scoreToCSMPN` also emits the data only the decoder has — the **real fingering** and
+the **real onset rhythm** — as the same `{tab}`/`{hybrid}` blocks CSMP's GP importer
+produces, so Pro renders a TAB staff + chord diagrams + slash-rhythm instead of
+generic shapes and even slashes. Both default ON; `opts.tab:false` / `opts.hybrid:false`
+suppress them (plain fakebook).
+
+- **`{tab}`** — unique chord voicings from `Event.frets` (`{engIdx→fret}`, 0 = low E …
+  5 = high e). `_csmpnVoicing` orders them **high-e (string 1) → low-E (string 6)** and
+  mutes absent strings (`x`) — the exact order CSMP's `parseTabVoicings` expects.
+  First-seen voicing per chord wins (matches the GP importer). The frets were **read off
+  the page**, so the diagram is the actual fingering. Naturally empty after transpose
+  (`transposeScore` drops position-specific frets), so a wrong fingering is never sent.
+- **`{hybrid}`** — one `barN:` line per bar; each event is `pos:dur(chord)` (rests
+  `pos:r dur`). Beat position uses **cumulative-quarter** units via `_csmpnHybridPos`
+  (mirrors importGuitarPro's `_cumQToHybridPos`: frac ≥ 0.4 → the `&` off-beat); duration
+  is **floor-mapped** by `_csmpnDurLetter` to the largest `w/h/q/e/s` ≤ the gap, because
+  CSMP's `parseHybridBarLine` **drops** any event that overlaps the previous one
+  (`beat < prevBeat + prevBeats`). Source of timing is the event's true `qbeat`/`qdur`
+  (`?? beat`/`?? durBeats` fallback). `cumQ = qbeat·4/beatType`.
+
+Both blocks are **non-destructive**: CSMP's plain `parseCSMPN` renders the pipe bars and
+ignores `{hybrid}`; `{tab}`/`{hybrid}` only light up in Pro's Slash-Rhythm View.
+
 ### Direct handoff → CSMP (`sendToPro`, the **→ Chord Sheet Maker Pro** button)
 
 Both apps deploy to the **same GitHub Pages origin** (`quantumq1981.github.io`), so
@@ -534,18 +559,20 @@ can never silently misread a payload.
 **Validation** (`npm test`): a CSMPN export test asserts the `Title`/`Time`/
 `Tempo`/`Key` headers, the `- Chart` marker, that an edit override surfaces in the
 bars (`| C G | A7 | F |`), and that it does **not** emit ChordPro grid directives.
+A second deterministic test (synthetic 2-event bar with frets) asserts the `{tab}`
+voicings come out high-e→low-E with muted strings (`G: 3,0,0,0,2,3`, `C: x,1,x,2,3,x`),
+the `{hybrid}` rhythm places the two half-note chords on beats 1 & 3
+(`bar1: 1:h(G) 3:h(C)`), that `tab:false`/`hybrid:false` suppress both blocks, and
+that a **transposed** score emits no `{tab}` (frets dropped).
 
-### Future integration ideas (analysis — not yet built)
+### Future integration ideas (analysis — partly built)
 
-See `docs/INTEGRATION-IDEAS.md` for the full write-up. Highest-value next steps:
-**(1)** round-trip the `{tab}` voicing block — Tab Translator already has exact
-`frets` per event, so emit CSMP `{tab}` fingering blocks so diagrams/TAB staff
-render in Pro; **(2)** scaffold a `{hybrid}` rhythm block from the decoded onset
-durations (Tab Translator knows real `qbeat`/`qdur`) so Pro's Slash-Rhythm View
-shows the actual strum rhythm, not just even slashes; **(3)** carry `Capo:` and
-detected tuning into the CSMPN header once tuning detection lands; **(4)** a
-reverse link — a "Decode this tab" button in CSMP/Chord Sheet Maker that hands a
-GP/PDF back to Tab Translator for recognition.
+See `docs/INTEGRATION-IDEAS.md` for the full write-up. **Shipped:** the `{tab}`
+fingering round-trip and the `{hybrid}` rhythm scaffold (above). Remaining high-value
+steps: **(3)** carry `Capo:` and detected tuning into the CSMPN header once tuning
+detection lands; **(4)** a reverse link — a "Decode this tab" button in
+CSMP/Chord Sheet Maker that hands a GP/PDF back to Tab Translator for recognition;
+**(5)** share the recognition engine as a zero-dep module across the trio.
 
 ## Path B (scans / photos) — OUT OF SCOPE
 
