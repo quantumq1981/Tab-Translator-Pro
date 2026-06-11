@@ -299,6 +299,15 @@ function buildChart(tokens) {
  * bar's FIRST chord is the downbeat). 4/4 is assumed — time-signature detection
  * from the PDF is a clean future task. Durations fill to the next onset.
  * ------------------------------------------------------------------------- */
+/* True (un-quantised) onset + duration in beats, kept ALONGSIDE the integer
+ * beat/durBeats (which the chord-grid chart view needs for CSS-grid placement).
+ * `qbeat`/`qdur` carry the real timing so ABC export and playback are accurate
+ * for dense melodic lines — where rounding several onsets to the same integer
+ * beat would otherwise make durBeats = 0 (invalid ABC) and stack notes in time.
+ * `qbeat` must already be set per event; `qdur` is always > 0. */
+function _fillTrueDur(events, beats) {
+  events.forEach((e, i) => { e.qdur = Math.max(1e-4, (i + 1 < events.length ? events[i + 1].qbeat : beats) - e.qbeat); });
+}
 function buildScore(chart, useSharp, beatsPerBar = 4) {
   const bars = chart.measures.map((m) => {
     const events = [];
@@ -310,15 +319,17 @@ function buildScore(chart, useSharp, beatsPerBar = 4) {
     const haveExt = typeof m.startX === "number" && typeof m.endX === "number" && m.endX > m.startX;
     const width = haveExt ? m.endX - m.startX : 0;
     events.forEach((e, i) => {
-      let b = i === 0 ? 0                                   // bar's first chord = downbeat
-        : haveExt ? Math.round(((e.x - m.startX) / width) * beatsPerBar)
+      const b = i === 0 ? 0                                 // bar's first chord = downbeat
+        : haveExt ? ((e.x - m.startX) / width) * beatsPerBar
         : i;                                               // no geometry → just sequence
-      e.beat = Math.max(0, Math.min(beatsPerBar - 1, b));
+      e.qbeat = Math.max(0, b);                            // true fractional position
+      e.beat = Math.max(0, Math.min(beatsPerBar - 1, Math.round(b)));
     });
     for (let i = 1; i < events.length; i++)                // keep beats strictly increasing
       if (events[i].beat <= events[i - 1].beat)
         events[i].beat = Math.min(beatsPerBar - 1, events[i - 1].beat + 1);
     events.forEach((e, i) => { e.durBeats = (i + 1 < events.length ? events[i + 1].beat : beatsPerBar) - e.beat; });
+    _fillTrueDur(events, beatsPerBar);
     return { number: m.number, events: events.map(({ x, ...e }) => e) };
   });
   return { timeSig: [beatsPerBar, 4], bars };
@@ -457,9 +468,10 @@ function parseMusicXML(xml, useSharp = true, partIndex = 0) {
     }));
     const events = [];
     raw.forEach((e) => { const last = events[events.length - 1]; if (!last || last.symbol !== e.symbol) events.push(e); });
-    events.forEach((e) => { e.beat = Math.max(0, Math.min(beats - 1, Math.round(e.onset / divPerBeat))); });
+    events.forEach((e) => { e.qbeat = e.onset / divPerBeat; e.beat = Math.max(0, Math.min(beats - 1, Math.round(e.qbeat))); });
     for (let i = 1; i < events.length; i++) if (events[i].beat <= events[i - 1].beat) events[i].beat = Math.min(beats - 1, events[i - 1].beat + 1);
     events.forEach((e, i) => { e.durBeats = (i + 1 < events.length ? events[i + 1].beat : beats) - e.beat; });
+    _fillTrueDur(events, beats);
     const number = parseInt(measure.getAttribute("number") || String(mi + 1), 10);
     bars.push({ number, timeSig: [beats, beatType], events: events.map(({ onset, ...e }) => e) });
   });
@@ -572,9 +584,10 @@ function parseGPIF(xml, useSharp = true, partIndex = 0) {
       .map(([onset, o]) => ({ symbol: symbolForMidis(o.midis, useSharp), midis: [...o.midis].sort((a, b) => a - b), frets: o.frets, onset }));
     const events = [];
     raw.forEach((e) => { const last = events[events.length - 1]; if (!last || last.symbol !== e.symbol) events.push(e); });
-    events.forEach((e) => { e.beat = Math.max(0, Math.min(bts - 1, Math.round(e.onset / qPerBeat))); });
+    events.forEach((e) => { e.qbeat = e.onset / qPerBeat; e.beat = Math.max(0, Math.min(bts - 1, Math.round(e.qbeat))); });
     for (let i = 1; i < events.length; i++) if (events[i].beat <= events[i - 1].beat) events[i].beat = Math.min(bts - 1, events[i - 1].beat + 1);
     events.forEach((e, i) => { e.durBeats = (i + 1 < events.length ? events[i + 1].beat : bts) - e.beat; });
+    _fillTrueDur(events, bts);
     bars.push({ number: mi + 1, timeSig: [bts, btype], events: events.map(({ onset, ...e }) => e) });
   });
 
@@ -834,9 +847,10 @@ function _gpBuildScore(tracks, tempo, version, useSharp, partIndex) {
       .map(([onset, o]) => ({ symbol: symbolForMidis(o.midis, useSharp), midis: [...o.midis].sort((a, b) => a - b), frets: o.frets, onset }));
     const events = [];
     raw.forEach((e) => { const last = events[events.length - 1]; if (!last || last.symbol !== e.symbol) events.push(e); });
-    events.forEach((e) => { e.beat = Math.max(0, Math.min(bts - 1, Math.round(e.onset / qPerBeat))); });
+    events.forEach((e) => { e.qbeat = e.onset / qPerBeat; e.beat = Math.max(0, Math.min(bts - 1, Math.round(e.qbeat))); });
     for (let i = 1; i < events.length; i++) if (events[i].beat <= events[i - 1].beat) events[i].beat = Math.min(bts - 1, events[i - 1].beat + 1);
     events.forEach((e, i) => { e.durBeats = (i + 1 < events.length ? events[i + 1].beat : bts) - e.beat; });
+    _fillTrueDur(events, bts);
     return { number: mi + 1, timeSig: [bts, btype], events: events.map(({ onset, ...e }) => e) };
   });
   return { source: "gp", timeSig: bars.length ? bars[0].timeSig : [4, 4], tuning: _tuningName(tr.tuning ? [...tr.tuning].reverse() : null), tempo, bars, parts, partIndex: idx };
@@ -1187,9 +1201,7 @@ function parsePowerTab(u8, useSharp = true, partIndex = 0) {
       events.forEach((e) => { e.qbeat = e.onset / qPerBeat; e.beat = Math.max(0, Math.min(bts - 1, Math.round(e.qbeat))); });
       for (let k = 1; k < events.length; k++) if (events[k].beat <= events[k - 1].beat) events[k].beat = Math.min(bts - 1, events[k - 1].beat + 1);
       events.forEach((e, k) => { e.durBeats = (k + 1 < events.length ? events[k + 1].beat : bts) - e.beat; });
-      // TRUE (un-quantised) duration for ABC export & playback (never 0); see the
-      // qbeat/qdur note in CLAUDE.md. (Inlined here; main has the _fillTrueDur helper.)
-      events.forEach((e, k) => { e.qdur = Math.max(1e-4, (k + 1 < events.length ? events[k + 1].qbeat : bts) - e.qbeat); });
+      _fillTrueDur(events, bts);                                     // true qbeat/qdur for ABC + playback (never 0)
       bars.push({ number: barNum++, timeSig: [bts, btype], events: events.map(({ onset, ...e }) => e) });
     }
   }
@@ -1304,7 +1316,13 @@ function midiToAbc(m) {
 }
 const _gcd = (a, b) => { a = Math.abs(a); b = Math.abs(b); while (b) { const t = b; b = a % b; a = t; } return a || 1; };
 function abcDur(durBeats, beatType) {
-  let num = durBeats * 4, den = beatType; const g = _gcd(num, den); num /= g; den /= g;
+  // ABC length multiplier (relative to L:1/4) = durBeats·4/beatType, as a reduced
+  // fraction. Scale by 12 so eighths/sixteenths AND triplets stay integer, round
+  // away float noise, and NEVER emit 0 — a 0 multiplier is invalid ABC (renderers
+  // drop the note or fail to parse). Callers pass the TRUE duration (e.qdur).
+  let num = Math.round(durBeats * 4 * 12), den = beatType * 12;
+  if (num < 1) num = 1;
+  const g = _gcd(num, den); num /= g; den /= g;
   if (den === 1) return num === 1 ? "" : String(num);
   return (num === 1 ? "" : String(num)) + "/" + den;
 }
@@ -1322,7 +1340,7 @@ function scoreToABC(score, opts = {}) {
     let cell = "";
     if (sig !== curSig) { cell += `[M:${sig}]`; curSig = sig; }
     bar.events.forEach((e) => {
-      const dur = abcDur(e.durBeats, bt);
+      const dur = abcDur(e.qdur != null ? e.qdur : e.durBeats, bt); // TRUE duration (never 0)
       const inner = e.midis && e.midis.length ? `[${e.midis.map(midiToAbc).join("")}]${dur}` : `z${dur}`;
       cell += `"${_abcChordName(_ovSym(bar, e, ov))}"${inner} `;
     });
@@ -1444,9 +1462,11 @@ function scoreEventTimes(score, bpm) {
     const [bb, bt] = bar.timeSig || score.timeSig;
     const q = (v) => (v * 4) / bt; // beats → quarters
     bar.events.forEach((e) => {
+      const startBeat = e.qbeat != null ? e.qbeat : e.beat;        // TRUE onset (dense lines)
+      const durBeats = e.qdur != null ? e.qdur : e.durBeats;       // TRUE duration
       events.push({
         key: `${bar.number}.${e.beat}`, bar: bar.number, midis: e.midis || [],
-        start: (tQ + q(e.beat)) * secPerQuarter, dur: Math.max(0.05, q(e.durBeats) * secPerQuarter),
+        start: (tQ + q(startBeat)) * secPerQuarter, dur: Math.max(0.05, q(durBeats) * secPerQuarter),
       });
     });
     tQ += q(bb);
