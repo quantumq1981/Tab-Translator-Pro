@@ -473,6 +473,80 @@ always > 0) carry the *true* timing. **`scoreToABC` and `scoreEventTimes` use
 floors the numerator at 1, so a 0 can never be emitted. Don't "simplify" the two
 fields back into one — the chart and the exporters genuinely need different things.
 
+## Integration — CSMPN export + Chord Sheet Maker Pro handoff (2026-06-11)
+
+Tab Translator Pro is the **front of the pipeline**: it turns a tab/PDF/Guitar
+Pro/MusicXML/Power Tab file into a recognised chord chart. **Chord Sheet Maker
+Pro** (CSMP) is the **finishing app** — fake-book layout, slash-rhythm rendering,
+print/PDF, setlists. This integration lets a recognised chart flow straight from
+the decoder into CSMP in CSMP's own native language, with one tap.
+
+### `scoreToCSMPN(score, opts)` — a 4th exporter (sits with the others)
+
+Mirrors `scoreToChordPro` exactly but emits **CSMPN**, CSMP's native fake-book
+source (not ChordPro). Output shape:
+
+```
+Title: …            ← opts.title
+Composer: …         ← opts.composer (omitted if absent)
+Key: …              ← keyName(opts.key, useSharp) (omitted if no key)
+Time: n/m           ← score.timeSig
+Tempo: …            ← opts.tempo (omitted if absent)
+
+- Chart             ← one CSMPN section marker
+| C | Am F | G | … | ← pipe bars, 4/row; multi-chord bars space-separated
+```
+
+**Invariants (don't regress):** the engine spells notes ASCII (`C#`/`Bb`, see
+`NOTE_SHARP`/`NOTE_FLAT`) so tokens are CSMPN-ready with **no** normalisation; the
+unrecognised/rest symbol `"—"` maps to CSMPN's no-chord token `N.C.` via
+`_csmpnSym`; overrides/transpose/♯♭/key/tempo flow in through the **same `opts`**
+the other exporters use (the caller passes the already-transposed `tscore`). It
+deliberately does **not** emit ChordPro `{start_of_grid}` directives — CSMPN uses
+bare pipe bars. Wired into `doExport` (new `"csmpn"` branch) and the export-button
+row (the **CSMPN** button), with a panel hint.
+
+### Direct handoff → CSMP (`sendToPro`, the **→ Chord Sheet Maker Pro** button)
+
+Both apps deploy to the **same GitHub Pages origin** (`quantumq1981.github.io`), so
+they **share `localStorage`**. The handoff reuses CSMP's existing, already-shipped
+receiver (`consumeCsmHandoff` in CSMP `index.html`, contract in
+`chord-sheet-maker/docs/HANDOFF-CONTRACT.md`) — Tab Translator is now a **third
+sender** alongside `chord-sheet-maker`:
+
+1. Build the **v1 envelope** `{ v:1, source:"tab-translator-pro", createdAt,
+   title, transposeSemitones, enharmonic, formats:{ csmpn, chordpro, musicxml? } }`.
+   CSMPN is preferred; ChordPro/MusicXML ride along as fallbacks. MusicXML is
+   **dropped when > 1.5 MB** to stay inside the localStorage quota.
+2. `localStorage.setItem("csm:handoff:v1", JSON.stringify(env))`.
+3. `window.location.assign(`${location.origin}/chord-sheet-maker-pro/?import=handoff`)`
+   — **same-tab** nav (mobile popup-safe). CSMP reads the key once, clears it,
+   loads the chart via its own import pipeline, and strips the query param.
+
+Wrapped in try/catch so a failure never wedges the UI. The envelope `source` lets
+CSMP credit the import ("Imported from Tab Translator Pro — …").
+
+**Why localStorage, not a URL payload:** charts (esp. with the MusicXML fallback)
+exceed the ~2 KB practical URL limit; localStorage has MBs and is shared at the
+origin. The contract is versioned (`:v1` + `v:1`) so an old sender + new receiver
+can never silently misread a payload.
+
+**Validation** (`npm test`): a CSMPN export test asserts the `Title`/`Time`/
+`Tempo`/`Key` headers, the `- Chart` marker, that an edit override surfaces in the
+bars (`| C G | A7 | F |`), and that it does **not** emit ChordPro grid directives.
+
+### Future integration ideas (analysis — not yet built)
+
+See `docs/INTEGRATION-IDEAS.md` for the full write-up. Highest-value next steps:
+**(1)** round-trip the `{tab}` voicing block — Tab Translator already has exact
+`frets` per event, so emit CSMP `{tab}` fingering blocks so diagrams/TAB staff
+render in Pro; **(2)** scaffold a `{hybrid}` rhythm block from the decoded onset
+durations (Tab Translator knows real `qbeat`/`qdur`) so Pro's Slash-Rhythm View
+shows the actual strum rhythm, not just even slashes; **(3)** carry `Capo:` and
+detected tuning into the CSMPN header once tuning detection lands; **(4)** a
+reverse link — a "Decode this tab" button in CSMP/Chord Sheet Maker that hands a
+GP/PDF back to Tab Translator for recognition.
+
 ## Path B (scans / photos) — OUT OF SCOPE
 
 Raster tab (a photo or scanned page) has no text layer and needs an OMR/Vision
