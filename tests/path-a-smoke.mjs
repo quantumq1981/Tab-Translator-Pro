@@ -35,7 +35,7 @@ const end = src.indexOf("async function extractTokens"); // browser-only; reprod
 if (start < 0 || end < 0) throw new Error("source markers not found in TabDecoderPro.tsx");
 const engineSrc =
   src.slice(start, end) +
-  "\nexport { buildChart, buildScore, simplifyScore, symbolForFrets, parseMusicXML, parseGP, parseGPIF, gpUnzip, parseGP345, parseGPX, scoreToABC, scoreToChordPro, scoreToMusicXML, transposeScore, scoreEventTimes, analyzeKey, romanFor, keyName };\n";
+  "\nexport { buildChart, buildScore, simplifyScore, symbolForFrets, parseMusicXML, parseGP, parseGPIF, gpUnzip, parseGP345, parseGPX, parsePowerTab, scoreToABC, scoreToChordPro, scoreToMusicXML, transposeScore, scoreEventTimes, analyzeKey, romanFor, keyName };\n";
 
 /* parseMusicXML uses the browser's global DOMParser; the app loads it natively.
  * Headlessly we install @xmldom/xmldom (a TEST-only dep) as that global so the
@@ -326,6 +326,23 @@ expect(mft6.parts[0].name.includes("Piano") && mft6NonEmpty > 30, `GP6 My Favori
 // decompression integrity: every scored bar maps to a real MasterBar (no truncation)
 expect(yard6.bars.length === 17 && weight6.bars.length === 63, `GP6 bar counts should match MasterBars (Yardbird 17, Weight 63), got ${yard6.bars.length} / ${weight6.bars.length}`);
 
+/* ---- Path G: Power Tab (.ptb) — MFC-style binary deserialization ----------
+ *      No oracle exists (like GP6); the validation is the same: the MFC
+ *      serialization must consume every object exactly, and the notes
+ *      (string+fret → MIDI via tuning) must reconstruct recognizable music. */
+const tunePtb = eng.parsePowerTab(new Uint8Array(fs.readFileSync(path.join(here, "fixtures", "tune.ptb"))), true);
+expect(tunePtb.source === "gp" && tunePtb.tuning === "Standard", `PTB tune expected source=gp / Standard, got ${tunePtb.source} / ${tunePtb.tuning}`);
+const tuneSyms = tunePtb.bars[0].events.map((e) => e.symbol.replace(" (single)", "")).join(" ");
+expect(tuneSyms === "E B G D A E", `PTB tune (open strings, proves string+fret+tuning math) expected "E B G D A E", got "${tuneSyms}"`);
+// House of the Rising Sun — recognizable 6/8 Am arpeggio; proves measure segmentation + meter
+const hotrs = eng.parsePowerTab(new Uint8Array(fs.readFileSync(path.join(here, "fixtures", "house-of-the-rising-sun.ptb"))), true);
+expect(JSON.stringify(hotrs.bars[0].timeSig) === JSON.stringify([6, 8]), `PTB HotRS expected 6/8 meter, got ${hotrs.bars[0].timeSig.join("/")}`);
+const hotrsBar1 = hotrs.bars[0].events.map((e) => e.symbol.replace(" (single)", "")).join(" ");
+expect(hotrsBar1 === "A E A C E C G", `PTB HotRS bar 1 expected the Am arpeggio "A E A C E C G", got "${hotrsBar1}"`);
+// the song's chords (Am, C, D, F) appear across the opening bars
+const hotrsRoots = new Set(hotrs.bars.slice(0, 4).flatMap((b) => b.events.map((e) => e.symbol.replace(" (single)", "")[0])));
+expect(["A", "C", "D", "F"].every((r) => hotrsRoots.has(r)), `PTB HotRS opening should span A/C/D/F roots, got ${[...hotrsRoots].join("")}`);
+
 /* ---- report -------------------------------------------------------------- */
 console.log(`PDF.js ${pdfjsLib.version} · ${pages} pages · ${tokens.length} tokens`);
 console.log(`systemsFound=${chart.systemsFound} columnsFound=${chart.columnsFound} bars=${bars.length}`);
@@ -340,6 +357,7 @@ console.log(`GP (.gp): ${gp.parts.length} tracks, ${gp.bars.length} bars, ${gp.t
 console.log(`GP3/4 (.gp3/.gp4): Blue Sky verse ${bs3Verse} · Kid Charlemagne bars 27-28 ${kc27} ${kc28} (PDF mis-read as Fm7) · Peg ${peg4Bars}`);
 console.log(`GP5 (.gp5): Anthropology v5.00 "${anth5.parts[1].name}" ${anth5Bars} · Au Privave v5.10 ${auPriv5.bars.length} bars tempo ${auPriv5.tempo}`);
 console.log(`GP6 (.gpx): Yardbird "${yard6.parts[1].name}" ${yard6Bars} · The Weight key-of-A chords · My Favorite Things ${mft6NonEmpty} piano bars`);
+console.log(`PTB (.ptb): tune open-strings ${tuneSyms} · House of the Rising Sun ${hotrs.bars[0].timeSig.join("/")} Am-arpeggio "${hotrsBar1}" (${hotrs.bars.length} bars)`);
 console.log(`ABC: ${abc.trim().split("\n").pop()}`);
 
 if (fails.length) {

@@ -14,9 +14,9 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
  *   • MUSICXML / GP (Path C/D) — upload a MusicXML score or a Guitar Pro 7/8
  *     `.gp` file; meter, tuning and rhythm are read *exactly* from the file (no
  *     geometry guessing), only chord *symbols* are inferred via the same engine.
- *     Guitar Pro 3/4/5/6/7/8 all import natively in-browser with zero new deps
- *     (`.gp` ZIP+XML, `.gpx` BCFZ filesystem, `.gp3/4/5` binary); Power Tab
- *     routes through MuseScore/TuxGuitar → MusicXML.
+ *     Guitar Pro 3/4/5/6/7/8 AND Power Tab (.ptb) all import natively in-browser
+ *     with zero new deps (`.gp` ZIP+XML, `.gpx` BCFZ filesystem, `.gp3/4/5` and
+ *     `.ptb` binary). See Paths C–G below.
  *
  *  Both chart modes share one ChartPanel: lead-sheet / grid views, inline chord
  *  re-labelling (overrides), whole-chart transpose, and ChordPro / ABC export
@@ -1062,6 +1062,152 @@ function parseGPX(u8, useSharp = true, partIndex = 0) {
   return parseGPIF(new TextDecoder("utf-8").decode(score.data), useSharp, partIndex);
 }
 
+/* ===========================================================================
+ *  PATH G — Power Tab (`.ptb`) import
+ *  --------------------------------------------------------------------------
+ *  Power Tab Editor's `.ptb` is an MFC-`CArchive`-style binary serialization
+ *  (Brad Larsen's format). This is a faithful, zero-dependency port of the
+ *  documented `Deserialize` order (from the open-source powertabeditor's
+ *  `powertabdocument` classes). Nothing is length-prefixed, so EVERY object —
+ *  even effects/diagrams/dynamics we discard — must be consumed exactly to stay
+ *  aligned (clean EOF across the corpus is the validation). We keep each
+ *  position's duration + its notes (string+fret → MIDI via the guitar tuning)
+ *  and emit the SAME `source:"gp"` score shape, so the rest of the app is shared.
+ *
+ *  Layout: header → Guitar Score + Bass Score (each: guitars, chord diagrams,
+ *  floating text, guitar-ins, tempo markers, dynamics, alt endings, SYSTEMS) →
+ *  3 fonts → spacing/fade. A System is a staff line holding several measures
+ *  delimited by barlines; each Position is a beat, each Note packs string+fret
+ *  in one byte (top 3 bits = string from high E, bottom 5 = fret). Targets the
+ *  ubiquitous v1.7 (=4) files; the new-format path also covers v1.5 (=3).
+ * ==========================================================================*/
+function _ptbReader(u8) {
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  const dec = new TextDecoder("latin1");
+  let p = 0;
+  const R = {
+    get pos() { return p; }, get left() { return u8.length - p; },
+    u8() { return dv.getUint8(p++); }, u16() { const v = dv.getUint16(p, true); p += 2; return v; },
+    u32() { const v = dv.getUint32(p, true); p += 4; return v; }, i32() { const v = dv.getInt32(p, true); p += 4; return v; },
+    skip(n) { p += n; }, bytes(n) { const a = u8.subarray(p, p + n); p += n; return a; },
+    count() { const w = R.u16(); return w !== 0xffff ? w : R.u32(); },
+    strLen() { const b = R.u8(); if (b < 0xff) return b; const w = R.u16(); if (w < 0xffff) return w; return R.u32(); },
+    str() { const n = R.strLen(); const s = dec.decode(u8.subarray(p, p + n)); p += n; return s; },
+    classInfo() { const wt = R.u16(); if (wt === 0x7fff) { R.u32(); return; } const ot = (((wt & 0x8000) << 16) | (wt & ~0x8000)) >>> 0; if (ot < 0x80000000) return; if (wt === 0xffff) { R.u16(); const len = R.u16(); R.skip(len); } },
+    vector(fn) { const c = R.count(); const out = []; for (let i = 0; i < c; i++) { R.classInfo(); out.push(fn()); } return out; },
+    smallVec(elem) { const n = R.u8(); return R.bytes(n * elem); },
+    rect() { R.skip(16); },
+  };
+  return R;
+}
+const _ptbNew = (v) => v >= 3;                                                  // 1.5+ uses the modern object layout
+const _ptbTuning = (r) => { r.str(); r.u8(); return { notes: [...r.smallVec(1)] }; }; // notes high→low
+const _ptbGuitar = (r) => { r.u8(); const name = r.str(); r.skip(8); return { name, tuning: _ptbTuning(r) }; };
+const _ptbChordName = (r, v) => { if (!_ptbNew(v)) { r.u8(); r.u8(); r.u16(); r.u8(); } else { r.u16(); r.u8(); r.u16(); r.u8(); } };
+const _ptbChordDiagram = (r, v) => { _ptbChordName(r, v); r.u8(); r.smallVec(1); };
+const _ptbFont = (r) => { r.str(); r.i32(); r.i32(); r.u8(); r.u8(); r.u8(); r.u32(); };
+const _ptbFloatingText = (r, v) => { r.str(); r.rect(); r.u8(); _ptbFont(r); };
+const _ptbGuitarIn = (r) => { r.u16(); r.u8(); r.u8(); r.u16(); };
+const _ptbDynamic = (r, v) => { if (!_ptbNew(v)) { r.u16(); r.u8(); r.u8(); r.u8(); } else { r.u16(); r.u8(); r.u8(); r.u16(); } };
+const _ptbSystemSymbol = (r) => { r.u16(); r.u8(); return r.u32(); };           // returns data (tempo BPM lives in the low word)
+const _ptbTempoMarker = (r) => { const data = _ptbSystemSymbol(r); r.str(); return { data }; };
+const _ptbDirection = (r) => { r.u8(); r.smallVec(2); };
+const _ptbChordText = (r, v) => { r.u8(); _ptbChordName(r, v); };
+const _ptbRhythmSlash = (r) => { r.u8(); r.u8(); r.u32(); };
+const _ptbRehearsal = (r) => { r.u8(); r.str(); };
+const _ptbBarline = (r, v) => { const pos = r.u8(); r.u8(); r.u8() /*keysig*/; const ts = r.u32(); r.u8() /*timesig pulses*/; _ptbRehearsal(r); return { pos, ts }; };
+const _ptbNote = (r) => { const sd = r.u8(); r.u16(); r.smallVec(4); return { string: (sd & 0xe0) >> 5, fret: sd & 0x1f }; };
+const _ptbPosition = (r, v) => { const pos = r.u8(); r.u16(); const data = r.u32(); r.smallVec(4); const notes = r.vector(() => _ptbNote(r)); return { pos, durType: (data >>> 24) & 0xff, dotted: data & 1, dbl: data & 2, notes }; };
+const _ptbStaff = (r, v) => { r.u8(); r.skip(4); return { voices: [r.vector(() => _ptbPosition(r, v)), r.vector(() => _ptbPosition(r, v))] }; };
+function _ptbSystem(r, v) {
+  r.rect(); r.u8() /*endBar*/; r.skip(4);
+  const startBar = _ptbBarline(r, v);
+  r.vector(() => _ptbDirection(r)); r.vector(() => _ptbChordText(r, v)); r.vector(() => _ptbRhythmSlash(r));
+  const staves = r.vector(() => _ptbStaff(r, v));
+  const bars = r.vector(() => _ptbBarline(r, v));
+  return { startBar, staves, bars };
+}
+function _ptbScore(r, v) {
+  const guitars = r.vector(() => _ptbGuitar(r));
+  r.vector(() => _ptbChordDiagram(r, v)); r.vector(() => _ptbFloatingText(r, v)); r.vector(() => _ptbGuitarIn(r));
+  const tempoMarkers = r.vector(() => _ptbTempoMarker(r));
+  r.vector(() => _ptbDynamic(r, v)); r.vector(() => _ptbSystemSymbol(r)) /*alt endings*/;
+  const systems = r.vector(() => _ptbSystem(r, v));
+  return { guitars, tempoMarkers, systems };
+}
+function _ptbHeader(r) {
+  if (r.u32() !== 0x62617470) throw new Error("Not a Power Tab (.ptb) file.");
+  const v = r.u16();
+  const fileType = r.u8();
+  if (fileType === 0) {                                                         // song
+    r.u8(); r.str(); r.str();                                                   // contentType, title, artist
+    const rel = r.u8();
+    if (rel === 0) { r.u8(); r.str(); r.u16(); r.u8(); }                        // audio
+    else if (rel === 1) { r.str(); r.u8(); }                                    // video
+    else if (rel === 2) { r.str(); r.u16(); r.u16(); r.u16(); }                 // bootleg
+    if (r.u8() === 0) { r.str(); r.str(); }                                     // authorType==known → composer, lyricist
+    for (let i = 0; i < 7; i++) r.str();                                        // arranger…bassScoreNotes
+  } else { r.str(); r.str(); r.u16(); r.u8(); r.str(); r.str(); r.str(); }      // lesson
+  return v;
+}
+function _ptbTimeSig(data) {
+  if (data & 0x400000) return { beats: 4, beatType: 4, show: !!(data & 0x100000) }; // common
+  if (data & 0x800000) return { beats: 2, beatType: 2, show: !!(data & 0x100000) }; // cut
+  return { beats: ((data >>> 27) & 0x1f) + 1, beatType: 1 << ((data >>> 24) & 0x7), show: !!(data & 0x100000) };
+}
+function parsePowerTab(u8, useSharp = true, partIndex = 0) {
+  const r = _ptbReader(u8);
+  const v = _ptbHeader(r);
+  const guitarScore = _ptbScore(r, v);
+  const bassScore = _ptbScore(r, v);
+  // (3 document fonts + spacing/fade follow but aren't needed; parse stops here.)
+  const all = [
+    ...guitarScore.guitars.map((g) => ({ g, score: guitarScore, base: 0 })),
+    ...bassScore.guitars.map((g) => ({ g, score: bassScore, base: guitarScore.guitars.length })),
+  ];
+  if (!all.length) throw new Error("No guitars found in the .ptb file.");
+  const parts = all.map((x, i) => ({ index: i, id: String(i), name: (x.g.name || "").trim() || `Guitar ${i + 1}` }));
+  const idx = Math.max(0, Math.min(all.length - 1, partIndex | 0));
+  const sel = all[idx], staffIdx = idx - sel.base, tuning = sel.g.tuning.notes, tunLen = tuning.length;
+  let tempo = null;
+  const tm = guitarScore.tempoMarkers[0] || bassScore.tempoMarkers[0];
+  if (tm) { const bpm = tm.data & 0xffff; if (bpm >= 20 && bpm <= 400) tempo = bpm; }
+
+  const bars = []; let curTS = [4, 4], barNum = 1;
+  for (const sys of sel.score.systems) {
+    const staff = sys.staves[staffIdx]; if (!staff) continue;
+    const positions = staff.voices[0];
+    const barlines = [sys.startBar, ...sys.bars].slice().sort((a, b) => a.pos - b.pos);
+    let maxPos = 1; positions.forEach((p) => { if (p.pos + 1 > maxPos) maxPos = p.pos + 1; }); barlines.forEach((b) => { if (b.pos + 1 > maxPos) maxPos = b.pos + 1; });
+    for (let i = 0; i < barlines.length; i++) {
+      const start = barlines[i].pos, end = i + 1 < barlines.length ? barlines[i + 1].pos : maxPos;
+      const ts = _ptbTimeSig(barlines[i].ts); if (ts.show || barNum === 1) curTS = [ts.beats, ts.beatType];
+      const [bts, btype] = curTS;
+      const onsets = new Map(); let cursor = 0;
+      positions.filter((p) => p.pos >= start && p.pos < end).forEach((pp) => {
+        const durType = pp.durType >= 1 && pp.durType <= 64 ? pp.durType : 4;
+        const durQ = (4 / durType) * (pp.dotted ? 1.5 : pp.dbl ? 1.75 : 1);
+        if (pp.notes.length) {
+          const o = { midis: [], frets: {} };
+          pp.notes.forEach((n) => { const open = tuning[n.string]; if (open !== undefined) { o.midis.push(open + n.fret); const eng = tunLen - 1 - n.string; if (eng >= 0 && eng <= 5 && o.frets[eng] === undefined) o.frets[eng] = n.fret; } });
+          if (o.midis.length) onsets.set(cursor, o);
+        }
+        cursor += durQ;
+      });
+      const qPerBeat = 4 / btype;
+      const raw = [...onsets.entries()].sort((a, b) => a[0] - b[0]).map(([onset, o]) => ({ symbol: symbolForMidis(o.midis, useSharp), midis: [...o.midis].sort((a, b) => a - b), frets: o.frets, onset }));
+      const events = [];
+      raw.forEach((e) => { const last = events[events.length - 1]; if (!last || last.symbol !== e.symbol) events.push(e); });
+      events.forEach((e) => { e.qbeat = e.onset / qPerBeat; e.beat = Math.max(0, Math.min(bts - 1, Math.round(e.qbeat))); });
+      for (let k = 1; k < events.length; k++) if (events[k].beat <= events[k - 1].beat) events[k].beat = Math.min(bts - 1, events[k - 1].beat + 1);
+      events.forEach((e, k) => { e.durBeats = (k + 1 < events.length ? events[k + 1].beat : bts) - e.beat; });
+      _fillTrueDur(events, bts);                                     // true qbeat/qdur for ABC + playback (never 0)
+      bars.push({ number: barNum++, timeSig: [bts, btype], events: events.map(({ onset, ...e }) => e) });
+    }
+  }
+  return { source: "gp", timeSig: bars.length ? bars[0].timeSig : [4, 4], tuning: _tuningName(tuning.length === 6 ? [...tuning].reverse() : null), tempo, bars, parts, partIndex: idx };
+}
+
 /* Detect format from the file head and dispatch to the right parser. */
 async function parseGuitarProOrXML(buf, fileName, useSharp = true, partIndex = 0) {
   const u8 = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
@@ -1069,6 +1215,7 @@ async function parseGuitarProOrXML(buf, fileName, useSharp = true, partIndex = 0
   if (u8[0] === 0x50 && u8[1] === 0x4b) { const xml = await gpUnzip(u8); const sc = parseGPIF(xml, useSharp, partIndex); sc._xml = xml; return sc; }        // GP7/8
   if (head.startsWith("BCFZ") || head.startsWith("BCFS")) { const sc = parseGPX(u8, useSharp, partIndex); sc._gpxbuf = u8; return sc; }                      // GP6 .gpx
   if (head.includes("FICHIER GUITAR PRO")) { const sc = parseGP345(u8, useSharp, partIndex); sc._gpbuf = u8; return sc; }                                  // GP3/4/5
+  if (head.startsWith("ptab")) { const sc = parsePowerTab(u8, useSharp, partIndex); sc._ptbbuf = u8; return sc; }                                          // Power Tab .ptb
   const xml = new TextDecoder("utf-8").decode(u8); const sc = parseMusicXML(xml, useSharp, partIndex); sc._xml = xml; return sc;                            // MusicXML
 }
 
@@ -1426,11 +1573,12 @@ export default function TabDecoderPro() {
   const _reparseScore = (prev, sharp, idx) => {
     if (!prev) return prev;
     let next;
-    if (prev._gpxbuf) next = parseGPX(prev._gpxbuf, sharp, idx);                 // GP6 .gpx
+    if (prev._ptbbuf) next = parsePowerTab(prev._ptbbuf, sharp, idx);           // Power Tab .ptb
+    else if (prev._gpxbuf) next = parseGPX(prev._gpxbuf, sharp, idx);            // GP6 .gpx
     else if (prev._gpbuf) next = parseGP345(prev._gpbuf, sharp, idx);            // GP3/4/5 binary
     else if (prev._xml) next = prev.source === "gp" ? parseGPIF(prev._xml, sharp, idx) : parseMusicXML(prev._xml, sharp, idx);
     else return prev;
-    next._gpbuf = prev._gpbuf; next._xml = prev._xml; next._gpxbuf = prev._gpxbuf; return next;
+    next._gpbuf = prev._gpbuf; next._xml = prev._xml; next._gpxbuf = prev._gpxbuf; next._ptbbuf = prev._ptbbuf; return next;
   };
 
   const onXml = async (e) => {
@@ -1596,18 +1744,18 @@ export default function TabDecoderPro() {
               </>
             ) : (
               <>
-                <SectionLabel C={C}>PATH C/D/E · MUSICXML or GUITAR PRO → CHORD CHART</SectionLabel>
+                <SectionLabel C={C}>PATH C/D/E/F/G · MUSICXML · GUITAR PRO · POWER TAB → CHORD CHART</SectionLabel>
                 {/* No `accept` filter on purpose: iOS maps `accept` extensions to UTIs, and
                     .gp/.gpx/.gp3/.gp4/.gp5/.ptb have no registered UTI, so iOS greys them out
                     (unselectable). Leaving it unset lets every file be picked on all platforms.
-                    Do NOT re-add an extension allowlist here — it breaks Guitar Pro upload on iOS. */}
+                    Do NOT re-add an extension allowlist here — it breaks GP/Power Tab upload on iOS. */}
                 <input ref={xmlRef} type="file" onChange={onXml} style={{ display: "none" }} />
                 <button onClick={() => xmlRef.current && xmlRef.current.click()}
                   style={{ width: "100%", background: C.bg, border: `1px dashed ${C.border}`, color: C.amber, borderRadius: 10, padding: "22px 12px", fontSize: 14, cursor: "pointer", fontFamily: "'IBM Plex Mono', monospace" }}>
-                  ⬆  Upload a MusicXML or Guitar Pro file  (.musicxml / .xml / .gp / .gpx / .gp3 / .gp4 / .gp5)
+                  ⬆  Upload a MusicXML, Guitar Pro or Power Tab file
                 </button>
                 <div style={{ fontSize: 11, color: C.dim, marginTop: 8, lineHeight: 1.6 }}>
-                  Reads <b>real</b> time signature, tuning &amp; rhythm straight from the file — no geometry guessing. Native Guitar Pro: <b>.gp</b> (7/8), <b>.gpx</b> (6), <b>.gp3 / .gp4 / .gp5</b> (legacy binary). For Power Tab, open in TuxGuitar / MuseScore and export MusicXML.
+                  Reads <b>real</b> time signature, tuning &amp; rhythm straight from the file — no geometry guessing. Native: <b>MusicXML</b>, Guitar Pro <b>.gp</b> (7/8) / <b>.gpx</b> (6) / <b>.gp3 / .gp4 / .gp5</b>, and Power Tab <b>.ptb</b>.
                 </div>
                 {xmlErr && <div style={{ marginTop: 10, color: C.red, fontSize: 12 }}>{xmlErr}</div>}
                 {xmlScore && xmlScore.parts && xmlScore.parts.length > 1 && (
