@@ -531,6 +531,55 @@ suppress them (plain fakebook).
 Both blocks are **non-destructive**: CSMP's plain `parseCSMPN` renders the pipe bars and
 ignores `{hybrid}`; `{tab}`/`{hybrid}` only light up in Pro's Slash-Rhythm View.
 
+#### Tuplet `tN` flags in `{hybrid}` (Phase 1 fidelity, 2026-06-11)
+
+`{hybrid}` events now carry CSMP's `tN` flag (e.g. `1:e(Dm7)t3`) for triplet/N-tuplet
+runs, so jazz/shuffle changes round-trip to Pro's triplet brackets instead of being
+mis-spaced on the straight grid.
+
+- **Tuplet is captured, not inferred.** Each rhythm parser already reads the tuplet but
+  discarded it; now it's threaded onto the event as `e.tuplet` (group size, 0 = none):
+  GP3/4/5 via `_gpReadDuration` (side-channel `r._tuplet`, **same bytes** — zero
+  alignment risk) → the beat → `_gpBuildScore`'s onset → event; GP6/7/8 via
+  `_gpRhythmTuplet` (`PrimaryTuplet num`); MusicXML via `<time-modification>
+  <actual-notes>`. `transposeScore` preserves it (object spread). PDF/PowerTab carry 0.
+- **Written note value, not sounding.** A triplet-eighth sounds 1/3 quarter but is
+  *written* as an eighth; the export recovers the notated value (`sounding × N/normal`,
+  `_csmpnTupNormal`: 3→2, 5/6/7→4, 9→8) so it emits `e`, not `s`. CSMP skips its overlap
+  check for same-tuplet events, so the contiguous quarter-grid positions are kept.
+- **No spurious brackets.** `tN` is emitted only when the event sits in a run of **≥2**
+  same-tuplet events — a lone tagged note would draw a bracket over one notehead.
+- **Honest limit (the score model is harmonic):** consecutive *identical* chords collapse
+  to one event (clean lead-sheet behaviour), so a same-chord triplet *strum* is one event,
+  not three — `tN` mainly benefits **distinct-chord** tuplet runs (common in bebop:
+  `Dm7 G7 C` triplet). Verified end-to-end: Anthropology.gp5 → 3 events/3 flags,
+  blue-sky.gp (GP7/8) → 8/8, non-tuplet files → 0 (no false flags).
+
+### Reverse handoff RECEIVER — "Decode this tab" (Phase 2, 2026-06-11)
+
+The loop is now **bidirectional**. A finishing app (CSMP / chord-sheet-maker, same
+GitHub Pages origin → shared localStorage) can hand a raw **GP / MusicXML / Power Tab /
+PDF** file BACK here for recognition with this engine (the strongest fret→chord + key
+engine in the trio — CSMP's GP importer guesses chords with a weaker inline table).
+
+- **Contract (mirror of the forward one):** opened at `?import=decode`, the file bytes
+  ride in `localStorage["ttp:decode:v1"]` as base64: `{ v:1, source, createdAt,
+  filename, b64 }`. No format field — `parseGuitarProOrXML` and the `%PDF` magic-byte
+  check detect the format from the bytes.
+- **Two mount effects** in `TabDecoderPro()`: the first reads + clears the key
+  one-shot, base64-decodes into a `decodeRef` and strips the URL param; the second
+  processes it — `%PDF` → the PDF pipeline (`extractTokens` + `buildChart`, **gated on
+  `pdfReady`** so it waits for PDF.js), else → `parseGuitarProOrXML` → `setMode("xml")`.
+  Both lands set the same state the file inputs do (`xmlScore`/`xmlName` or `chart`), so
+  it renders through the normal ChartPanel and the part picker works. Wrapped in
+  try/catch — a bad payload can never wedge boot.
+- Lands on **part 0** by default (same as a normal upload); the user switches parts.
+- **Validated end-to-end** (headless round-trip probe): a real `blue-sky.gp` →
+  chunked-base64 envelope (217 KB JSON, well inside quota) → `atob` → `Uint8Array`
+  (byte-identical) → `parseGuitarProOrXML` → 165-bar score. The CSMP **sender** is the
+  `Decode tab → Tab Translator Pro ↗` import-menu item (`fileInputDecode` →
+  base64 → `ttp:decode:v1` → `…/Tab-Translator-Pro/?import=decode`).
+
 ### Direct handoff → CSMP (`sendToPro`, the **→ Chord Sheet Maker Pro** button)
 
 Both apps deploy to the **same GitHub Pages origin** (`quantumq1981.github.io`), so

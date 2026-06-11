@@ -65,14 +65,15 @@ surfaces capo/tuning on the score object (a clean, already-noted future task —
 could go in a `; tuning: DADGAD` annotation line (CSMP treats `;`-lines as
 comments, so it's lossless and non-breaking).
 
-### ★★ 6. Reverse link — "Decode this tab" from CSMP / the workbench (med effort)
-Right now the flow is one-way (decode → finish). A reverse button in CSMP or the
-workbench that hands a `.gp`/`.gpx`/`.ptb`/PDF **back** to Tab Translator for
-recognition closes the loop: a user importing a Guitar Pro file into CSMP could
-tap "Re-recognise chords" to get Tab Translator's confidence-scored, key-aware
-reading (often better than CSMP's inline fret-to-chord guess for dense/altered
-voicings). Mechanism: same shared-origin pattern, a `ttp:handoff:v1` key Tab
-Translator reads on load + `?decode=handoff`. (New contract, mirror of v1.)
+### 6. Reverse link — "Decode this tab" from CSMP / the workbench ✅ (2026-06-11)
+The flow is now **bidirectional**. A `Decode tab → Tab Translator Pro ↗` item in CSMP's
+import menu hands a `.gp`/`.gpx`/`.gp3-5`/`.ptb`/`.xml`/PDF file **back** to Tab
+Translator for recognition with this engine. Contract mirrors the forward one:
+`localStorage["ttp:decode:v1"]` (base64 bytes + filename) + `?import=decode`; Tab
+Translator's two on-mount effects decode it and route GP/MusicXML/PowerTab →
+`parseGuitarProOrXML` and PDF → the PDF pipeline (gated on `pdfReady`). Validated by a
+headless byte-identical round-trip on `blue-sky.gp` (165 bars). **Sender:** CSMP
+`index.html` `fileInputDecode`. **Receiver:** `TabDecoderPro.tsx` mount effects.
 
 ### ★ 7. Multi-part → setlist (low value, med effort)
 A multi-part GP/MusicXML file (Tab Translator already has a part picker) could
