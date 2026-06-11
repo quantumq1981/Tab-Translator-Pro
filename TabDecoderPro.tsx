@@ -1365,6 +1365,38 @@ function scoreToChordPro(score, opts = {}) {
   out.push("{end_of_grid}");
   return out.join("\n") + "\n";
 }
+/* ---- CSMPN export: Chord Sheet Maker Pro's NATIVE fake-book source ---------
+ * CSMPN is the source language of chord-sheet-maker-pro (the "finishing" app):
+ * a header block (Title/Composer/Key/Time/Tempo) then `- Section` markers and
+ * pipe-delimited bars (`| C | Am F | G |`). Multiple chords in one bar are
+ * space-separated (standard fake-book grid); an empty/unrecognised bar becomes
+ * `N.C.` (Pro's no-chord token). This is what the cross-app handoff hands over,
+ * so Pro receives its own native syntax — no lossy re-parse. Honours overrides,
+ * transpose (the score is already transposed by the caller), the ♯/♭ setting,
+ * the detected key, and the (possibly user-edited) tempo. Mirrors the
+ * scoreToChordPro grid layout (4 bars/row) for readability. */
+const _csmpnSym = (s) => (!s || s === "—" ? "N.C." : s);
+function scoreToCSMPN(score, opts = {}) {
+  const ov = opts.overrides || {};
+  const [b, bt] = score.timeSig;
+  const out = [`Title: ${opts.title || "Tab Decoder chart"}`];
+  if (opts.composer) out.push(`Composer: ${opts.composer}`);
+  const kn = keyName(opts.key, opts.useSharp !== false);
+  if (kn) out.push(`Key: ${kn}`);
+  out.push(`Time: ${b}/${bt}`);
+  if (opts.tempo) out.push(`Tempo: ${Math.round(opts.tempo)}`);
+  out.push("", "- Chart");
+  let row = [];
+  score.bars.forEach((bar, bi) => {
+    const cell = bar.events.length
+      ? bar.events.map((e) => _csmpnSym(_ovSym(bar, e, ov))).join(" ")
+      : "N.C.";
+    row.push(cell);
+    if ((bi + 1) % 4 === 0) { out.push("| " + row.join(" | ") + " |"); row = []; }
+  });
+  if (row.length) out.push("| " + row.join(" | ") + " |");
+  return out.join("\n") + "\n";
+}
 
 /* ---- MusicXML export: a proper round-trippable chord chart -----------------
  * Emits both a <harmony> (chord symbol, so MuseScore / Guitar Pro show it above
@@ -1853,6 +1885,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   const [semis, setSemis] = useState(0);
   const [exp, setExp] = useState(null); // null | { fmt, text }
   const [copied, setCopied] = useState(false);
+  const [sent, setSent] = useState(false);
   const [bpm, setBpm] = useState(score.tempo || 100);
   const [playing, setPlaying] = useState(false);
   const [playKey, setPlayKey] = useState("");
@@ -1879,10 +1912,42 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   const symOf = (bar, e) => { const v = overrides[`${bar.number}.${e.beat}`]; return v != null ? v : e.symbol; };
   const doExport = (fmt) => {
     const opts = { overrides, title, key, useSharp, tempo: bpm };
-    const text = fmt === "abc" ? scoreToABC(tscore, opts) : fmt === "musicxml" ? scoreToMusicXML(tscore, opts) : scoreToChordPro(tscore, opts);
+    const text = fmt === "abc" ? scoreToABC(tscore, opts)
+      : fmt === "musicxml" ? scoreToMusicXML(tscore, opts)
+      : fmt === "csmpn" ? scoreToCSMPN(tscore, opts)
+      : scoreToChordPro(tscore, opts);
     setExp({ fmt, text }); setCopied(false);
   };
   const copy = () => { try { navigator.clipboard.writeText(exp.text); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch (_) {} };
+  /* ---- Direct handoff → Chord Sheet Maker Pro --------------------------------
+   * Both apps are served from the SAME GitHub Pages origin
+   * (quantumq1981.github.io), so they share localStorage. We write the chart
+   * into the versioned handoff envelope Pro already listens for
+   * (`csm:handoff:v1` + `?import=handoff`; see chord-sheet-maker/docs/
+   * HANDOFF-CONTRACT.md) and navigate to Pro, which loads it via its own
+   * import pipeline. CSMPN is Pro's native source (preferred); ChordPro +
+   * MusicXML ride along as fallbacks. MusicXML is dropped when large to stay
+   * inside the localStorage quota. Same-tab navigation avoids mobile popup
+   * blocking. Wrapped in try/catch so a failure never wedges the UI. */
+  const sendToPro = () => {
+    try {
+      const opts = { overrides, title, key, useSharp, tempo: bpm };
+      const formats = { csmpn: scoreToCSMPN(tscore, opts), chordpro: scoreToChordPro(tscore, opts) };
+      try { const xml = scoreToMusicXML(tscore, opts); if (xml && xml.length < 1500000) formats.musicxml = xml; } catch (_) {}
+      const env = {
+        v: 1,
+        source: "tab-translator-pro",
+        createdAt: new Date().toISOString(),
+        title: title || "Tab Decoder chart",
+        transposeSemitones: semis,
+        enharmonic: useSharp ? "sharps" : "flats",
+        formats,
+      };
+      localStorage.setItem("csm:handoff:v1", JSON.stringify(env));
+      setSent(true);
+      window.location.assign(`${window.location.origin}/chord-sheet-maker-pro/?import=handoff`);
+    } catch (e) { setSent(false); console.warn("Send to Pro failed:", e); }
+  };
   const bump = (d) => setSemis((s) => Math.max(-11, Math.min(11, s + d)));
 
   let prevSig = null;
@@ -1915,10 +1980,13 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
           <span style={{ fontSize: 11, minWidth: 46, textAlign: "center", color: C.dim }}>♩={bpm}</span>
           <button onClick={() => bumpBpm(5)} style={{ ...chip(C), padding: "3px 8px" }}>+</button>
         </span>
-        <span style={{ marginLeft: "auto", display: "inline-flex", gap: 4 }}>
-          {[["chordpro", "ChordPro"], ["abc", "ABC"], ["musicxml", "MusicXML"]].map(([f, lbl]) => (
+        <span style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 4 }}>
+          {[["chordpro", "ChordPro"], ["abc", "ABC"], ["musicxml", "MusicXML"], ["csmpn", "CSMPN"]].map(([f, lbl]) => (
             <button key={f} onClick={() => doExport(f)} style={{ ...chip(C), padding: "3px 9px", borderColor: exp && exp.fmt === f ? C.cyan : C.border, color: exp && exp.fmt === f ? C.cyan : C.dim }}>{lbl}</button>
           ))}
+          <span style={{ width: 1, alignSelf: "stretch", background: C.border, margin: "0 2px" }} />
+          <button onClick={sendToPro} title="Open this chart in Chord Sheet Maker Pro (native CSMPN handoff)"
+            style={{ ...chip(C), padding: "3px 10px", borderColor: sent ? C.green : C.amber, color: sent ? C.green : C.amber, fontWeight: 600 }}>{sent ? "opening Pro ✓" : "→ Chord Sheet Maker Pro"}</button>
         </span>
       </div>
 
@@ -1989,7 +2057,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
       {exp && (
         <div style={{ marginTop: 12 }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-            <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim }}>EXPORT · {exp.fmt === "abc" ? "ABC NOTATION" : exp.fmt === "musicxml" ? "MUSICXML" : "CHORDPRO"}</span>
+            <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim }}>EXPORT · {exp.fmt === "abc" ? "ABC NOTATION" : exp.fmt === "musicxml" ? "MUSICXML" : exp.fmt === "csmpn" ? "CSMPN" : "CHORDPRO"}</span>
             <span style={{ display: "inline-flex", gap: 6 }}>
               <button onClick={copy} style={{ ...chip(C), padding: "3px 9px", borderColor: copied ? C.green : C.border, color: copied ? C.green : C.dim }}>{copied ? "copied ✓" : "copy"}</button>
               <button onClick={() => setExp(null)} style={{ ...chip(C), padding: "3px 9px" }}>close</button>
@@ -1999,6 +2067,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
             style={{ width: "100%", height: 120, resize: "vertical", boxSizing: "border-box", background: C.bg, color: C.text, border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, fontSize: 12, lineHeight: 1.5, fontFamily: "'IBM Plex Mono', monospace", outline: "none" }} />
           {exp.fmt === "abc" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>Real, playable notes + chord symbols — paste into any ABC player (e.g. abcjs / editor at abcnotation.com) to hear it.</div>}
           {exp.fmt === "musicxml" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>Save as <b>.musicxml</b> and open in MuseScore / Guitar Pro — carries chord symbols + notes + meter. Round-trips back into this app.</div>}
+          {exp.fmt === "csmpn" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}><b>Chord Sheet Maker Pro</b>'s native fake-book source. Paste into Pro's editor, or use <b>→ Chord Sheet Maker Pro</b> to send it straight there.</div>}
         </div>
       )}
     </>

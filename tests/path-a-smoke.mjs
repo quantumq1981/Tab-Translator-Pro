@@ -35,7 +35,7 @@ const end = src.indexOf("async function extractTokens"); // browser-only; reprod
 if (start < 0 || end < 0) throw new Error("source markers not found in TabDecoderPro.tsx");
 const engineSrc =
   src.slice(start, end) +
-  "\nexport { buildChart, buildScore, simplifyScore, symbolForFrets, parseMusicXML, parseGP, parseGPIF, gpUnzip, parseGP345, parseGPX, parsePowerTab, scoreToABC, scoreToChordPro, scoreToMusicXML, transposeScore, scoreEventTimes, analyzeKey, romanFor, keyName };\n";
+  "\nexport { buildChart, buildScore, simplifyScore, symbolForFrets, parseMusicXML, parseGP, parseGPIF, gpUnzip, parseGP345, parseGPX, parsePowerTab, scoreToABC, scoreToChordPro, scoreToCSMPN, scoreToMusicXML, transposeScore, scoreEventTimes, analyzeKey, romanFor, keyName };\n";
 
 /* parseMusicXML uses the browser's global DOMParser; the app loads it natively.
  * Headlessly we install @xmldom/xmldom (a TEST-only dep) as that global so the
@@ -164,6 +164,17 @@ expect(/\[M:3\/4\]/.test(abc), "ABC should mark the mid-tune 3/4 change");
 expect(/"A7"/.test(abc), "ABC should carry the A7 override as a chord annotation");
 // C3-E3-G3 → ABC [C,E,G,] (C4/middle-C is "C", so C3 is "C,"), half note = 2 L-units
 expect(/"C"\[C,E,G,\]2/.test(abc), `ABC should voice C3 major as [C,E,G,] half-note, got:\n${abc}`);
+
+/* ---- CSMPN export (Chord Sheet Maker Pro's native source) ----------------- */
+const csmpn = eng.scoreToCSMPN(mx, { overrides, title: "Demo", tempo: 120, key: eng.analyzeKey(mx) });
+expect(/^Title: Demo$/m.test(csmpn), `CSMPN should carry a Title header, got:\n${csmpn}`);
+expect(/^Time: 4\/4$/m.test(csmpn), "CSMPN should carry the Time header");
+expect(/^Tempo: 120$/m.test(csmpn), "CSMPN should carry the Tempo header");
+expect(/^Key: C$/m.test(csmpn), "CSMPN should carry the detected key");
+expect(/^- Chart$/m.test(csmpn), "CSMPN should emit a section marker");
+expect(/\| C G \| A7 \| F \|/.test(csmpn), `CSMPN bars should reflect the override, got:\n${csmpn}`);
+// round-trip: feed the CSMPN bars back as MusicXML-free text — the chord grid survives.
+expect(!/\{start_of_grid\}/.test(csmpn), "CSMPN must NOT use ChordPro grid directives (native pipe bars only)");
 
 /* ---- multi-part: the part picker selects which instrument to chart -------- */
 const mpXml = fs.readFileSync(path.join(here, "fixtures", "sample-multipart.musicxml"), "utf8");
