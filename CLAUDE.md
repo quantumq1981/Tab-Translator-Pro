@@ -531,6 +531,30 @@ suppress them (plain fakebook).
 Both blocks are **non-destructive**: CSMP's plain `parseCSMPN` renders the pipe bars and
 ignores `{hybrid}`; `{tab}`/`{hybrid}` only light up in Pro's Slash-Rhythm View.
 
+#### Tuplet `tN` flags in `{hybrid}` (Phase 1 fidelity, 2026-06-11)
+
+`{hybrid}` events now carry CSMP's `tN` flag (e.g. `1:e(Dm7)t3`) for triplet/N-tuplet
+runs, so jazz/shuffle changes round-trip to Pro's triplet brackets instead of being
+mis-spaced on the straight grid.
+
+- **Tuplet is captured, not inferred.** Each rhythm parser already reads the tuplet but
+  discarded it; now it's threaded onto the event as `e.tuplet` (group size, 0 = none):
+  GP3/4/5 via `_gpReadDuration` (side-channel `r._tuplet`, **same bytes** — zero
+  alignment risk) → the beat → `_gpBuildScore`'s onset → event; GP6/7/8 via
+  `_gpRhythmTuplet` (`PrimaryTuplet num`); MusicXML via `<time-modification>
+  <actual-notes>`. `transposeScore` preserves it (object spread). PDF/PowerTab carry 0.
+- **Written note value, not sounding.** A triplet-eighth sounds 1/3 quarter but is
+  *written* as an eighth; the export recovers the notated value (`sounding × N/normal`,
+  `_csmpnTupNormal`: 3→2, 5/6/7→4, 9→8) so it emits `e`, not `s`. CSMP skips its overlap
+  check for same-tuplet events, so the contiguous quarter-grid positions are kept.
+- **No spurious brackets.** `tN` is emitted only when the event sits in a run of **≥2**
+  same-tuplet events — a lone tagged note would draw a bracket over one notehead.
+- **Honest limit (the score model is harmonic):** consecutive *identical* chords collapse
+  to one event (clean lead-sheet behaviour), so a same-chord triplet *strum* is one event,
+  not three — `tN` mainly benefits **distinct-chord** tuplet runs (common in bebop:
+  `Dm7 G7 C` triplet). Verified end-to-end: Anthropology.gp5 → 3 events/3 flags,
+  blue-sky.gp (GP7/8) → 8/8, non-tuplet files → 0 (no false flags).
+
 ### Direct handoff → CSMP (`sendToPro`, the **→ Chord Sheet Maker Pro** button)
 
 Both apps deploy to the **same GitHub Pages origin** (`quantumq1981.github.io`), so

@@ -457,14 +457,15 @@ function parseMusicXML(xml, useSharp = true, partIndex = 0) {
           if (!isNaN(sNum) && !isNaN(f)) { eng = 6 - sNum; fret = f; if (midi == null) { const open = (tuning || TUNINGS.Standard)[eng]; if (open != null) midi = open + f; } }
         }
         if (midi == null) continue;
-        if (!onsets.has(onset)) onsets.set(onset, { midis: [], frets: {} });
+        const tm = _xFirst(node, "time-modification"); let tup = 0; if (tm) { const an = parseInt(_xChildText(tm, "actual-notes") || "0", 10); if (an > 1) tup = an; }
+        if (!onsets.has(onset)) onsets.set(onset, { midis: [], frets: {}, tuplet: tup });
         const o = onsets.get(onset); o.midis.push(midi); if (eng != null && o.frets[eng] === undefined) o.frets[eng] = fret;
       } else if (tag === "backup") { cursor -= parseInt(_xChildText(node, "duration") || "0", 10) || 0; }
       else if (tag === "forward") { cursor += parseInt(_xChildText(node, "duration") || "0", 10) || 0; }
     }
     const divPerBeat = (divisions * 4) / beatType || divisions;
     const raw = [...onsets.entries()].sort((a, b2) => a[0] - b2[0]).map(([onset, o]) => ({
-      symbol: symbolForMidis(o.midis, useSharp), midis: [...o.midis].sort((a, b2) => a - b2), frets: o.frets, onset,
+      symbol: symbolForMidis(o.midis, useSharp), midis: [...o.midis].sort((a, b2) => a - b2), frets: o.frets, tuplet: o.tuplet || 0, onset,
     }));
     const events = [];
     raw.forEach((e) => { const last = events[events.length - 1]; if (!last || last.symbol !== e.symbol) events.push(e); });
@@ -516,6 +517,12 @@ function _gpRhythmQuarters(r) {
   const tup = _xFirst(r, "PrimaryTuplet"); if (tup) { const n = parseInt(tup.getAttribute("num") || "0", 10), d = parseInt(tup.getAttribute("den") || "0", 10); if (n > 0 && d > 0) q *= d / n; }
   return q;
 }
+/* Tuplet group size (num) of a Rhythm, or 0 — for the {hybrid} `tN` flag. */
+function _gpRhythmTuplet(r) {
+  const tup = r && _xFirst(r, "PrimaryTuplet"); if (!tup) return 0;
+  const n = parseInt(tup.getAttribute("num") || "0", 10);
+  return n > 1 ? n : 0;
+}
 function _gpNoteMidi(note) {
   const me = _gpProp(note, "Midi"); const n = me ? parseInt(_xChildText(me, "Number"), 10) : NaN;
   if (!isNaN(n)) return n;
@@ -556,10 +563,10 @@ function parseGPIF(xml, useSharp = true, partIndex = 0) {
         let cursor = 0;
         _gpIds(_xChildText(voice, "Beats")).forEach((beatId) => {
           const beat = beatMap.get(beatId); if (!beat) return;
-          const rRef = _xFirst(beat, "Rhythm"); const q = _gpRhythmQuarters(rRef && rhythmMap.get(rRef.getAttribute("ref")));
+          const rRef = _xFirst(beat, "Rhythm"); const rEl = rRef && rhythmMap.get(rRef.getAttribute("ref")); const q = _gpRhythmQuarters(rEl); const tup = _gpRhythmTuplet(rEl);
           const noteIds = _gpIds(_xText(_xFirst(beat, "Notes")));
           if (noteIds.length) {
-            if (!onsets.has(cursor)) onsets.set(cursor, { midis: [], frets: {} });
+            if (!onsets.has(cursor)) onsets.set(cursor, { midis: [], frets: {}, tuplet: tup });
             const o = onsets.get(cursor);
             noteIds.forEach((nId) => {
               const note = noteMap.get(nId); if (!note) return;
@@ -581,7 +588,7 @@ function parseGPIF(xml, useSharp = true, partIndex = 0) {
     }
     const qPerBeat = 4 / btype; // a "beat" = one 1/beatType note
     const raw = [...onsets.entries()].filter(([, o]) => o.midis.length).sort((a, b) => a[0] - b[0])
-      .map(([onset, o]) => ({ symbol: symbolForMidis(o.midis, useSharp), midis: [...o.midis].sort((a, b) => a - b), frets: o.frets, onset }));
+      .map(([onset, o]) => ({ symbol: symbolForMidis(o.midis, useSharp), midis: [...o.midis].sort((a, b) => a - b), frets: o.frets, tuplet: o.tuplet || 0, onset }));
     const events = [];
     raw.forEach((e) => { const last = events[events.length - 1]; if (!last || last.symbol !== e.symbol) events.push(e); });
     events.forEach((e) => { e.qbeat = e.onset / qPerBeat; e.beat = Math.max(0, Math.min(bts - 1, Math.round(e.qbeat))); });
@@ -664,9 +671,10 @@ function _gpReader(u8) {
 }
 const _GP_TUPLET = { 3: [3, 2], 5: [5, 4], 6: [6, 4], 7: [7, 4], 9: [9, 8], 10: [10, 8], 11: [11, 8], 12: [12, 8], 13: [13, 8] };
 function _gpReadDuration(r, flags) {
+  r._tuplet = 0;                              // side-channel: tuplet group size of this beat (0 = none)
   let q = 4 / (1 << (r.i8() + 2));            // value: -2→whole(4q) … 0→quarter(1q) … 2→16th(.25q)
   if (flags & 0x01) q *= 1.5;                 // dotted
-  if (flags & 0x20) { const t = _GP_TUPLET[r.i32()]; if (t) q *= t[1] / t[0]; } // tuplet
+  if (flags & 0x20) { const tv = r.i32(); const t = _GP_TUPLET[tv]; if (t) { q *= t[1] / t[0]; r._tuplet = tv; } } // tuplet (same bytes; capture the group size)
   return q;
 }
 function _gpReadBend(r) { r.i8(); r.i32(); const n = r.i32(); for (let i = 0; i < n; i++) { r.i32(); r.i32(); r.bool(); } }
@@ -769,7 +777,7 @@ function _gpReadBeat(r, v, stringCount, tuning, state) {
       if (note) { midis.push(note.midi); frets[6 - s] = note.fret; }
     }
   }
-  return { durQuarters: empty ? 0 : durQuarters, midis, frets };
+  return { durQuarters: empty ? 0 : durQuarters, midis, frets, tuplet: r._tuplet || 0 };
 }
 function parseGP345(u8, useSharp = true, partIndex = 0) {
   const r = _gpReader(u8);
@@ -838,13 +846,13 @@ function _gpBuildScore(tracks, tempo, version, useSharp, partIndex) {
     m.voices.forEach((beats) => {                                     // GP5 has 2 voices; each restarts at beat 0
       let cursor = 0;
       beats.forEach((b) => {
-        if (b.midis.length) { if (!onsets.has(cursor)) onsets.set(cursor, { midis: [], frets: {} }); const o = onsets.get(cursor); b.midis.forEach((x) => o.midis.push(x)); Object.keys(b.frets).forEach((k) => { if (o.frets[k] === undefined) o.frets[k] = b.frets[k]; }); }
+        if (b.midis.length) { if (!onsets.has(cursor)) onsets.set(cursor, { midis: [], frets: {}, tuplet: b.tuplet || 0 }); const o = onsets.get(cursor); b.midis.forEach((x) => o.midis.push(x)); Object.keys(b.frets).forEach((k) => { if (o.frets[k] === undefined) o.frets[k] = b.frets[k]; }); }
         cursor += b.durQuarters;
       });
     });
     const qPerBeat = 4 / btype;
     const raw = [...onsets.entries()].filter(([, o]) => o.midis.length).sort((a, b) => a[0] - b[0])
-      .map(([onset, o]) => ({ symbol: symbolForMidis(o.midis, useSharp), midis: [...o.midis].sort((a, b) => a - b), frets: o.frets, onset }));
+      .map(([onset, o]) => ({ symbol: symbolForMidis(o.midis, useSharp), midis: [...o.midis].sort((a, b) => a - b), frets: o.frets, tuplet: o.tuplet || 0, onset }));
     const events = [];
     raw.forEach((e) => { const last = events[events.length - 1]; if (!last || last.symbol !== e.symbol) events.push(e); });
     events.forEach((e) => { e.qbeat = e.onset / qPerBeat; e.beat = Math.max(0, Math.min(bts - 1, Math.round(e.qbeat))); });
@@ -918,7 +926,7 @@ function _gp5Beat(r, stringCount, tuning, state, gt500) {
   }
   const f2 = r.i16();
   if (f2 & 0x0800) r.u8();                                           // break-secondary-beams count
-  return { durQuarters: empty ? 0 : durQuarters, midis, frets };
+  return { durQuarters: empty ? 0 : durQuarters, midis, frets, tuplet: r._tuplet || 0 };
 }
 function parseGP5(u8, version, useSharp = true, partIndex = 0) {
   const r = _gpReader(u8);
@@ -1381,6 +1389,10 @@ const _csmpnSym = (s) => (!s || s === "—" ? "N.C." : s);
  * any event that overlaps the previous one (`beat < prevBeat + prevBeats`). */
 const _CSMPN_DUR = [["w", 4], ["h", 2], ["q", 1], ["e", 0.5], ["s", 0.25]];
 const _csmpnDurLetter = (q) => { for (const [l, v] of _CSMPN_DUR) if (q + 1e-6 >= v) return l; return "s"; };
+/* Normal-note count for an N-tuplet (largest power of 2 ≤ N): 3→2, 5/6/7→4, 9→8.
+ * Matches CSMP's hrTupletNormal — used to recover a tuplet event's WRITTEN note
+ * value from its (shorter) sounding duration so a triplet-eighth notates as `e`. */
+const _csmpnTupNormal = (n) => { let p = 1; while (p * 2 <= n) p *= 2; return p; };
 /* Cumulative-quarter onset → CSMP hybrid beat position ("1","1&","2",…),
  * mirroring importGuitarPro.js `_cumQToHybridPos` (frac ≥ 0.4 → the "&" off-beat). */
 const _csmpnHybridPos = (cumQ) => { const w = Math.floor(cumQ + 1e-6); return (cumQ - w >= 0.4 ? `${w + 1}&` : String(w + 1)); };
@@ -1435,12 +1447,20 @@ function scoreToCSMPN(score, opts = {}) {
   if (opts.hybrid !== false) {
     const hyb = [];
     score.bars.forEach((bar, bi) => {
-      const lbt = (bar.timeSig || score.timeSig)[1];
-      const toks = bar.events.map((e) => {
+      const lbt = (bar.timeSig || score.timeSig)[1], evs = bar.events;
+      const toks = evs.map((e, ei) => {
         const cumQ = (e.qbeat != null ? e.qbeat : e.beat) * 4 / lbt;
-        const durQ = (e.qdur != null ? e.qdur : e.durBeats) * 4 / lbt;
+        // `tN` tuplet flag, but only when this event sits in a run of ≥2 same-tuplet
+        // events — a lone tagged note would draw a spurious bracket. CSMP brackets
+        // the group and skips its overlap check for same-tuplet events.
+        const tup = e.tuplet | 0;
+        const grouped = tup > 1 && ((ei > 0 && (evs[ei - 1].tuplet | 0) === tup) || (ei + 1 < evs.length && (evs[ei + 1].tuplet | 0) === tup));
+        // Tuplet events: recover the WRITTEN note value (sounding × N/normal) so a
+        // triplet-eighth notates as `e`, not its 1/3-quarter sounding `s`.
+        let durQ = (e.qdur != null ? e.qdur : e.durBeats) * 4 / lbt;
+        if (grouped) durQ *= tup / _csmpnTupNormal(tup);
         const pos = _csmpnHybridPos(cumQ), dur = _csmpnDurLetter(durQ), sym = _csmpnSym(_ovSym(bar, e, ov));
-        return (e.midis && e.midis.length) ? `${pos}:${dur}(${sym})` : `${pos}:r${dur}`;
+        return (e.midis && e.midis.length) ? `${pos}:${dur}(${sym})${grouped ? `t${tup}` : ""}` : `${pos}:r${dur}`;
       });
       if (toks.length) hyb.push(`  bar${bi + 1}: ${toks.join(" ")}`);
     });

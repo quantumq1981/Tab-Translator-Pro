@@ -201,6 +201,27 @@ expect(!/\{tab\b/.test(plain) && !/\{hybrid\b/.test(plain), "tab:false/hybrid:fa
 const richT = eng.transposeScore(richScore, 2, true);
 expect(!/\{tab\b/.test(eng.scoreToCSMPN(richT, {})), "transposed score should NOT emit {tab} (frets are dropped)");
 
+/* ---- CSMPN {hybrid} tuplet `tN` flag (Phase 1 fidelity) ------------------- */
+// An eighth-note triplet of three distinct chords filling beat 1, then a chord on
+// beat 2. Triplet events carry tuplet:3 and notate as eighths (sounding 1/3 quarter
+// → written `e` via the N/normal recovery); the lone beat-2 chord stays un-flagged.
+const tupScore = { timeSig: [4, 4], bars: [
+  { number: 1, events: [
+    { symbol: "Dm7", beat: 0, durBeats: 1, qbeat: 0, qdur: 1 / 3, midis: [50, 53, 57, 60], tuplet: 3 },
+    { symbol: "G7", beat: 0, durBeats: 1, qbeat: 1 / 3, qdur: 1 / 3, midis: [43, 47, 50, 53], tuplet: 3 },
+    { symbol: "C", beat: 1, durBeats: 1, qbeat: 2 / 3, qdur: 1 / 3, midis: [48, 52, 55], tuplet: 3 },
+    { symbol: "F", beat: 1, durBeats: 3, qbeat: 1, qdur: 3, midis: [53, 57, 60], tuplet: 0 },
+  ] },
+] };
+const tcsmpn = eng.scoreToCSMPN(tupScore, { title: "Trip" });
+expect(/bar1: 1:e\(Dm7\)t3 1:e\(G7\)t3 1&:e\(C\)t3 2:h\(F\)/.test(tcsmpn), `triplet run should emit t3 on each grouped eighth (written value e) and leave the lone chord un-flagged, got:\n${tcsmpn}`);
+// a lone tuplet event (no same-tuplet neighbour) must NOT draw a bracket
+const loneScore = { timeSig: [4, 4], bars: [{ number: 1, events: [
+  { symbol: "C", beat: 0, durBeats: 2, qbeat: 0, qdur: 2, midis: [48, 52, 55], tuplet: 3 },
+  { symbol: "G", beat: 2, durBeats: 2, qbeat: 2, qdur: 2, midis: [55, 59, 62], tuplet: 0 },
+] }] };
+expect(!/t3/.test(eng.scoreToCSMPN(loneScore, {})), "a lone tuplet event must not emit a tN bracket");
+
 /* ---- multi-part: the part picker selects which instrument to chart -------- */
 const mpXml = fs.readFileSync(path.join(here, "fixtures", "sample-multipart.musicxml"), "utf8");
 const p0 = eng.parseMusicXML(mpXml, true, 0);
