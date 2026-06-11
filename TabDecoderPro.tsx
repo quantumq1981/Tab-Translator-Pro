@@ -1702,6 +1702,58 @@ export default function TabDecoderPro() {
     setXmlScore((prev) => _reparseScore(prev, useSharp, prev ? prev.partIndex : 0));
   }, [useSharp]);
 
+  /* ---- Reverse handoff RECEIVER — "Decode this tab" from Chord Sheet Maker Pro ----
+   * The finishing apps (same GitHub Pages origin → shared localStorage) can hand a
+   * raw GP/MusicXML/Power Tab/PDF file BACK here for recognition with this engine.
+   * Contract mirrors the forward one: opened at `?import=decode`, the file bytes ride
+   * in `ttp:decode:v1` as base64. We decode once on mount into a ref, then process it
+   * (PDF waits for PDF.js via pdfReady) through the SAME paths the file inputs use, so
+   * it lands on the right mode with a chart. One-shot + try/catch so a bad payload can
+   * never wedge boot. See chord-sheet-maker/docs/HANDOFF-CONTRACT.md. */
+  const decodeRef = useRef(null);
+  const [decodeReq, setDecodeReq] = useState(0);
+  useEffect(() => {
+    try {
+      const p = new URLSearchParams(window.location.search);
+      if (p.get("import") !== "decode") return;
+      const raw = localStorage.getItem("ttp:decode:v1");
+      localStorage.removeItem("ttp:decode:v1"); // one-shot
+      if (window.history && history.replaceState) history.replaceState(null, "", window.location.pathname);
+      if (!raw) return;
+      const env = JSON.parse(raw);
+      if (!env || env.v !== 1 || !env.b64) return;
+      const bin = atob(env.b64), bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      decodeRef.current = { bytes, filename: env.filename || "decoded tab" };
+      setDecodeReq((n) => n + 1);
+    } catch (err) { console.warn("decode handoff skipped:", err); }
+  }, []);
+  useEffect(() => {
+    const d = decodeRef.current; if (!d) return;
+    const isPdf = d.bytes[0] === 0x25 && d.bytes[1] === 0x50 && d.bytes[2] === 0x44 && d.bytes[3] === 0x46; // %PDF
+    if (isPdf && !pdfReady) return; // wait for PDF.js to load
+    decodeRef.current = null;
+    (async () => {
+      if (isPdf) {
+        setMode("pdf"); setPdfErr(""); setPdfBusy(true); setChart(null); clearSel();
+        try {
+          const { tokens, pages } = await extractTokens(d.bytes.buffer);
+          const c = buildChart(tokens);
+          if (!c.measures.length) setPdfErr("No tab measures detected. Is this a digital (text) tab PDF rather than a scan?");
+          setChart({ ...c, pages, fileName: d.filename });
+        } catch (err) { setPdfErr("Parse failed: " + (err && err.message ? err.message : String(err))); }
+        finally { setPdfBusy(false); }
+      } else {
+        setMode("xml"); setXmlErr(""); setXmlScore(null); clearSel();
+        try {
+          const sc = await parseGuitarProOrXML(d.bytes, d.filename, useSharp);
+          if (!sc.bars.length) setXmlErr("No measures found. Is this a MusicXML score or a Guitar Pro file?");
+          setXmlScore(sc); setXmlName(d.filename);
+        } catch (err) { setXmlErr("Parse failed: " + (err && err.message ? err.message : String(err))); }
+      }
+    })();
+  }, [decodeReq, pdfReady]);
+
   const selectPart = (idx) => {
     setXmlScore((prev) => _reparseScore(prev, useSharp, idx));
     clearSel();

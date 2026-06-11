@@ -555,6 +555,31 @@ mis-spaced on the straight grid.
   `Dm7 G7 C` triplet). Verified end-to-end: Anthropology.gp5 → 3 events/3 flags,
   blue-sky.gp (GP7/8) → 8/8, non-tuplet files → 0 (no false flags).
 
+### Reverse handoff RECEIVER — "Decode this tab" (Phase 2, 2026-06-11)
+
+The loop is now **bidirectional**. A finishing app (CSMP / chord-sheet-maker, same
+GitHub Pages origin → shared localStorage) can hand a raw **GP / MusicXML / Power Tab /
+PDF** file BACK here for recognition with this engine (the strongest fret→chord + key
+engine in the trio — CSMP's GP importer guesses chords with a weaker inline table).
+
+- **Contract (mirror of the forward one):** opened at `?import=decode`, the file bytes
+  ride in `localStorage["ttp:decode:v1"]` as base64: `{ v:1, source, createdAt,
+  filename, b64 }`. No format field — `parseGuitarProOrXML` and the `%PDF` magic-byte
+  check detect the format from the bytes.
+- **Two mount effects** in `TabDecoderPro()`: the first reads + clears the key
+  one-shot, base64-decodes into a `decodeRef` and strips the URL param; the second
+  processes it — `%PDF` → the PDF pipeline (`extractTokens` + `buildChart`, **gated on
+  `pdfReady`** so it waits for PDF.js), else → `parseGuitarProOrXML` → `setMode("xml")`.
+  Both lands set the same state the file inputs do (`xmlScore`/`xmlName` or `chart`), so
+  it renders through the normal ChartPanel and the part picker works. Wrapped in
+  try/catch — a bad payload can never wedge boot.
+- Lands on **part 0** by default (same as a normal upload); the user switches parts.
+- **Validated end-to-end** (headless round-trip probe): a real `blue-sky.gp` →
+  chunked-base64 envelope (217 KB JSON, well inside quota) → `atob` → `Uint8Array`
+  (byte-identical) → `parseGuitarProOrXML` → 165-bar score. The CSMP **sender** is the
+  `Decode tab → Tab Translator Pro ↗` import-menu item (`fileInputDecode` →
+  base64 → `ttp:decode:v1` → `…/Tab-Translator-Pro/?import=decode`).
+
 ### Direct handoff → CSMP (`sendToPro`, the **→ Chord Sheet Maker Pro** button)
 
 Both apps deploy to the **same GitHub Pages origin** (`quantumq1981.github.io`), so
