@@ -1376,6 +1376,25 @@ function scoreToChordPro(score, opts = {}) {
  * the detected key, and the (possibly user-edited) tempo. Mirrors the
  * scoreToChordPro grid layout (4 bars/row) for readability. */
 const _csmpnSym = (s) => (!s || s === "—" ? "N.C." : s);
+/* Largest slash-duration letter whose quarter-value is ≤ q. Used so a {hybrid}
+ * event's notated duration never exceeds the gap to the next onset — CSMP drops
+ * any event that overlaps the previous one (`beat < prevBeat + prevBeats`). */
+const _CSMPN_DUR = [["w", 4], ["h", 2], ["q", 1], ["e", 0.5], ["s", 0.25]];
+const _csmpnDurLetter = (q) => { for (const [l, v] of _CSMPN_DUR) if (q + 1e-6 >= v) return l; return "s"; };
+/* Cumulative-quarter onset → CSMP hybrid beat position ("1","1&","2",…),
+ * mirroring importGuitarPro.js `_cumQToHybridPos` (frac ≥ 0.4 → the "&" off-beat). */
+const _csmpnHybridPos = (cumQ) => { const w = Math.floor(cumQ + 1e-6); return (cumQ - w >= 0.4 ? `${w + 1}&` : String(w + 1)); };
+/* Event.frets ({engIdx→fret}, 0 = low E … 5 = high e) → CSMP {tab} voicing string,
+ * ordered high-e (string 1) → low-E (string 6); a string with no fret is muted "x".
+ * The decoder read these frets off the page, so the diagram is the REAL fingering,
+ * not a generic shape. Returns null if nothing is fretted (or frets is absent —
+ * e.g. after transpose, which drops position-specific frets). */
+const _csmpnVoicing = (frets) => {
+  if (!frets) return null;
+  const out = []; let any = false;
+  for (let eng = 5; eng >= 0; eng--) { if (frets[eng] != null) { out.push(String(frets[eng])); any = true; } else out.push("x"); }
+  return any ? out.join(",") : null;
+};
 function scoreToCSMPN(score, opts = {}) {
   const ov = opts.overrides || {};
   const [b, bt] = score.timeSig;
@@ -1395,6 +1414,38 @@ function scoreToCSMPN(score, opts = {}) {
     if ((bi + 1) % 4 === 0) { out.push("| " + row.join(" | ") + " |"); row = []; }
   });
   if (row.length) out.push("| " + row.join(" | ") + " |");
+
+  // {tab} — unique chord voicings read off the page (Event.frets), so CSMP renders
+  // the REAL fingering as a TAB staff + chord-diagram grid, not a generic shape.
+  // First-seen voicing per chord wins (matches the GP importer). Naturally empty
+  // when transposed (transposeScore drops frets), so a wrong fingering is never sent.
+  if (opts.tab !== false) {
+    const tabLines = [], seen = Object.create(null);
+    score.bars.forEach((bar) => bar.events.forEach((e) => {
+      const sym = _csmpnSym(_ovSym(bar, e, ov)), v = _csmpnVoicing(e.frets);
+      if (v && sym !== "N.C." && !seen[sym]) { seen[sym] = true; tabLines.push(`  ${sym}: ${v}`); }
+    }));
+    if (tabLines.length) { out.push("{tab"); tabLines.forEach((l) => out.push(l)); out.push("}"); }
+  }
+
+  // {hybrid} — the REAL onset rhythm (qbeat/qdur, the decoder's true timing) as one
+  // `barN:` line per bar, so CSMP's Slash-Rhythm View shows the actual strum/comp
+  // rhythm instead of even slashes. Beat position is in quarter units (matches the GP
+  // importer); duration is floor-mapped to the gap so CSMP never drops an event.
+  if (opts.hybrid !== false) {
+    const hyb = [];
+    score.bars.forEach((bar, bi) => {
+      const lbt = (bar.timeSig || score.timeSig)[1];
+      const toks = bar.events.map((e) => {
+        const cumQ = (e.qbeat != null ? e.qbeat : e.beat) * 4 / lbt;
+        const durQ = (e.qdur != null ? e.qdur : e.durBeats) * 4 / lbt;
+        const pos = _csmpnHybridPos(cumQ), dur = _csmpnDurLetter(durQ), sym = _csmpnSym(_ovSym(bar, e, ov));
+        return (e.midis && e.midis.length) ? `${pos}:${dur}(${sym})` : `${pos}:r${dur}`;
+      });
+      if (toks.length) hyb.push(`  bar${bi + 1}: ${toks.join(" ")}`);
+    });
+    if (hyb.length) { out.push("{hybrid"); hyb.forEach((l) => out.push(l)); out.push("}"); }
+  }
   return out.join("\n") + "\n";
 }
 
@@ -2067,7 +2118,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
             style={{ width: "100%", height: 120, resize: "vertical", boxSizing: "border-box", background: C.bg, color: C.text, border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, fontSize: 12, lineHeight: 1.5, fontFamily: "'IBM Plex Mono', monospace", outline: "none" }} />
           {exp.fmt === "abc" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>Real, playable notes + chord symbols — paste into any ABC player (e.g. abcjs / editor at abcnotation.com) to hear it.</div>}
           {exp.fmt === "musicxml" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>Save as <b>.musicxml</b> and open in MuseScore / Guitar Pro — carries chord symbols + notes + meter. Round-trips back into this app.</div>}
-          {exp.fmt === "csmpn" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}><b>Chord Sheet Maker Pro</b>'s native fake-book source. Paste into Pro's editor, or use <b>→ Chord Sheet Maker Pro</b> to send it straight there.</div>}
+          {exp.fmt === "csmpn" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}><b>Chord Sheet Maker Pro</b>'s native fake-book source — carries the real fingering (<code>{"{tab}"}</code>) and decoded strum rhythm (<code>{"{hybrid}"}</code>). Paste into Pro's editor, or use <b>→ Chord Sheet Maker Pro</b> to send it straight there.</div>}
         </div>
       )}
     </>

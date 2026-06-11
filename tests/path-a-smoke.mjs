@@ -176,6 +176,31 @@ expect(/\| C G \| A7 \| F \|/.test(csmpn), `CSMPN bars should reflect the overri
 // round-trip: feed the CSMPN bars back as MusicXML-free text — the chord grid survives.
 expect(!/\{start_of_grid\}/.test(csmpn), "CSMPN must NOT use ChordPro grid directives (native pipe bars only)");
 
+/* ---- CSMPN {tab} + {hybrid} fidelity blocks (deterministic synthetic score) -- */
+// Event.frets is {engIdx→fret}, engIdx 0 = low E … 5 = high e. The {tab} voicing
+// must come out high-e→low-E, with absent strings muted ("x").
+const richScore = { timeSig: [4, 4], bars: [
+  { number: 1, events: [
+    { symbol: "G", beat: 0, durBeats: 2, qbeat: 0, qdur: 2, midis: [55, 59, 62], frets: { 0: 3, 1: 2, 2: 0, 3: 0, 4: 0, 5: 3 } },
+    { symbol: "C", beat: 2, durBeats: 2, qbeat: 2, qdur: 2, midis: [48, 52, 55], frets: { 1: 3, 2: 2, 4: 1 } },
+  ] },
+] };
+const rich = eng.scoreToCSMPN(richScore, { title: "Rich" });
+// {tab}: G frets {0:3,1:2,2:0,3:0,4:0,5:3} → eng 5,4,3,2,1,0 = 3,0,0,0,2,3
+expect(/\{tab\b/.test(rich) && /\}/.test(rich), `CSMPN should emit a {tab} block, got:\n${rich}`);
+expect(/^ {2}G: 3,0,0,0,2,3$/m.test(rich), `G voicing should be high-e→low-E "3,0,0,0,2,3", got:\n${rich}`);
+// C frets {1:3,2:2,4:1} → eng 5=x,4=1,3=x,2=2,1=3,0=x = x,1,x,2,3,x
+expect(/^ {2}C: x,1,x,2,3,x$/m.test(rich), `C voicing should mute absent strings, got:\n${rich}`);
+// {hybrid}: G@beat1 (2 beats=half), C@beat3 (2 beats=half) → "bar1: 1:h(G) 3:h(C)"
+expect(/\{hybrid\b/.test(rich), `CSMPN should emit a {hybrid} block, got:\n${rich}`);
+expect(/^ {2}bar1: 1:h\(G\) 3:h\(C\)$/m.test(rich), `hybrid rhythm should place G/C as half-note slashes on beats 1 & 3, got:\n${rich}`);
+// opt-outs: the blocks can be suppressed (plain fakebook)
+const plain = eng.scoreToCSMPN(richScore, { title: "Plain", tab: false, hybrid: false });
+expect(!/\{tab\b/.test(plain) && !/\{hybrid\b/.test(plain), "tab:false/hybrid:false should suppress both blocks");
+// transposed scores drop frets → no {tab} block (a transposed fingering would be wrong)
+const richT = eng.transposeScore(richScore, 2, true);
+expect(!/\{tab\b/.test(eng.scoreToCSMPN(richT, {})), "transposed score should NOT emit {tab} (frets are dropped)");
+
 /* ---- multi-part: the part picker selects which instrument to chart -------- */
 const mpXml = fs.readFileSync(path.join(here, "fixtures", "sample-multipart.musicxml"), "utf8");
 const p0 = eng.parseMusicXML(mpXml, true, 0);
