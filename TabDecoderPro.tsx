@@ -1611,6 +1611,9 @@ async function extractTokens(buf) {
     const tc = await page.getTextContent();
     for (const it of tc.items) {
       const s = (it.str || "").trim();
+      // alphaTab PDFs can emit this text-layer artifact between note names; it
+      // is not tablature data and must not enter downstream chord clustering.
+      if (s === "(single)") continue;
       const m = s.match(/\d+/);
       if (!m) continue;
       tokens.push({ x: it.transform[4], y: vp.height - it.transform[5], val: parseInt(m[0], 10), page: p });

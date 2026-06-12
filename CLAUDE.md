@@ -83,6 +83,9 @@ Layout facts the parser relies on (verified, A3-scale alphaTab render):
 
 - Fret numbers are real text (`ArialMT`), extractable with positions. **Not** a
   raster scan.
+- PDF.js may also surface alphaTab text-layer artifacts such as `(single)`;
+  `extractTokens` discards exact `(single)` tokens before integer extraction so
+  they cannot be clustered into PDF-derived chord labels.
 - Within a staff system the 6 string lines are **evenly spaced in y** (~6.9pt
   on the validation file). Top line = high e.
 - Chords are **columns at distinct x** (~41pt apart on that file).
