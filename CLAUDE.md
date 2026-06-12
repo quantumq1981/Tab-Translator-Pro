@@ -71,6 +71,22 @@ Two different numbers, on purpose:
 lowest-MIDI note in the voicing (before octave-folding). C/E, D/F# etc. depend
 on this. Don’t fold the bass into the chroma set before grabbing it.
 
+## Invariant 5 — Single-note blocks: bare name in the symbol, flag for the UI
+
+A one-pitch-class block (a single note, not a chord) recognises as `{ single:true }`
+and `symbolOf` returns the **bare note name** (`"E"`), NOT `"E (single)"`. The
+single-note fact rides on the `result.single` **flag** only — the readout panel reads
+it to suppress chord-quality details (`best = !result.single ? … : null`).
+
+Why this is a rule: the `" (single)"` text was once baked into the symbol *string*, so
+it flowed verbatim into **`e.symbol`** and out through **every** exporter
+(`scoreToABC`/`scoreToMusicXML`/`scoreToCSMPN`) and the chart label as spurious noise —
+e.g. ABC `"E (single)"[E,,]/2`. It is engine-generated, never a PDF token, so a
+filter in `extractTokens` (a prior attempt) could never catch it. Fixing it at the
+single source (`symbolOf`) cleans every consumer at once; do **not** re-introduce the
+suffix into the string. Guarded by a `npm test` regression (single MIDI → `"E"`; no
+`(single)` in any export; Blue Sky symbols unchanged).
+
 -----
 
 ## Path A — PDF geometry assumptions (READ before editing the parser)

@@ -35,7 +35,7 @@ const end = src.indexOf("async function extractTokens"); // browser-only; reprod
 if (start < 0 || end < 0) throw new Error("source markers not found in TabDecoderPro.tsx");
 const engineSrc =
   src.slice(start, end) +
-  "\nexport { buildChart, buildScore, simplifyScore, symbolForFrets, parseMusicXML, parseGP, parseGPIF, gpUnzip, parseGP345, parseGPX, parsePowerTab, scoreToABC, scoreToChordPro, scoreToCSMPN, scoreToMusicXML, transposeScore, scoreEventTimes, analyzeKey, romanFor, keyName };\n";
+  "\nexport { buildChart, buildScore, simplifyScore, symbolForFrets, symbolForMidis, parseMusicXML, parseGP, parseGPIF, gpUnzip, parseGP345, parseGPX, parsePowerTab, scoreToABC, scoreToChordPro, scoreToCSMPN, scoreToMusicXML, transposeScore, scoreEventTimes, analyzeKey, romanFor, keyName };\n";
 
 /* parseMusicXML uses the browser's global DOMParser; the app loads it natively.
  * Headlessly we install @xmldom/xmldom (a TEST-only dep) as that global so the
@@ -392,16 +392,31 @@ expect(yard6.bars.length === 17 && weight6.bars.length === 63, `GP6 bar counts s
  *      (string+fret → MIDI via tuning) must reconstruct recognizable music. */
 const tunePtb = eng.parsePowerTab(new Uint8Array(fs.readFileSync(path.join(here, "fixtures", "tune.ptb"))), true);
 expect(tunePtb.source === "gp" && tunePtb.tuning === "Standard", `PTB tune expected source=gp / Standard, got ${tunePtb.source} / ${tunePtb.tuning}`);
-const tuneSyms = tunePtb.bars[0].events.map((e) => e.symbol.replace(" (single)", "")).join(" ");
+// single-note events are now the bare note ("E"), NOT "E (single)" — so no .replace() needed.
+const tuneSyms = tunePtb.bars[0].events.map((e) => e.symbol).join(" ");
 expect(tuneSyms === "E B G D A E", `PTB tune (open strings, proves string+fret+tuning math) expected "E B G D A E", got "${tuneSyms}"`);
 // House of the Rising Sun — recognizable 6/8 Am arpeggio; proves measure segmentation + meter
 const hotrs = eng.parsePowerTab(new Uint8Array(fs.readFileSync(path.join(here, "fixtures", "house-of-the-rising-sun.ptb"))), true);
 expect(JSON.stringify(hotrs.bars[0].timeSig) === JSON.stringify([6, 8]), `PTB HotRS expected 6/8 meter, got ${hotrs.bars[0].timeSig.join("/")}`);
-const hotrsBar1 = hotrs.bars[0].events.map((e) => e.symbol.replace(" (single)", "")).join(" ");
+const hotrsBar1 = hotrs.bars[0].events.map((e) => e.symbol).join(" ");
 expect(hotrsBar1 === "A E A C E C G", `PTB HotRS bar 1 expected the Am arpeggio "A E A C E C G", got "${hotrsBar1}"`);
 // the song's chords (Am, C, D, F) appear across the opening bars
-const hotrsRoots = new Set(hotrs.bars.slice(0, 4).flatMap((b) => b.events.map((e) => e.symbol.replace(" (single)", "")[0])));
+const hotrsRoots = new Set(hotrs.bars.slice(0, 4).flatMap((b) => b.events.map((e) => e.symbol[0])));
 expect(["A", "C", "D", "F"].every((r) => hotrsRoots.has(r)), `PTB HotRS opening should span A/C/D/F roots, got ${[...hotrsRoots].join("")}`);
+
+/* ---- single-note symbols carry NO "(single)" artifact (regression) -------
+ * A one-pitch block recognises as the bare note name; the old engine appended
+ * " (single)" to the symbol STRING, which leaked into every export + the chart
+ * label (e.g. ABC `"E (single)"[E]/2`). The single-note fact now lives only on
+ * the `result.single` flag, so every consumer is clean at the single source. */
+expect(eng.symbolForMidis([64], true) === "E", `single MIDI should symbolise as bare "E", got "${eng.symbolForMidis([64], true)}"`);
+expect(eng.symbolForFrets({ 0: 0 }, true) === "E", `single open low-E should symbolise as bare "E", got "${eng.symbolForFrets({ 0: 0 }, true)}"`);
+const oneNote = { timeSig: [4, 4], bars: [{ number: 1, events: [{ symbol: eng.symbolForMidis([64], true), beat: 0, durBeats: 4, qbeat: 0, qdur: 4, midis: [64] }] }] };
+expect(!/\(single\)/.test(eng.scoreToABC(oneNote, {})), "ABC export must not contain (single)");
+expect(!/\(single\)/.test(eng.scoreToCSMPN(oneNote, {})), "CSMPN export must not contain (single)");
+expect(!/\(single\)/.test(eng.scoreToMusicXML(oneNote, {})), "MusicXML export must not contain (single)");
+// no regression on real multi-note recognition (Blue Sky chords are unchanged)
+expect(!score.bars.some((b) => b.events.some((e) => /\(single\)/.test(e.symbol))), "Blue Sky symbols must not contain (single)");
 
 /* ---- report -------------------------------------------------------------- */
 console.log(`PDF.js ${pdfjsLib.version} · ${pages} pages · ${tokens.length} tokens`);

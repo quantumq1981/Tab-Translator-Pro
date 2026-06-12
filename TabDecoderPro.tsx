@@ -156,7 +156,14 @@ function recognise(chroma, chordMask, bassPc) {
 function symbolOf(result, useSharp) {
   if (!result) return "—";
   const names = useSharp ? NOTE_SHARP : NOTE_FLAT;
-  if (result.single) return names[result.roots] + " (single)";
+  // A single-note block is just that note — return the bare name (e.g. "E"), NOT
+  // "E (single)". The annotation used to be baked into the symbol STRING, which
+  // then flowed verbatim into every exporter (ABC/MusicXML/CSMPN) and the chart
+  // label as spurious noise (`"E (single)"[E,,]/2`). The single-note fact is
+  // carried by the `result.single` FLAG instead (the readout panel reads it to
+  // hide chord-quality details), so dropping the suffix here cleans every consumer
+  // at the single source without touching recognition logic or QUALITIES.
+  if (result.single) return names[result.roots];
   const { best, isSlash, bassPc } = result;
   const sym = names[best.root] + best.quality.suffix;
   return isSlash ? `${sym}/${names[bassPc]}` : sym;
