@@ -433,6 +433,14 @@ through the shared shape, so these work identically for Path A and Path C:
   limits: rootless/altered jazz voicings (e.g. Steely Dan) and `7♭9`/`7♯9` chords
   the `QUALITIES` table doesn't model won't always match a lead sheet — Edit +
   Transpose cover the gaps, and MusicXML import is the high-fidelity route.
+  - **Melodic-chart nudge** (`melodic` memo in `ChartPanel`): when **≥50%** of the
+    chart's events are single-note (`midis.length === 1`, over ≥4 events), the chart
+    is a melodic line (a single-note PDF/tab head, or a lead part), not block harmony
+    — so an amber hint banner offers a **Turn on Simplify** button. Gated on `!simplify`
+    (disappears once enabled). Validated against real files: Blue Sky's PDF chord
+    chart and GP rhythm-guitar part read 0% single → no nudge; Blue Sky's lead part
+    and Anthropology's bebop head read 100% → nudge shows. No false positives on the
+    validated chord charts.
 - **Editable chords**: tap-to-relabel in *Edit* mode writes an `overrides` map
   (`"<bar>.<beat>" → symbol`), lifted to the parent so it survives view/transpose
   switches and flows into export. Blank reverts to the detected symbol; edits are
