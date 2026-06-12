@@ -2027,6 +2027,14 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   const base = useMemo(() => (simplify ? simplifyScore(score, useSharp) : score), [simplify, score, useSharp]);
   const tscore = useMemo(() => transposeScore(base, semis, useSharp), [base, semis, useSharp]);
   const key = useMemo(() => analyzeKey(tscore), [tscore]);
+  // "Mostly single notes" → the chart is a melodic line (e.g. a single-note PDF/tab
+  // head), not block harmony. Simplify (1 chord/bar) duration-weights each bar's notes
+  // into one inferred chord, which is the right tool there — so nudge the user to it.
+  const melodic = useMemo(() => {
+    let total = 0, single = 0;
+    score.bars.forEach((b) => b.events.forEach((e) => { total++; if (e.midis && e.midis.length === 1) single++; }));
+    return total >= 4 && single / total >= 0.5;
+  }, [score]);
 
   useEffect(() => { setBpm(score.tempo || 100); }, [score.tempo]);
   const stopPlay = () => { if (player.current) { player.current.stop(); player.current = null; } setPlaying(false); setPlayKey(""); };
@@ -2119,6 +2127,13 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
             style={{ ...chip(C), padding: "3px 10px", borderColor: sent ? C.green : C.amber, color: sent ? C.green : C.amber, fontWeight: 600 }}>{sent ? "opening Pro ✓" : "→ Chord Sheet Maker Pro"}</button>
         </span>
       </div>
+
+      {melodic && !simplify && (
+        <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8, fontSize: 11, color: C.amber, background: "rgba(233,162,75,0.08)", border: `1px solid ${C.amber}`, borderRadius: 8, padding: "7px 10px", marginBottom: 10 }}>
+          <span style={{ flex: "1 1 240px" }}>♪ Mostly single notes — this looks like a melodic line, not block chords. <b>Simplify</b> infers one chord per bar from the notes that sound.</span>
+          <button onClick={() => setSimplify(true)} style={{ ...chip(C), padding: "3px 10px", borderColor: C.amber, color: C.amber, fontWeight: 600 }}>Turn on Simplify</button>
+        </div>
+      )}
 
       {view === "chart" ? (
         <>
