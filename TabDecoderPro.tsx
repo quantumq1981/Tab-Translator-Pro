@@ -1424,15 +1424,22 @@ function scoreToCSMPN(score, opts = {}) {
   out.push(`Time: ${b}/${bt}`);
   if (opts.tempo) out.push(`Tempo: ${Math.round(opts.tempo)}`);
   out.push("", "- Chart");
+  // CSMPN fakebook grammar: ONE bar = ONE whitespace token (parseBarStructures splits
+  // on whitespace → each token is a bar). Multiple chords in a bar are joined with `_`
+  // (Bb7_A7) — NOT spaces, which would make them separate bars. Bars are space-separated,
+  // 4/row. `%` repeats the previous bar; an empty bar is `N.C.`.
   let row = [];
+  let prevCell = null;
   score.bars.forEach((bar, bi) => {
-    const cell = bar.events.length
-      ? bar.events.map((e) => _csmpnSym(_ovSym(bar, e, ov))).join(" ")
+    let cell = bar.events.length
+      ? bar.events.map((e) => _csmpnSym(_ovSym(bar, e, ov))).join("_")
       : "N.C.";
+    if (cell !== "N.C." && cell === prevCell) cell = "%"; // simile: repeat the previous bar
+    else prevCell = cell;
     row.push(cell);
-    if ((bi + 1) % 4 === 0) { out.push("| " + row.join(" | ") + " |"); row = []; }
+    if ((bi + 1) % 4 === 0) { out.push(row.join(" ")); row = []; }
   });
-  if (row.length) out.push("| " + row.join(" | ") + " |");
+  if (row.length) out.push(row.join(" "));
 
   // {tab} — unique chord voicings read off the page (Event.frets), so CSMP renders
   // the REAL fingering as a TAB staff + chord-diagram grid, not a generic shape.
@@ -1473,6 +1480,49 @@ function scoreToCSMPN(score, opts = {}) {
     });
     if (hyb.length) { out.push("{hybrid"); hyb.forEach((l) => out.push(l)); out.push("}"); }
   }
+  return out.join("\n") + "\n";
+}
+
+/* ---- ChordSlashML export: CSMP's beat-slotted notation ----------------------
+ * A DIFFERENT format from the CSMPN fakebook: `[Section]` labels and pipe-delimited
+ * measures whose beat slots are space-separated. Each measure has `_csmlBeats`
+ * slots (4/4→4, 12/8→4, 6/8→2, 9/8→3, 3/4→3); a chord sits on its beat, a bare
+ * (space-separated) `_` holds the previous chord, `.` is a rest before the first
+ * chord, and `A_B` (joined, no space) is a compound beat (two chords share one
+ * slot). Mirrors CSMP's `csmlParse` grammar so it round-trips through the
+ * ChordSlashML live editor. Honours overrides/transpose/♯♭/key/tempo via `opts`. */
+const _csmlBeats = (num, den) => (den === 8 && num % 3 === 0 ? num / 3 : num);
+function scoreToCSML(score, opts = {}) {
+  const ov = opts.overrides || {};
+  const [b, bt] = score.timeSig;
+  const out = [`Title: ${opts.title || "Tab Decoder chart"}`];
+  if (opts.composer) out.push(`Composer: ${opts.composer}`);
+  const kn = keyName(opts.key, opts.useSharp !== false);
+  if (kn) out.push(`Key: ${kn}`);
+  out.push(`Time: ${b}/${bt}`);
+  if (opts.tempo) out.push(`Tempo: ${Math.round(opts.tempo)}`);
+  out.push("", "[Chart]");
+  let row = [];
+  score.bars.forEach((bar, bi) => {
+    const [num, den] = bar.timeSig || score.timeSig;
+    const pulses = Math.max(1, _csmlBeats(num, den));
+    const slots = new Array(pulses).fill(null); // null | [symbol, …]
+    let any = false;
+    bar.events.forEach((e) => {
+      const sym = _csmpnSym(_ovSym(bar, e, ov));
+      if (sym === "N.C.") return;
+      const qb = e.qbeat != null ? e.qbeat : e.beat;
+      const idx = Math.max(0, Math.min(pulses - 1, Math.round((qb * pulses) / num)));
+      if (slots[idx]) slots[idx].push(sym); else slots[idx] = [sym];
+      any = true;
+    });
+    let started = false;
+    const cells = slots.map((s) => { if (s) { started = true; return s.join("_"); } return started ? "_" : "."; });
+    if (!any) { cells[0] = "N.C."; for (let k = 1; k < cells.length; k++) cells[k] = "_"; }
+    row.push(cells.join(" "));
+    if ((bi + 1) % 4 === 0) { out.push("| " + row.join(" | ") + " |"); row = []; }
+  });
+  if (row.length) out.push("| " + row.join(" | ") + " |");
   return out.join("\n") + "\n";
 }
 
@@ -2056,6 +2106,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
     const text = fmt === "abc" ? scoreToABC(tscore, opts)
       : fmt === "musicxml" ? scoreToMusicXML(tscore, opts)
       : fmt === "csmpn" ? scoreToCSMPN(tscore, opts)
+      : fmt === "csml" ? scoreToCSML(tscore, opts)
       : scoreToChordPro(tscore, opts);
     setExp({ fmt, text }); setCopied(false);
   };
@@ -2122,7 +2173,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
           <button onClick={() => bumpBpm(5)} style={{ ...chip(C), padding: "3px 8px" }}>+</button>
         </span>
         <span style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 4 }}>
-          {[["chordpro", "ChordPro"], ["abc", "ABC"], ["musicxml", "MusicXML"], ["csmpn", "CSMPN"]].map(([f, lbl]) => (
+          {[["chordpro", "ChordPro"], ["abc", "ABC"], ["musicxml", "MusicXML"], ["csmpn", "CSMPN"], ["csml", "ChordSlashML"]].map(([f, lbl]) => (
             <button key={f} onClick={() => doExport(f)} style={{ ...chip(C), padding: "3px 9px", borderColor: exp && exp.fmt === f ? C.cyan : C.border, color: exp && exp.fmt === f ? C.cyan : C.dim }}>{lbl}</button>
           ))}
           <span style={{ width: 1, alignSelf: "stretch", background: C.border, margin: "0 2px" }} />
@@ -2205,7 +2256,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
       {exp && (
         <div style={{ marginTop: 12 }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-            <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim }}>EXPORT · {exp.fmt === "abc" ? "ABC NOTATION" : exp.fmt === "musicxml" ? "MUSICXML" : exp.fmt === "csmpn" ? "CSMPN" : "CHORDPRO"}</span>
+            <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim }}>EXPORT · {exp.fmt === "abc" ? "ABC NOTATION" : exp.fmt === "musicxml" ? "MUSICXML" : exp.fmt === "csmpn" ? "CSMPN" : exp.fmt === "csml" ? "CHORDSLASHML" : "CHORDPRO"}</span>
             <span style={{ display: "inline-flex", gap: 6 }}>
               <button onClick={copy} style={{ ...chip(C), padding: "3px 9px", borderColor: copied ? C.green : C.border, color: copied ? C.green : C.dim }}>{copied ? "copied ✓" : "copy"}</button>
               <button onClick={() => setExp(null)} style={{ ...chip(C), padding: "3px 9px" }}>close</button>
@@ -2215,7 +2266,8 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
             style={{ width: "100%", height: 120, resize: "vertical", boxSizing: "border-box", background: C.bg, color: C.text, border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, fontSize: 12, lineHeight: 1.5, fontFamily: "'IBM Plex Mono', monospace", outline: "none" }} />
           {exp.fmt === "abc" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>Real, playable notes + chord symbols — paste into any ABC player (e.g. abcjs / editor at abcnotation.com) to hear it.</div>}
           {exp.fmt === "musicxml" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>Save as <b>.musicxml</b> and open in MuseScore / Guitar Pro — carries chord symbols + notes + meter. Round-trips back into this app.</div>}
-          {exp.fmt === "csmpn" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}><b>Chord Sheet Maker Pro</b>'s native fake-book source — carries the real fingering (<code>{"{tab}"}</code>) and decoded strum rhythm (<code>{"{hybrid}"}</code>). Paste into Pro's editor, or use <b>→ Chord Sheet Maker Pro</b> to send it straight there.</div>}
+          {exp.fmt === "csmpn" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}><b>Chord Sheet Maker Pro</b>'s native fake-book source (one chord = one bar; <code>_</code> splits a bar) — also carries the real fingering (<code>{"{tab}"}</code>) and decoded strum rhythm (<code>{"{hybrid}"}</code>). Paste into Pro's editor, or use <b>→ Chord Sheet Maker Pro</b> to send it straight there.</div>}
+          {exp.fmt === "csml" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}><b>ChordSlashML</b> — Pro's beat-slotted notation (<code>{"|"}</code> measures, <code>_</code> holds, <code>.</code> rests). Paste into Pro's <b>ChordSlashML</b> live editor.</div>}
         </div>
       )}
     </>

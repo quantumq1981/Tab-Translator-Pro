@@ -521,8 +521,17 @@ Time: n/m           ← score.timeSig
 Tempo: …            ← opts.tempo (omitted if absent)
 
 - Chart             ← one CSMPN section marker
-| C | Am F | G | … | ← pipe bars, 4/row; multi-chord bars space-separated
+Bb7 Bb7_A7_D7 Eb6 % ← bars are WHITESPACE-separated, 4/row; one bar = one token
 ```
+
+**CSMPN grammar — get the bar separator right (this was a real bug):** CSMP's
+`parseBarStructures` (chord-sheet-maker-pro/chordProcessing.js) tokenises a bar line
+on **whitespace** — *each whitespace token is one bar*. So a multi-chord bar **must**
+join its chords with `_` (`Bb7_A7_D7`); joining with a space (the old output `| C | Am F | G |`)
+made `Am` and `F` parse as **two separate bars**. Bars are now space-separated single
+tokens; `%` collapses a bar that repeats the previous one (simile); an empty bar is `N.C.`.
+Verified by parsing the output through CSMP's actual `parseCSMPN` + `parseBarStructures`
+(`Bb7 % Eb7_Eo7` → `["Bb7","%","Eb7_Eo7"]`).
 
 **Invariants (don't regress):** the engine spells notes ASCII (`C#`/`Bb`, see
 `NOTE_SHARP`/`NOTE_FLAT`) so tokens are CSMPN-ready with **no** normalisation; the
@@ -632,14 +641,31 @@ exceed the ~2 KB practical URL limit; localStorage has MBs and is shared at the
 origin. The contract is versioned (`:v1` + `v:1`) so an old sender + new receiver
 can never silently misread a payload.
 
-**Validation** (`npm test`): a CSMPN export test asserts the `Title`/`Time`/
-`Tempo`/`Key` headers, the `- Chart` marker, that an edit override surfaces in the
-bars (`| C G | A7 | F |`), and that it does **not** emit ChordPro grid directives.
-A second deterministic test (synthetic 2-event bar with frets) asserts the `{tab}`
-voicings come out high-e→low-E with muted strings (`G: 3,0,0,0,2,3`, `C: x,1,x,2,3,x`),
-the `{hybrid}` rhythm places the two half-note chords on beats 1 & 3
-(`bar1: 1:h(G) 3:h(C)`), that `tab:false`/`hybrid:false` suppress both blocks, and
-that a **transposed** score emits no `{tab}` (frets dropped).
+### `scoreToCSML(score, opts)` — ChordSlashML (a 5th exporter)
+
+ChordSlashML is CSMP's **other** native format (the `window.csml` live editor) — a
+**different grammar** from CSMPN fakebook, so it gets its own exporter:
+`[Section]` labels (square brackets) and **pipe-delimited measures** whose **beat
+slots are space-separated**. Each measure has `_csmlBeats(timeSig)` slots
+(`4/4→4`, `12/8→4`, `6/8→2`, `9/8→3`, `3/4→3` — `den===8 && num%3===0 ? num/3 : num`,
+mirroring CSMP's `beatsPerMeasure`). A chord sits on its beat slot; a **space-separated**
+`_` holds the previous chord; `.` is a leading rest; **`A_B` joined (no spaces)** is a
+compound beat (two chords share one slot). Each event's slot = `round(qbeat·pulses/num)`,
+so the **per-bar meter is honoured** (a mid-tune 3/4 bar emits 3 slots). Example:
+`| C _ G _ | A7 _ _ _ | F _ _ |`. Wired into `doExport` (`"csml"`) + the **ChordSlashML**
+export button. No `{tab}`/`{hybrid}` blocks (those are CSMPN-only).
+
+**Validation** (`npm test` + a cross-app probe): the CSMPN test asserts a multi-chord
+bar uses `_` (`C_G A7 F`, **not** the old space-joined form), the `Title`/`Time`/`Tempo`/
+`Key` headers and `- Chart` marker, and no ChordPro grid directives. The CSML test asserts
+`[Chart]` labels and beat-slotted measures with per-bar meter (`| C _ G _ | A7 _ _ _ | F _ _ |`,
+the last bar 3/4), and a 12/8 measure mapping to 4 slots (`| Bb7 _ A7 _ |`). The `{tab}`/
+`{hybrid}` test (synthetic 2-event bar with frets) asserts the voicings come out
+high-e→low-E with muted strings (`G: 3,0,0,0,2,3`, `C: x,1,x,2,3,x`), the rhythm on beats
+1 & 3 (`bar1: 1:h(G) 3:h(C)`), the `tab:false`/`hybrid:false` opt-outs, and no `{tab}` after
+transpose. **Both formats were round-trip-verified through CSMP's actual `parseCSMPN` +
+`parseBarStructures` and `csml.parse`** — correct bar counts, multi-chord `_`, `%` simile,
+and compound-meter slots, with **zero CSML parse warnings**.
 
 ### Future integration ideas (analysis — partly built)
 

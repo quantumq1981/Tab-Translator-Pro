@@ -35,7 +35,7 @@ const end = src.indexOf("async function extractTokens"); // browser-only; reprod
 if (start < 0 || end < 0) throw new Error("source markers not found in TabDecoderPro.tsx");
 const engineSrc =
   src.slice(start, end) +
-  "\nexport { buildChart, buildScore, simplifyScore, symbolForFrets, symbolForMidis, parseMusicXML, parseGP, parseGPIF, gpUnzip, parseGP345, parseGPX, parsePowerTab, scoreToABC, scoreToChordPro, scoreToCSMPN, scoreToMusicXML, transposeScore, scoreEventTimes, analyzeKey, romanFor, keyName };\n";
+  "\nexport { buildChart, buildScore, simplifyScore, symbolForFrets, symbolForMidis, parseMusicXML, parseGP, parseGPIF, gpUnzip, parseGP345, parseGPX, parsePowerTab, scoreToABC, scoreToChordPro, scoreToCSMPN, scoreToCSML, scoreToMusicXML, transposeScore, scoreEventTimes, analyzeKey, romanFor, keyName };\n";
 
 /* parseMusicXML uses the browser's global DOMParser; the app loads it natively.
  * Headlessly we install @xmldom/xmldom (a TEST-only dep) as that global so the
@@ -175,9 +175,27 @@ expect(/^Time: 4\/4$/m.test(csmpn), "CSMPN should carry the Time header");
 expect(/^Tempo: 120$/m.test(csmpn), "CSMPN should carry the Tempo header");
 expect(/^Key: C$/m.test(csmpn), "CSMPN should carry the detected key");
 expect(/^- Chart$/m.test(csmpn), "CSMPN should emit a section marker");
-expect(/\| C G \| A7 \| F \|/.test(csmpn), `CSMPN bars should reflect the override, got:\n${csmpn}`);
+// CSMPN fakebook grammar: ONE bar = ONE whitespace token; a multi-chord bar joins
+// chords with `_` (Bb7_A7), NOT spaces (which CSMP's parseBarStructures would read as
+// separate bars). mx bar1 = {C,G} → "C_G"; bar2 override A7; bar3 F.
+expect(/^C_G A7 F$/m.test(csmpn), `CSMPN bars: multi-chord bar must use _ (got:\n${csmpn})`);
 // round-trip: feed the CSMPN bars back as MusicXML-free text — the chord grid survives.
 expect(!/\{start_of_grid\}/.test(csmpn), "CSMPN must NOT use ChordPro grid directives (native pipe bars only)");
+
+/* ---- ChordSlashML export (CSMP's beat-slotted notation) ------------------- */
+const csml = eng.scoreToCSML(mx, { overrides, title: "Demo", key: eng.analyzeKey(mx) });
+expect(/^Title: Demo$/m.test(csml) && /^Time: 4\/4$/m.test(csml), "CSML should carry headers");
+expect(/^\[Chart\]$/m.test(csml), "CSML should use [Section] labels (square brackets)");
+// Beat slots follow each bar's own meter: bar1 4/4 C@0 G@2 → "C _ G _"; bar2 4/4 A7;
+// bar3 is the mid-tune 3/4 change → only 3 slots ("F _ _"). `_` holds the prev chord.
+expect(/^\| C _ G _ \| A7 _ _ _ \| F _ _ \|$/m.test(csml), `CSML measures should be beat-slotted (per-bar meter), got:\n${csml}`);
+expect(!/\{/.test(csml), "CSML must NOT emit CSMPN {tab}/{hybrid} blocks (different format)");
+// compound meter: 12/8 → 4 dotted-quarter slots; a chord at qbeat 6 lands on slot 2.
+const c128 = eng.scoreToCSML({ timeSig: [12, 8], bars: [{ number: 1, events: [
+  { symbol: "Bb7", beat: 0, durBeats: 6, qbeat: 0, qdur: 6, midis: [58] },
+  { symbol: "A7", beat: 6, durBeats: 6, qbeat: 6, qdur: 6, midis: [57] },
+] }] }, {});
+expect(/^\| Bb7 _ A7 _ \|$/m.test(c128), `CSML 12/8 should map to 4 slots, got:\n${c128}`);
 
 /* ---- CSMPN {tab} + {hybrid} fidelity blocks (deterministic synthetic score) -- */
 // Event.frets is {engIdx→fret}, engIdx 0 = low E … 5 = high e. The {tab} voicing
