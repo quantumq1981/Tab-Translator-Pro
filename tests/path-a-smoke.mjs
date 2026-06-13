@@ -194,6 +194,27 @@ const c128 = eng.scoreToCSML({ timeSig: [12, 8], bars: [{ number: 1, events: [
 ] }] }, {});
 expect(/^\| Bb7 _ A7 _ \|$/m.test(c128), `CSML 12/8 should map to 4 slots, got:\n${c128}`);
 
+/* ---- sections + repeats + endings carry into both exports --------------- */
+// A score with section labels, a |: … :| repeat, and 1st/2nd endings (the markers
+// GP/MusicXML carry but the export used to drop). Mirrors the GP measure-header /
+// gpif <Section>/<Repeat>/<AlternateEndings> data.
+const structScore = { timeSig: [4, 4], bars: [
+  { number: 1, section: "Intro", repeatStart: true, events: [{ symbol: "C", beat: 0, durBeats: 4, qbeat: 0, qdur: 4, midis: [48] }] },
+  { number: 2, repeatEnd: true, events: [{ symbol: "G", beat: 0, durBeats: 4, qbeat: 0, qdur: 4, midis: [55] }] },
+  { number: 3, section: "Verse", ending: "1", events: [{ symbol: "Am", beat: 0, durBeats: 4, qbeat: 0, qdur: 4, midis: [57] }] },
+  { number: 4, ending: "2", events: [{ symbol: "F", beat: 0, durBeats: 4, qbeat: 0, qdur: 4, midis: [53] }] },
+] };
+const sc = eng.scoreToCSMPN(structScore, { tab: false, hybrid: false });
+expect(/^- Intro$/m.test(sc) && /^- Verse$/m.test(sc), `CSMPN should emit section markers, got:\n${sc}`);
+expect(/\|: C/.test(sc) && /G :\|/.test(sc), `CSMPN should emit |: … :| repeat barlines, got:\n${sc}`);
+expect(/(^|\s)1\. Am(\s|$)/m.test(sc) && /(^|\s)2\. F(\s|$)/m.test(sc), `CSMPN should emit 1./2. ending tokens, got:\n${sc}`);
+const sl = eng.scoreToCSML(structScore, {});
+expect(/^\[Intro\]$/m.test(sl) && /^\[Verse\]$/m.test(sl), `CSML should emit [Section] labels, got:\n${sl}`);
+expect(/^\|: C _ _ _ \| G _ _ _ :\|$/m.test(sl), `CSML should emit |: … :| repeat barlines, got:\n${sl}`);
+expect(/^\[1st Ending\]$/m.test(sl) && /^\[2nd Ending\]$/m.test(sl), `CSML should emit [Nth Ending] labels, got:\n${sl}`);
+// a section-less score still falls back to one - Chart / [Chart] block (mx fixture, above)
+expect(/^- Chart$/m.test(csmpn) && /^\[Chart\]$/m.test(csml), "section-less score → - Chart / [Chart]");
+
 /* ---- CSMPN {tab} + {hybrid} fidelity blocks (deterministic synthetic score) -- */
 // Event.frets is {engIdx→fret}, engIdx 0 = low E … 5 = high e. The {tab} voicing
 // must come out high-e→low-E, with absent strings muted ("x").
