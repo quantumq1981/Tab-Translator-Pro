@@ -353,13 +353,14 @@ function buildScore(chart, useSharp, beatsPerBar = 4) {
 function simplifyScore(score, useSharp) {
   const bars = score.bars.map((bar) => {
     const sig = bar.timeSig || score.timeSig;
+    const mk = { section: bar.section, repeatStart: bar.repeatStart, repeatEnd: bar.repeatEnd, ending: bar.ending }; // carry markers
     const pcW = new Array(12).fill(0);
     let any = false;
     for (const e of bar.events) {
       const w = Math.max(0.25, e.durBeats || 1);
       for (const m of e.midis || []) { pcW[m % 12] += w; any = true; }
     }
-    if (!any) return { number: bar.number, timeSig: bar.timeSig, events: [] };
+    if (!any) return { number: bar.number, timeSig: bar.timeSig, ...mk, events: [] };
     const maxW = Math.max(...pcW);
     const chroma = [];
     for (let pc = 0; pc < 12; pc++) if (pcW[pc] >= maxW * 0.2) chroma.push(pc); // drop weak passing tones
@@ -375,7 +376,7 @@ function simplifyScore(score, useSharp) {
       midis = result.best.quality.intervals.map((i) => rootMidi + i);
       if (result.isSlash) midis = [36 + result.bassPc, ...midis];
     } else midis = bassMidi === Infinity ? [] : [bassMidi];
-    return { number: bar.number, timeSig: bar.timeSig, events: [{ symbol, beat: 0, durBeats: sig[0], midis, frets: undefined }] };
+    return { number: bar.number, timeSig: bar.timeSig, ...mk, events: [{ symbol, beat: 0, durBeats: sig[0], midis, frets: undefined }] };
   });
   return { ...score, bars, simplified: true };
 }
@@ -481,7 +482,17 @@ function parseMusicXML(xml, useSharp = true, partIndex = 0) {
     events.forEach((e, i) => { e.durBeats = (i + 1 < events.length ? events[i + 1].beat : beats) - e.beat; });
     _fillTrueDur(events, beats);
     const number = parseInt(measure.getAttribute("number") || String(mi + 1), 10);
-    bars.push({ number, timeSig: [beats, beatType], events: events.map(({ onset, ...e }) => e) });
+    // section/repeat/ending markers: <rehearsal> text, <barline><repeat>/<ending>
+    const reh = _xFirst(measure, "rehearsal");
+    const section = (reh && _xText(reh).trim()) || "";
+    let repeatStart = false, repeatEnd = false, ending = null;
+    _xEls(measure, "barline").forEach((bl) => {
+      const rep = _xFirst(bl, "repeat"); const dir = rep && rep.getAttribute("direction");
+      if (dir === "forward") repeatStart = true; else if (dir === "backward") repeatEnd = true;
+      const end = _xFirst(bl, "ending"); const n = end && end.getAttribute("number");
+      if (end && (end.getAttribute("type") === "start") && n) ending = String(n).split(/[,\s]+/)[0];
+    });
+    bars.push({ number, timeSig: [beats, beatType], section: section || undefined, repeatStart, repeatEnd, ending, events: events.map(({ onset, ...e }) => e) });
   });
   // tempo: <sound tempo="…"> if present, else a <metronome> per-minute (assume
   // it's a quarter-note BPM). null → callers default (e.g. 100 for playback).
@@ -561,6 +572,14 @@ function parseGPIF(xml, useSharp = true, partIndex = 0) {
     const tt = _xChildText(mb, "Time");
     if (tt && /^\d+\/\d+$/.test(tt)) lastSig = tt.split("/").map((n) => parseInt(n, 10));
     const [bts, btype] = lastSig;
+    // section/repeat/ending markers the gpif carries but we used to ignore
+    const secEl = _xFirst(mb, "Section");
+    const section = (secEl && (_xChildText(secEl, "Text") || "").trim()) || "";
+    const repEl = _xFirst(mb, "Repeat");
+    const repeatStart = !!(repEl && repEl.getAttribute("start") === "true");
+    const repeatEnd = !!(repEl && repEl.getAttribute("end") === "true");
+    const altTxt = (_xChildText(mb, "AlternateEndings") || "").trim();
+    const ending = altTxt ? altTxt.split(/\s+/)[0] : null;
     const barIds = _gpIds(_xChildText(mb, "Bars"));
     const bar = barMap.get(barIds[idx]);
     const onsets = new Map(); // onsetQuarters -> { midis:[], frets:{} }
@@ -602,7 +621,7 @@ function parseGPIF(xml, useSharp = true, partIndex = 0) {
     for (let i = 1; i < events.length; i++) if (events[i].beat <= events[i - 1].beat) events[i].beat = Math.min(bts - 1, events[i - 1].beat + 1);
     events.forEach((e, i) => { e.durBeats = (i + 1 < events.length ? events[i + 1].beat : bts) - e.beat; });
     _fillTrueDur(events, bts);
-    bars.push({ number: mi + 1, timeSig: [bts, btype], events: events.map(({ onset, ...e }) => e) });
+    bars.push({ number: mi + 1, timeSig: [bts, btype], section: section || undefined, repeatStart, repeatEnd, ending, events: events.map(({ onset, ...e }) => e) });
   });
 
   // tempo: first <Automation><Type>Tempo</Type> … <Value>BPM ref</Value>
@@ -677,6 +696,8 @@ function _gpReader(u8) {
   return R;
 }
 const _GP_TUPLET = { 3: [3, 2], 5: [5, 4], 6: [6, 4], 7: [7, 4], 9: [9, 8], 10: [10, 8], 11: [11, 8], 12: [12, 8], 13: [13, 8] };
+// GP alternate-ending byte (bitmask of repeat passes) → a 1-based ending label, or null.
+const _gpEndingLabel = (b) => (b ? String(Math.round(Math.log2(b & -b)) + 1) : null);
 function _gpReadDuration(r, flags) {
   r._tuplet = 0;                              // side-channel: tuplet group size of this beat (0 = none)
   let q = 4 / (1 << (r.i8() + 2));            // value: -2→whole(4q) … 0→quarter(1q) … 2→16th(.25q)
@@ -804,16 +825,19 @@ function parseGP345(u8, useSharp = true, partIndex = 0) {
   const measureCount = r.i32();
   const trackCount = r.i32();
   // --- measure headers (timeSig, inherited) ---
-  const headers = []; let num = 4, den = 4;
+  const headers = [], meta = []; let num = 4, den = 4;
   for (let m = 0; m < measureCount; m++) {
     const flags = r.u8();
     if (flags & 0x01) num = r.i8();
     if (flags & 0x02) den = r.i8();
-    if (flags & 0x08) r.i8();                                        // repeat close
-    if (flags & 0x10) r.u8();                                        // alternate ending
-    if (flags & 0x20) { r.intByteString(); r.skip(4); }             // marker name + color
+    const repeatStart = !!(flags & 0x04);                           // |: (flag only, no bytes)
+    const repeatEnd = (flags & 0x08) ? (r.i8(), true) : false;      // repeat close (count byte)
+    const ending = _gpEndingLabel((flags & 0x10) ? r.u8() : 0);     // alternate ending bitmask
+    let section = "";
+    if (flags & 0x20) { section = (r.intByteString() || "").trim(); r.skip(4); } // marker = section
     if (flags & 0x40) { r.i8(); r.i8(); }                           // key sig change
     headers.push([num, den]);
+    meta.push({ section, repeatStart, repeatEnd, ending });
   }
   // --- tracks ---
   const tracks = [];
@@ -838,7 +862,7 @@ function parseGP345(u8, useSharp = true, partIndex = 0) {
       const beatCount = r.i32();
       const beats = [];
       for (let b = 0; b < beatCount; b++) beats.push(_gpReadBeat(r, v, tr.stringCount, tr.tuning, state[t]));
-      tr.measures.push({ timeSig: headers[m], voices: [beats] });
+      tr.measures.push({ timeSig: headers[m], meta: meta[m], voices: [beats] });
     }
   }
   return _gpBuildScore(tracks, tempo, version, useSharp, partIndex);
@@ -866,7 +890,8 @@ function _gpBuildScore(tracks, tempo, version, useSharp, partIndex) {
     for (let i = 1; i < events.length; i++) if (events[i].beat <= events[i - 1].beat) events[i].beat = Math.min(bts - 1, events[i - 1].beat + 1);
     events.forEach((e, i) => { e.durBeats = (i + 1 < events.length ? events[i + 1].beat : bts) - e.beat; });
     _fillTrueDur(events, bts);
-    return { number: mi + 1, timeSig: [bts, btype], events: events.map(({ onset, ...e }) => e) };
+    const md = m.meta || {};
+    return { number: mi + 1, timeSig: [bts, btype], section: md.section || undefined, repeatStart: !!md.repeatStart, repeatEnd: !!md.repeatEnd, ending: md.ending || null, events: events.map(({ onset, ...e }) => e) };
   });
   return { source: "gp", timeSig: bars.length ? bars[0].timeSig : [4, 4], tuning: _tuningName(tr.tuning ? [...tr.tuning].reverse() : null), tempo, bars, parts, partIndex: idx };
 }
@@ -956,20 +981,23 @@ function parseGP5(u8, version, useSharp = true, partIndex = 0) {
   const measureCount = r.i32();
   const trackCount = r.i32();
   // --- measure headers ---
-  const headers = []; let num = 4, den = 4;
+  const headers = [], meta = []; let num = 4, den = 4;
   for (let m = 0; m < measureCount; m++) {
     if (m > 0) r.skip(1);
     const flags = r.u8();
     if (flags & 0x01) num = r.i8();
     if (flags & 0x02) den = r.i8();
-    if (flags & 0x08) r.i8();                                        // repeat close
-    if (flags & 0x20) { r.intByteString(); r.skip(4); }             // marker
+    const repeatStart = !!(flags & 0x04);                           // |: (flag only)
+    const repeatEnd = (flags & 0x08) ? (r.i8(), true) : false;      // repeat close (count byte)
+    let section = "";
+    if (flags & 0x20) { section = (r.intByteString() || "").trim(); r.skip(4); } // marker = section
     if (flags & 0x40) { r.i8(); r.i8(); }                           // key sig
-    if (flags & 0x10) r.u8();                                        // alt ending
+    const ending = _gpEndingLabel((flags & 0x10) ? r.u8() : 0);     // alt ending bitmask
     if (flags & 0x03) r.skip(4);                                     // time-sig beams
     if (!(flags & 0x10)) r.skip(1);
     r.u8();                                                          // triplet feel
     headers.push([num, den]);
+    meta.push({ section, repeatStart, repeatEnd, ending });
   }
   // --- tracks ---
   const tracks = [];
@@ -1006,7 +1034,7 @@ function parseGP5(u8, version, useSharp = true, partIndex = 0) {
         voices.push(beats);
       }
       if (r.pos < u8.length) r.u8();                                 // line break (absent on a final measure — PyGuitarPro reads default 0)
-      tr.measures.push({ timeSig: headers[m], voices });
+      tr.measures.push({ timeSig: headers[m], meta: meta[m], voices });
     }
   }
   return _gpBuildScore(tracks, tempo, version, useSharp, partIndex);
@@ -1423,23 +1451,27 @@ function scoreToCSMPN(score, opts = {}) {
   if (kn) out.push(`Key: ${kn}`);
   out.push(`Time: ${b}/${bt}`);
   if (opts.tempo) out.push(`Tempo: ${Math.round(opts.tempo)}`);
-  out.push("", "- Chart");
+  out.push("");
   // CSMPN fakebook grammar: ONE bar = ONE whitespace token (parseBarStructures splits
   // on whitespace → each token is a bar). Multiple chords in a bar are joined with `_`
-  // (Bb7_A7) — NOT spaces, which would make them separate bars. Bars are space-separated,
-  // 4/row. `%` repeats the previous bar; an empty bar is `N.C.`.
-  let row = [];
-  let prevCell = null;
-  score.bars.forEach((bar, bi) => {
-    let cell = bar.events.length
-      ? bar.events.map((e) => _csmpnSym(_ovSym(bar, e, ov))).join("_")
-      : "N.C.";
-    if (cell !== "N.C." && cell === prevCell) cell = "%"; // simile: repeat the previous bar
-    else prevCell = cell;
+  // (Bb7_A7) — NOT spaces, which would make them separate bars. `|:`/`:|` are repeat
+  // barline tokens; `1.`/`2.` mark endings; `- Name` starts a section; `%` repeats the
+  // previous bar; an empty bar is `N.C.`. ~4 bars/row.
+  const hasSections = score.bars.some((bar) => bar.section);
+  let row = [], prevCell = null, curSection = null, n = 0;
+  const flush = () => { if (row.length) { out.push(row.join(" ")); row = []; } };
+  if (!hasSections) out.push("- Chart");
+  score.bars.forEach((bar) => {
+    if (hasSections && bar.section && bar.section !== curSection) { flush(); out.push("- " + bar.section); curSection = bar.section; prevCell = null; n = 0; }
+    if (bar.repeatStart) row.push("|:");
+    if (bar.ending) row.push(bar.ending + ".");
+    let cell = bar.events.length ? bar.events.map((e) => _csmpnSym(_ovSym(bar, e, ov))).join("_") : "N.C.";
+    if (cell !== "N.C." && cell === prevCell) cell = "%"; else prevCell = cell;
     row.push(cell);
-    if ((bi + 1) % 4 === 0) { out.push(row.join(" ")); row = []; }
+    if (bar.repeatEnd) row.push(":|");
+    if (++n % 4 === 0) { flush(); }
   });
-  if (row.length) out.push(row.join(" "));
+  flush();
 
   // {tab} — unique chord voicings read off the page (Event.frets), so CSMP renders
   // the REAL fingering as a TAB staff + chord-diagram grid, not a generic shape.
@@ -1492,6 +1524,7 @@ function scoreToCSMPN(score, opts = {}) {
  * slot). Mirrors CSMP's `csmlParse` grammar so it round-trips through the
  * ChordSlashML live editor. Honours overrides/transpose/♯♭/key/tempo via `opts`. */
 const _csmlBeats = (num, den) => (den === 8 && num % 3 === 0 ? num / 3 : num);
+const _ordinal = (s) => { const k = parseInt(s, 10); return k === 1 ? "1st" : k === 2 ? "2nd" : k === 3 ? "3rd" : k + "th"; };
 function scoreToCSML(score, opts = {}) {
   const ov = opts.overrides || {};
   const [b, bt] = score.timeSig;
@@ -1501,12 +1534,13 @@ function scoreToCSML(score, opts = {}) {
   if (kn) out.push(`Key: ${kn}`);
   out.push(`Time: ${b}/${bt}`);
   if (opts.tempo) out.push(`Tempo: ${Math.round(opts.tempo)}`);
-  out.push("", "[Chart]");
-  let row = [];
-  score.bars.forEach((bar, bi) => {
+  out.push("");
+  // each bar → its beat-slot string + repeat-barline flags; grouped into `[Section]`
+  // (and `[Nth Ending]`) label blocks; rendered 4 measures/row with `|`/`|:`/`:|`.
+  const mlist = score.bars.map((bar) => {
     const [num, den] = bar.timeSig || score.timeSig;
     const pulses = Math.max(1, _csmlBeats(num, den));
-    const slots = new Array(pulses).fill(null); // null | [symbol, …]
+    const slots = new Array(pulses).fill(null);
     let any = false;
     bar.events.forEach((e) => {
       const sym = _csmpnSym(_ovSym(bar, e, ov));
@@ -1519,10 +1553,30 @@ function scoreToCSML(score, opts = {}) {
     let started = false;
     const cells = slots.map((s) => { if (s) { started = true; return s.join("_"); } return started ? "_" : "."; });
     if (!any) { cells[0] = "N.C."; for (let k = 1; k < cells.length; k++) cells[k] = "_"; }
-    row.push(cells.join(" "));
-    if ((bi + 1) % 4 === 0) { out.push("| " + row.join(" | ") + " |"); row = []; }
+    return { beats: cells.join(" "), repStart: !!bar.repeatStart, repEnd: !!bar.repeatEnd, section: bar.section || "", ending: bar.ending || null };
   });
-  if (row.length) out.push("| " + row.join(" | ") + " |");
+  const hasSec = mlist.some((m) => m.section || m.ending);
+  if (!hasSec) out.push("[Chart]");
+  // render a run of measures as one barlined line (`|: A | B :|`), handling abutting repeats.
+  const renderRow = (ms) => {
+    const t = [];
+    ms.forEach((m, i) => {
+      if (i === 0) t.push(m.repStart ? "|:" : "|");
+      else { const p = ms[i - 1]; if (p.repEnd) t.push(":|"); if (m.repStart) t.push("|:"); if (!p.repEnd && !m.repStart) t.push("|"); }
+      t.push(m.beats);
+    });
+    t.push(ms[ms.length - 1].repEnd ? ":|" : "|");
+    return t.join(" ");
+  };
+  let curSec = null, curEnd = null, run = [];
+  const flush = () => { if (run.length) { out.push(renderRow(run)); run = []; } };
+  mlist.forEach((m) => {
+    if (m.section && m.section !== curSec) { flush(); out.push("[" + m.section + "]"); curSec = m.section; curEnd = null; }
+    if (m.ending && m.ending !== curEnd) { flush(); out.push("[" + _ordinal(m.ending) + " Ending]"); curEnd = m.ending; }
+    run.push(m);
+    if (run.length === 4) flush();
+  });
+  flush();
   return out.join("\n") + "\n";
 }
 

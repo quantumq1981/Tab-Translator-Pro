@@ -667,6 +667,33 @@ transpose. **Both formats were round-trip-verified through CSMP's actual `parseC
 `parseBarStructures` and `csml.parse`** — correct bar counts, multi-chord `_`, `%` simile,
 and compound-meter slots, with **zero CSML parse warnings**.
 
+#### Sections + repeats + endings (structure round-trips, 2026-06-13)
+
+A decoded chart now carries the **section labels, repeat barlines and 1st/2nd endings**
+the source files already encode — captured (not inferred), the same way tuplets were:
+
+- **Score model:** each bar gains optional `section` (label that starts at this bar),
+  `repeatStart`/`repeatEnd` (bool), and `ending` (`"1"`/`"2"`/… or null).
+- **Capture sites (zero alignment risk — read the bytes/elements already present):**
+  - **parseGPIF** (GP6/7/8/GPX) — gpif `<Section><Text>`, `<Repeat start/end>`, `<AlternateEndings>`.
+  - **parseGP345** (GP3/4) — measure-header flags `0x04` (`|:`, flag only), `0x08`
+    (`:|` + count byte), `0x10` (alt-ending bitmask → `_gpEndingLabel`), `0x20` (marker = section).
+    Threaded via a parallel `meta[]` array → `tr.measures[m].meta` → `_gpBuildScore` → bar.
+  - **parseGP5** — same flags, different byte order (marker before key-sig before alt-ending).
+  - **parseMusicXML** — `<rehearsal>` text, `<barline><repeat direction>` (`forward`/`backward`),
+    `<ending number type="start">`.
+  - PDF/PowerTab carry none. `transposeScore` (object spread) and `simplifyScore`
+    (explicit `mk` carry) preserve all four fields.
+- **Emit:** `scoreToCSMPN` groups bars into `- Section` blocks and emits `|:`/`:|` barline
+  tokens + `1.`/`2.` ending tokens. `scoreToCSML` emits `[Section]` labels, `|:`/`:|` barlines
+  (with a token builder that handles abutting repeats), and endings as `[1st Ending]`/
+  `[2nd Ending]` labels (CSML's grammar has no inline ending token — matches the user's
+  example). A section-less score still falls back to one `- Chart` / `[Chart]` block.
+- **Verified on real GP through CSMP's parsers (0 warnings):** *Steely Dan – Black Cow*
+  → 5 sections (`-Intro -Verse -Chorus …` / `[Intro] [Verse] …`); *Robben Ford – Revelation*
+  → sections + `|:`/`:|` + `1.`/`2.` tokens (CSMPN) and `[1st Ending]`/`[2nd Ending]` (CSML).
+  Deterministic unit test covers all three markers in both formats.
+
 ### Future integration ideas (analysis — partly built)
 
 See `docs/INTEGRATION-IDEAS.md` for the full write-up. **Shipped:** the `{tab}`
