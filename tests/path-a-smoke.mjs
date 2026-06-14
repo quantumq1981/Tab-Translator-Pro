@@ -381,14 +381,14 @@ expect(kc27 === "C7" && kc28 === "C7", `KC bars 27-28 expected C7/C7 (the PDF mi
 const peg4 = eng.parseGP345(new Uint8Array(fs.readFileSync(path.join(repo, "Steely Dan - Peg.gp4"))), true, 3);
 expect(peg4.parts[3].name === "Rhythm guitar", `Peg gp4 track 3 expected "Rhythm guitar", got "${peg4.parts[3].name}"`);
 const peg4Bars = peg4.bars.slice(0, 5).map((b) => [...new Set(b.events.map((e) => e.symbol))].join(" ")).join(" | ");
-expect(peg4Bars === "Gmaj7 | F#7 | Fmaj7 | E7 | D#maj7", `Peg gp4 bars 1-5 expected jazz changes, got "${peg4Bars}"`);
+expect(peg4Bars === "Gmaj7 | F#7 | Fmaj7 | E7 | Ebmaj7", `Peg gp4 bars 1-5 expected jazz changes, got "${peg4Bars}"`);
 
 // GP5 — both sub-formats: Anthropology (v5.00, 2 tracks, part picker) + Au Privave (v5.10)
 const anth5 = eng.parseGP345(new Uint8Array(fs.readFileSync(path.join(repo, "Charlie Parker - Anthropology.gp5"))), true, 1);
 expect(anth5.source === "gp" && anth5.tempo === 184 && anth5.tuning === "Standard", `GP5 v5.00 expected tempo 184 / Standard, got ${anth5.tempo} / ${anth5.tuning}`);
 expect(anth5.parts.length === 2 && anth5.parts[1].name === "Chords", `GP5 expected 2 parts incl. "Chords", got ${anth5.parts.map((p) => p.name).join(", ")}`);
 const anth5Bars = anth5.bars.slice(0, 4).map((b) => [...new Set(b.events.map((e) => e.symbol))].join(" ")).join(" | ");
-expect(anth5Bars === "Gm7/A# G7 | Cm7 F7 | Gm7/A# Gm7 | C7 F7", `GP5 Anthropology "Chords" bars 1-4 expected rhythm changes, got "${anth5Bars}"`);
+expect(anth5Bars === "Gm7/Bb G7 | Cm7 F7 | Gm7/Bb Gm7 | C7 F7", `GP5 Anthropology "Chords" bars 1-4 expected rhythm changes, got "${anth5Bars}"`);
 const auPriv5 = eng.parseGP345(new Uint8Array(fs.readFileSync(path.join(repo, "Charlie Parker - Au Privave.gp5"))), true, 0);
 expect(auPriv5.bars.length === 14 && auPriv5.tempo === 220 && auPriv5.tuning === "Standard", `GP5 v5.10 Au Privave expected 14 bars / tempo 220 / Standard, got ${auPriv5.bars.length} / ${auPriv5.tempo} / ${auPriv5.tuning}`);
 
@@ -414,7 +414,7 @@ const yard6 = await eng.parseGPX(new Uint8Array(fs.readFileSync(path.join(repo, 
 expect(yard6.source === "gp" && yard6.tempo === 224 && yard6.tuning === "Standard", `GP6 Yardbird expected tempo 224 / Standard, got ${yard6.tempo} / ${yard6.tuning}`);
 expect(yard6.bars.length === 17, `GP6 Yardbird expected 17 bars, got ${yard6.bars.length}`);
 const yard6Bars = yard6.bars.slice(1, 7).map((b) => [...new Set(b.events.map((e) => e.symbol))].join(" ")).join(" | ");
-expect(yard6Bars === "Em7 | Am6/F# D#aug/B | Em7 | C#aug/A | Dm7 | Gm6/E C#aug/A", `GP6 Yardbird "simple chords" (String+Fret) unexpected: "${yard6Bars}"`);
+expect(yard6Bars === "Em7 | Am6/F# Ebaug/B | Em7 | C#aug/A | Dm7 | Gm6/E C#aug/A", `GP6 Yardbird "simple chords" (String+Fret) unexpected: "${yard6Bars}"`);
 // The Weight — String+Fret guitar, key of A (recognizable chords)
 const weight6 = await eng.parseGPX(new Uint8Array(fs.readFileSync(path.join(repo, "band-the_weight.gpx"))), true, 0);
 expect(weight6.bars[0].events.some((e) => e.symbol === "C#m") && weight6.bars[0].events.some((e) => e.symbol === "F#m"), `GP6 The Weight bar 1 expected C#m + F#m, got ${weight6.bars[0].events.map((e) => e.symbol).join(" ")}`);

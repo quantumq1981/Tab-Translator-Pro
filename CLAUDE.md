@@ -354,8 +354,8 @@ still routes through MuseScore/TuxGuitar → MusicXML.
 `E A A E E A A E`, decodes **Kid Charlemagne**'s Rhythm-Guitar bars 27–28 to the
 correct **`C7`** (the very bars the PDF path mis-anchored to `Fm7` — three
 importers now agree on the geometry-defeating case), reads **Peg.gp4**'s jazz
-changes `Gmaj7 | F#7 | Fmaj7 | E7 | D#maj7`, and decodes **GP5** both ways:
-**Anthropology** (v5.00) `Chords` track → `Gm7/A# G7 | Cm7 F7 | …` rhythm changes
+changes `Gmaj7 | F#7 | Fmaj7 | E7 | Ebmaj7`, and decodes **GP5** both ways:
+**Anthropology** (v5.00) `Chords` track → `Gm7/Bb G7 | Cm7 F7 | …` rhythm changes
 and **Au Privave** (v5.10). A dev-time PyGuitarPro cross-check matched **2445/2446
 measures** across the GP3/4 files and **4806/4806** across six GP5 files (v5.00 and
 v5.10, single- and multi-track) — the lone GP3/4 diff is one passing tone in a
@@ -385,7 +385,7 @@ as `Tone(<Step> = chromatic 0–11)` + `Octave(<Number>)` → `octave·12 + step
 **Validation** (`npm test`): PyGuitarPro **cannot read GPX**, so correctness rests
 on the decompressor producing a coherent score (a single bit error in the LZ
 back-references cascades into garbage). `parseGPX` decodes **Yardbird Suite**'s
-`simple chords` track to `Em7 | Am6/F# D#aug/B | Em7 | C#aug/A | Dm7 | …`, **The
+`simple chords` track to `Em7 | Am6/F# Ebaug/B | Em7 | C#aug/A | Dm7 | …`, **The
 Weight** to its key-of-A guitar chords (`C#m`/`F#m` in bar 1, via String+Fret), and
 **My Favorite Things**' McCoy-Tyner piano part to 48 populated bars (via the
 Tone+Octave encoding) — across 5 diverse `.gpx` files (32–736 KB gpif).
@@ -556,6 +556,14 @@ made `Am` and `F` parse as **two separate bars**. Bars are now space-separated s
 tokens; `%` collapses a bar that repeats the previous one (simile); an empty bar is `N.C.`.
 Verified by parsing the output through CSMP's actual `parseCSMPN` + `parseBarStructures`
 (`Bb7 % Eb7_Eo7` → `["Bb7","%","Eb7_Eo7"]`).
+
+**Family enharmonic default (2026-06-14):** the engine's DEFAULT spelling
+(`useSharp=true`, the "Default ♯♭" toggle) is the family-wide table **`C C# D Eb E F
+F# G Ab A Bb B`** — ALWAYS `Bb · C# · Eb · F# · Ab`, never `A#/Db/D#/Gb/G#`. This is
+`NOTE_SHARP` (renamed in spirit; the constant still drives `symbolOf`/`fretToMidi`);
+the "Flats ♭" toggle (`NOTE_FLAT`) remains the explicit all-flats override. Smoke-test
+expectations updated accordingly (`Peg` → `… E7 | Ebmaj7`; Anthropology → `Gm7/Bb …`;
+Yardbird → `… Ebaug/B …`) — same pitch classes, family-default spelling.
 
 **Invariants (don't regress):** the engine spells notes ASCII (`C#`/`Bb`, see
 `NOTE_SHARP`/`NOTE_FLAT`) so tokens are CSMPN-ready with **no** normalisation; the
