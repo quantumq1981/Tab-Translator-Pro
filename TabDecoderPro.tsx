@@ -44,7 +44,9 @@ const TUNINGS = {
   Standard: [40, 45, 50, 55, 59, 64], // E2 A2 D3 G3 B3 E4  (index 0 = lowest)
   "Drop D": [38, 45, 50, 55, 59, 64], // D2 A2 D3 G3 B3 E4
 };
-const NOTE_SHARP = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+// Family enharmonic DEFAULT (always): Bb, C#, Eb, F#, Ab — never A#/Db/D#/Gb/G#.
+// This is the default spelling (useSharp=true); NOTE_FLAT is the explicit all-flats override.
+const NOTE_SHARP = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"];
 const NOTE_FLAT  = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"];
 const INTERVAL_LABELS = ["R", "♭2", "2", "♭3", "3", "4", "♭5", "5", "♭6", "6", "♭7", "7"];
 
@@ -1963,7 +1965,7 @@ export default function TabDecoderPro() {
                   </Control>
                   <Control C={C} label="SPELLING">
                     <div style={{ display: "flex", gap: 6 }}>
-                      <button onClick={() => setUseSharp(true)} style={{ ...toggle(C), ...(useSharp ? activeToggle(C) : {}) }}>Sharps ♯</button>
+                      <button onClick={() => setUseSharp(true)} style={{ ...toggle(C), ...(useSharp ? activeToggle(C) : {}) }}>Default ♯♭</button>
                       <button onClick={() => setUseSharp(false)} style={{ ...toggle(C), ...(!useSharp ? activeToggle(C) : {}) }}>Flats ♭</button>
                     </div>
                   </Control>
