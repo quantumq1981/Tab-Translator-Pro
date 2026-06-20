@@ -105,6 +105,36 @@ contract guards for the module split (every import is exported, engine stays
 React-free / persistence-free) and the persistence rails (feature-detect,
 try/catch, localStorage fallback, one-shot restore).
 
+### Parse Web Worker (since 2026-06-20 — Roadmap Wave 1 #2 → #3)
+
+Dense binary parsers (`parseGP345`/`parsePowerTab`) are pure-JS byte loops that
+can block the main thread for 100s of ms — noticeable jank on mobile Safari. They
+now run **off-thread** in a module Worker that imports the **same** transpiled
+engine the UI uses (the loader publishes it at a Blob URL, `window.__TTP_ENGINE_URL__`)
+— one engine, no copy, no drift. Lives in `TabDecoderPro.tsx` (browser-only glue;
+`engine.tsx` stays pure).
+
+- **RPC:** `_engineRPC(fn, args)` posts `{id, fn, args}` to the worker, which does
+  `E[fn](...args)` and posts the result back. `parseScoreOffThread(bytes, …)` is
+  the entry the upload/decode/restore sites call. The returned score is
+  structured-cloneable (plain fields + `_xml` string / `_gpbuf`/`_gpxbuf`/`_ptbbuf`
+  Uint8Array — verified no DOM nodes / functions leak onto it).
+- **HONEST LIMIT — only DOMParser-free formats run in the worker.** `DOMParser` is
+  **window-only** (absent in Workers), so the XML paths (MusicXML, GP6/7/8 gpif)
+  stay main-thread; routing (`_workerableBytes`) sends only **GP3/4/5**
+  (`FICHIER GUITAR PRO`) and **Power Tab** (`ptab`) off-thread. The browser's native
+  XML parser is fast C++, so the main-thread XML paths aren't the jank source. A
+  future option is a tiny worker-side XML shim to cover gpif too.
+- **PROGRESSIVE ENHANCEMENT:** every off-thread call **falls back to the identical
+  main-thread engine call** if the worker is missing/errors, so correctness NEVER
+  depends on the worker — it is pure offloading. This RPC infra is also the home
+  for the Wave 3 ONNX classifier. Browser-only — smoke-test on hardware. `npm test`
+  statically guards the rails (loader publishes the URL; module worker; routing
+  gated to binary formats; main-thread fallback present).
+- **Not yet off-thread:** `_reparseScore` (♯♭ / part-switch) stays synchronous on
+  the main thread to preserve the functional-`setState` updater pattern; route it
+  through the worker in a follow-on once view-decoupling (Wave 2 #6) lifts that state.
+
 -----
 
 ## Invariant 1 — Chord masks are DERIVED, never hardcoded
@@ -908,9 +938,7 @@ contract). Build strictly in this order; each wave depends on the prior.
    unblocks the Worker, ONNX, audio, and cross-trio engine sharing.
 2. ✅ **OPFS persistence** — DONE 2026-06-20. See "Session persistence" below.
    Substrate for step 4.
-3. **Web Worker offloading** — run the `raw bytes → score` pipeline (now importable
-   from `engine.tsx`) off the main thread via a Blob-URL worker. PDF.js already
-   workers; extend the pattern.
+3. ✅ **Web Worker offloading** — DONE 2026-06-20. See "Parse Web Worker" below.
 4. **Memory eviction + OPFS handoff** — `_reparseScore` reads buffers from OPFS
    instead of holding `_gpbuf`/`_gpxbuf` in state; move the CSMP handoff payload to
    `opfs:handoff:v1` to kill the 1.5 MB MusicXML drop.
