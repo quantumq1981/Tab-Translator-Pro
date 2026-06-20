@@ -568,6 +568,34 @@ expect(q([48, 51, 55, 58]) === "Cm7", `m7 must stay Cm7 (not m9), got ${q([48, 5
 // doesn't change this; the assertion just guards that 6/9 didn't start grabbing plain 6ths.
 expect(q([48, 52, 55, 57]) === "Am7/C", `{C E G A} stays Am7/C (m7 out-ranks the enharmonic 6; 6/9 must not override), got ${q([48, 52, 55, 57])}`);
 
+/* ---- Wave 3 #10: chord-quality classifier + confidence-gated arbiter -------
+ * Pure-JS matmul+softmax brain (weights code-gen'd by scripts/train_chord_classifier.py).
+ * The engine stays the ORACLE; the classifier is a gated second opinion. */
+const vec = (pcs) => { const v = new Array(12).fill(0); pcs.forEach((p) => { v[((p % 12) + 12) % 12] = 1; }); return v; };
+const reco = (midis) => { const n = eng.normalise(midis.map((m) => ({ midi: m }))); return eng.recognise(n.chroma, n.chordMask, n.bassPc); };
+// the classifier recognises each canonical (root-relative) quality
+expect(eng.classifyChromaQuality(vec([0, 4, 7]), 0).suffix === "", `classifier: C major -> major, got "${eng.classifyChromaQuality(vec([0, 4, 7]), 0).suffix}"`);
+expect(eng.classifyChromaQuality(vec([0, 3, 7]), 0).suffix === "m", "classifier: C minor -> m");
+expect(eng.classifyChromaQuality(vec([0, 4, 7, 10]), 0).suffix === "7", "classifier: dom7 -> 7");
+expect(eng.classifyChromaQuality(vec([0, 4, 7, 11]), 0).suffix === "maj7", "classifier: maj7");
+expect(eng.classifyChromaQuality(vec([0, 3, 7, 10]), 0).suffix === "m7", "classifier: m7");
+// root-relative: a D-minor voicing classified at root 2 → m
+expect(eng.classifyChromaQuality(vec([2, 5, 9]), 2).suffix === "m", "classifier root-relative: D minor -> m");
+expect(eng.classifyChromaQuality([0, 0, 0], 0) === null, "classifier rejects a non-12-length input");
+// arbiter CONTRACT: a confident engine is NEVER overridden
+const confident = reco([48, 52, 55]); // clean C major → conf ≈ 1
+expect(confident.best.confidence >= 0.999, `clean C major engine conf should be ~1, got ${confident.best.confidence}`);
+expect(eng.arbitrateChord(confident, vec([0, 4, 7])).source === "engine", "confident engine is never overridden");
+// unsure engine + a clearly-minor chroma → classifier second opinion adopted (same root, quality m)
+const unsure = reco([48, 52, 55]); unsure.best = { ...unsure.best, confidence: 0.5 };
+const a2 = eng.arbitrateChord(unsure, vec([0, 3, 7]));
+expect(a2.source === "classifier" && a2.result.best.quality.suffix === "m", `unsure engine + minor chroma -> classifier m, got ${a2.source}/${a2.result.best.quality.suffix}`);
+// ...but only if the model clears minModel — raise the bar and the oracle stands
+expect(eng.arbitrateChord(unsure, vec([0, 3, 7]), { minModel: 0.999 }).source === "engine", "model below minModel -> keep the oracle");
+// single-note / null results bypass the classifier entirely
+expect(eng.arbitrateChord({ single: true }, vec([0])).source === "engine", "single-note -> engine");
+expect(eng.arbitrateChord(null, vec([0, 4, 7])).source === "engine", "null result -> engine");
+
 /* ---- single-note symbols carry NO "(single)" artifact (regression) -------
  * A one-pitch block recognises as the bare note name; the old engine appended
  * " (single)" to the symbol STRING, which leaked into every export + the chart

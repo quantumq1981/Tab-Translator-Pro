@@ -142,6 +142,86 @@ function recognise(chroma, chordMask, bassPc) {
   const best = candidates[0];
   return { best, candidates: candidates.slice(0, 4), isSlash: bassPc !== null && best.root !== bassPc, bassPc };
 }
+/* ============================================================================
+ *  Wave 3 #10 — chord-QUALITY classifier ("confidence-gated second opinion")
+ *  ---------------------------------------------------------------------------
+ *  The rule-based engine (`recognise`/`QUALITIES`) is the ORACLE and the test
+ *  oracle — it is deterministic and near-optimal on a binary pitch-class SET. A
+ *  classifier earns its keep only on a *weighted / noisy* chroma (duration-
+ *  weighted, partial/missing tones) — the engine's honest limits. So this is a
+ *  tiny multinomial-logistic "brain": `logits = W·x + b`, softmax → quality.
+ *
+ *  WHY pure-JS matmul, not onnxruntime-web: GitHub Pages can't set COOP/COEP, so
+ *  WASM threads (SharedArrayBuffer) are unavailable; and a 8×12 matrix needs no
+ *  runtime at all. This forward pass is identical in interface to an ONNX tensor
+ *  pass (`x[12] → {quality, confidence}`), so a real `.onnx` swaps in later by
+ *  replacing ONLY the body of `classifyChromaQuality` — the arbiter contract,
+ *  the tests and the worker boundary stay unchanged. Weights are code-gen'd by
+ *  `scripts/train_chord_classifier.py` (dependency-free, reproducible, seed 42).
+ *  Embedded (not a fetched asset) BECAUSE it is tiny and that keeps it offline-
+ *  robust on iOS — the "fetch the asset" rule is for the heavy future .onnx. */
+const CHORD_CLASSIFIER = {
+  classes: ["", "m", "7", "maj7", "m7", "dim", "aug", "sus4"],     // engine QUALITIES suffixes ("" = major)
+  norm: "max",
+  b: [0.22299, 0.14269, -0.45136, -0.37546, -0.43408, 0.32545, 0.33729, 0.23247],
+  W: [
+    [0.16717, 0.04228, -0.08087, -1.18053, 1.70873, -0.64426, -0.26747, 1.07138, -0.61144, 0.12675, -1.38973, -1.03141],
+    [0.28647, -0.09507, -0.02508, 2.2766, -1.49303, -0.60558, -0.88541, 0.90926, -0.38505, -0.00372, -1.53736, -0.41836],
+    [-0.40378, -0.10314, -0.00908, -1.3822, 1.62302, -0.44682, -0.2799, 0.44578, -0.55382, -0.04742, 3.16329, -0.71437],
+    [-0.41551, 0.01669, 0.00743, -0.97114, 1.2358, -0.4881, -0.26313, 0.67177, -0.52533, -0.0776, -1.00586, 3.60941],
+    [-0.44967, -0.04078, -0.03005, 1.91916, -1.68262, -0.53368, -0.58095, 0.64204, -0.25289, -0.08868, 2.93858, -0.30714],
+    [0.24664, 0.07649, 0.05301, 1.6307, -1.09595, -0.32717, 2.95273, -2.16418, -0.38524, 0.08537, -0.73232, -0.18955],
+    [0.37015, 0.02595, 0.02336, -0.94849, 1.26823, -0.30684, -0.34252, -2.32559, 3.048, 0.00085, -0.61341, -0.48118],
+    [0.19853, 0.07758, 0.06128, -1.3441, -1.56419, 3.35246, -0.33336, 0.74954, -0.33422, 0.00446, -0.82318, -0.4674],
+  ],
+};
+/* Forward pass: a 12-d chroma (weighted or binary) + a root pitch-class → the
+ * most likely QUALITY at that root. Rotates the chroma to root-relative, max-
+ * normalises (matching training), runs W·x+b → softmax. Returns the engine
+ * QUALITIES suffix, a probability, and the full distribution. Pure + sync. */
+function classifyChromaQuality(chroma, root = 0) {
+  if (!Array.isArray(chroma) || chroma.length !== 12) return null;
+  const r = ((root % 12) + 12) % 12;
+  const x = new Array(12);
+  for (let i = 0; i < 12; i++) x[i] = chroma[(i + r) % 12] || 0;   // root-relative
+  const mx = Math.max(...x) || 1;
+  for (let i = 0; i < 12; i++) x[i] /= mx;                          // max-norm
+  const { W, b, classes } = CHORD_CLASSIFIER;
+  const z = W.map((row, k) => { let s = b[k]; for (let j = 0; j < 12; j++) s += row[j] * x[j]; return s; });
+  const m = Math.max(...z);
+  const e = z.map((zk) => Math.exp(zk - m));
+  const sum = e.reduce((a, c) => a + c, 0) || 1;
+  const probs = e.map((ek) => ek / sum);
+  let bi = 0; for (let k = 1; k < probs.length; k++) if (probs[k] > probs[bi]) bi = k;
+  return { suffix: classes[bi], confidence: probs[bi], probs };
+}
+/* The CONTRACT (Wave 3 #10): the engine is the supreme oracle. The classifier is
+ * consulted ONLY when the engine is unsure (Jaccard confidence < `gate`), and it
+ * can adopt the model's quality only when the model is itself confident
+ * (`minModel`). A confident engine is NEVER overridden. Returns the engine result
+ * shape, tagged with `source` and (when consulted) `secondOpinion`. PURE — same
+ * signature a real ONNX inference would slot behind, so the wiring never changes.
+ *
+ * NOTE for the live integration: surface `source === "classifier"` as a
+ * SUPPLEMENTARY readout, do not silently rewrite the chart symbol, until it's
+ * device-validated — that preserves the validated corpus (the oracle's output). */
+function arbitrateChord(engineResult, chroma, opts = {}) {
+  const gate = opts.gate != null ? opts.gate : 0.75;
+  const minModel = opts.minModel != null ? opts.minModel : 0.8;
+  if (!engineResult || engineResult.single || !engineResult.best)
+    return { result: engineResult, source: "engine", secondOpinion: null };
+  const conf = engineResult.best.confidence || 0;
+  if (conf >= gate) return { result: engineResult, source: "engine", secondOpinion: null };
+  const op = classifyChromaQuality(chroma, engineResult.best.root);  // engine keeps the ROOT
+  if (!op) return { result: engineResult, source: "engine", secondOpinion: null };
+  const q = QUALITIES.find((x) => x.suffix === op.suffix) || null;
+  const secondOpinion = q ? { root: engineResult.best.root, quality: q, confidence: op.confidence } : null;
+  if (secondOpinion && op.confidence > minModel && q !== engineResult.best.quality) {
+    const best = { ...engineResult.best, quality: q, confidence: op.confidence };
+    return { result: { ...engineResult, best }, source: "classifier", secondOpinion };
+  }
+  return { result: engineResult, source: "engine", secondOpinion }; // unsure ⇒ keep the oracle
+}
 function symbolOf(result, useSharp) {
   if (!result) return "—";
   const names = useSharp ? NOTE_SHARP : NOTE_FLAT;
@@ -1846,6 +1926,9 @@ export {
   fretToMidi,
   normalise,
   recognise,
+  CHORD_CLASSIFIER,
+  classifyChromaQuality,
+  arbitrateChord,
   symbolOf,
   symbolForFrets,
   symbolForMidis,
