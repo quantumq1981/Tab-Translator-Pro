@@ -282,6 +282,16 @@ expect(eng.arrangeScore(mx, "block").bars[0].events.map((e) => e.symbol).join(" 
 const arrS = eng.arrangeScore(mx, "shuffle");
 expect(arrS.bars[0].events.length === 8 && arrS.bars[0].events.every((e) => e.tuplet === 3), "shuffle bar1 expected 8 tuplet-3 hits");
 expect(/t3/.test(eng.scoreToCSMPN(arrS, {})), "shuffle arrangement should export t3 tuplet flags in CSMPN {hybrid}");
+// sixteenths: four hits per beat → 16 in a 4/4 bar, on true quarter-beat positions
+const arr16 = eng.arrangeScore(mx, "sixteenths");
+expect(arr16.bars[0].events.length === 16, `sixteenths bar1 expected 16 hits, got ${arr16.bars[0].events.length}`);
+expect(Math.abs(arr16.bars[0].events[1].qbeat - 0.25) < 1e-9, `sixteenths 2nd hit qbeat expected 0.25, got ${arr16.bars[0].events[1].qbeat}`);
+expect(arr16.bars[2].events.length === 12, `sixteenths bar3 (3/4) expected 12 hits, got ${arr16.bars[2].events.length}`);
+// skank: reggae off-beat — one hit per beat on the "&" (first onset at qbeat 0.5), tracks changes
+const arrK = eng.arrangeScore(mx, "skank");
+expect(arrK.bars[0].events.length === 4 && Math.abs(arrK.bars[0].events[0].qbeat - 0.5) < 1e-9, `skank bar1 expected 4 off-beat hits starting at 0.5, got ${arrK.bars[0].events.length}@${arrK.bars[0].events[0].qbeat}`);
+expect(arrK.bars[0].events.map((e) => e.symbol).join(" ") === "C C G G", `skank bar1 should track the changes, got "${arrK.bars[0].events.map((e) => e.symbol).join(" ")}"`);
+expect(arrK.bars[2].events.length === 3, `skank bar3 (3/4) expected 3 hits, got ${arrK.bars[2].events.length}`);
 // arranged score flows through the existing exporters unchanged
 expect(/\{hybrid\b/.test(eng.scoreToCSMPN(arrQ, {})), "arranged score still exports a {hybrid} block");
 // playback/MIDI scale with the added hits (4 + 4 + 3 = 11 events for quarters)

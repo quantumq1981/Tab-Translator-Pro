@@ -592,7 +592,11 @@ bloating the monolith. Lifting `semis`/transpose state out to the parent for per
   a 3/4 bar gets 3 hits): **`block`** (keep existing onsets = a clean sustain),
   **`quarters`** (one strum/beat), **`eighths`** (straight eighths),
   **`shuffle`** (swung eighths, long-short, flagged `tuplet:3` so CSMPN/CSML draw the
-  triplet bracket). Output is the **same score shape** every parser emits, so it
+  triplet bracket), **`sixteenths`** (four/beat) and **`skank`** (reggae/ska off-beat
+  — one hit per beat on the "&"). Honest limit: CSMP's `{hybrid}` grid is
+  eighth-resolution, so `sixteenths` round-trips *lossily* into the slash-rhythm
+  (positions collapse), but the SCORE (qbeat/qdur) is exact so MIDI/ABC/playback render
+  all 16ths faithfully. Output is the **same score shape** every parser emits, so it
   flows untouched through the exporters (CSMPN/CSML `{hybrid}` slash-rhythm, MIDI,
   ABC), playback, transpose and key analysis — **zero new plumbing**. Pipeline order
   in `ChartPanel` is **simplify → arrange → transpose** (`simp`/`base`/`tscore`
@@ -1026,7 +1030,7 @@ contract). Build strictly in this order; each wave depends on the prior.
    53.3 pt) proves any auto-shift that fixes a sparse system regresses the
    correctly-anchored Blue Sky output. Manual override is the honest escape hatch.
 8. ✅ **Procedural arrangement generator** — DONE 2026-06-20. `arrangeScore` +
-   `ARRANGE_TEMPLATES` (block/quarters/eighths/shuffle) → same score shape, reuses
+   `ARRANGE_TEMPLATES` (block/quarters/eighths/shuffle/sixteenths/skank) → same score shape, reuses
    every exporter (CSMPN/CSML `{hybrid}`, MIDI, ABC). See the **Arrange** bullet
    under "Shared ChartPanel".
 9. ✅ **MIDI export** — DONE 2026-06-20 (built ahead of order while #4 was blocked).

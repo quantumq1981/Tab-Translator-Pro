@@ -382,13 +382,18 @@ function simplifyScore(score, useSharp) {
  * Templates are per-beat sub-patterns (→ meter-independent; `tup` flags a tuplet
  * so the {hybrid}/CSMPN export draws the bracket). `block` is special-cased:
  * it keeps the existing onsets (the harmonic rhythm) — a clean sustain.
- *   block · quarters · eighths · shuffle (swung eighths, triplet feel)
+ *   block · quarters · eighths · shuffle (swung eighths) · sixteenths · skank (reggae off-beat)
+ * HONEST LIMIT: CSMP's {hybrid} grid is eighth-resolution, so `sixteenths` round-trips
+ * lossily into CSMPN/CSML slash-rhythm (positions collapse) — but the SCORE itself
+ * (qbeat/qdur) is exact, so MIDI / ABC / playback render all 16ths faithfully.
  * `template` may be a name or `{ template }`; unknown name → passthrough. */
 const ARRANGE_TEMPLATES = {
   block: null,                                                   // keep existing onsets
   quarters: [{ at: 0, dur: 1, tup: 0 }],                         // one strum per beat
   eighths: [{ at: 0, dur: 0.5, tup: 0 }, { at: 0.5, dur: 0.5, tup: 0 }],
   shuffle: [{ at: 0, dur: 2 / 3, tup: 3 }, { at: 2 / 3, dur: 1 / 3, tup: 3 }], // long-short swing
+  sixteenths: [{ at: 0, dur: 0.25, tup: 0 }, { at: 0.25, dur: 0.25, tup: 0 }, { at: 0.5, dur: 0.25, tup: 0 }, { at: 0.75, dur: 0.25, tup: 0 }],
+  skank: [{ at: 0.5, dur: 0.5, tup: 0 }],                        // reggae/ska: chord on the off-beat only
 };
 function arrangeScore(score, template = "quarters") {
   const name = (template && typeof template === "object" ? template.template : template) || "quarters";

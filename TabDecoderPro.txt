@@ -948,6 +948,8 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
           <option value="quarters">↳ Quarters</option>
           <option value="eighths">↳ Eighths</option>
           <option value="shuffle">↳ Shuffle</option>
+          <option value="sixteenths">↳ Sixteenths</option>
+          <option value="skank">↳ Skank (off-beat)</option>
         </select>
         <span style={{ display: "inline-flex", alignItems: "center", gap: 4, marginLeft: 2 }}>
           <button onClick={() => bump(-1)} style={{ ...chip(C), padding: "3px 8px" }}>−</button>
