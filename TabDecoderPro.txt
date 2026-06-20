@@ -176,6 +176,8 @@ import {
   _harmonyXML,
   scoreToMusicXML,
   transposeScore,
+  _midiVarLen,
+  scoreToMidi,
   scoreEventTimes,
   playScore,
 } from "./engine.tsx";
@@ -859,6 +861,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   const symOf = (bar, e) => { const v = overrides[`${bar.number}.${e.beat}`]; return v != null ? v : e.symbol; };
   const doExport = (fmt) => {
     const opts = { overrides, title, key, useSharp, tempo: bpm };
+    if (fmt === "midi") { setExp({ fmt, bytes: scoreToMidi(tscore, opts) }); setCopied(false); setDownloaded(false); return; } // binary
     const text = fmt === "abc" ? scoreToABC(tscore, opts)
       : fmt === "musicxml" ? scoreToMusicXML(tscore, opts)
       : fmt === "csmpn" ? scoreToCSMPN(tscore, opts)
@@ -869,15 +872,15 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   const copy = () => { try { navigator.clipboard.writeText(exp.text); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch (_) {} };
   // Download the generated export as a real file. Extension/MIME per format so it
   // opens in the right tool (.musicxml → MuseScore/Guitar Pro, .abc → ABC players).
-  const _EXPORT_EXT = { abc: "abc", musicxml: "musicxml", chordpro: "chordpro", csmpn: "csmpn", csml: "csml" };
-  const _EXPORT_MIME = { musicxml: "application/vnd.recordare.musicxml+xml" };
+  const _EXPORT_EXT = { abc: "abc", musicxml: "musicxml", chordpro: "chordpro", csmpn: "csmpn", csml: "csml", midi: "mid" };
+  const _EXPORT_MIME = { musicxml: "application/vnd.recordare.musicxml+xml", midi: "audio/midi" };
   const download = () => {
     try {
       if (!exp) return;
       const ext = _EXPORT_EXT[exp.fmt] || "txt";
       const mime = _EXPORT_MIME[exp.fmt] || "text/plain";
       const base = (title || "chart").replace(/\.[^.]+$/, "").replace(/[^\w.-]+/g, "_").replace(/^_+|_+$/g, "") || "chart";
-      const blob = new Blob([exp.text], { type: mime + ";charset=utf-8" });
+      const blob = exp.bytes ? new Blob([exp.bytes], { type: mime }) : new Blob([exp.text], { type: mime + ";charset=utf-8" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url; a.download = `${base}.${ext}`;
@@ -948,7 +951,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
           <button onClick={() => bumpBpm(5)} style={{ ...chip(C), padding: "3px 8px" }}>+</button>
         </span>
         <span style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 4 }}>
-          {[["chordpro", "ChordPro"], ["abc", "ABC"], ["musicxml", "MusicXML"], ["csmpn", "CSMPN"], ["csml", "ChordSlashML"]].map(([f, lbl]) => (
+          {[["chordpro", "ChordPro"], ["abc", "ABC"], ["musicxml", "MusicXML"], ["midi", "MIDI"], ["csmpn", "CSMPN"], ["csml", "ChordSlashML"]].map(([f, lbl]) => (
             <button key={f} onClick={() => doExport(f)} style={{ ...chip(C), padding: "3px 9px", borderColor: exp && exp.fmt === f ? C.cyan : C.border, color: exp && exp.fmt === f ? C.cyan : C.dim }}>{lbl}</button>
           ))}
           <span style={{ width: 1, alignSelf: "stretch", background: C.border, margin: "0 2px" }} />
@@ -1031,15 +1034,21 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
       {exp && (
         <div style={{ marginTop: 12 }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-            <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim }}>EXPORT · {exp.fmt === "abc" ? "ABC NOTATION" : exp.fmt === "musicxml" ? "MUSICXML" : exp.fmt === "csmpn" ? "CSMPN" : exp.fmt === "csml" ? "CHORDSLASHML" : "CHORDPRO"}</span>
+            <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim }}>EXPORT · {exp.fmt === "abc" ? "ABC NOTATION" : exp.fmt === "musicxml" ? "MUSICXML" : exp.fmt === "midi" ? "MIDI FILE" : exp.fmt === "csmpn" ? "CSMPN" : exp.fmt === "csml" ? "CHORDSLASHML" : "CHORDPRO"}</span>
             <span style={{ display: "inline-flex", gap: 6 }}>
-              <button onClick={copy} style={{ ...chip(C), padding: "3px 9px", borderColor: copied ? C.green : C.border, color: copied ? C.green : C.dim }}>{copied ? "copied ✓" : "copy"}</button>
+              {!exp.bytes && <button onClick={copy} style={{ ...chip(C), padding: "3px 9px", borderColor: copied ? C.green : C.border, color: copied ? C.green : C.dim }}>{copied ? "copied ✓" : "copy"}</button>}
               <button onClick={download} title={`download as .${_EXPORT_EXT[exp.fmt] || "txt"}`} style={{ ...chip(C), padding: "3px 9px", borderColor: downloaded ? C.green : C.border, color: downloaded ? C.green : C.cyan }}>{downloaded ? "saved ✓" : "⬇ download"}</button>
               <button onClick={() => setExp(null)} style={{ ...chip(C), padding: "3px 9px" }}>close</button>
             </span>
           </div>
-          <textarea readOnly value={exp.text} spellCheck={false} className="tdp-scroll"
-            style={{ width: "100%", height: 120, resize: "vertical", boxSizing: "border-box", background: C.bg, color: C.text, border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, fontSize: 12, lineHeight: 1.5, fontFamily: "'IBM Plex Mono', monospace", outline: "none" }} />
+          {exp.bytes ? (
+            <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, padding: "12px 12px", fontSize: 12, color: C.dim, lineHeight: 1.6 }}>
+              🎹 Standard MIDI File · {exp.bytes.length.toLocaleString()} bytes · ♩={bpm}{semis ? ` · transposed ${semis > 0 ? "+" : ""}${semis} st` : ""}. Binary, so there's nothing to copy — hit <b style={{ color: C.cyan }}>⬇ download</b> to save the <b>.mid</b> and open it in any DAW or notation app.
+            </div>
+          ) : (
+            <textarea readOnly value={exp.text} spellCheck={false} className="tdp-scroll"
+              style={{ width: "100%", height: 120, resize: "vertical", boxSizing: "border-box", background: C.bg, color: C.text, border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, fontSize: 12, lineHeight: 1.5, fontFamily: "'IBM Plex Mono', monospace", outline: "none" }} />
+          )}
           {exp.fmt === "abc" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>Real, playable notes + chord symbols — paste into any ABC player (e.g. abcjs / editor at abcnotation.com) to hear it.</div>}
           {exp.fmt === "musicxml" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>Save as <b>.musicxml</b> and open in MuseScore / Guitar Pro — carries chord symbols + notes + meter. Round-trips back into this app.</div>}
           {exp.fmt === "csmpn" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}><b>Chord Sheet Maker Pro</b>'s native fake-book source (one chord = one bar; <code>_</code> splits a bar) — also carries the real fingering (<code>{"{tab}"}</code>) and decoded strum rhythm (<code>{"{hybrid}"}</code>). Paste into Pro's editor, or use <b>→ Chord Sheet Maker Pro</b> to send it straight there.</div>}
