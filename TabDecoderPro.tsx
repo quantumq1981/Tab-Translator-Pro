@@ -621,6 +621,9 @@ export default function TabDecoderPro() {
         .tdp-scroll::-webkit-scrollbar-thumb{background:#2a3036;border-radius:8px;}
         textarea::placeholder{color:#5a605d;}
         .meas:hover{border-color:#e9a24b88!important;}
+        .tdp-cols{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:16px;}
+        .tdp-cols.manual{grid-template-columns:minmax(0,1fr) minmax(0,1fr);}
+        @media (max-width:760px){.tdp-cols,.tdp-cols.manual{grid-template-columns:1fr;}}
       `}</style>
 
       <div style={{ position: "relative", maxWidth: 1100, margin: "0 auto", padding: "20px 16px 40px" }}>
@@ -648,7 +651,7 @@ export default function TabDecoderPro() {
           </div>
         )}
 
-        <div style={{ position: "relative", display: "grid", gridTemplateColumns: mode !== "manual" ? "minmax(0,1.25fr) minmax(0,1fr)" : "minmax(0,1fr) minmax(0,1fr)", gap: 16 }}>
+        <div className={"tdp-cols" + (mode === "manual" ? " manual" : "")} style={{ position: "relative" }}>
           <section className="panel-rise" style={{ animationDelay: ".05s", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
             {mode === "manual" ? (
               <>
@@ -964,7 +967,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
           <span style={{ fontSize: 11, minWidth: 46, textAlign: "center", color: C.dim }}>♩={bpm}</span>
           <button onClick={() => bumpBpm(5)} style={{ ...chip(C), padding: "3px 8px" }}>+</button>
         </span>
-        <span style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 4 }}>
+        <span style={{ marginLeft: "auto", display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "flex-end", gap: 4 }}>
           {[["chordpro", "ChordPro"], ["abc", "ABC"], ["musicxml", "MusicXML"], ["midi", "MIDI"], ["csmpn", "CSMPN"], ["csml", "ChordSlashML"]].map(([f, lbl]) => (
             <button key={f} onClick={() => doExport(f)} style={{ ...chip(C), padding: "3px 9px", borderColor: exp && exp.fmt === f ? C.cyan : C.border, color: exp && exp.fmt === f ? C.cyan : C.dim }}>{lbl}</button>
           ))}
