@@ -894,6 +894,48 @@ standard + no capo (validated: gp3 → `Tuning: Standard`, synthetic Drop D + ca
 capo 0 / PDF charts omit the lines). Remaining: **(5)** share the recognition engine
 as a zero-dep module across the trio.
 
+## Wave 3 #10 — chord-quality classifier (Phase 1, 2026-06-20)
+
+The "AI second opinion" — built **iOS-first** and **dependency-free**, so it works in
+the exact environment this ships into (mobile/tablet Safari on GitHub Pages).
+
+**The contract (load-bearing — do not invert it):** the rule-based engine
+(`recognise`/`QUALITIES`) is the **ORACLE** and the test oracle. The classifier is a
+**confidence-gated second opinion** that can NEVER override a confident engine. The
+arbiter `arbitrateChord(engineResult, chroma, {gate=0.75, minModel=0.8})`: if the
+engine's Jaccard confidence ≥ `gate` → engine, full stop; only when the engine is
+*unsure* is the classifier consulted, and it's adopted only if its own confidence >
+`minModel` AND it differs. Otherwise the oracle stands. Pure + sync; returns
+`{ result, source:"engine"|"classifier", secondOpinion }`.
+
+**Why pure-JS matmul instead of `onnxruntime-web` (the iOS "get ahead" decision):**
+GitHub Pages can't set `COOP`/`COEP` headers, so WASM threads (`SharedArrayBuffer`)
+are unavailable — ORT would be single-threaded anyway. And the model is a single
+linear layer (8×12 + bias), so it needs **no runtime at all**: `classifyChromaQuality`
+rotates the chroma root-relative, max-normalises, and computes `softmax(W·x + b)`. This
+is **identical in interface to an ONNX tensor pass** (`x[12] → {suffix, confidence}`),
+so a real `.onnx` swaps in later by replacing ONLY that function's body — the arbiter,
+the tests, and the future worker boundary stay unchanged. Weights are **embedded**
+(tiny → offline-robust on iOS; the "fetch the .onnx asset" rule is for the heavy
+future model).
+
+**The model brain:** `scripts/train_chord_classifier.py` — a **dependency-free**
+(stdlib-only, seeded) multinomial-logistic trainer. (This container has no
+numpy/sklearn and can't pip-install, so the trainer is hand-rolled GD; re-runnable to
+reproduce `CHORD_CLASSIFIER`.) It synthesises noisy/dropout root-relative weighted
+chromas for the 8 core qualities (`maj·min·7·maj7·m7·dim·aug·sus4`) → **89.5% held-out**.
+The learned weights are musically sane (major: +M3/−m3; minor the reverse).
+
+**Where it stands:** built, exported (`CHORD_CLASSIFIER`, `classifyChromaQuality`,
+`arbitrateChord`), and unit-tested — but **NOT yet wired into the live render**, so the
+validated corpus is untouched (zero recognition-output change). The honest next steps:
+(a) surface `source==="classifier"` as a **display-only** supplementary readout (never
+silently rewrite the chart symbol — that preserves the oracle/corpus) once
+device-validated; (b) train a stronger real model and swap the matmul for ORT in the
+worker. `npm test` guards: each canonical quality classifies correctly, root-relative
+works, and the arbiter contract holds (confident engine never overridden; unsure engine
++ confident model adopts; `minModel` gate respected; single/null bypass).
+
 ## Path B (scans / photos) — OUT OF SCOPE
 
 Raster tab (a photo or scanned page) has no text layer and needs an OMR/Vision
@@ -1038,8 +1080,12 @@ contract). Build strictly in this order; each wave depends on the prior.
 
 **Wave 3 — AI/Audio moat (additive; engine stays oracle + fallback):**
 10. **ONNX chord classifier** — a **confidence-gated second opinion**, NEVER a
-    replacement for `QUALITIES` (which is also the test oracle). Runs in the Wave-1
-    worker; `.onnx` as a runtime-fetched asset (not base64 in source).
+    replacement for `QUALITIES` (which is also the test oracle). **Phase 1 DONE
+    2026-06-20** (see "Wave 3 #10" section): the pure-JS classifier brain +
+    `arbitrateChord` contract ship now (no ONNX runtime needed — sidesteps the
+    iOS/Pages COOP/COEP thread wall). **Pending:** swap the matmul body for a real
+    `.onnx` (runtime-fetched asset, in the Wave-1 worker) + the display-only UI
+    wiring.
 11. **Shared pitch-detection pipeline → monophonic transcription (MVP)**.
 12. **Practice mode** — match mic input against known expected chords (reuses #11).
 13. **AI arrangement** — optional upgrade over #8.
