@@ -927,14 +927,19 @@ chromas for the 8 core qualities (`maj·min·7·maj7·m7·dim·aug·sus4`) → *
 The learned weights are musically sane (major: +M3/−m3; minor the reverse).
 
 **Where it stands:** built, exported (`CHORD_CLASSIFIER`, `classifyChromaQuality`,
-`arbitrateChord`), and unit-tested — but **NOT yet wired into the live render**, so the
-validated corpus is untouched (zero recognition-output change). The honest next steps:
-(a) surface `source==="classifier"` as a **display-only** supplementary readout (never
-silently rewrite the chart symbol — that preserves the oracle/corpus) once
-device-validated; (b) train a stronger real model and swap the matmul for ORT in the
-worker. `npm test` guards: each canonical quality classifies correctly, root-relative
-works, and the arbiter contract holds (confident engine never overridden; unsure engine
-+ confident model adopts; `minModel` gate respected; single/null bypass).
+`arbitrateChord`), unit-tested, and now **wired DISPLAY-ONLY into the readout** (Phase 2
+step 1, 2026-06-20): an `arb` memo in `TabDecoderPro` runs `arbitrateChord(result,
+chromaVec)` on the live/selected chord and, **only when `source==="classifier"`** (engine
+unsure < gate AND the model confidently disagrees), renders a dashed "🤖 2nd opinion"
+line under the CONFIDENCE bar. It **never** rewrites `symbol`/the chart — the displayed
+symbol stays `symbolOf(result)` — so the validated corpus is still untouched (the
+transpile + contract tests pass unchanged). It's browser-only render, so it wants a
+**device check** (does the line show on a genuinely ambiguous voicing, hide on clean
+ones). Remaining: (b) train a stronger real model and swap the matmul for ORT in the
+worker. `npm test` guards the engine pieces: each canonical quality classifies
+correctly, root-relative works, and the arbiter contract holds (confident engine never
+overridden; unsure engine + confident model adopts; `minModel` gate respected;
+single/null bypass).
 
 ## Path B (scans / photos) — OUT OF SCOPE
 
