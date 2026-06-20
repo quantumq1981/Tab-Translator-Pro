@@ -483,6 +483,28 @@ const pagesYml = fs.readFileSync(path.join(repo, ".github", "workflows", "pages.
 expect(/cp\s+engine\.tsx\s+_site/.test(pagesYml) && /cp\s+TabDecoderPro\.tsx\s+_site/.test(pagesYml),
   "Pages deploy must ship BOTH engine.tsx and TabDecoderPro.tsx (the loader fetches both)");
 
+/* The React UI (TabDecoderPro.tsx) is otherwise browser-only; at least prove it
+ * (and the engine) TRANSPILE with the exact Babel presets index.html uses, so a
+ * syntax/JSX error can't ship green. Catches the class of bug the loader can't. */
+const _B = await import("@babel/standalone");
+const Babel = _B && _B.transform ? _B : _B.default;
+const BPRESETS = [["typescript", { allExtensions: true, isTSX: true, onlyRemoveTypeImports: true }], ["react"]];
+let transpileErr = "";
+for (const [name, code] of [["engine.tsx", engineSrc], ["TabDecoderPro.tsx", uiSrc]]) {
+  try { Babel.transform(code, { filename: name, presets: BPRESETS }); }
+  catch (e) { transpileErr = `${name}: ${e.message}`; break; }
+}
+expect(!transpileErr, `source must transpile with the index.html Babel presets — ${transpileErr}`);
+
+/* Session persistence (Wave 1 #2) contract — browser-only (OPFS + base64), so
+ * statically guard the safety rails: OPFS is feature-detected, persistence is
+ * wrapped in try/catch, there's a localStorage fallback, restore is one-shot,
+ * and the engine stays free of any persistence concern (it's pure). */
+expect(/navigator\.storage/.test(uiSrc) && /getDirectory/.test(uiSrc), "UI must feature-detect OPFS (navigator.storage.getDirectory)");
+expect(/SESS_BIN_LS|localStorage/.test(uiSrc) && /_bytesToB64|btoa/.test(uiSrc), "UI must have a localStorage base64 fallback when OPFS is unavailable");
+expect(/restoreRef/.test(uiSrc) && /catch\s*\(/.test(uiSrc), "session restore must be one-shot (ref-guarded) and wrapped in try/catch");
+expect(!/navigator\.storage/.test(engineSrc) && !/localStorage/.test(engineSrc), "engine.tsx must stay free of persistence/browser-storage concerns");
+
 /* ---- report -------------------------------------------------------------- */
 console.log(`module split: UI imports ${imported.length}/${exported.length} engine exports, 0 missing · engine.tsx pure`);
 console.log(`PDF.js ${pdfjsLib.version} · ${pages} pages · ${tokens.length} tokens`);

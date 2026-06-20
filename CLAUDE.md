@@ -70,6 +70,41 @@ two files. `.txt` mirrors (`engine.txt`, `TabDecoderPro.txt`) track each source.
 **Invariant:** keep `engine.tsx` plain ES (no TS syntax, no JSX, no React/DOM) —
 that purity is what lets Node import it verbatim and lets it run in a Worker.
 
+### Session persistence (since 2026-06-20 — Roadmap Wave 1 #2)
+
+The app is a **persistent workspace**: close the tab, reopen, your chart + edits
+are back. Lives entirely in `TabDecoderPro.tsx` (browser-only; `engine.tsx` stays
+pure — guarded by a test).
+
+- **What's cached:** the uploaded file's **raw bytes** (OPFS file `session.bin`
+  via `navigator.storage.getDirectory()` — quota-free; falls back to a base64
+  `localStorage` blob for files ≤ 3 MB when OPFS/`createWritable` is unavailable,
+  e.g. older Safari) + a small **meta JSON** in `localStorage["ttp:session:v1"]`
+  (`{ v, kind:"pdf"|"xml", filename, useSharp, overrides, partIndex }`).
+- **Restore = re-parse, not re-serialise.** On mount (unless an `?import=`
+  handoff/decode is present — those win) we re-run the **same validated parser
+  paths** the file inputs use (PDF gated on `pdfReady`), then re-apply the saved
+  spelling/part/overrides. Score objects carry non-JSON re-parse state
+  (`_gpbuf`/`_gpxbuf`/`_ptbbuf`/id-maps) the ♯♭ + part-switch need, so re-parsing
+  from bytes restores **full fidelity** for free. The Wave 1 #3 worker will make
+  that re-parse non-blocking. (Future: cache the score JSON too for instant paint.)
+- **Safety rails (mirror the decode receiver):** OPFS feature-detected; all I/O in
+  `try/catch` so a stale/garbage cache can never wedge boot; restore is one-shot
+  (`restoreRef`); a `restoringRef` suppresses transient meta writes mid-restore so
+  the cleared-then-restored `overrides` can't briefly overwrite the saved copy.
+  A **"↺ Restored… / Start fresh"** banner clears the cache + resets state.
+- **Not yet persisted:** the Manual-tab textarea, and transpose (lives as local
+  `semis` in `ChartPanel`; lift it in Wave 2 #6 view-decoupling, then persist).
+
+### Headless transpile guard (test infra, 2026-06-20)
+
+`npm test` now also **Babel-transpiles `engine.tsx` and `TabDecoderPro.tsx`** with
+the exact presets `index.html` uses (`@babel/standalone`, a TEST-only dep) — so a
+syntax/JSX error in the otherwise browser-only UI can't ship green. Plus static
+contract guards for the module split (every import is exported, engine stays
+React-free / persistence-free) and the persistence rails (feature-detect,
+try/catch, localStorage fallback, one-shot restore).
+
 -----
 
 ## Invariant 1 — Chord masks are DERIVED, never hardcoded
@@ -871,9 +906,8 @@ contract). Build strictly in this order; each wave depends on the prior.
 **Wave 1 — Foundation (no engine *logic* change):**
 1. ✅ **Engine module extraction** (`engine.tsx`) — DONE 2026-06-20. The keystone:
    unblocks the Worker, ONNX, audio, and cross-trio engine sharing.
-2. **OPFS persistence** — cache raw file buffers + parsed score JSON + overrides/
-   transpose state; restore last session on re-open. Fallback to localStorage for
-   tiny scores. Substrate for steps 4 below.
+2. ✅ **OPFS persistence** — DONE 2026-06-20. See "Session persistence" below.
+   Substrate for step 4.
 3. **Web Worker offloading** — run the `raw bytes → score` pipeline (now importable
    from `engine.tsx`) off the main thread via a Blob-URL worker. PDF.js already
    workers; extend the pattern.

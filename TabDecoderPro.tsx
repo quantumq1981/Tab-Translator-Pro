@@ -201,6 +201,85 @@ async function extractTokens(buf) {
   return { tokens, pages: pdf.numPages };
 }
 
+/* ==========================================================================
+ *  SESSION PERSISTENCE (Roadmap Wave 1 #2) — OPFS + localStorage fallback
+ *
+ *  Turns the app from a one-shot decoder into a persistent workspace: the
+ *  uploaded file's RAW BYTES are cached (OPFS — quota-free — when available,
+ *  else a base64 localStorage fallback for small files) and a small JSON of
+ *  UI state (mode, filename, spelling, part, chord overrides) rides in
+ *  localStorage. On re-open we re-run the SAME validated parser paths the file
+ *  inputs use (no separate restore path to drift), then re-apply the saved
+ *  edits — so closing the tab no longer loses your work.
+ *
+ *  Why re-parse instead of serialising the score: score objects carry
+ *  non-JSON re-parse state (_gpbuf / _gpxbuf / _ptbbuf / id-maps) that the
+ *  ♯/♭ + part-switch need. Re-parsing from the cached bytes restores FULL
+ *  fidelity for free and reuses code already validated by `npm test`. The
+ *  Wave 1 #3 worker will make that re-parse non-blocking.
+ *
+ *  Everything here is browser-only (OPFS API + base64) — like extractTokens /
+ *  playScore it's smoke-tested on hardware; `npm test` statically guards the
+ *  contract (feature-detect, try/catch, localStorage fallback, one-shot). */
+const SESS_META = "ttp:session:v1";   // localStorage: small UI-state JSON
+const SESS_BIN_LS = "ttp:session:bin:v1"; // localStorage: base64 bytes (fallback only)
+const SESS_BIN_OPFS = "session.bin";  // OPFS: raw file bytes (preferred)
+const SESS_LS_MAX = 3_000_000;        // don't base64 huge files into localStorage
+
+async function _opfsDir() {
+  try {
+    if (!navigator.storage || !navigator.storage.getDirectory) return null;
+    return await navigator.storage.getDirectory();
+  } catch (_) { return null; }
+}
+// OPFS write needs main-thread createWritable (Chrome; Safari 16.4+). Where it's
+// missing (older Safari) we fall back to localStorage, so persistence still works.
+async function _opfsWrite(bytes) {
+  const dir = await _opfsDir(); if (!dir) return false;
+  try {
+    const fh = await dir.getFileHandle(SESS_BIN_OPFS, { create: true });
+    if (typeof fh.createWritable !== "function") return false;
+    const w = await fh.createWritable();
+    await w.write(bytes); await w.close();
+    return true;
+  } catch (_) { return false; }
+}
+async function _opfsRead() {
+  const dir = await _opfsDir(); if (!dir) return null;
+  try {
+    const fh = await dir.getFileHandle(SESS_BIN_OPFS);
+    const f = await fh.getFile();
+    return new Uint8Array(await f.arrayBuffer());
+  } catch (_) { return null; }
+}
+async function _opfsRemove() {
+  const dir = await _opfsDir(); if (!dir) return;
+  try { await dir.removeEntry(SESS_BIN_OPFS); } catch (_) {}
+}
+const _bytesToB64 = (bytes) => { let s = ""; for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]); return btoa(s); };
+const _b64ToBytes = (b64) => { const bin = atob(b64), u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u; };
+
+// Persist the source bytes once (on upload/decode); chooses OPFS, else localStorage.
+async function saveSessionFile(bytes) {
+  try {
+    const ok = await _opfsWrite(bytes);
+    if (ok) { try { localStorage.removeItem(SESS_BIN_LS); } catch (_) {} return "opfs"; }
+    if (bytes.length <= SESS_LS_MAX) { localStorage.setItem(SESS_BIN_LS, _bytesToB64(bytes)); return "ls"; }
+    return "none"; // too big for localStorage and no OPFS — meta still saved, bytes won't restore
+  } catch (err) { console.warn("session file save skipped:", err); return "none"; }
+}
+const saveSessionMeta = (meta) => { try { localStorage.setItem(SESS_META, JSON.stringify(meta)); } catch (err) { console.warn("session meta save skipped:", err); } };
+const readSessionMeta = () => { try { const r = localStorage.getItem(SESS_META); return r ? JSON.parse(r) : null; } catch (_) { return null; } };
+async function readSessionFile() {
+  const fromOpfs = await _opfsRead();
+  if (fromOpfs) return fromOpfs;
+  try { const b = localStorage.getItem(SESS_BIN_LS); return b ? _b64ToBytes(b) : null; } catch (_) { return null; }
+}
+async function clearSession() {
+  try { localStorage.removeItem(SESS_META); localStorage.removeItem(SESS_BIN_LS); } catch (_) {}
+  await _opfsRemove();
+}
+
 /* ========================================================================== */
 /*  UI                                                                        */
 /* ========================================================================== */
@@ -223,6 +302,7 @@ export default function TabDecoderPro() {
   const [xmlScore, setXmlScore] = useState(null);
   const [xmlErr, setXmlErr] = useState("");
   const [xmlName, setXmlName] = useState("");
+  const [restored, setRestored] = useState(false); // showing a restored-from-cache session
   const fileRef = useRef(null);
   const xmlRef = useRef(null);
 
@@ -243,10 +323,13 @@ export default function TabDecoderPro() {
     setPdfErr(""); setPdfBusy(true); setChart(null); clearSel();
     try {
       const buf = await f.arrayBuffer();
+      const bytes = new Uint8Array(buf.slice(0)); // copy for the session cache (PDF.js may detach buf)
       const { tokens, pages } = await extractTokens(buf);
       const c = buildChart(tokens);
       if (!c.measures.length) setPdfErr("No tab measures detected. Is this a digital (text) tab PDF rather than a scan?");
       setChart({ ...c, pages, fileName: f.name });
+      setRestored(false);
+      saveSessionFile(bytes); // meta is written by the persist effect
     } catch (err) {
       setPdfErr("Parse failed: " + (err && err.message ? err.message : String(err)));
     } finally { setPdfBusy(false); }
@@ -271,9 +354,12 @@ export default function TabDecoderPro() {
     if (!f) return;
     setXmlErr(""); setXmlScore(null); clearSel();
     try {
-      const sc = await parseGuitarProOrXML(await f.arrayBuffer(), f.name, useSharp); // MusicXML / GP3-8 auto-detect
+      const bytes = new Uint8Array(await f.arrayBuffer());
+      const sc = await parseGuitarProOrXML(bytes, f.name, useSharp); // MusicXML / GP3-8 auto-detect
       if (!sc.bars.length) setXmlErr("No measures found. Is this a MusicXML score or a Guitar Pro file?");
       setXmlScore(sc); setXmlName(f.name);
+      setRestored(false);
+      saveSessionFile(bytes); // meta is written by the persist effect
     } catch (err) {
       setXmlErr("Parse failed: " + (err && err.message ? err.message : String(err)));
     }
@@ -315,6 +401,8 @@ export default function TabDecoderPro() {
     const isPdf = d.bytes[0] === 0x25 && d.bytes[1] === 0x50 && d.bytes[2] === 0x44 && d.bytes[3] === 0x46; // %PDF
     if (isPdf && !pdfReady) return; // wait for PDF.js to load
     decodeRef.current = null;
+    setRestored(false);
+    saveSessionFile(new Uint8Array(d.bytes.slice(0))); // a decoded tab becomes a restorable session too
     (async () => {
       if (isPdf) {
         setMode("pdf"); setPdfErr(""); setPdfBusy(true); setChart(null); clearSel();
@@ -339,6 +427,72 @@ export default function TabDecoderPro() {
   const selectPart = (idx) => {
     setXmlScore((prev) => _reparseScore(prev, useSharp, idx));
     clearSel();
+  };
+
+  /* ---- Session persistence (Wave 1 #2) -----------------------------------
+   * SAVE: the upload handlers cache the raw bytes once (saveSessionFile); this
+   * effect keeps the small UI-state meta in sync as the chart, spelling, part,
+   * or chord overrides change. RESTORE: on mount (unless an import param is
+   * present — an incoming handoff/decode wins) we re-run the SAME parser paths
+   * the file inputs use, gated on pdfReady for PDFs, then re-apply saved edits.
+   * Mirror of the decode receiver: one-shot via a ref, wrapped in try/catch so
+   * a stale/garbage cache can never wedge boot. */
+  const restoringRef = useRef(false); // suppress transient meta writes mid-restore
+  useEffect(() => {
+    if (restoringRef.current) return; // the restore effect re-affirms meta itself
+    const active = (mode === "pdf" && chart) ? { kind: "pdf", filename: chart.fileName }
+                 : (mode === "xml" && xmlScore) ? { kind: "xml", filename: xmlName } : null;
+    if (!active) return;
+    saveSessionMeta({ v: 1, kind: active.kind, filename: active.filename, useSharp, overrides, partIndex: xmlScore ? (xmlScore.partIndex || 0) : 0 });
+  }, [mode, chart, xmlScore, xmlName, overrides, useSharp]);
+
+  const restoreRef = useRef(null);
+  const [restoreReq, setRestoreReq] = useState(0);
+  useEffect(() => {
+    try {
+      const p = new URLSearchParams(window.location.search);
+      if (p.get("import") === "decode" || p.get("import") === "handoff") return; // incoming import wins
+      const meta = readSessionMeta();
+      if (!meta || (meta.kind !== "pdf" && meta.kind !== "xml")) return;
+      restoreRef.current = meta;
+      setRestoreReq((n) => n + 1);
+    } catch (err) { console.warn("session restore skipped:", err); }
+  }, []);
+  useEffect(() => {
+    const meta = restoreRef.current; if (!meta) return;
+    if (meta.kind === "pdf" && !pdfReady) return; // wait for PDF.js
+    restoreRef.current = null;
+    restoringRef.current = true;
+    (async () => {
+      try {
+        const bytes = await readSessionFile();
+        if (!bytes) { restoringRef.current = false; return; } // bytes evicted / too big — nothing to restore
+        const sharp = meta.useSharp !== false;
+        setUseSharp(sharp);
+        if (meta.kind === "pdf") {
+          setMode("pdf"); setPdfErr(""); setPdfBusy(true); setChart(null); clearSel();
+          try {
+            const { tokens, pages } = await extractTokens(bytes.buffer);
+            const c = buildChart(tokens);
+            setChart({ ...c, pages, fileName: meta.filename || "restored.pdf" });
+          } finally { setPdfBusy(false); }
+        } else {
+          setMode("xml"); setXmlErr(""); setXmlScore(null); clearSel();
+          let sc = await parseGuitarProOrXML(bytes, meta.filename || "restored", sharp);
+          if (meta.partIndex) sc = _reparseScore(sc, sharp, meta.partIndex);
+          setXmlScore(sc); setXmlName(meta.filename || "restored");
+        }
+        if (meta.overrides && Object.keys(meta.overrides).length) setOverrides(meta.overrides);
+        setRestored(true);
+        saveSessionMeta(meta); // re-affirm the restored state in one clean write
+      } catch (err) { console.warn("session restore failed:", err); }
+      finally { restoringRef.current = false; }
+    })();
+  }, [restoreReq, pdfReady]);
+
+  const startFresh = async () => {
+    try { await clearSession(); } catch (_) {}
+    setChart(null); setXmlScore(null); setXmlName(""); setMode("manual"); clearSel(); setRestored(false);
   };
 
   const pickChord = (key, e) => { setSelKey(key); setSelFrets(e.frets || null); setSelMidis(e.midis || null); };
@@ -409,6 +563,13 @@ export default function TabDecoderPro() {
             ))}
           </div>
         </header>
+
+        {restored && (
+          <div className="panel-rise" style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", marginBottom: 14, padding: "8px 12px", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 12, color: C.dim }}>
+            <span>↺ Restored your last session — your chart and edits are back. Upload a new file or</span>
+            <button onClick={startFresh} style={{ ...toggle(C), padding: "4px 12px", flex: "none" }}>Start fresh</button>
+          </div>
+        )}
 
         <div style={{ position: "relative", display: "grid", gridTemplateColumns: mode !== "manual" ? "minmax(0,1.25fr) minmax(0,1fr)" : "minmax(0,1fr) minmax(0,1fr)", gap: 16 }}>
           <section className="panel-rise" style={{ animationDelay: ".05s", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
