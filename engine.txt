@@ -43,6 +43,16 @@ const QUALITIES = [
   { name: "Half-dim 7th",   suffix: "m7♭5",  intervals: [0, 3, 6, 10], rank: 12 },
   { name: "Diminished 7th", suffix: "dim7",  intervals: [0, 3, 6, 9],  rank: 13 },
   { name: "7sus4",          suffix: "7sus4", intervals: [0, 5, 7, 10], rank: 14 },
+  // Extended/altered qualities (rank high = uncommon → never win a ranking tie over
+  // a plainer chord; they only win when they genuinely fit MORE of the voicing).
+  { name: "Add 9",          suffix: "add9",  intervals: [0, 2, 4, 7],      rank: 15 },
+  { name: "Minor-major 7",  suffix: "m(maj7)", intervals: [0, 3, 7, 11],   rank: 16 },
+  { name: "6/9",            suffix: "6/9",   intervals: [0, 2, 4, 7, 9],   rank: 17 },
+  { name: "Dominant 9th",   suffix: "9",     intervals: [0, 2, 4, 7, 10],  rank: 18 },
+  { name: "Minor 9th",      suffix: "m9",    intervals: [0, 2, 3, 7, 10],  rank: 19 },
+  { name: "Major 9th",      suffix: "maj9",  intervals: [0, 2, 4, 7, 11],  rank: 20 },
+  { name: "7♭9",            suffix: "7♭9",   intervals: [0, 1, 4, 7, 10],  rank: 21 },
+  { name: "7♯9",            suffix: "7♯9",   intervals: [0, 3, 4, 7, 10],  rank: 22 },
 ].map((q) => ({ ...q, mask: makeMask(q.intervals) }));
 
 const PRESETS = [

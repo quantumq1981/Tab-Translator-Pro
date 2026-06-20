@@ -532,6 +532,32 @@ expect(hotrsBar1 === "A E A C E C G", `PTB HotRS bar 1 expected the Am arpeggio 
 const hotrsRoots = new Set(hotrs.bars.slice(0, 4).flatMap((b) => b.events.map((e) => e.symbol[0])));
 expect(["A", "C", "D", "F"].every((r) => hotrsRoots.has(r)), `PTB HotRS opening should span A/C/D/F roots, got ${[...hotrsRoots].join("")}`);
 
+/* ---- extended/altered chord qualities (additive QUALITIES expansion) ------
+ * The new qualities must recognise their own voicings AND must NOT over-label the
+ * plainer chords (a triad stays a triad, a 7th stays a 7th — they only win when the
+ * voicing genuinely contains the extension). Roots at C: useSharp leaves the literal
+ * ♭/♯ in the suffix. The validated-corpus progressions above are the regression guard
+ * that none of these displaced an existing recognition. */
+const q = (midis) => eng.symbolForMidis(midis, true);
+// each NEW quality recognises its canonical voicing
+expect(q([48, 52, 55, 62]) === "Cadd9", `add9 {C E G D} expected Cadd9, got ${q([48, 52, 55, 62])}`);
+expect(q([48, 52, 55, 57, 62]) === "C6/9", `6/9 {C E G A D} expected C6/9, got ${q([48, 52, 55, 57, 62])}`);
+expect(q([48, 51, 55, 59]) === "Cm(maj7)", `minor-major7 {C Eb G B} expected Cm(maj7), got ${q([48, 51, 55, 59])}`);
+expect(q([48, 52, 55, 58, 62]) === "C9", `dom9 {C E G Bb D} expected C9, got ${q([48, 52, 55, 58, 62])}`);
+expect(q([48, 51, 55, 58, 62]) === "Cm9", `min9 {C Eb G Bb D} expected Cm9, got ${q([48, 51, 55, 58, 62])}`);
+expect(q([48, 52, 55, 59, 62]) === "Cmaj9", `maj9 {C E G B D} expected Cmaj9, got ${q([48, 52, 55, 59, 62])}`);
+expect(q([48, 52, 55, 58, 61]) === "C7♭9", `7b9 {C E G Bb Db} expected C7♭9, got ${q([48, 52, 55, 58, 61])}`);
+expect(q([48, 52, 55, 58, 63]) === "C7♯9", `7#9 {C E G Bb D#} expected C7♯9, got ${q([48, 52, 55, 58, 63])}`);
+// plainer chords are NOT over-labelled by the new richer qualities
+expect(q([48, 52, 55]) === "C", `plain triad must stay C, got ${q([48, 52, 55])}`);
+expect(q([48, 52, 55, 59]) === "Cmaj7", `maj7 must stay Cmaj7 (not maj9), got ${q([48, 52, 55, 59])}`);
+expect(q([48, 52, 55, 58]) === "C7", `dom7 must stay C7 (not 9), got ${q([48, 52, 55, 58])}`);
+expect(q([48, 51, 55, 58]) === "Cm7", `m7 must stay Cm7 (not m9), got ${q([48, 51, 55, 58])}`);
+// {C E G A} is enharmonic with Am7 (rooted on the 6th); m7 (rank 3) out-ranks 6 (rank 9)
+// on that tie → Am7/C. PRE-EXISTING behavior — the 6/9 addition scores lower here, so it
+// doesn't change this; the assertion just guards that 6/9 didn't start grabbing plain 6ths.
+expect(q([48, 52, 55, 57]) === "Am7/C", `{C E G A} stays Am7/C (m7 out-ranks the enharmonic 6; 6/9 must not override), got ${q([48, 52, 55, 57])}`);
+
 /* ---- single-note symbols carry NO "(single)" artifact (regression) -------
  * A one-pitch block recognises as the bare note name; the old engine appended
  * " (single)" to the symbol STRING, which leaked into every export + the chart
