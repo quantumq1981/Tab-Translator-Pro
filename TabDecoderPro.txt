@@ -598,6 +598,15 @@ export default function TabDecoderPro() {
 
   const norm = useMemo(() => normalise(displayNotes), [displayNotes]);
   const result = useMemo(() => recognise(norm.chroma, norm.chordMask, norm.bassPc), [norm]);
+  // Wave 3 #10 — DISPLAY-ONLY second opinion. The engine stays the oracle: arbitrateChord
+  // only consults the classifier when the engine is unsure, and we surface its read as a
+  // supplementary readout line — we NEVER rewrite `symbol`/the chart (that preserves the
+  // validated corpus). chromaVec = the 12-bit absolute mask expanded to a 0/1 vector.
+  const arb = useMemo(() => {
+    if (!result || result.single || !result.best) return null;
+    const chromaVec = Array.from({ length: 12 }, (_, i) => (norm.chordMask >> i) & 1);
+    return arbitrateChord(result, chromaVec, {});
+  }, [result, norm.chordMask]);
 
   const scoreView = useMemo(() => (chart ? buildScore(chart, useSharp) : null), [chart, useSharp]);
 
@@ -779,6 +788,15 @@ export default function TabDecoderPro() {
                 <div style={{ width: `${conf * 100}%`, height: "100%", background: confColor, transition: "width .25s ease, background .25s ease" }} />
               </div>
             </div>
+
+            {arb && arb.source === "classifier" && arb.secondOpinion && (
+              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, marginBottom: 16, padding: "8px 11px", background: "rgba(87,209,214,0.07)", border: `1px dashed ${C.cyan}`, borderRadius: 8, fontSize: 12 }}>
+                <span style={{ color: C.cyan, fontWeight: 600 }}>🤖 2nd opinion</span>
+                <span style={{ color: C.text, fontFamily: "'Space Mono', monospace", fontWeight: 700 }}>{names[arb.secondOpinion.root]}{arb.secondOpinion.quality.suffix}</span>
+                <span style={{ color: C.dim }}>· {Math.round(arb.secondOpinion.confidence * 100)}% model</span>
+                <span style={{ flexBasis: "100%", color: C.dim, fontSize: 10, lineHeight: 1.4 }}>engine was unsure ({Math.round(conf * 100)}%); shown for reference — the chart keeps the engine's read.</span>
+              </div>
+            )}
 
             <SectionLabel C={C}>CHROMA BITMASK · absolute (bit i = pitch-class i)</SectionLabel>
             <div style={{ fontSize: 13, color: C.dim, marginBottom: 6 }}>
