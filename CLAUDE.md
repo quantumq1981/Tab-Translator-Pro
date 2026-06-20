@@ -152,6 +152,18 @@ source of truth and makes that class of bug impossible.
 `QUALITIES` is the chord DB. Each entry: `{ name, suffix, intervals, rank, mask }`
 where `mask` is auto-filled via `.map(q => ({...q, mask: makeMask(q.intervals)}))`.
 
+**Expanding `QUALITIES` is additive but touches recognition OUTPUT — the validated
+corpus is the guardrail.** The triads/7ths/sus/6 set was extended (2026-06-20) with
+the common jazz qualities **`add9 · m(maj7) · 6/9 · 9 · m9 · maj9 · 7♭9 · 7♯9`**, each
+at a **high `rank`** (uncommon → never wins a ranking *tie* over a plainer chord; it
+only wins when it fits genuinely MORE of the voicing, since `score = inter − 0.8·extra
+− 1.2·missing`). The rule for any future addition: **every existing test progression
+must stay byte-identical** (Blue Sky/Peg/Anthropology/Yardbird/… all did) AND add a
+positive test for the new quality's canonical voicing + a guard that the plainer chord
+isn't over-labelled. Note an enharmonic gotcha the tests encode: a major-6 voicing
+`{C,E,G,A}` is the same pitch-set as `Am7` and `m7` (rank 3) out-ranks `6` (rank 9), so
+it reads as **`Am7/C`** — long-standing, not a bug.
+
 ## Invariant 2 — String mapping is POSITIONAL, never by label
 
 Tab string indices run **0 = lowest-pitched string** (low E) through
@@ -560,9 +572,10 @@ bloating the monolith. Lifting `semis`/transpose state out to the parent for per
   (drops passing tones), takes the bass from the **structural** tones (so a brief
   low melody note can't fake a slash), and runs that chroma through the engine →
   one chord per bar. Default OFF (Blue Sky / clean charts stay per-onset). Honest
-  limits: rootless/altered jazz voicings (e.g. Steely Dan) and `7♭9`/`7♯9` chords
-  the `QUALITIES` table doesn't model won't always match a lead sheet — Edit +
-  Transpose cover the gaps, and MusicXML import is the high-fidelity route.
+  limits: **rootless** / heavily-altered jazz voicings (e.g. Steely Dan) won't always
+  match a lead sheet — Edit + Transpose cover the gaps, and MusicXML import is the
+  high-fidelity route. (The common extensions `7♭9`/`7♯9`/`9`/`m9`/`maj9`/`add9`/`6/9`/
+  `m(maj7)` ARE now modelled in `QUALITIES` — see Invariant 1.)
   - **Melodic-chart nudge** (`melodic` memo in `ChartPanel`): when **≥50%** of the
     chart's events are single-note (`midis.length === 1`, over ≥4 events), the chart
     is a melodic line (a single-note PDF/tab head, or a lead part), not block harmony
@@ -927,6 +940,12 @@ accordingly.
 - **Engine**: 12 preset voicings pass (C, G, Am, Em, F-barre, C/E, D/F#, Asus4,
   Dm7, G7, Cmaj7-no5 → 75% “missing 1”, D5 in Drop D). The Drop-D case
   specifically guards Invariant 2.
+- **Extended qualities** (`npm test`): the additive `add9/m(maj7)/6/9/9/m9/maj9/7♭9/7♯9`
+  set recognises each canonical C-rooted voicing (e.g. `{C,E,G,Bb,D}` → `C9`,
+  `{C,Eb,G,B}` → `Cm(maj7)`, `{C,E,G,Bb,Db}` → `C7♭9`) AND does **not** over-label the
+  plainer chords (triad stays `C`, `maj7` stays `Cmaj7`, `7` stays `C7`, `m7` stays
+  `Cm7`; `{C,E,G,A}` stays `Am7/C`). The whole validated corpus above is the regression
+  guard that nothing existing shifted.
 - **Path A**: the Python reference parser reconstructs **all 165 measures** of
   Blue Sky with the correct progression — verse I–IV (`E | A | A | E …`), the V
   chord (`B`) at section turns, and a bridge with `C#m` / `F#m7`. If a parser
