@@ -924,7 +924,6 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   };
   const bump = (d) => setSemis((s) => Math.max(-11, Math.min(11, s + d)));
 
-  let prevSig = null;
   return (
     <>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, fontSize: 11, color: C.dim, margin: "14px 0 6px" }}>
@@ -972,102 +971,132 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
         </span>
       </div>
 
-      {melodic && !simplify && (
-        <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8, fontSize: 11, color: C.amber, background: "rgba(233,162,75,0.08)", border: `1px solid ${C.amber}`, borderRadius: 8, padding: "7px 10px", marginBottom: 10 }}>
-          <span style={{ flex: "1 1 240px" }}>♪ Mostly single notes — this looks like a melodic line, not block chords. <b>Simplify</b> infers one chord per bar from the notes that sound.</span>
-          <button onClick={() => setSimplify(true)} style={{ ...chip(C), padding: "3px 10px", borderColor: C.amber, color: C.amber, fontWeight: 600 }}>Turn on Simplify</button>
-        </div>
-      )}
+      {melodic && !simplify && <MelodicNudge C={C} onSimplify={() => setSimplify(true)} />}
 
-      {view === "chart" ? (
-        <>
-          <div className="tdp-scroll" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(146px, 1fr))", gap: "10px 0", maxHeight: 420, overflow: "auto", paddingRight: 4 }}>
-            {tscore.bars.map((bar) => {
-              const sig = bar.timeSig || tscore.timeSig;
-              const sigChanged = !prevSig || prevSig[0] !== sig[0] || prevSig[1] !== sig[1];
-              prevSig = sig;
-              return (
-                <div key={bar.number} style={{ position: "relative", borderLeft: `2px solid ${C.border}`, padding: "16px 8px 6px 10px", minHeight: 44 }}>
-                  <span style={{ position: "absolute", top: 2, left: 10, fontSize: 9, color: C.dim }}>{bar.number}</span>
-                  {sigChanged && <span style={{ position: "absolute", top: 2, right: 6, fontSize: 9, color: C.amber }}>{sig.join("/")}</span>}
-                  <div style={{ display: "grid", gridTemplateColumns: `repeat(${sig[0]}, 1fr)`, alignItems: "center", columnGap: 2, minHeight: 24 }}>
-                    {bar.events.map((e, i) => {
-                      const k = `${bar.number}.${e.beat}`;
-                      const cur = symOf(bar, e);
-                      const edited = overrides[k] != null;
-                      const gridCol = `${e.beat + 1} / span ${Math.max(1, e.durBeats)}`;
-                      if (editMode && editKey === k) {
-                        const commit = () => { const v = draft.trim(); setOverrides((o) => { const n = { ...o }; if (!v || v === e.symbol) delete n[k]; else n[k] = v; return n; }); setEditKey(""); };
-                        return (
-                          <input key={i} autoFocus value={draft} onChange={(ev) => setDraft(ev.target.value)} onBlur={commit}
-                            onKeyDown={(ev) => { if (ev.key === "Enter") commit(); if (ev.key === "Escape") setEditKey(""); }}
-                            style={{ gridColumn: gridCol, width: "100%", boxSizing: "border-box", background: C.bg, color: C.amber, border: `1px solid ${C.amber}`, borderRadius: 4, padding: "1px 3px", font: "700 14px 'Space Mono', monospace" }} />
-                        );
-                      }
-                      const isSel = selKey === k;
-                      const isPlaying = playKey === k;
-                      return (
-                        <button key={i} onClick={() => (editMode ? (setEditKey(k), setDraft(cur)) : onPick(k, e))} title={editMode ? "click to re-label" : `beat ${e.beat + 1}`}
-                          style={{ gridColumn: gridCol, justifySelf: "start", textAlign: "left", background: isPlaying ? `${C.green}22` : "transparent", borderRadius: 4, border: "none", borderBottom: isSel ? `2px solid ${C.amber}` : "2px solid transparent", padding: "0 2px", cursor: "pointer", color: isPlaying ? C.green : edited ? C.green : isSel ? C.amber : C.cyan, fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: cur.length > 4 ? 13 : 16, lineHeight: 1.2, transition: "background .1s, color .1s" }}>
-                          <span style={{ display: "block" }}>{cur}{edited ? "*" : ""}</span>
-                          {showRoman && key && <span style={{ display: "block", fontSize: 9, fontWeight: 400, color: C.dim, marginTop: 1 }}>{romanFor(cur, key)}</span>}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-          <div style={{ fontSize: 11, color: C.dim, marginTop: 8 }}>
-            {editMode ? "Edit mode · click a chord to re-label it (blank = revert to detected). * marks edits." : "Lead sheet · chords sit on the beat they change. Tap a chord to inspect its voicing →"}
-          </div>
-        </>
-      ) : (
-        <>
-          <div className="tdp-scroll" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(74px, 1fr))", gap: 6, maxHeight: 420, overflow: "auto", paddingRight: 4 }}>
-            {tscore.bars.map((bar) => {
-              const collapsed = bar.events.map((e) => symOf(bar, e));
-              const k = `${bar.number}`;
-              const isSel = selKey === k;
-              return (
-                <button key={k} className="meas" onClick={() => onPick(k, bar.events[0] || {})}
-                  style={{ position: "relative", background: C.bg, border: `1px solid ${isSel ? C.amber : C.border}`, borderRadius: 8, padding: "10px 4px 8px", cursor: "pointer", minHeight: 56, textAlign: "center" }}>
-                  <span style={{ position: "absolute", top: 3, left: 6, fontSize: 9, color: C.dim }}>{bar.number}</span>
-                  <div style={{ marginTop: 6, fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: collapsed.join(" ").length > 6 ? 13 : 17, color: C.cyan, lineHeight: 1.15 }}>{collapsed.join(" ")}</div>
-                </button>
-              );
-            })}
-          </div>
-          <div style={{ fontSize: 11, color: C.dim, marginTop: 8 }}>Tap any bar to inspect its voicing in the readout →</div>
-        </>
-      )}
+      {view === "chart"
+        ? <LeadSheetView score={tscore} C={C} overrides={overrides} setOverrides={setOverrides} editMode={editMode}
+            editKey={editKey} setEditKey={setEditKey} draft={draft} setDraft={setDraft} selKey={selKey}
+            playKey={playKey} showRoman={showRoman} musicKey={key} onPick={onPick} symOf={symOf} />
+        : <GridView score={tscore} C={C} symOf={symOf} selKey={selKey} onPick={onPick} />}
 
-      {exp && (
-        <div style={{ marginTop: 12 }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-            <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim }}>EXPORT · {exp.fmt === "abc" ? "ABC NOTATION" : exp.fmt === "musicxml" ? "MUSICXML" : exp.fmt === "midi" ? "MIDI FILE" : exp.fmt === "csmpn" ? "CSMPN" : exp.fmt === "csml" ? "CHORDSLASHML" : "CHORDPRO"}</span>
-            <span style={{ display: "inline-flex", gap: 6 }}>
-              {!exp.bytes && <button onClick={copy} style={{ ...chip(C), padding: "3px 9px", borderColor: copied ? C.green : C.border, color: copied ? C.green : C.dim }}>{copied ? "copied ✓" : "copy"}</button>}
-              <button onClick={download} title={`download as .${_EXPORT_EXT[exp.fmt] || "txt"}`} style={{ ...chip(C), padding: "3px 9px", borderColor: downloaded ? C.green : C.border, color: downloaded ? C.green : C.cyan }}>{downloaded ? "saved ✓" : "⬇ download"}</button>
-              <button onClick={() => setExp(null)} style={{ ...chip(C), padding: "3px 9px" }}>close</button>
-            </span>
-          </div>
-          {exp.bytes ? (
-            <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, padding: "12px 12px", fontSize: 12, color: C.dim, lineHeight: 1.6 }}>
-              🎹 Standard MIDI File · {exp.bytes.length.toLocaleString()} bytes · ♩={bpm}{semis ? ` · transposed ${semis > 0 ? "+" : ""}${semis} st` : ""}. Binary, so there's nothing to copy — hit <b style={{ color: C.cyan }}>⬇ download</b> to save the <b>.mid</b> and open it in any DAW or notation app.
-            </div>
-          ) : (
-            <textarea readOnly value={exp.text} spellCheck={false} className="tdp-scroll"
-              style={{ width: "100%", height: 120, resize: "vertical", boxSizing: "border-box", background: C.bg, color: C.text, border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, fontSize: 12, lineHeight: 1.5, fontFamily: "'IBM Plex Mono', monospace", outline: "none" }} />
-          )}
-          {exp.fmt === "abc" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>Real, playable notes + chord symbols — paste into any ABC player (e.g. abcjs / editor at abcnotation.com) to hear it.</div>}
-          {exp.fmt === "musicxml" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>Save as <b>.musicxml</b> and open in MuseScore / Guitar Pro — carries chord symbols + notes + meter. Round-trips back into this app.</div>}
-          {exp.fmt === "csmpn" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}><b>Chord Sheet Maker Pro</b>'s native fake-book source (one chord = one bar; <code>_</code> splits a bar) — also carries the real fingering (<code>{"{tab}"}</code>) and decoded strum rhythm (<code>{"{hybrid}"}</code>). Paste into Pro's editor, or use <b>→ Chord Sheet Maker Pro</b> to send it straight there.</div>}
-          {exp.fmt === "csml" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}><b>ChordSlashML</b> — Pro's beat-slotted notation (<code>{"|"}</code> measures, <code>_</code> holds, <code>.</code> rests). Paste into Pro's <b>ChordSlashML</b> live editor.</div>}
-        </div>
-      )}
+      <ExportPanel exp={exp} setExp={setExp} C={C} bpm={bpm} semis={semis}
+        copy={copy} download={download} copied={copied} downloaded={downloaded} extOf={(f) => _EXPORT_EXT[f] || "txt"} />
     </>
+  );
+}
+
+/* ---- view layer: pure presentational sub-views ----------------------------
+ * ChartPanel is the CONTROLLER (state + score transforms + export/playback
+ * handlers); these render its output. Splitting them keeps the panel from
+ * bloating as new views (Audio/Practice, Wave 3) land — each is just another
+ * sibling here, switched on `view`, with no shared-state entanglement. Pure
+ * props in, JSX out — no engine internals, no own persistent state. */
+function MelodicNudge({ C, onSimplify }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8, fontSize: 11, color: C.amber, background: "rgba(233,162,75,0.08)", border: `1px solid ${C.amber}`, borderRadius: 8, padding: "7px 10px", marginBottom: 10 }}>
+      <span style={{ flex: "1 1 240px" }}>♪ Mostly single notes — this looks like a melodic line, not block chords. <b>Simplify</b> infers one chord per bar from the notes that sound.</span>
+      <button onClick={onSimplify} style={{ ...chip(C), padding: "3px 10px", borderColor: C.amber, color: C.amber, fontWeight: 600 }}>Turn on Simplify</button>
+    </div>
+  );
+}
+/* Lead-sheet view: chords on their beat, barlines, inline relabel in Edit mode.
+ * `musicKey` is the detected key (named to avoid clashing with React list keys). */
+function LeadSheetView({ score, C, overrides, setOverrides, editMode, editKey, setEditKey, draft, setDraft, selKey, playKey, showRoman, musicKey, onPick, symOf }) {
+  let prevSig = null;
+  return (
+    <>
+      <div className="tdp-scroll" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(146px, 1fr))", gap: "10px 0", maxHeight: 420, overflow: "auto", paddingRight: 4 }}>
+        {score.bars.map((bar) => {
+          const sig = bar.timeSig || score.timeSig;
+          const sigChanged = !prevSig || prevSig[0] !== sig[0] || prevSig[1] !== sig[1];
+          prevSig = sig;
+          return (
+            <div key={bar.number} style={{ position: "relative", borderLeft: `2px solid ${C.border}`, padding: "16px 8px 6px 10px", minHeight: 44 }}>
+              <span style={{ position: "absolute", top: 2, left: 10, fontSize: 9, color: C.dim }}>{bar.number}</span>
+              {sigChanged && <span style={{ position: "absolute", top: 2, right: 6, fontSize: 9, color: C.amber }}>{sig.join("/")}</span>}
+              <div style={{ display: "grid", gridTemplateColumns: `repeat(${sig[0]}, 1fr)`, alignItems: "center", columnGap: 2, minHeight: 24 }}>
+                {bar.events.map((e, i) => {
+                  const k = `${bar.number}.${e.beat}`;
+                  const cur = symOf(bar, e);
+                  const edited = overrides[k] != null;
+                  const gridCol = `${e.beat + 1} / span ${Math.max(1, e.durBeats)}`;
+                  if (editMode && editKey === k) {
+                    const commit = () => { const v = draft.trim(); setOverrides((o) => { const n = { ...o }; if (!v || v === e.symbol) delete n[k]; else n[k] = v; return n; }); setEditKey(""); };
+                    return (
+                      <input key={i} autoFocus value={draft} onChange={(ev) => setDraft(ev.target.value)} onBlur={commit}
+                        onKeyDown={(ev) => { if (ev.key === "Enter") commit(); if (ev.key === "Escape") setEditKey(""); }}
+                        style={{ gridColumn: gridCol, width: "100%", boxSizing: "border-box", background: C.bg, color: C.amber, border: `1px solid ${C.amber}`, borderRadius: 4, padding: "1px 3px", font: "700 14px 'Space Mono', monospace" }} />
+                    );
+                  }
+                  const isSel = selKey === k;
+                  const isPlaying = playKey === k;
+                  return (
+                    <button key={i} onClick={() => (editMode ? (setEditKey(k), setDraft(cur)) : onPick(k, e))} title={editMode ? "click to re-label" : `beat ${e.beat + 1}`}
+                      style={{ gridColumn: gridCol, justifySelf: "start", textAlign: "left", background: isPlaying ? `${C.green}22` : "transparent", borderRadius: 4, border: "none", borderBottom: isSel ? `2px solid ${C.amber}` : "2px solid transparent", padding: "0 2px", cursor: "pointer", color: isPlaying ? C.green : edited ? C.green : isSel ? C.amber : C.cyan, fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: cur.length > 4 ? 13 : 16, lineHeight: 1.2, transition: "background .1s, color .1s" }}>
+                      <span style={{ display: "block" }}>{cur}{edited ? "*" : ""}</span>
+                      {showRoman && musicKey && <span style={{ display: "block", fontSize: 9, fontWeight: 400, color: C.dim, marginTop: 1 }}>{romanFor(cur, musicKey)}</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ fontSize: 11, color: C.dim, marginTop: 8 }}>
+        {editMode ? "Edit mode · click a chord to re-label it (blank = revert to detected). * marks edits." : "Lead sheet · chords sit on the beat they change. Tap a chord to inspect its voicing →"}
+      </div>
+    </>
+  );
+}
+/* Grid view: the compact one-symbol-per-bar card grid. */
+function GridView({ score, C, symOf, selKey, onPick }) {
+  return (
+    <>
+      <div className="tdp-scroll" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(74px, 1fr))", gap: 6, maxHeight: 420, overflow: "auto", paddingRight: 4 }}>
+        {score.bars.map((bar) => {
+          const collapsed = bar.events.map((e) => symOf(bar, e));
+          const k = `${bar.number}`;
+          const isSel = selKey === k;
+          return (
+            <button key={k} className="meas" onClick={() => onPick(k, bar.events[0] || {})}
+              style={{ position: "relative", background: C.bg, border: `1px solid ${isSel ? C.amber : C.border}`, borderRadius: 8, padding: "10px 4px 8px", cursor: "pointer", minHeight: 56, textAlign: "center" }}>
+              <span style={{ position: "absolute", top: 3, left: 6, fontSize: 9, color: C.dim }}>{bar.number}</span>
+              <div style={{ marginTop: 6, fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: collapsed.join(" ").length > 6 ? 13 : 17, color: C.cyan, lineHeight: 1.15 }}>{collapsed.join(" ")}</div>
+            </button>
+          );
+        })}
+      </div>
+      <div style={{ fontSize: 11, color: C.dim, marginTop: 8 }}>Tap any bar to inspect its voicing in the readout →</div>
+    </>
+  );
+}
+/* Export preview: the generated text (or MIDI byte summary) + copy/download. */
+function ExportPanel({ exp, setExp, C, bpm, semis, copy, download, copied, downloaded, extOf }) {
+  if (!exp) return null;
+  return (
+    <div style={{ marginTop: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+        <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim }}>EXPORT · {exp.fmt === "abc" ? "ABC NOTATION" : exp.fmt === "musicxml" ? "MUSICXML" : exp.fmt === "midi" ? "MIDI FILE" : exp.fmt === "csmpn" ? "CSMPN" : exp.fmt === "csml" ? "CHORDSLASHML" : "CHORDPRO"}</span>
+        <span style={{ display: "inline-flex", gap: 6 }}>
+          {!exp.bytes && <button onClick={copy} style={{ ...chip(C), padding: "3px 9px", borderColor: copied ? C.green : C.border, color: copied ? C.green : C.dim }}>{copied ? "copied ✓" : "copy"}</button>}
+          <button onClick={download} title={`download as .${extOf(exp.fmt)}`} style={{ ...chip(C), padding: "3px 9px", borderColor: downloaded ? C.green : C.border, color: downloaded ? C.green : C.cyan }}>{downloaded ? "saved ✓" : "⬇ download"}</button>
+          <button onClick={() => setExp(null)} style={{ ...chip(C), padding: "3px 9px" }}>close</button>
+        </span>
+      </div>
+      {exp.bytes ? (
+        <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, padding: "12px 12px", fontSize: 12, color: C.dim, lineHeight: 1.6 }}>
+          🎹 Standard MIDI File · {exp.bytes.length.toLocaleString()} bytes · ♩={bpm}{semis ? ` · transposed ${semis > 0 ? "+" : ""}${semis} st` : ""}. Binary, so there's nothing to copy — hit <b style={{ color: C.cyan }}>⬇ download</b> to save the <b>.mid</b> and open it in any DAW or notation app.
+        </div>
+      ) : (
+        <textarea readOnly value={exp.text} spellCheck={false} className="tdp-scroll"
+          style={{ width: "100%", height: 120, resize: "vertical", boxSizing: "border-box", background: C.bg, color: C.text, border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, fontSize: 12, lineHeight: 1.5, fontFamily: "'IBM Plex Mono', monospace", outline: "none" }} />
+      )}
+      {exp.fmt === "abc" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>Real, playable notes + chord symbols — paste into any ABC player (e.g. abcjs / editor at abcnotation.com) to hear it.</div>}
+      {exp.fmt === "musicxml" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>Save as <b>.musicxml</b> and open in MuseScore / Guitar Pro — carries chord symbols + notes + meter. Round-trips back into this app.</div>}
+      {exp.fmt === "csmpn" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}><b>Chord Sheet Maker Pro</b>'s native fake-book source (one chord = one bar; <code>_</code> splits a bar) — also carries the real fingering (<code>{"{tab}"}</code>) and decoded strum rhythm (<code>{"{hybrid}"}</code>). Paste into Pro's editor, or use <b>→ Chord Sheet Maker Pro</b> to send it straight there.</div>}
+      {exp.fmt === "csml" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}><b>ChordSlashML</b> — Pro's beat-slotted notation (<code>{"|"}</code> measures, <code>_</code> holds, <code>.</code> rests). Paste into Pro's <b>ChordSlashML</b> live editor.</div>}
+    </div>
   );
 }
 

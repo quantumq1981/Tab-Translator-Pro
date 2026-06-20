@@ -540,6 +540,20 @@ filter is unnecessary — and adding one back breaks Guitar Pro upload on iPhone
 
 Both chart modes feed one `ChartPanel`. Anything that reads/writes a score does so
 through the shared shape, so these work identically for Path A and Path C:
+
+**View-layer decoupling (since 2026-06-20 — Roadmap Wave 2 #6).** `ChartPanel` is the
+**controller** — it owns all state (`view`/`semis`/`simplify`/`arrange`/`exp`/playback
+…), the score-transform memo chain (`simp → base → tscore`), and the export/playback/
+handoff handlers. Its *render* is four **pure presentational sub-views** that take props
+and return JSX (no engine internals, no own persistent state): **`MelodicNudge`** (the
+amber simplify hint), **`LeadSheetView`** (`view==="chart"` — chords on the beat + inline
+Edit; takes `musicKey` so the name doesn't clash with React list keys), **`GridView`**
+(the compact one-symbol-per-bar cards), and **`ExportPanel`** (the export text / MIDI-byte
+summary + copy/download). This is a **pure refactor** (behavior identical; guarded by the
+transpile + contract tests) whose point is that the next views (Audio/Practice, Wave 3)
+are just **more siblings switched on `view`** — they plug into this seam instead of
+bloating the monolith. Lifting `semis`/transpose state out to the parent for persistence
++ off-thread re-parse stays a follow-on (it's the "then persist" half of the roadmap).
 - **Simplify** (`simplifyScore(score, useSharp)`): opt-in "1 chord/bar" mode for
   dense transcriptions (melody + harmony), where the per-onset chart is noise. It
   weights each pitch class by the total duration it sounds, keeps the strong ones
@@ -980,8 +994,9 @@ contract). Build strictly in this order; each wave depends on the prior.
    offline becomes a priority (the one place to relax zero-build).
 
 **Wave 2 — View decoupling + deterministic wins:**
-6. **ChartPanel / view-layer decoupling** — pure refactor (tests guard it);
-   prerequisite for Audio/Practice views so they don't bloat the monolith.
+6. ✅ **ChartPanel / view-layer decoupling** — DONE 2026-06-20. ChartPanel is now
+   the CONTROLLER; the render is four pure sub-views (`MelodicNudge`,
+   `LeadSheetView`, `GridView`, `ExportPanel`). See "Shared ChartPanel" note.
 7. **PDF *Edit-tuning* UI** — the **manual** per-system string-shift override only.
    Do **NOT** build the auto-anchor heuristic: CLAUDE.md (Kid Charlemagne, 52.6 vs
    53.3 pt) proves any auto-shift that fixes a sparse system regresses the
