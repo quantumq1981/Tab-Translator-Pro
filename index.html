@@ -10,9 +10,11 @@
   <!--
     Zero-build static host. Mirrors the app's existing pattern of loading deps
     from a CDN at runtime (PDF.js already loads this way). No bundler, no repo
-    deps: we fetch the single-file React component (TabDecoderPro.tsx), transpile
-    it in-browser with Babel standalone, and resolve bare `react` imports via the
-    importmap below. Keep this faithful to the "zero build step" project ethos.
+    deps: we fetch the pure recognition engine (engine.tsx) and the React UI
+    (TabDecoderPro.tsx), transpile both in-browser with Babel standalone, wire
+    the UI's `import ... from "./engine.tsx"` to the engine's Blob URL, and
+    resolve bare `react` imports via the importmap below. Keep this faithful to
+    the "zero build step" project ethos.
   -->
   <script src="https://unpkg.com/@babel/standalone@7.25.6/babel.min.js" crossorigin></script>
   <script type="importmap">
@@ -55,29 +57,39 @@
     try {
       if (!window.Babel) throw new Error("Babel standalone failed to load from unpkg.com");
 
-      // 1. fetch the single-file component source
-      const res = await fetch("./TabDecoderPro.tsx", { cache: "no-cache" });
-      if (!res.ok) throw new Error("fetch TabDecoderPro.tsx → HTTP " + res.status);
-      const source = await res.text();
-
-      // 2. transpile TSX → JS in-browser (strip TS, transform JSX); keep ESM so
-      //    the `import ... from "react"` resolves via the importmap.
-      const { code } = window.Babel.transform(source, {
-        filename: "TabDecoderPro.tsx",
+      // transpile helper: strip TS, transform JSX; keep ESM so `import` survives.
+      const transpile = (source, filename) => window.Babel.transform(source, {
+        filename,
         presets: [
           ["typescript", { allExtensions: true, isTSX: true, onlyRemoveTypeImports: true }],
           ["react"],
         ],
-      });
+      }).code;
 
-      // 3. load the transpiled module + React, mount.
-      const url = URL.createObjectURL(new Blob([code], { type: "text/javascript" }));
+      // 1. fetch the engine module + the UI component in parallel.
+      const [engRes, appRes] = await Promise.all([
+        fetch("./engine.tsx", { cache: "no-cache" }),
+        fetch("./TabDecoderPro.tsx", { cache: "no-cache" }),
+      ]);
+      if (!engRes.ok) throw new Error("fetch engine.tsx → HTTP " + engRes.status);
+      if (!appRes.ok) throw new Error("fetch TabDecoderPro.tsx → HTTP " + appRes.status);
+      const engineSrc = await engRes.text();
+      let appSrc = await appRes.text();
+
+      // 2. transpile the engine, publish it at a Blob URL, and repoint the UI's
+      //    `import ... from "./engine.tsx"` at that URL (no bundler needed).
+      const engineUrl = URL.createObjectURL(new Blob([transpile(engineSrc, "engine.tsx")], { type: "text/javascript" }));
+      appSrc = appSrc.replace(/from\s*["']\.\/engine\.tsx["']/, 'from "' + engineUrl + '"');
+
+      // 3. transpile the UI (React stays a bare import → importmap), load, mount.
+      const appUrl = URL.createObjectURL(new Blob([transpile(appSrc, "TabDecoderPro.tsx")], { type: "text/javascript" }));
       const [{ default: TabDecoderPro }, React, { createRoot }] = await Promise.all([
-        import(url),
+        import(appUrl),
         import("react"),
         import("react-dom/client"),
       ]);
-      URL.revokeObjectURL(url);
+      URL.revokeObjectURL(appUrl);
+      // engineUrl is left alive: the UI module's import binding resolves against it.
 
       createRoot(boot).render(React.createElement(TabDecoderPro));
       splash.remove();
