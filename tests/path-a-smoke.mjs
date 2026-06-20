@@ -505,6 +505,15 @@ expect(/SESS_BIN_LS|localStorage/.test(uiSrc) && /_bytesToB64|btoa/.test(uiSrc),
 expect(/restoreRef/.test(uiSrc) && /catch\s*\(/.test(uiSrc), "session restore must be one-shot (ref-guarded) and wrapped in try/catch");
 expect(!/navigator\.storage/.test(engineSrc) && !/localStorage/.test(engineSrc), "engine.tsx must stay free of persistence/browser-storage concerns");
 
+/* Parse Web Worker (Wave 1 #3) contract — browser-only glue, so statically guard
+ * the rails: the loader publishes the engine URL; the worker is a module worker
+ * importing it; routing is gated to DOMParser-free formats; and there is a
+ * guaranteed main-thread fallback so correctness never depends on the worker. */
+expect(/window\.__TTP_ENGINE_URL__\s*=/.test(htmlSrc), "index.html must publish window.__TTP_ENGINE_URL__ for the parse worker");
+expect(/__TTP_ENGINE_URL__/.test(uiSrc) && /new Worker\(/.test(uiSrc) && /type:\s*["']module["']/.test(uiSrc), "UI must create a module Worker that imports the published engine URL");
+expect(/FICHIER GUITAR PRO/.test(uiSrc) && /ptab/.test(uiSrc), "worker routing must be gated to DOMParser-free formats (GP3/4/5 + Power Tab)");
+expect(/parseScoreOffThread/.test(uiSrc) && /return parseGuitarProOrXML\(/.test(uiSrc), "off-thread parse must fall back to the same main-thread engine call");
+
 /* ---- report -------------------------------------------------------------- */
 console.log(`module split: UI imports ${imported.length}/${exported.length} engine exports, 0 missing · engine.tsx pure`);
 console.log(`PDF.js ${pdfjsLib.version} · ${pages} pages · ${tokens.length} tokens`);

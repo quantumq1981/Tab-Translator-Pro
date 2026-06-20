@@ -80,6 +80,11 @@
       //    `import ... from "./engine.tsx"` at that URL (no bundler needed).
       const engineUrl = URL.createObjectURL(new Blob([transpile(engineSrc, "engine.tsx")], { type: "text/javascript" }));
       appSrc = appSrc.replace(/from\s*["']\.\/engine\.tsx["']/, 'from "' + engineUrl + '"');
+      // Publish the transpiled-engine Blob URL so the app can spin a parse Web
+      // Worker that imports the SAME engine module (Roadmap Wave 1 #3). The worker
+      // is a progressive enhancement — the app falls back to main-thread parsing
+      // if this is absent, so boot never depends on it.
+      window.__TTP_ENGINE_URL__ = engineUrl;
 
       // 3. transpile the UI (React stays a bare import → importmap), load, mount.
       const appUrl = URL.createObjectURL(new Blob([transpile(appSrc, "TabDecoderPro.tsx")], { type: "text/javascript" }));

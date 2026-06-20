@@ -280,6 +280,74 @@ async function clearSession() {
   await _opfsRemove();
 }
 
+/* ==========================================================================
+ *  PARSE WEB WORKER (Roadmap Wave 1 #3) — non-blocking binary parsing
+ *
+ *  Dense binary parsers (parseGP345 / parsePowerTab) are pure-JS byte loops that
+ *  can block the main thread for 100s of ms on a large file — noticeable jank,
+ *  especially on mobile Safari. We run them off-thread in a module Worker that
+ *  imports the SAME transpiled engine the UI uses (published at a Blob URL by the
+ *  index.html loader as window.__TTP_ENGINE_URL__) — one engine, no copy, no drift.
+ *
+ *  HONEST LIMIT: only DOMParser-free parsers can run here. DOMParser is window-
+ *  only (absent in Workers), so the XML-based paths (MusicXML, GP6/7/8 gpif) stay
+ *  on the main thread — the browser's native XML parser is fast C++ anyway. We
+ *  route GP3/4/5 + Power Tab to the worker and everything else stays main-thread.
+ *
+ *  PROGRESSIVE ENHANCEMENT: every call falls back to the identical main-thread
+ *  engine call if the worker is unavailable or errors, so correctness NEVER
+ *  depends on the worker (it's pure offloading). This RPC infra is also the home
+ *  for the Wave 3 ONNX classifier. Browser-only glue — smoke-test on hardware. */
+let _engineWorker = null, _engineWorkerDead = false, _rpcSeq = 0;
+const _rpcPending = new Map();
+function _getEngineWorker() {
+  if (_engineWorker || _engineWorkerDead) return _engineWorker;
+  try {
+    const engineUrl = typeof window !== "undefined" && window.__TTP_ENGINE_URL__;
+    if (!engineUrl || typeof Worker === "undefined") { _engineWorkerDead = true; return null; }
+    const code =
+      "import * as E from " + JSON.stringify(engineUrl) + ";\n" +
+      "self.onmessage = async (ev) => {\n" +
+      "  const { id, fn, args } = ev.data;\n" +
+      "  try { const result = await E[fn](...args); self.postMessage({ id, ok: true, result }); }\n" +
+      "  catch (err) { self.postMessage({ id, ok: false, error: String((err && err.message) || err) }); }\n" +
+      "};";
+    const w = new Worker(URL.createObjectURL(new Blob([code], { type: "text/javascript" })), { type: "module" });
+    w.onmessage = (ev) => {
+      const { id, ok, result, error } = ev.data || {};
+      const p = _rpcPending.get(id); if (!p) return;
+      _rpcPending.delete(id);
+      ok ? p.resolve(result) : p.reject(new Error(error || "worker error"));
+    };
+    w.onerror = () => { _engineWorkerDead = true; _engineWorker = null; _rpcPending.forEach((p) => p.reject(new Error("worker crashed"))); _rpcPending.clear(); };
+    _engineWorker = w;
+    return w;
+  } catch (_) { _engineWorkerDead = true; return null; }
+}
+function _engineRPC(fn, args) {
+  return new Promise((resolve, reject) => {
+    const w = _getEngineWorker();
+    if (!w) { reject(new Error("no engine worker")); return; }
+    const id = ++_rpcSeq;
+    _rpcPending.set(id, { resolve, reject });
+    try { w.postMessage({ id, fn, args }); } catch (err) { _rpcPending.delete(id); reject(err); }
+  });
+}
+// True only for DOMParser-free formats the worker can actually parse.
+function _workerableBytes(bytes) {
+  try { const head = new TextDecoder("latin1").decode(bytes.subarray(0, 32)); return head.includes("FICHIER GUITAR PRO") || head.startsWith("ptab"); }
+  catch (_) { return false; }
+}
+// bytes -> score, off-thread when possible; ALWAYS falls back to the same engine
+// call on the main thread so a missing/broken worker never changes the result.
+async function parseScoreOffThread(bytes, filename, sharp) {
+  if (_workerableBytes(bytes)) {
+    try { return await _engineRPC("parseGuitarProOrXML", [bytes, filename, sharp]); }
+    catch (err) { console.warn("worker parse fell back to main thread:", err && err.message); }
+  }
+  return parseGuitarProOrXML(bytes, filename, sharp);
+}
+
 /* ========================================================================== */
 /*  UI                                                                        */
 /* ========================================================================== */
@@ -302,6 +370,7 @@ export default function TabDecoderPro() {
   const [xmlScore, setXmlScore] = useState(null);
   const [xmlErr, setXmlErr] = useState("");
   const [xmlName, setXmlName] = useState("");
+  const [xmlBusy, setXmlBusy] = useState(false); // parsing GP/MusicXML (may be off-thread)
   const [restored, setRestored] = useState(false); // showing a restored-from-cache session
   const fileRef = useRef(null);
   const xmlRef = useRef(null);
@@ -352,17 +421,17 @@ export default function TabDecoderPro() {
   const onXml = async (e) => {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
-    setXmlErr(""); setXmlScore(null); clearSel();
+    setXmlErr(""); setXmlScore(null); setXmlBusy(true); clearSel();
     try {
       const bytes = new Uint8Array(await f.arrayBuffer());
-      const sc = await parseGuitarProOrXML(bytes, f.name, useSharp); // MusicXML / GP3-8 auto-detect
+      const sc = await parseScoreOffThread(bytes, f.name, useSharp); // MusicXML / GP3-8 auto-detect (binary GP/PTB off-thread)
       if (!sc.bars.length) setXmlErr("No measures found. Is this a MusicXML score or a Guitar Pro file?");
       setXmlScore(sc); setXmlName(f.name);
       setRestored(false);
       saveSessionFile(bytes); // meta is written by the persist effect
     } catch (err) {
       setXmlErr("Parse failed: " + (err && err.message ? err.message : String(err)));
-    }
+    } finally { setXmlBusy(false); }
   };
 
   // re-recognise symbols when the sharp/flat spelling flips (keep part)
@@ -414,12 +483,13 @@ export default function TabDecoderPro() {
         } catch (err) { setPdfErr("Parse failed: " + (err && err.message ? err.message : String(err))); }
         finally { setPdfBusy(false); }
       } else {
-        setMode("xml"); setXmlErr(""); setXmlScore(null); clearSel();
+        setMode("xml"); setXmlErr(""); setXmlScore(null); setXmlBusy(true); clearSel();
         try {
-          const sc = await parseGuitarProOrXML(d.bytes, d.filename, useSharp);
+          const sc = await parseScoreOffThread(d.bytes, d.filename, useSharp);
           if (!sc.bars.length) setXmlErr("No measures found. Is this a MusicXML score or a Guitar Pro file?");
           setXmlScore(sc); setXmlName(d.filename);
         } catch (err) { setXmlErr("Parse failed: " + (err && err.message ? err.message : String(err))); }
+        finally { setXmlBusy(false); }
       }
     })();
   }, [decodeReq, pdfReady]);
@@ -477,10 +547,12 @@ export default function TabDecoderPro() {
             setChart({ ...c, pages, fileName: meta.filename || "restored.pdf" });
           } finally { setPdfBusy(false); }
         } else {
-          setMode("xml"); setXmlErr(""); setXmlScore(null); clearSel();
-          let sc = await parseGuitarProOrXML(bytes, meta.filename || "restored", sharp);
-          if (meta.partIndex) sc = _reparseScore(sc, sharp, meta.partIndex);
-          setXmlScore(sc); setXmlName(meta.filename || "restored");
+          setMode("xml"); setXmlErr(""); setXmlScore(null); setXmlBusy(true); clearSel();
+          try {
+            let sc = await parseScoreOffThread(bytes, meta.filename || "restored", sharp);
+            if (meta.partIndex) sc = _reparseScore(sc, sharp, meta.partIndex);
+            setXmlScore(sc); setXmlName(meta.filename || "restored");
+          } finally { setXmlBusy(false); }
         }
         if (meta.overrides && Object.keys(meta.overrides).length) setOverrides(meta.overrides);
         setRestored(true);
@@ -648,9 +720,9 @@ export default function TabDecoderPro() {
                     (unselectable). Leaving it unset lets every file be picked on all platforms.
                     Do NOT re-add an extension allowlist here — it breaks GP/Power Tab upload on iOS. */}
                 <input ref={xmlRef} type="file" onChange={onXml} style={{ display: "none" }} />
-                <button onClick={() => xmlRef.current && xmlRef.current.click()}
-                  style={{ width: "100%", background: C.bg, border: `1px dashed ${C.border}`, color: C.amber, borderRadius: 10, padding: "22px 12px", fontSize: 14, cursor: "pointer", fontFamily: "'IBM Plex Mono', monospace" }}>
-                  ⬆  Upload a MusicXML, Guitar Pro or Power Tab file
+                <button onClick={() => xmlRef.current && xmlRef.current.click()} disabled={xmlBusy}
+                  style={{ width: "100%", background: C.bg, border: `1px dashed ${C.border}`, color: C.amber, borderRadius: 10, padding: "22px 12px", fontSize: 14, cursor: xmlBusy ? "default" : "pointer", fontFamily: "'IBM Plex Mono', monospace" }}>
+                  {xmlBusy ? "parsing…" : "⬆  Upload a MusicXML, Guitar Pro or Power Tab file"}
                 </button>
                 <div style={{ fontSize: 11, color: C.dim, marginTop: 8, lineHeight: 1.6 }}>
                   Reads <b>real</b> time signature, tuning &amp; rhythm straight from the file — no geometry guessing. Native: <b>MusicXML</b>, Guitar Pro <b>.gp</b> (7/8) / <b>.gpx</b> (6) / <b>.gp3 / .gp4 / .gp5</b>, and Power Tab <b>.ptb</b>.
