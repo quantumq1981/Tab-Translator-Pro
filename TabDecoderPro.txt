@@ -163,6 +163,7 @@ import {
   _csmpnTupNormal,
   _csmpnHybridPos,
   _csmpnVoicing,
+  _csmPerfHeaders,
   scoreToCSMPN,
   _csmlBeats,
   _ordinal,

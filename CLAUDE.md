@@ -680,6 +680,8 @@ Composer: …         ← opts.composer (omitted if absent)
 Key: …              ← keyName(opts.key, useSharp) (omitted if no key)
 Time: n/m           ← score.timeSig
 Tempo: …            ← opts.tempo (omitted if absent)
+Tuning: …           ← score.tuning (Drop D / Standard…; omitted for PDF charts)
+Capo: n             ← score.capo (GP3/4/5; omitted when 0)
 
 - Chart             ← one CSMPN section marker
 Bb7 Bb7_A7_D7 Eb6 % ← bars are WHITESPACE-separated, 4/row; one bar = one token
@@ -866,11 +868,14 @@ the source files already encode — captured (not inferred), the same way tuplet
 ### Future integration ideas (analysis — partly built)
 
 See `docs/INTEGRATION-IDEAS.md` for the full write-up. **Shipped:** the `{tab}`
-fingering round-trip and the `{hybrid}` rhythm scaffold (above). Remaining high-value
-steps: **(3)** carry `Capo:` and detected tuning into the CSMPN header once tuning
-detection lands; **(4)** a reverse link — a "Decode this tab" button in
-CSMP/Chord Sheet Maker that hands a GP/PDF back to Tab Translator for recognition;
-**(5)** share the recognition engine as a zero-dep module across the trio.
+fingering round-trip, the `{hybrid}` rhythm scaffold (above), the reverse **"Decode
+this tab"** link **(4)**, and **(3)** the **`Tuning:`/`Capo:` headers** — CSMPN + CSML
+now emit the parser-detected tuning (`score.tuning`) and capo (`score.capo`, captured
+free from the GP3/4/5 bytes already read; `opts` can override) via the shared
+`_csmPerfHeaders` helper, so Pro renders the right TAB/diagrams instead of assuming
+standard + no capo (validated: gp3 → `Tuning: Standard`, synthetic Drop D + capo 2,
+capo 0 / PDF charts omit the lines). Remaining: **(5)** share the recognition engine
+as a zero-dep module across the trio.
 
 ## Path B (scans / photos) — OUT OF SCOPE
 

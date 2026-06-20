@@ -459,6 +459,28 @@ expect(anth5Bars === "Gm7/Bb G7 | Cm7 F7 | Gm7/Bb Gm7 | C7 F7", `GP5 Anthropolog
 const auPriv5 = eng.parseGP345(new Uint8Array(fs.readFileSync(path.join(repo, "Charlie Parker - Au Privave.gp5"))), true, 0);
 expect(auPriv5.bars.length === 14 && auPriv5.tempo === 220 && auPriv5.tuning === "Standard", `GP5 v5.10 Au Privave expected 14 bars / tempo 220 / Standard, got ${auPriv5.bars.length} / ${auPriv5.tempo} / ${auPriv5.tuning}`);
 
+/* ---- Tuning/Capo export headers (Integration idea #3) -------------------- */
+// The GP parsers now carry the detected tuning + capo onto the score. The capo bytes
+// were already being read+discarded, so this capture is alignment-neutral — the verse
+// assertions above still pass, which is the proof it didn't shift the cursor.
+expect(typeof bs3.capo === "number" && bs3.tuning === "Standard", `gp3 score should carry a numeric capo + Standard tuning, got capo=${bs3.capo} tuning=${bs3.tuning}`);
+expect(typeof anth5.capo === "number", `gp5 score should carry a numeric capo, got ${anth5.capo}`);
+// CSMPN + CSML emit "Tuning:" from score.tuning (Standard included → explicit + round-trips)
+expect(/^Tuning: Standard$/m.test(eng.scoreToCSMPN(bs3, {})), "CSMPN should emit the detected Tuning header");
+expect(/^Tuning: Standard$/m.test(eng.scoreToCSML(bs3, {})), "CSML should emit the detected Tuning header");
+// synthetic score: a non-standard tuning + capo both surface in both formats
+const perfScore = { timeSig: [4, 4], tuning: "Drop D", capo: 2, bars: [{ number: 1, events: [{ symbol: "D5", beat: 0, durBeats: 4, qbeat: 0, qdur: 4, midis: [38, 45, 50] }] }] };
+const perfCsmpn = eng.scoreToCSMPN(perfScore, {});
+expect(/^Tuning: Drop D$/m.test(perfCsmpn) && /^Capo: 2$/m.test(perfCsmpn), `CSMPN should emit Drop D tuning + Capo 2, got:\n${perfCsmpn}`);
+expect(/^Tuning: Drop D$/m.test(eng.scoreToCSML(perfScore, {})) && /^Capo: 2$/m.test(eng.scoreToCSML(perfScore, {})), "CSML should emit Drop D tuning + Capo 2");
+// opts override the score values
+expect(/^Capo: 5$/m.test(eng.scoreToCSMPN(perfScore, { capo: 5 })), "opts.capo overrides score.capo");
+// a score with no tuning/capo (e.g. a PDF chart) emits neither header
+const plainPerf = { timeSig: [4, 4], bars: [{ number: 1, events: [{ symbol: "C", beat: 0, durBeats: 4, qbeat: 0, qdur: 4, midis: [48, 52, 55] }] }] };
+expect(!/Tuning:/.test(eng.scoreToCSMPN(plainPerf, {})) && !/Capo:/.test(eng.scoreToCSMPN(plainPerf, {})), "no tuning/capo on the score → no headers (PDF-style)");
+// capo 0 is omitted (never "Capo: 0")
+expect(!/Capo:/.test(eng.scoreToCSMPN({ ...plainPerf, tuning: "Standard", capo: 0 }, {})), "capo 0 must be omitted");
+
 /* ---- ABC export of a DENSE melodic line must never emit a 0 duration --------
  * Anthropology's track-0 head is straight eighths: ~8 onsets per 4/4 bar. The
  * integer beat/durBeats keep the chart grid happy, but the ABC exporter must use
