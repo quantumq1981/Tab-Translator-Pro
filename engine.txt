@@ -875,9 +875,9 @@ function parseGP345(u8, useSharp = true, partIndex = 0) {
     r.i32();                                                         // port
     r.i32(); r.i32();                                                // channel + effect channel
     r.i32();                                                         // fret count
-    r.i32();                                                         // capo
+    const capo = r.i32();                                            // capo fret (kept for the export header)
     r.skip(4);                                                       // colour
-    tracks.push({ name, stringCount, tuning, measures: [] });
+    tracks.push({ name, stringCount, tuning, capo, measures: [] });
   }
   // --- measures (measure-major, then track) ---
   const state = tracks.map(() => ({ lastFret: {} }));
@@ -918,7 +918,7 @@ function _gpBuildScore(tracks, tempo, version, useSharp, partIndex) {
     const md = m.meta || {};
     return { number: mi + 1, timeSig: [bts, btype], section: md.section || undefined, repeatStart: !!md.repeatStart, repeatEnd: !!md.repeatEnd, ending: md.ending || null, events: events.map(({ onset, ...e }) => e) };
   });
-  return { source: "gp", timeSig: bars.length ? bars[0].timeSig : [4, 4], tuning: _tuningName(tr.tuning ? [...tr.tuning].reverse() : null), tempo, bars, parts, partIndex: idx };
+  return { source: "gp", timeSig: bars.length ? bars[0].timeSig : [4, 4], tuning: _tuningName(tr.tuning ? [...tr.tuning].reverse() : null), capo: tr.capo || 0, tempo, bars, parts, partIndex: idx };
 }
 /* ---- GP5: a separate reader (different container: RSE, page setup, directions,
  * 2 voices/measure, wider headers/tracks/notes). gt500 = format > 5.0.0 (v5.10),
@@ -1035,7 +1035,7 @@ function parseGP5(u8, version, useSharp = true, partIndex = 0) {
     for (let i = 0; i < 7; i++) { const tu = r.i32(); if (i < stringCount) tuning.push(tu); }
     r.i32();                                                         // port
     r.i32(); r.i32();                                                // channel
-    r.i32(); r.i32();                                                // fret count, capo
+    r.i32(); const capo = r.i32();                                   // fret count, capo (kept for the export header)
     r.skip(4);                                                       // colour
     r.i16();                                                         // flags2
     r.u8(); r.u8(); r.u8();                                          // auto-accent, bank, humanize
@@ -1043,7 +1043,7 @@ function parseGP5(u8, version, useSharp = true, partIndex = 0) {
     r.skip(12);
     _gp5RSEInstrument(r, gt500);
     if (gt500) { for (let i = 0; i < 4; i++) r.i8(); r.intByteString(); r.intByteString(); } // track EQ-4 + RSE effect names
-    tracks.push({ name, stringCount, tuning, measures: [] });
+    tracks.push({ name, stringCount, tuning, capo, measures: [] });
   }
   r.skip(gt500 ? 1 : 2);                                             // blank byte(s) after all tracks
   // --- measures (measure-major, then track; 2 voices each + line break) ---
@@ -1467,6 +1467,18 @@ const _csmpnVoicing = (frets) => {
   for (let eng = 5; eng >= 0; eng--) { if (frets[eng] != null) { out.push(String(frets[eng])); any = true; } else out.push("x"); }
   return any ? out.join(",") : null;
 };
+/* Performance headers shared by CSMPN + CSML: the decoder's detected tuning
+ * (e.g. "Standard", "Drop D" — from the file, omitted for PDF charts that carry
+ * none) and capo fret (GP3/4/5; 0 → omitted). `opts` overrides the score values.
+ * Lets Pro render the right TAB/diagrams instead of assuming standard + no capo. */
+function _csmPerfHeaders(score, opts) {
+  const lines = [];
+  const tuning = opts.tuning != null ? opts.tuning : score.tuning;
+  if (tuning) lines.push(`Tuning: ${tuning}`);
+  const capo = opts.capo != null ? opts.capo : score.capo;
+  if (capo) lines.push(`Capo: ${capo}`);
+  return lines;
+}
 function scoreToCSMPN(score, opts = {}) {
   const ov = opts.overrides || {};
   const [b, bt] = score.timeSig;
@@ -1476,6 +1488,7 @@ function scoreToCSMPN(score, opts = {}) {
   if (kn) out.push(`Key: ${kn}`);
   out.push(`Time: ${b}/${bt}`);
   if (opts.tempo) out.push(`Tempo: ${Math.round(opts.tempo)}`);
+  _csmPerfHeaders(score, opts).forEach((l) => out.push(l));
   out.push("");
   // CSMPN fakebook grammar: ONE bar = ONE whitespace token (parseBarStructures splits
   // on whitespace → each token is a bar). Multiple chords in a bar are joined with `_`
@@ -1559,6 +1572,7 @@ function scoreToCSML(score, opts = {}) {
   if (kn) out.push(`Key: ${kn}`);
   out.push(`Time: ${b}/${bt}`);
   if (opts.tempo) out.push(`Tempo: ${Math.round(opts.tempo)}`);
+  _csmPerfHeaders(score, opts).forEach((l) => out.push(l));
   out.push("");
   // each bar → its beat-slot string + repeat-barline flags; grouped into `[Section]`
   // (and `[Nth Ending]`) label blocks; rendered 4 measures/row with `|`/`|:`/`:|`.
@@ -1928,6 +1942,7 @@ export {
   _csmpnTupNormal,
   _csmpnHybridPos,
   _csmpnVoicing,
+  _csmPerfHeaders,
   scoreToCSMPN,
   _csmlBeats,
   _ordinal,
