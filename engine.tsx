@@ -360,6 +360,52 @@ function simplifyScore(score, useSharp) {
   return { ...score, bars, simplified: true };
 }
 
+/* ---- arrange: procedural rhythm generator (Roadmap Wave 2 #8) --------------
+ * Turns a recognised HARMONIC chart (chords on their beats) into a rhythmic
+ * ARRANGEMENT by stamping a comping/strum template across each bar — each hit
+ * carries the chord SOUNDING at that position (so multi-chord bars keep their
+ * changes). Pure + deterministic, no model — templates are fixed patterns. The
+ * output is the SAME score shape every parser emits, so it flows untouched
+ * through the exporters (CSMPN/CSML {hybrid} rhythm, MIDI, ABC), playback,
+ * transpose and key analysis — zero new plumbing.
+ *
+ * Templates are per-beat sub-patterns (→ meter-independent; `tup` flags a tuplet
+ * so the {hybrid}/CSMPN export draws the bracket). `block` is special-cased:
+ * it keeps the existing onsets (the harmonic rhythm) — a clean sustain.
+ *   block · quarters · eighths · shuffle (swung eighths, triplet feel)
+ * `template` may be a name or `{ template }`; unknown name → passthrough. */
+const ARRANGE_TEMPLATES = {
+  block: null,                                                   // keep existing onsets
+  quarters: [{ at: 0, dur: 1, tup: 0 }],                         // one strum per beat
+  eighths: [{ at: 0, dur: 0.5, tup: 0 }, { at: 0.5, dur: 0.5, tup: 0 }],
+  shuffle: [{ at: 0, dur: 2 / 3, tup: 3 }, { at: 2 / 3, dur: 1 / 3, tup: 3 }], // long-short swing
+};
+function arrangeScore(score, template = "quarters") {
+  const name = (template && typeof template === "object" ? template.template : template) || "quarters";
+  if (!(name in ARRANGE_TEMPLATES)) return score;               // unknown → never throw, passthrough
+  const pat = ARRANGE_TEMPLATES[name];
+  const bars = (score.bars || []).map((bar) => {
+    const sig = bar.timeSig || score.timeSig || [4, 4];
+    const beats = sig[0];
+    const mk = { section: bar.section, repeatStart: bar.repeatStart, repeatEnd: bar.repeatEnd, ending: bar.ending };
+    const src = (bar.events || []).map((e) => ({ ...e, _q: e.qbeat != null ? e.qbeat : e.beat })).sort((a, b) => a._q - b._q);
+    if (!src.length) return { number: bar.number, timeSig: bar.timeSig, ...mk, events: [] };
+    const chordAt = (pos) => { let c = src[0]; for (const e of src) { if (e._q <= pos + 1e-6) c = e; else break; } return c; };
+    let onsets;
+    if (pat === null) onsets = src.map((e) => ({ q: e._q, tup: e.tuplet || 0, src: e }));
+    else { onsets = []; for (let b = 0; b < beats; b++) for (const h of pat) { const q = b + h.at; if (q < beats - 1e-6) onsets.push({ q, tup: h.tup, src: chordAt(q) }); } }
+    const events = onsets.map((o) => ({
+      symbol: o.src.symbol, midis: o.src.midis ? [...o.src.midis] : [], frets: o.src.frets,
+      tuplet: o.tup || 0, qbeat: o.q, beat: Math.max(0, Math.min(beats - 1, Math.round(o.q))),
+    }));
+    for (let i = 1; i < events.length; i++) if (events[i].beat <= events[i - 1].beat) events[i].beat = Math.min(beats - 1, events[i - 1].beat + 1);
+    events.forEach((e, i) => { e.durBeats = (i + 1 < events.length ? events[i + 1].beat : beats) - e.beat; });
+    _fillTrueDur(events, beats);                                 // true qbeat/qdur for {hybrid}/ABC/playback/MIDI
+    return { number: bar.number, timeSig: bar.timeSig, ...mk, events };
+  });
+  return { ...score, bars, arrangedAs: name };
+}
+
 /* ============================================================================
  *  PATH C — MusicXML import  (explicit meter + tuning + rhythm, no recognition
  *  of geometry needed). MusicXML encodes <time>, <staff-tuning> and every
@@ -1895,6 +1941,8 @@ export {
   _harmonyXML,
   scoreToMusicXML,
   transposeScore,
+  ARRANGE_TEMPLATES,
+  arrangeScore,
   _midiVarLen,
   scoreToMidi,
   scoreEventTimes,
