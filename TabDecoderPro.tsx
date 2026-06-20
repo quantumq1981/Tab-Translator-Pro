@@ -823,6 +823,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   const [semis, setSemis] = useState(0);
   const [exp, setExp] = useState(null); // null | { fmt, text }
   const [copied, setCopied] = useState(false);
+  const [downloaded, setDownloaded] = useState(false);
   const [sent, setSent] = useState(false);
   const [bpm, setBpm] = useState(score.tempo || 100);
   const [playing, setPlaying] = useState(false);
@@ -863,9 +864,28 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
       : fmt === "csmpn" ? scoreToCSMPN(tscore, opts)
       : fmt === "csml" ? scoreToCSML(tscore, opts)
       : scoreToChordPro(tscore, opts);
-    setExp({ fmt, text }); setCopied(false);
+    setExp({ fmt, text }); setCopied(false); setDownloaded(false);
   };
   const copy = () => { try { navigator.clipboard.writeText(exp.text); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch (_) {} };
+  // Download the generated export as a real file. Extension/MIME per format so it
+  // opens in the right tool (.musicxml → MuseScore/Guitar Pro, .abc → ABC players).
+  const _EXPORT_EXT = { abc: "abc", musicxml: "musicxml", chordpro: "chordpro", csmpn: "csmpn", csml: "csml" };
+  const _EXPORT_MIME = { musicxml: "application/vnd.recordare.musicxml+xml" };
+  const download = () => {
+    try {
+      if (!exp) return;
+      const ext = _EXPORT_EXT[exp.fmt] || "txt";
+      const mime = _EXPORT_MIME[exp.fmt] || "text/plain";
+      const base = (title || "chart").replace(/\.[^.]+$/, "").replace(/[^\w.-]+/g, "_").replace(/^_+|_+$/g, "") || "chart";
+      const blob = new Blob([exp.text], { type: mime + ";charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `${base}.${ext}`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+      setDownloaded(true); setTimeout(() => setDownloaded(false), 1500);
+    } catch (err) { console.warn("download failed:", err); }
+  };
   /* ---- Direct handoff → Chord Sheet Maker Pro --------------------------------
    * Both apps are served from the SAME GitHub Pages origin
    * (quantumq1981.github.io), so they share localStorage. We write the chart
@@ -1014,6 +1034,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
             <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim }}>EXPORT · {exp.fmt === "abc" ? "ABC NOTATION" : exp.fmt === "musicxml" ? "MUSICXML" : exp.fmt === "csmpn" ? "CSMPN" : exp.fmt === "csml" ? "CHORDSLASHML" : "CHORDPRO"}</span>
             <span style={{ display: "inline-flex", gap: 6 }}>
               <button onClick={copy} style={{ ...chip(C), padding: "3px 9px", borderColor: copied ? C.green : C.border, color: copied ? C.green : C.dim }}>{copied ? "copied ✓" : "copy"}</button>
+              <button onClick={download} title={`download as .${_EXPORT_EXT[exp.fmt] || "txt"}`} style={{ ...chip(C), padding: "3px 9px", borderColor: downloaded ? C.green : C.border, color: downloaded ? C.green : C.cyan }}>{downloaded ? "saved ✓" : "⬇ download"}</button>
               <button onClick={() => setExp(null)} style={{ ...chip(C), padding: "3px 9px" }}>close</button>
             </span>
           </div>

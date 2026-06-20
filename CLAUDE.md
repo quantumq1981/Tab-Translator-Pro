@@ -574,7 +574,11 @@ through the shared shape, so these work identically for Path A and Path C:
   as real music *and* **round-trips through `parseMusicXML`** (the notes
   reconstruct the same symbols — that round-trip is a test, incl. the full 165-bar
   Blue Sky score). All exporters honour `overrides` and the current transpose;
-  ChordPro/ABC/MusicXML all carry the detected key.
+  ChordPro/ABC/MusicXML all carry the detected key. Every export (all 5 formats)
+  can be **copied** to the clipboard OR **downloaded** as a real file from the
+  preview panel (`download()` in `ChartPanel` — per-format extension/MIME:
+  `.abc`, `.musicxml` → `application/vnd.recordare.musicxml+xml`, `.chordpro`,
+  `.csmpn`, `.csml`; filename derived from the chart title via a Blob + anchor).
 - **Key + roman numerals** (`analyzeKey`, `romanFor`, `keyName`): scores all 24
   keys — each chord adds its duration when diatonic (×0.3 if only its root fits =
   a borrowed quality), plus a small cadential bonus for the last/first chord being
