@@ -920,23 +920,30 @@ the tests, and the future worker boundary stay unchanged. Weights are **embedded
 future model).
 
 **The model brain:** `scripts/train_chord_classifier.py` — a **dependency-free**
-(stdlib-only, seeded) multinomial-logistic trainer. (This container has no
-numpy/sklearn and can't pip-install, so the trainer is hand-rolled GD; re-runnable to
-reproduce `CHORD_CLASSIFIER`.) It synthesises noisy/dropout root-relative weighted
-chromas for the 8 core qualities (`maj·min·7·maj7·m7·dim·aug·sus4`) → **89.5% held-out**.
-The learned weights are musically sane (major: +M3/−m3; minor the reverse).
+(stdlib-only, seeded) trainer. (This container has no numpy/sklearn and can't
+pip-install, so it's hand-rolled; re-runnable to reproduce `CHORD_CLASSIFIER`.) It
+synthesises noisy/dropout root-relative weighted chromas and trains a model over the
+quality vocabulary. **Phase 2 step 2 (2026-06-20)** upgraded it from a linear softmax
+(8 classes, 89.5%) to a **2-layer MLP** (tanh hidden 16 → softmax) over **14
+qualities** (`maj·min·7·maj7·m7·dim·aug·sus4·6·m6·m7♭5·dim7·sus2·7sus4`) →
+**~86% held-out, 14-of-14 canonical voicings correct**. The MLP forward pass
+(`h = tanh(W1·x+b1); softmax(W2·h+b2)`) lives in `classifyChromaQuality`; **swapping
+to ORT later means replacing only that body** — the const shape (`W1/b1/W2/b2`),
+arbiter, readout and tests are the swap-stable boundary (proven: this very upgrade
+changed the topology without touching any of them).
 
 **Where it stands:** built, exported (`CHORD_CLASSIFIER`, `classifyChromaQuality`,
-`arbitrateChord`), unit-tested, and now **wired DISPLAY-ONLY into the readout** (Phase 2
-step 1, 2026-06-20): an `arb` memo in `TabDecoderPro` runs `arbitrateChord(result,
-chromaVec)` on the live/selected chord and, **only when `source==="classifier"`** (engine
-unsure < gate AND the model confidently disagrees), renders a dashed "🤖 2nd opinion"
-line under the CONFIDENCE bar. It **never** rewrites `symbol`/the chart — the displayed
-symbol stays `symbolOf(result)` — so the validated corpus is still untouched (the
-transpile + contract tests pass unchanged). It's browser-only render, so it wants a
-**device check** (does the line show on a genuinely ambiguous voicing, hide on clean
-ones). Remaining: (b) train a stronger real model and swap the matmul for ORT in the
-worker. `npm test` guards the engine pieces: each canonical quality classifies
+`arbitrateChord`), unit-tested (all 14 canonical qualities classify correctly), and
+**wired DISPLAY-ONLY into the readout** (Phase 2 step 1, 2026-06-20): an `arb` memo in
+`TabDecoderPro` runs `arbitrateChord(result, chromaVec)` on the live/selected chord and,
+**only when `source==="classifier"`** (engine unsure < gate AND the model confidently
+disagrees), renders a dashed "🤖 2nd opinion" line under the CONFIDENCE bar. It **never**
+rewrites `symbol`/the chart — the displayed symbol stays `symbolOf(result)` — so the
+validated corpus is still untouched (the transpile + contract tests pass unchanged). It's
+browser-only render, so it wants a **device check** (does the line show on a genuinely
+ambiguous voicing, hide on clean ones). Remaining: swap the pure-JS MLP for a real
+`.onnx` (same shape) running via ORT in the Wave-1 worker — needs a non-CDN-blocked env
+to fetch/test onnxruntime-web. `npm test` guards the engine pieces: each canonical quality classifies
 correctly, root-relative works, and the arbiter contract holds (confident engine never
 overridden; unsure engine + confident model adopts; `minModel` gate respected;
 single/null bypass).
