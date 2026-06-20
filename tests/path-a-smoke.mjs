@@ -569,16 +569,19 @@ expect(q([48, 51, 55, 58]) === "Cm7", `m7 must stay Cm7 (not m9), got ${q([48, 5
 expect(q([48, 52, 55, 57]) === "Am7/C", `{C E G A} stays Am7/C (m7 out-ranks the enharmonic 6; 6/9 must not override), got ${q([48, 52, 55, 57])}`);
 
 /* ---- Wave 3 #10: chord-quality classifier + confidence-gated arbiter -------
- * Pure-JS matmul+softmax brain (weights code-gen'd by scripts/train_chord_classifier.py).
+ * Pure-JS 2-layer MLP brain (weights code-gen'd by scripts/train_chord_classifier.py).
  * The engine stays the ORACLE; the classifier is a gated second opinion. */
 const vec = (pcs) => { const v = new Array(12).fill(0); pcs.forEach((p) => { v[((p % 12) + 12) % 12] = 1; }); return v; };
 const reco = (midis) => { const n = eng.normalise(midis.map((m) => ({ midi: m }))); return eng.recognise(n.chroma, n.chordMask, n.bassPc); };
-// the classifier recognises each canonical (root-relative) quality
-expect(eng.classifyChromaQuality(vec([0, 4, 7]), 0).suffix === "", `classifier: C major -> major, got "${eng.classifyChromaQuality(vec([0, 4, 7]), 0).suffix}"`);
-expect(eng.classifyChromaQuality(vec([0, 3, 7]), 0).suffix === "m", "classifier: C minor -> m");
-expect(eng.classifyChromaQuality(vec([0, 4, 7, 10]), 0).suffix === "7", "classifier: dom7 -> 7");
-expect(eng.classifyChromaQuality(vec([0, 4, 7, 11]), 0).suffix === "maj7", "classifier: maj7");
-expect(eng.classifyChromaQuality(vec([0, 3, 7, 10]), 0).suffix === "m7", "classifier: m7");
+// the classifier recognises every canonical (root-relative) quality in its 14-class vocab
+const canon = [[[0, 4, 7], ""], [[0, 3, 7], "m"], [[0, 4, 7, 10], "7"], [[0, 4, 7, 11], "maj7"],
+  [[0, 3, 7, 10], "m7"], [[0, 3, 6], "dim"], [[0, 4, 8], "aug"], [[0, 5, 7], "sus4"],
+  [[0, 4, 7, 9], "6"], [[0, 3, 7, 9], "m6"], [[0, 3, 6, 10], "m7♭5"], [[0, 3, 6, 9], "dim7"],
+  [[0, 2, 7], "sus2"], [[0, 5, 7, 10], "7sus4"]];
+for (const [pcs, suf] of canon) {
+  const got = eng.classifyChromaQuality(vec(pcs), 0).suffix;
+  expect(got === suf, `classifier canonical {${pcs}} expected "${suf}", got "${got}"`);
+}
 // root-relative: a D-minor voicing classified at root 2 → m
 expect(eng.classifyChromaQuality(vec([2, 5, 9]), 2).suffix === "m", "classifier root-relative: D minor -> m");
 expect(eng.classifyChromaQuality([0, 0, 0], 0) === null, "classifier rejects a non-12-length input");
