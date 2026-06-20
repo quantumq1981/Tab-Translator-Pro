@@ -23,19 +23,19 @@ import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, "..");
-const SRC = path.join(repo, "TabDecoderPro.tsx");
+const SRC = path.join(repo, "engine.tsx");          // the pure engine module (Wave 1 #1)
+const UI = path.join(repo, "TabDecoderPro.tsx");    // the React UI that imports it
+const HTML = path.join(repo, "index.html");         // the in-browser loader
 const PDF = path.join(repo, "Blue Sky - The Allman Brothers Band.pdf");
 
 const LOG_TOKENS = process.argv.includes("--log-tokens");
 
-/* ---- load the real pure functions from source (no copy = no drift) ------- */
-const src = fs.readFileSync(SRC, "utf8");
-const start = src.indexOf("/* ---- bit helpers");
-const end = src.indexOf("async function extractTokens"); // browser-only; reproduced below
-if (start < 0 || end < 0) throw new Error("source markers not found in TabDecoderPro.tsx");
-const engineSrc =
-  src.slice(start, end) +
-  "\nexport { buildChart, buildScore, simplifyScore, symbolForFrets, symbolForMidis, parseMusicXML, parseGP, parseGPIF, gpUnzip, parseGP345, parseGPX, parsePowerTab, scoreToABC, scoreToChordPro, scoreToCSMPN, scoreToCSML, scoreToMusicXML, transposeScore, scoreEventTimes, analyzeKey, romanFor, keyName };\n";
+/* ---- load the real engine module from source (no copy = no drift) --------
+ * The engine is now its OWN pure ES module (engine.tsx, Roadmap Wave 1 #1) with
+ * its own `export {...}` surface, so we import it directly — no string-slicing.
+ * It stays plain ES (zero TS syntax, zero React) by invariant, so Node runs it
+ * verbatim after a .mjs rename. */
+const engineSrc = fs.readFileSync(SRC, "utf8");
 
 /* parseMusicXML uses the browser's global DOMParser; the app loads it natively.
  * Headlessly we install @xmldom/xmldom (a TEST-only dep) as that global so the
@@ -457,7 +457,34 @@ expect(!/\(single\)/.test(eng.scoreToMusicXML(oneNote, {})), "MusicXML export mu
 // no regression on real multi-note recognition (Blue Sky chords are unchanged)
 expect(!score.bars.some((b) => b.events.some((e) => /\(single\)/.test(e.symbol))), "Blue Sky symbols must not contain (single)");
 
+/* ---- module-split integrity (Roadmap Wave 1 #1) --------------------------
+ * The engine is now a standalone module imported by the UI and rewritten into a
+ * Blob URL by the in-browser loader. App boot is the one thing that can't be
+ * exercised headlessly, so we statically guarantee the contract that boot relies
+ * on: every name the UI imports from ./engine.tsx is actually exported by it; the
+ * engine stays pure (no React); the UI no longer DEFINES engine internals (so no
+ * duplicate-declaration drift); and the loader wires the two files together. */
+const uiSrc = fs.readFileSync(UI, "utf8");
+const htmlSrc = fs.readFileSync(HTML, "utf8");
+const nameList = (block) => (block ? block.split(",").map((s) => s.trim().replace(/\/\/.*$/, "").trim()).filter(Boolean) : []);
+const impMatch = uiSrc.match(/import\s*\{([\s\S]*?)\}\s*from\s*["']\.\/engine\.tsx["']/);
+const expMatch = engineSrc.match(/export\s*\{([\s\S]*?)\}\s*;?\s*$/m);
+const imported = nameList(impMatch && impMatch[1]);
+const exported = nameList(expMatch && expMatch[1]);
+expect(imported.length > 0, "UI must import the engine from ./engine.tsx");
+expect(exported.length > 0, "engine.tsx must export a public surface");
+const missing = imported.filter((n) => !exported.includes(n));
+expect(missing.length === 0, `UI imports names engine.tsx does not export: ${missing.join(", ")}`);
+expect(!/\bfrom\s*["']react["']/.test(engineSrc) && !/\buseState\s*\(/.test(engineSrc), "engine.tsx must stay React-free (pure module)");
+expect(!/^const\s+makeMask\b/m.test(uiSrc) && !/^function\s+buildChart\b/m.test(uiSrc), "UI must not re-define engine internals (engine moved to engine.tsx)");
+expect(uiSrc.includes('async function extractTokens'), "extractTokens (browser PDF seam) stays in the UI file");
+expect(/from\s*\$\{engineUrl\}/.test(htmlSrc) || /engine\.tsx/.test(htmlSrc), "index.html loader must reference/wire engine.tsx");
+const pagesYml = fs.readFileSync(path.join(repo, ".github", "workflows", "pages.yml"), "utf8");
+expect(/cp\s+engine\.tsx\s+_site/.test(pagesYml) && /cp\s+TabDecoderPro\.tsx\s+_site/.test(pagesYml),
+  "Pages deploy must ship BOTH engine.tsx and TabDecoderPro.tsx (the loader fetches both)");
+
 /* ---- report -------------------------------------------------------------- */
+console.log(`module split: UI imports ${imported.length}/${exported.length} engine exports, 0 missing · engine.tsx pure`);
 console.log(`PDF.js ${pdfjsLib.version} · ${pages} pages · ${tokens.length} tokens`);
 console.log(`systemsFound=${chart.systemsFound} columnsFound=${chart.columnsFound} bars=${bars.length}`);
 console.log(`verse 1-8: ${verse}`);

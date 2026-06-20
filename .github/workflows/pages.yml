@@ -1,7 +1,8 @@
 name: Deploy to GitHub Pages
 
-# Publishes the zero-build static app. The site is just index.html (which
-# fetches + transpiles the component in-browser) plus the single-file source.
+# Publishes the zero-build static app. The site is index.html (which fetches +
+# transpiles the source in-browser) plus the two source files it loads at
+# runtime: engine.tsx (pure recognition engine) and TabDecoderPro.tsx (React UI).
 on:
   push:
     branches: [main]
@@ -30,6 +31,7 @@ jobs:
         run: |
           mkdir -p _site
           cp index.html _site/
+          cp engine.tsx _site/
           cp TabDecoderPro.tsx _site/
 
       # enablement: true turns Pages on (source = GitHub Actions) using the

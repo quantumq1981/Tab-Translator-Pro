@@ -33,8 +33,8 @@ The family is **recognize → normalize → finish**:
 
 ## What this is
 
-A single-file React prototype (`TabDecoderPro.jsx`, default export, zero build
-deps, inline styles) that turns guitar tablature into chord symbols. Two modes:
+A zero-build React prototype (default export, no repo deps, inline styles) that
+turns guitar tablature into chord symbols. Two modes:
 
 - **Manual** — paste an ASCII tab slice → analyse one chord block.
 - **PDF Chart (Path A)** — upload a *digital* tab PDF → reconstruct a
@@ -42,6 +42,33 @@ deps, inline styles) that turns guitar tablature into chord symbols. Two modes:
 
 The recognition engine is shared by both modes. There is exactly one code path
 from “frets on strings” → “chord symbol”; keep it that way.
+
+### Source layout (since 2026-06-20 — Roadmap Wave 1 #1)
+
+The app is now **two files**, split along the seam that already existed:
+
+- **`engine.tsx`** — the **pure recognition engine** (everything from `makeMask`
+  through `playScore`: chord DB, all parsers Paths A–G, scorers, exporters, key
+  analysis, transpose, playback scheduler). **Zero React, zero browser globals.**
+  It ends with a single `export { … }` block listing **every** top-level binding,
+  so the UI, the headless tests, and the future parse Web Worker all import the
+  ONE engine (single source of truth, no copy, no drift).
+- **`TabDecoderPro.tsx`** — the **React UI** (`default export`), plus
+  `extractTokens` (the only browser-only seam: `window.pdfjsLib`). It does
+  `import { … } from "./engine.tsx"` — importing the *full* engine surface, so
+  every call site resolves exactly as when this was one file.
+
+**`index.html` (zero-build loader):** fetches both files, Babel-transpiles each
+in-browser, publishes the engine at a Blob URL, and rewrites the UI's
+`from "./engine.tsx"` to that URL before transpiling the UI. App **boot** is the
+one thing not headlessly testable (same category as the PDF.js worker glue) —
+smoke-test on hardware after touching the loader. `npm test` statically guards
+the contract boot depends on: every imported name is exported, the engine stays
+React-free, the UI doesn't re-define engine internals, and the loader wires the
+two files. `.txt` mirrors (`engine.txt`, `TabDecoderPro.txt`) track each source.
+
+**Invariant:** keep `engine.tsx` plain ES (no TS syntax, no JSX, no React/DOM) —
+that purity is what lets Node import it verbatim and lets it run in a Worker.
 
 -----
 
@@ -769,8 +796,10 @@ real hardware): loading `pdf.min.js` from cdnjs + setting `workerSrc`; the
 `<input type=file>` → `File.arrayBuffer()` read; and the PDF.js **web-worker**
 path (the harness runs on the main thread).
 
-Note: the source file is `TabDecoderPro.tsx` (this doc historically said `.jsx`);
-a `.txt` mirror of the same source also sits in the repo root.
+Note: the source is now **two files** — `engine.tsx` (pure engine) and
+`TabDecoderPro.tsx` (React UI, default export). See "Source layout" near the top.
+`.txt` mirrors of each sit in the repo root. (This doc historically said `.jsx`
+and "single file"; both are superseded.)
 
 PDF.js is loaded from cdnjs (`pdf.min.js` 3.11.174 + matching worker). If you
 move to a bundler, switch to the npm `pdfjs-dist` package and set `workerSrc`
@@ -827,5 +856,55 @@ accordingly.
 
 - Surgical edits over rewrites. Preserve working code; don’t restructure the
   shared engine path to “clean it up” unless a test forces it.
-- Single file, single engine path, no new dependencies without a reason.
+- One engine path (`engine.tsx`), no new app dependencies without a reason.
 - Update this CLAUDE.md at the start and end of each working session.
+
+-----
+
+## Roadmap (agreed 2026-06-20) — recognition-engine evolution
+
+The owner approved a sequenced plan to grow this from a "smart tab decoder" into
+a persistent, worker-driven, AI-assisted music-cognition tool — **without ever
+regressing the validated engine** (every step is additive; `npm test` stays the
+contract). Build strictly in this order; each wave depends on the prior.
+
+**Wave 1 — Foundation (no engine *logic* change):**
+1. ✅ **Engine module extraction** (`engine.tsx`) — DONE 2026-06-20. The keystone:
+   unblocks the Worker, ONNX, audio, and cross-trio engine sharing.
+2. **OPFS persistence** — cache raw file buffers + parsed score JSON + overrides/
+   transpose state; restore last session on re-open. Fallback to localStorage for
+   tiny scores. Substrate for steps 4 below.
+3. **Web Worker offloading** — run the `raw bytes → score` pipeline (now importable
+   from `engine.tsx`) off the main thread via a Blob-URL worker. PDF.js already
+   workers; extend the pattern.
+4. **Memory eviction + OPFS handoff** — `_reparseScore` reads buffers from OPFS
+   instead of holding `_gpbuf`/`_gpxbuf` in state; move the CSMP handoff payload to
+   `opfs:handoff:v1` to kill the 1.5 MB MusicXML drop.
+5. **Service Worker offline** — ⚠️ NOT trivial here: "offline" must cache the
+   in-browser transpile *toolchain* (Babel-standalone ~3 MB + esm.sh React + cdnjs
+   PDF.js) cross-origin, plus a **versioned cache** so a stale source can't pin
+   users to old code. Consider a tiny precompile-at-deploy step only if true
+   offline becomes a priority (the one place to relax zero-build).
+
+**Wave 2 — View decoupling + deterministic wins:**
+6. **ChartPanel / view-layer decoupling** — pure refactor (tests guard it);
+   prerequisite for Audio/Practice views so they don't bloat the monolith.
+7. **PDF *Edit-tuning* UI** — the **manual** per-system string-shift override only.
+   Do **NOT** build the auto-anchor heuristic: CLAUDE.md (Kid Charlemagne, 52.6 vs
+   53.3 pt) proves any auto-shift that fixes a sparse system regresses the
+   correctly-anchored Blue Sky output. Manual override is the honest escape hatch.
+8. **Procedural arrangement generator** (templates → CSMPN `{hybrid}`) — reuses
+   existing exporters, deterministic, testable, no model.
+9. **MIDI export** — `score → .mid`, deterministic + testable like the other
+   exporters; high musician value, zero new deps.
+
+**Wave 3 — AI/Audio moat (additive; engine stays oracle + fallback):**
+10. **ONNX chord classifier** — a **confidence-gated second opinion**, NEVER a
+    replacement for `QUALITIES` (which is also the test oracle). Runs in the Wave-1
+    worker; `.onnx` as a runtime-fetched asset (not base64 in source).
+11. **Shared pitch-detection pipeline → monophonic transcription (MVP)**.
+12. **Practice mode** — match mic input against known expected chords (reuses #11).
+13. **AI arrangement** — optional upgrade over #8.
+
+**Wave 4 — Visionary:** system-audio/polyphonic capture → Path B OMR (keep
+SEPARATE from Path A) → WebRTC collab → live Web MIDI / DAW I/O.
