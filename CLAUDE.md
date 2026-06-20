@@ -574,11 +574,21 @@ through the shared shape, so these work identically for Path A and Path C:
   as real music *and* **round-trips through `parseMusicXML`** (the notes
   reconstruct the same symbols — that round-trip is a test, incl. the full 165-bar
   Blue Sky score). All exporters honour `overrides` and the current transpose;
-  ChordPro/ABC/MusicXML all carry the detected key. Every export (all 5 formats)
-  can be **copied** to the clipboard OR **downloaded** as a real file from the
-  preview panel (`download()` in `ChartPanel` — per-format extension/MIME:
-  `.abc`, `.musicxml` → `application/vnd.recordare.musicxml+xml`, `.chordpro`,
-  `.csmpn`, `.csml`; filename derived from the chart title via a Blob + anchor).
+  ChordPro/ABC/MusicXML all carry the detected key.
+  - **MIDI export** (`scoreToMidi`, Roadmap Wave 2 #9): a 6th exporter — a pure,
+    deterministic **Standard MIDI File** (format 0, PPQ 480) returning a
+    `Uint8Array`. Same timing model as `scoreEventTimes`/ABC (a "beat" = one
+    `1/beatType` note = `4/beatType` quarters; per-bar `timeSig` → time-sig metas;
+    tempo from `opts.tempo`). Writes the actual voiced `event.midis` (so the
+    caller passes the already-transposed score). Binary, so the export panel
+    offers **download only** (no copy) with a byte-count summary. Unit-tested
+    headlessly via a minimal SMF walker (note-on count = voiced pitches, C triad
+    present, +2 transpose → D triad, deterministic, 480 PPQ, 120 bpm = 500000us).
+  - Every export can be **copied** to the clipboard OR **downloaded** as a real
+    file from the preview panel (`download()` in `ChartPanel` — per-format
+    extension/MIME: `.abc`, `.musicxml` → `application/vnd.recordare.musicxml+xml`,
+    `.mid` → `audio/midi`, `.chordpro`, `.csmpn`, `.csml`; filename from the chart
+    title via a Blob + anchor).
 - **Key + roman numerals** (`analyzeKey`, `romanFor`, `keyName`): scores all 24
   keys — each chord adds its duration when diatonic (×0.3 if only its root fits =
   a borrowed quality), plus a small cadential bonus for the last/first chord being
@@ -961,8 +971,8 @@ contract). Build strictly in this order; each wave depends on the prior.
    correctly-anchored Blue Sky output. Manual override is the honest escape hatch.
 8. **Procedural arrangement generator** (templates → CSMPN `{hybrid}`) — reuses
    existing exporters, deterministic, testable, no model.
-9. **MIDI export** — `score → .mid`, deterministic + testable like the other
-   exporters; high musician value, zero new deps.
+9. ✅ **MIDI export** — DONE 2026-06-20 (built ahead of order while #4 was blocked).
+   `scoreToMidi` → `.mid`; see the MIDI export bullet under "Shared ChartPanel".
 
 **Wave 3 — AI/Audio moat (additive; engine stays oracle + fallback):**
 10. **ONNX chord classifier** — a **confidence-gated second opinion**, NEVER a

@@ -1642,6 +1642,66 @@ function transposeScore(score, n, useSharp) {
   return { ...score, bars, transposedBy: n };
 }
 
+/* ---- MIDI export: score → Standard MIDI File (format 0) -------------------
+ * Deterministic + testable like the other exporters (no deps, no browser API):
+ * returns a Uint8Array of a single-track SMF. Same timing model as
+ * scoreEventTimes / ABC — a "beat" is one (1/beatType) note = 4/beatType quarters,
+ * per-bar timeSig honoured (mid-tune meter changes emit a new time-sig meta). It
+ * writes the actual voiced pitches (event.midis); the caller passes the already-
+ * transposed score, so the .mid matches what's shown and heard. Tempo from
+ * opts.tempo (falls back to score.tempo, then 100). PPQ = 480. */
+function _midiVarLen(n) {
+  n = n >>> 0;
+  const out = [n & 0x7f];
+  n >>>= 7;
+  while (n > 0) { out.unshift((n & 0x7f) | 0x80); n >>>= 7; }
+  return out;
+}
+function scoreToMidi(score, opts = {}) {
+  const PPQ = 480;
+  const bpm = Math.max(20, Math.min(400, Math.round(opts.tempo || score.tempo || 100)));
+  const evs = []; // { tick, order, bytes } — order breaks ties: meta < noteOff < noteOn < endOfTrack
+  const uspq = Math.round(60000000 / bpm);
+  evs.push({ tick: 0, order: 0, bytes: [0xFF, 0x51, 0x03, (uspq >> 16) & 0xff, (uspq >> 8) & 0xff, uspq & 0xff] });
+  let tQ = 0, maxTick = 0, prevSig = null;
+  for (const bar of score.bars || []) {
+    const sig = bar.timeSig || score.timeSig || [4, 4];
+    const bb = sig[0], bt = sig[1];
+    const barTick = Math.round(tQ * PPQ);
+    if (!prevSig || prevSig[0] !== bb || prevSig[1] !== bt) {
+      evs.push({ tick: barTick, order: 0, bytes: [0xFF, 0x58, 0x04, bb & 0xff, Math.max(0, Math.round(Math.log2(bt))) & 0xff, 24, 8] });
+      prevSig = [bb, bt];
+    }
+    const q = (v) => (v * 4) / bt; // beats → quarters
+    for (const e of bar.events || []) {
+      const startQ = tQ + q(e.qbeat != null ? e.qbeat : e.beat);
+      const durQ = Math.max(0.0625, q(e.qdur != null ? e.qdur : e.durBeats));
+      const onTick = Math.round(startQ * PPQ);
+      const offTick = Math.max(onTick + 1, Math.round((startQ + durQ) * PPQ));
+      for (const m of e.midis || []) {
+        const note = Math.max(0, Math.min(127, m | 0));
+        evs.push({ tick: onTick, order: 2, bytes: [0x90, note, 80] });
+        evs.push({ tick: offTick, order: 1, bytes: [0x80, note, 0] });
+        if (offTick > maxTick) maxTick = offTick;
+      }
+    }
+    tQ += q(bb);
+    if (Math.round(tQ * PPQ) > maxTick) maxTick = Math.round(tQ * PPQ);
+  }
+  evs.push({ tick: maxTick, order: 3, bytes: [0xFF, 0x2F, 0x00] }); // end of track
+  evs.sort((a, b) => a.tick - b.tick || a.order - b.order);
+  const track = [];
+  let prevTick = 0;
+  for (const ev of evs) { track.push(..._midiVarLen(Math.max(0, ev.tick - prevTick)), ...ev.bytes); prevTick = ev.tick; }
+  const tl = track.length;
+  const bytes = [
+    0x4D, 0x54, 0x68, 0x64, 0, 0, 0, 6, 0, 0, 0, 1, (PPQ >> 8) & 0xff, PPQ & 0xff, // MThd: format 0, 1 track, PPQ
+    0x4D, 0x54, 0x72, 0x6B, (tl >>> 24) & 0xff, (tl >>> 16) & 0xff, (tl >>> 8) & 0xff, tl & 0xff, // MTrk + length
+    ...track,
+  ];
+  return new Uint8Array(bytes);
+}
+
 /* ---- playback: schedule a score on a wall-clock, then synth it ------------
  * scoreEventTimes is PURE (testable headlessly): it flattens the score into
  * timed chord events in SECONDS at `bpm` (a quarter-note BPM). A "beat" in our
@@ -1835,6 +1895,8 @@ export {
   _harmonyXML,
   scoreToMusicXML,
   transposeScore,
+  _midiVarLen,
+  scoreToMidi,
   scoreEventTimes,
   playScore,
 };

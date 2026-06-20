@@ -316,6 +316,46 @@ expect(bsRt.bars.length === 165, `Blue Sky MusicXML round-trip expected 165 bars
 const bsVerse = bsRt.bars.slice(0, 8).map((b) => b.events.map((e) => e.symbol).join(" ")).join(" ");
 expect(bsVerse === "E A A E E A A E", `Blue Sky round-trip verse drifted: "${bsVerse}"`);
 
+/* ---- MIDI export (deterministic SMF; same timing model as ABC/playback) --- */
+function _parseMidi(bytes) {
+  // minimal SMF format-0 walker: returns header facts + noteOn pitches + noteOff count
+  const u8 = bytes; let i = 0;
+  const tag = (o) => String.fromCharCode(u8[o], u8[o + 1], u8[o + 2], u8[o + 3]);
+  if (tag(0) !== "MThd") throw new Error("missing MThd");
+  const division = (u8[12] << 8) | u8[13];
+  i = 8 + ((u8[4] << 24) | (u8[5] << 16) | (u8[6] << 8) | u8[7]); // past header chunk
+  if (tag(i) !== "MTrk") throw new Error("missing MTrk");
+  const trkLen = (u8[i + 4] << 24) | (u8[i + 5] << 16) | (u8[i + 6] << 8) | u8[i + 7];
+  let p = i + 8; const end = p + trkLen;
+  const readVar = () => { let v = 0, b; do { b = u8[p++]; v = (v << 7) | (b & 0x7f); } while (b & 0x80); return v; };
+  const ons = []; let offs = 0, tempo = 0, endOfTrack = false;
+  while (p < end) {
+    readVar(); // delta
+    const status = u8[p++];
+    if (status === 0xFF) { const type = u8[p++]; const len = readVar(); if (type === 0x51) tempo = (u8[p] << 16) | (u8[p + 1] << 8) | u8[p + 2]; if (type === 0x2F) { endOfTrack = true; p += len; break; } p += len; }
+    else if ((status & 0xf0) === 0x90) { const n = u8[p++], vel = u8[p++]; if (vel > 0) ons.push(n); else offs++; }
+    else if ((status & 0xf0) === 0x80) { p++; p++; offs++; }
+    else { p += 2; } // unexpected — skip 2 data bytes
+  }
+  return { division, ons, offs, tempo, endOfTrack };
+}
+const midiBytes = eng.scoreToMidi(mx, { tempo: 120 });
+expect(midiBytes instanceof Uint8Array && midiBytes.length > 22, "scoreToMidi returns a non-trivial Uint8Array");
+const midi = _parseMidi(midiBytes);
+expect(midi.division === 480, `MIDI division expected 480, got ${midi.division}`);
+expect(midi.tempo === 500000, `MIDI tempo at 120bpm expected 500000us/qtr, got ${midi.tempo}`);
+expect(midi.endOfTrack, "MIDI track must end with an End-of-Track meta");
+const mxNotes = mx.bars.flatMap((b) => b.events).reduce((s, e) => s + (e.midis ? e.midis.length : 0), 0);
+expect(midi.ons.length === mxNotes, `MIDI note-on count ${midi.ons.length} should match the ${mxNotes} voiced pitches`);
+expect(midi.offs === midi.ons.length, `every MIDI note-on must have a note-off (${midi.ons.length} on / ${midi.offs} off)`);
+// the C-major triad on the downbeat (bar1 = [48,52,55]) must appear as note-ons
+expect([48, 52, 55].every((n) => midi.ons.includes(n)), `MIDI should contain the C triad pitches, got [${midi.ons.slice(0, 6).join(",")}]`);
+// transpose +2 then export: pitches shift up a tone (50/54/57)
+const midiT = _parseMidi(eng.scoreToMidi(eng.transposeScore(mx, 2, true), { tempo: 120 }));
+expect([50, 54, 57].every((n) => midiT.ons.includes(n)), "transposed MIDI should contain the D triad pitches");
+// deterministic
+expect(eng.scoreToMidi(mx, { tempo: 120 }).join(",") === midiBytes.join(","), "scoreToMidi must be deterministic");
+
 /* ---- key + roman-numeral analysis ---------------------------------------- */
 const mxKey = eng.analyzeKey(mx); // C G | Am | F  ->  C major
 expect(mxKey && eng.keyName(mxKey, true) === "C", `expected key of C major, got ${mxKey && eng.keyName(mxKey, true)}`);
