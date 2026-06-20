@@ -264,6 +264,33 @@ const loneScore = { timeSig: [4, 4], bars: [{ number: 1, events: [
 ] }] };
 expect(!/t3/.test(eng.scoreToCSMPN(loneScore, {})), "a lone tuplet event must not emit a tN bracket");
 
+/* ---- procedural arranger (Roadmap Wave 2 #8) ----------------------------- */
+// quarters: one strum per beat; a multi-chord bar follows its changes (C..G..)
+const arrQ = eng.arrangeScore(mx, "quarters"); // mx = C G | Am | F (bar3 in 3/4)
+expect(arrQ.arrangedAs === "quarters", "arrangeScore tags arrangedAs");
+expect(arrQ.bars[0].events.length === 4, `quarters bar1 expected 4 hits, got ${arrQ.bars[0].events.length}`);
+expect(arrQ.bars[0].events.map((e) => e.symbol).join(" ") === "C C G G", `quarters bar1 should track the changes "C C G G", got "${arrQ.bars[0].events.map((e) => e.symbol).join(" ")}"`);
+// meter honoured: bar3 is 3/4 → exactly 3 hits
+expect(arrQ.bars[2].timeSig.join("/") === "3/4" && arrQ.bars[2].events.length === 3, `quarters bar3 (3/4) expected 3 hits, got ${arrQ.bars[2].events.length}`);
+// each hit carries the chord's pitches → MIDI/playback/ABC all work downstream
+expect(JSON.stringify(arrQ.bars[0].events[0].midis) === JSON.stringify([48, 52, 55]), "quarters hits carry the chord's midis (C triad)");
+// eighths: two per beat → 8 hits in a 4/4 bar
+expect(eng.arrangeScore(mx, "eighths").bars[0].events.length === 8, "eighths bar1 expected 8 hits");
+// block: keep the existing onsets (the harmonic rhythm) → C G
+expect(eng.arrangeScore(mx, "block").bars[0].events.map((e) => e.symbol).join(" ") === "C G", "block keeps the existing onsets (C G)");
+// shuffle: swung eighths flagged tuplet 3 → CSMPN {hybrid} draws t3 brackets
+const arrS = eng.arrangeScore(mx, "shuffle");
+expect(arrS.bars[0].events.length === 8 && arrS.bars[0].events.every((e) => e.tuplet === 3), "shuffle bar1 expected 8 tuplet-3 hits");
+expect(/t3/.test(eng.scoreToCSMPN(arrS, {})), "shuffle arrangement should export t3 tuplet flags in CSMPN {hybrid}");
+// arranged score flows through the existing exporters unchanged
+expect(/\{hybrid\b/.test(eng.scoreToCSMPN(arrQ, {})), "arranged score still exports a {hybrid} block");
+// playback/MIDI scale with the added hits (4 + 4 + 3 = 11 events for quarters)
+expect(eng.scoreEventTimes(arrQ, 120).events.length === 11, `arranged quarters expected 11 timed events, got ${eng.scoreEventTimes(arrQ, 120).events.length}`);
+// unknown template → safe passthrough (returns the same object, never throws)
+expect(eng.arrangeScore(mx, "nope") === mx, "unknown template is a passthrough");
+// deterministic
+expect(JSON.stringify(eng.arrangeScore(mx, "quarters")) === JSON.stringify(arrQ), "arrangeScore is deterministic");
+
 /* ---- multi-part: the part picker selects which instrument to chart -------- */
 const mpXml = fs.readFileSync(path.join(here, "fixtures", "sample-multipart.musicxml"), "utf8");
 const p0 = eng.parseMusicXML(mpXml, true, 0);

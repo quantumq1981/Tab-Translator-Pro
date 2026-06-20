@@ -557,6 +557,23 @@ through the shared shape, so these work identically for Path A and Path C:
     chart and GP rhythm-guitar part read 0% single → no nudge; Blue Sky's lead part
     and Anthropology's bebop head read 100% → nudge shows. No false positives on the
     validated chord charts.
+- **Arrange** (`arrangeScore(score, template)`, Roadmap Wave 2 #8): the inverse of
+  Simplify — turns a *harmonic* chart into a rhythmic **arrangement** by stamping a
+  comping/strum template across each bar; each hit carries the chord **sounding at
+  that position** (so multi-chord bars keep their changes). Pure + deterministic, no
+  model — `ARRANGE_TEMPLATES` are fixed per-beat sub-patterns (meter-independent, so
+  a 3/4 bar gets 3 hits): **`block`** (keep existing onsets = a clean sustain),
+  **`quarters`** (one strum/beat), **`eighths`** (straight eighths),
+  **`shuffle`** (swung eighths, long-short, flagged `tuplet:3` so CSMPN/CSML draw the
+  triplet bracket). Output is the **same score shape** every parser emits, so it
+  flows untouched through the exporters (CSMPN/CSML `{hybrid}` slash-rhythm, MIDI,
+  ABC), playback, transpose and key analysis — **zero new plumbing**. Pipeline order
+  in `ChartPanel` is **simplify → arrange → transpose** (`simp`/`base`/`tscore`
+  memos); the **Arrange…** `<select>` default OFF, unknown template = safe
+  passthrough. Validated headlessly (`npm test`): quarters tracks `C C G G` across a
+  C·G bar, honours the 3/4 bar (3 hits), eighths = 8 hits, block = the original `C G`,
+  shuffle = 8 `tuplet:3` hits emitting `t3` in CSMPN, and the arranged score still
+  exports `{hybrid}` + lays 11 timed playback events.
 - **Editable chords**: tap-to-relabel in *Edit* mode writes an `overrides` map
   (`"<bar>.<beat>" → symbol`), lifted to the parent so it survives view/transpose
   switches and flows into export. Blank reverts to the detected symbol; edits are
@@ -969,8 +986,10 @@ contract). Build strictly in this order; each wave depends on the prior.
    Do **NOT** build the auto-anchor heuristic: CLAUDE.md (Kid Charlemagne, 52.6 vs
    53.3 pt) proves any auto-shift that fixes a sparse system regresses the
    correctly-anchored Blue Sky output. Manual override is the honest escape hatch.
-8. **Procedural arrangement generator** (templates → CSMPN `{hybrid}`) — reuses
-   existing exporters, deterministic, testable, no model.
+8. ✅ **Procedural arrangement generator** — DONE 2026-06-20. `arrangeScore` +
+   `ARRANGE_TEMPLATES` (block/quarters/eighths/shuffle) → same score shape, reuses
+   every exporter (CSMPN/CSML `{hybrid}`, MIDI, ABC). See the **Arrange** bullet
+   under "Shared ChartPanel".
 9. ✅ **MIDI export** — DONE 2026-06-20 (built ahead of order while #4 was blocked).
    `scoreToMidi` → `.mid`; see the MIDI export bullet under "Shared ChartPanel".
 

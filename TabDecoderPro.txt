@@ -176,6 +176,8 @@ import {
   _harmonyXML,
   scoreToMusicXML,
   transposeScore,
+  ARRANGE_TEMPLATES,
+  arrangeScore,
   _midiVarLen,
   scoreToMidi,
   scoreEventTimes,
@@ -834,8 +836,10 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
 
   const [showRoman, setShowRoman] = useState(false);
   const [simplify, setSimplify] = useState(false);
+  const [arrange, setArrange] = useState("off"); // off | block | quarters | eighths | shuffle
 
-  const base = useMemo(() => (simplify ? simplifyScore(score, useSharp) : score), [simplify, score, useSharp]);
+  const simp = useMemo(() => (simplify ? simplifyScore(score, useSharp) : score), [simplify, score, useSharp]);
+  const base = useMemo(() => (arrange === "off" ? simp : arrangeScore(simp, arrange)), [simp, arrange]);
   const tscore = useMemo(() => transposeScore(base, semis, useSharp), [base, semis, useSharp]);
   const key = useMemo(() => analyzeKey(tscore), [tscore]);
   // "Mostly single notes" → the chart is a melodic line (e.g. a single-note PDF/tab
@@ -937,6 +941,14 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
           style={{ ...chip(C), padding: "3px 9px", borderColor: showRoman ? C.cyan : C.border, color: showRoman ? C.cyan : C.dim }}>{showRoman ? "I·V·vi ✓" : "I·V·vi"}</button>
         <button onClick={() => setSimplify((s) => !s)} title="aggregate each bar's notes into one chord (for dense transcriptions)"
           style={{ ...chip(C), padding: "3px 9px", borderColor: simplify ? C.green : C.border, color: simplify ? C.green : C.dim }}>{simplify ? "1 chord/bar ✓" : "Simplify"}</button>
+        <select value={arrange} onChange={(e) => setArrange(e.target.value)} title="stamp a strum/comping rhythm across each bar (exports as CSMPN/CSML slash-rhythm)"
+          style={{ ...chip(C), padding: "3px 9px", borderColor: arrange !== "off" ? C.cyan : C.border, color: arrange !== "off" ? C.cyan : C.dim, background: C.raised, cursor: "pointer" }}>
+          <option value="off">Arrange…</option>
+          <option value="block">↳ Block (sustain)</option>
+          <option value="quarters">↳ Quarters</option>
+          <option value="eighths">↳ Eighths</option>
+          <option value="shuffle">↳ Shuffle</option>
+        </select>
         <span style={{ display: "inline-flex", alignItems: "center", gap: 4, marginLeft: 2 }}>
           <button onClick={() => bump(-1)} style={{ ...chip(C), padding: "3px 8px" }}>−</button>
           <span style={{ fontSize: 11, minWidth: 44, textAlign: "center", color: semis ? C.amber : C.dim }}>transpose</span>
