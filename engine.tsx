@@ -2107,11 +2107,10 @@ function pcmToChroma(samples, sampleRate, opts = {}) {
   const mx = Math.max(...chroma) || 1;
   return chroma.map((v) => v / mx);
 }
-/* One frame of PCM → recognised chord (via the engine). Peak-picks the chroma to a
- * pitch-class set and runs `recognise`. Returns { symbol, midis, result, chroma } or
- * null. `midis` is a clean voicing (root octave 4) so the chart/export/playback work. */
-function detectChord(samples, sampleRate, opts = {}) {
-  const chroma = pcmToChroma(samples, sampleRate, opts);
+/* A 12-bin chroma → recognised chord. Peak-picks the chroma to a pitch-class set and
+ * runs `recognise`. Returns { symbol, midis, result } or null. `midis` is a clean
+ * voicing (root octave 4) so the chart/export/playback work. */
+function chordFromChroma(chroma, opts = {}) {
   const thr = opts.pickThreshold != null ? opts.pickThreshold : 0.4;
   const pcs = [];
   for (let p = 0; p < 12; p++) if (chroma[p] >= thr) pcs.push(p);
@@ -2120,24 +2119,51 @@ function detectChord(samples, sampleRate, opts = {}) {
   if (!result || result.single || !result.best) return null;
   const rootMidi = 48 + result.best.root;
   const midis = result.best.quality.intervals.map((i) => rootMidi + i);
-  return { symbol: symbolOf(result, opts.useSharp !== false), midis, result, chroma };
+  return { symbol: symbolOf(result, opts.useSharp !== false), midis, result };
 }
-/* Slide detectChord over a whole (decoded) buffer and collapse consecutive same-
- * chord frames into timed events { symbol, midis, startSec, durSec }. The chord MVP
- * for an isolated chordal stem. `audioEventsToScore` maps these onto a beat grid. */
+/* One frame of PCM → recognised chord. (Thin wrapper: chroma → chord.) */
+function detectChord(samples, sampleRate, opts = {}) {
+  const d = chordFromChroma(pcmToChroma(samples, sampleRate, opts), opts);
+  return d ? { ...d, chroma: undefined } : null;
+}
+/* Slide over a whole (decoded) buffer → timed chord events { symbol, midis, startSec,
+ * durSec }. For a REAL stem (esp. rhythm+lead, where transients/lead notes flip the
+ * chord every frame) raw per-frame detection is far too noisy, so we:
+ *   1) gate out low-energy frames (silence / note decay) → rests, not garbage chords;
+ *   2) AVERAGE the chroma over a ~`smoothSec` window before recognising (a strum or a
+ *      passing lead note can't flip the chord on its own);
+ *   3) collapse consecutive identical labels and drop sub-`minDurSec` blips.
+ * `audioEventsToScore` then maps these onto a beat grid. */
 function transcribeChords(samples, sampleRate, opts = {}) {
   const win = opts.window || 4096;
   const hop = opts.hop || Math.floor(sampleRate * (opts.hopSec || 0.25));
-  const minDur = opts.minDurSec != null ? opts.minDurSec : 0.2;
-  const cover = Math.max(win, hop) / sampleRate;               // a frame represents its hop interval, not just its window
-  const events = [];
-  let cur = null;
+  const minDur = opts.minDurSec != null ? opts.minDurSec : 0.4;
+  const cover = Math.max(win, hop) / sampleRate;
+  const smoothSec = opts.smoothSec != null ? opts.smoothSec : 0.4;
+  const half = Math.max(0, Math.round((smoothSec / (hop / sampleRate) - 1) / 2));
+  // per-frame chroma + energy
+  const frames = [];
   for (let s = 0; s + win <= samples.length; s += hop) {
     const frame = samples.subarray ? samples.subarray(s, s + win) : samples.slice(s, s + win);
-    const d = detectChord(frame, sampleRate, opts);
-    const t = s / sampleRate, sym = d ? d.symbol : null;
+    let e = 0; for (let i = 0; i < frame.length; i++) e += frame[i] * frame[i];
+    frames.push({ t: s / sampleRate, chroma: pcmToChroma(frame, sampleRate, opts), energy: Math.sqrt(e / frame.length) });
+  }
+  if (!frames.length) return [];
+  const maxE = Math.max(...frames.map((f) => f.energy)) || 1;
+  const gate = (opts.energyGate != null ? opts.energyGate : 0.08) * maxE;
+  // smoothed label per frame (averaged chroma over the window; gated frames → rest)
+  const events = [];
+  let cur = null;
+  for (let i = 0; i < frames.length; i++) {
+    let sym = null, midis = null;
+    if (frames[i].energy >= gate) {
+      const avg = new Array(12).fill(0); let cnt = 0;
+      for (let j = Math.max(0, i - half); j <= Math.min(frames.length - 1, i + half); j++) { if (frames[j].energy >= gate) { for (let p = 0; p < 12; p++) avg[p] += frames[j].chroma[p]; cnt++; } }
+      if (cnt) { for (let p = 0; p < 12; p++) avg[p] /= cnt; const d = chordFromChroma(avg, opts); if (d) { sym = d.symbol; midis = d.midis; } }
+    }
+    const t = frames[i].t;
     if (sym && cur && cur.symbol === sym) cur.endSec = t + cover;
-    else { if (cur) events.push(cur); cur = sym ? { symbol: sym, midis: d.midis, startSec: t, endSec: t + cover } : null; }
+    else { if (cur) events.push(cur); cur = sym ? { symbol: sym, midis, startSec: t, endSec: t + cover } : null; }
   }
   if (cur) events.push(cur);
   return events.filter((e) => e.endSec - e.startSec >= minDur).map((e) => ({ symbol: e.symbol, midis: e.midis, startSec: +e.startSec.toFixed(3), durSec: +(e.endSec - e.startSec).toFixed(3) }));
@@ -2337,6 +2363,7 @@ export {
   transcribeMonophonic,
   _fft,
   pcmToChroma,
+  chordFromChroma,
   detectChord,
   transcribeChords,
   audioEventsToScore,

@@ -993,8 +993,12 @@ chroma). Two regimes, both reusing what we already have:
 - **Chordal stem** (rhythm guitar, piano comping) → **`transcribeChords`**: PCM → FFT
   (`_fft`, pure radix-2) → fold the spectrum into a 12-bin **chromagram** (`pcmToChroma`,
   with light octave/5th/maj-3rd **harmonic suppression** so overtones don't fake chord
-  tones) → peak-pick → the SAME `recognise` engine. `detectChord` is one frame;
-  `transcribeChords` slides + collapses to timed `{ symbol, startSec, durSec }` events.
+  tones) → peak-pick (`chordFromChroma`) → the SAME `recognise` engine. `detectChord` is
+  one frame; `transcribeChords` slides + collapses to timed `{ symbol, startSec, durSec }`.
+  **Noise control (a real rhythm+lead stem flips the chord every frame otherwise):**
+  an **energy gate** (low-energy frames → rests, not garbage), a **chroma average over a
+  ~`smoothSec` window** before recognising (a strum / passing lead note can't flip the
+  chord alone), and a `minDurSec` blip drop. The UI uses `hopSec 0.12 / smoothSec 0.5`.
 - **Monophonic stem** (bass, lead) → the existing **`transcribeMonophonic`** (YIN) →
   the note line / root movement.
 
