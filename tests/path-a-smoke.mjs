@@ -634,6 +634,37 @@ const tmidis = notes.map((n) => n.midi);
 expect(tmidis.includes(69) && tmidis.includes(72), `transcribe A4→C5 should yield 69 & 72, got [${tmidis}]`);
 expect(notes.every((n) => n.durSec > 0 && typeof n.note === "string"), "transcription notes carry positive durations + names");
 
+/* ---- audio → chroma → CHORD (clean isolated chordal stem) ------------------
+ * Pure DSP: FFT → 12-bin chromagram → the SAME chord engine. Fed synthesized
+ * chord tones (each note + 2 harmonics, like a real instrument). The MP3→PCM
+ * decode is the only browser-only step. */
+const chordSig = (freqs, secs) => {
+  const n = Math.floor(secs * SR), a = new Float32Array(n);
+  for (let i = 0; i < n; i++) { let s = 0; for (const f of freqs) { s += Math.sin(2 * Math.PI * f * i / SR) + 0.35 * Math.sin(2 * Math.PI * 2 * f * i / SR) + 0.18 * Math.sin(2 * Math.PI * 3 * f * i / SR); } a[i] = (s / freqs.length) * 0.4; }
+  return a;
+};
+// _fft sanity: a pure cosine at bin 4 has its magnitude peak at bin 4
+{
+  const N = 64, re = new Float64Array(N), im = new Float64Array(N);
+  for (let i = 0; i < N; i++) re[i] = Math.cos(2 * Math.PI * 4 * i / N);
+  eng._fft(re, im);
+  let peak = 1; for (let k = 2; k < N / 2; k++) if (Math.hypot(re[k], im[k]) > Math.hypot(re[peak], im[peak])) peak = k;
+  expect(peak === 4, `_fft cosine@4 should peak at bin 4, got ${peak}`);
+}
+// detectChord on synthesized triads/7ths (with harmonics)
+expect(eng.detectChord(chordSig([261.63, 329.63, 392.00], 0.25), SR).symbol === "C", `detectChord C major → C, got ${eng.detectChord(chordSig([261.63, 329.63, 392.00], 0.25), SR).symbol}`);
+expect(eng.detectChord(chordSig([220.00, 261.63, 329.63], 0.25), SR).symbol === "Am", `detectChord A minor → Am, got ${eng.detectChord(chordSig([220.00, 261.63, 329.63], 0.25), SR).symbol}`);
+expect(eng.detectChord(chordSig([196.00, 246.94, 293.66, 349.23], 0.25), SR).symbol === "G7", `detectChord G7 → G7, got ${eng.detectChord(chordSig([196.00, 246.94, 293.66, 349.23], 0.25), SR).symbol}`);
+// pcmToChroma peaks at the chord tones (C/E/G for C major)
+const ch = eng.pcmToChroma(chordSig([261.63, 329.63, 392.00], 0.2), SR);
+expect(ch[0] > 0.5 && ch[4] > 0.5 && ch[7] > 0.5, `C-major chroma should peak at C,E,G, got [${ch.map((v) => v.toFixed(2))}]`);
+// transcribeChords over a C (0.5s) → G (0.5s) progression → two chord events
+const cg = new Float32Array(Math.floor(1.0 * SR));
+cg.set(chordSig([261.63, 329.63, 392.00], 0.5), 0);
+cg.set(chordSig([196.00, 246.94, 293.66], 0.5), Math.floor(0.5 * SR));
+const chords = eng.transcribeChords(cg, SR);
+expect(chords.some((c) => c.symbol === "C") && chords.some((c) => c.symbol === "G"), `transcribeChords C→G should yield C and G, got [${chords.map((c) => c.symbol)}]`);
+
 /* ---- single-note symbols carry NO "(single)" artifact (regression) -------
  * A one-pitch block recognises as the bare note name; the old engine appended
  * " (single)" to the symbol STRING, which leaked into every export + the chart

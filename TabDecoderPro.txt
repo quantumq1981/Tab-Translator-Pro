@@ -191,6 +191,10 @@ import {
   midiToNoteName,
   detectPitch,
   transcribeMonophonic,
+  _fft,
+  pcmToChroma,
+  detectChord,
+  transcribeChords,
 } from "./engine.tsx";
 
 async function extractTokens(buf) {
@@ -359,6 +363,14 @@ async function parseScoreOffThread(bytes, filename, sharp) {
     catch (err) { console.warn("worker parse fell back to main thread:", err && err.message); }
   }
   return parseGuitarProOrXML(bytes, filename, sharp);
+}
+/* PCM → chord/note events, off-thread when possible (the analysis is a heavy pure-JS
+ * FFT/YIN loop that would jank the main thread on a long stem); ALWAYS falls back to
+ * the identical main-thread engine call so correctness never depends on the worker. */
+async function analyzeAudioOffThread(samples, sr, kind, opts = {}) {
+  const fn = kind === "notes" ? "transcribeMonophonic" : "transcribeChords";
+  try { return await _engineRPC(fn, [samples, sr, opts]); }
+  catch (_) { return (kind === "notes" ? transcribeMonophonic : transcribeChords)(samples, sr, opts); }
 }
 
 /* ========================================================================== */
@@ -653,7 +665,7 @@ export default function TabDecoderPro() {
             <span style={{ color: C.dim, fontSize: 12, letterSpacing: 3 }}>TABTRANSLATOR PRO</span>
           </div>
           <div style={{ display: "flex", gap: 6 }}>
-            {[["manual", "Manual"], ["pdf", "PDF Chart"], ["xml", "MusicXML / GP"], ["tuner", "Tuner 🎤"]].map(([m, lbl]) => (
+            {[["manual", "Manual"], ["pdf", "PDF Chart"], ["xml", "MusicXML / GP"], ["audio", "Audio 🎵"], ["tuner", "Tuner 🎤"]].map(([m, lbl]) => (
               <button key={m} onClick={() => { setMode(m); clearSel(); }} style={{ ...toggle(C), padding: "6px 14px", flex: "none", ...(mode === m ? activeToggle(C) : {}) }}>
                 {lbl}
               </button>
@@ -668,7 +680,7 @@ export default function TabDecoderPro() {
           </div>
         )}
 
-        {mode === "tuner" ? <LiveTuner C={C} useSharp={useSharp} /> : (
+        {mode === "tuner" ? <LiveTuner C={C} useSharp={useSharp} /> : mode === "audio" ? <AudioImport C={C} useSharp={useSharp} /> : (
         <div className={"tdp-cols" + (mode === "manual" ? " manual" : "")} style={{ position: "relative" }}>
           <section className="panel-rise" style={{ animationDelay: ".05s", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
             {mode === "manual" ? (
@@ -1224,6 +1236,134 @@ function LiveTuner({ C, useSharp }) {
       <div style={{ marginTop: 16, fontSize: 11, color: C.dim, lineHeight: 1.6, textAlign: "center" }}>
         Pure-JS YIN detection — locks the fundamental, not an overtone. Best with a clean single note (a tuner / melody line), not full chords. Needs mic permission; nothing leaves your device.
       </div>
+    </section>
+  );
+}
+
+/* ---- Audio import (Wave 3/4: chords/notes from an isolated stem) -----------
+ * BROWSER-ONLY glue (engine stays pure): upload an audio file → Web Audio
+ * `decodeAudioData` (the one step that needs the browser; handles MP3/M4A/WAV) →
+ * mono + downsample → the engine's pure analysis (transcribeChords for a chordal
+ * stem, transcribeMonophonic for a bass/lead), run OFF-THREAD with main-thread
+ * fallback. Plays the file back with a live highlight on the current event.
+ * HONEST: works on a CLEAN ISOLATED stem (one instrument) — a full mix won't
+ * recognise reliably. Can't be headless-tested (decode + playback) — device only;
+ * the analysis engine under it is unit-tested. */
+function AudioImport({ C, useSharp }) {
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [kind, setKind] = useState("chords");        // chords | notes
+  const [events, setEvents] = useState([]);          // [{ label, startSec, durSec }]
+  const [dur, setDur] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const [pos, setPos] = useState(0);
+  const ref = useRef({});                            // { audioBuf, ds, sr, ctx, src, raf, startedAt }
+  const TARGET = 16000;
+
+  const stopPlay = () => {
+    const s = ref.current;
+    if (s.raf) cancelAnimationFrame(s.raf);
+    if (s.src) { try { s.src.stop(); } catch (_) {} s.src = null; }
+    if (s.ctx && s.ctx.state !== "closed") { try { s.ctx.close(); } catch (_) {} s.ctx = null; }
+    s.raf = null; setPlaying(false);
+  };
+  useEffect(() => () => stopPlay(), []);
+
+  const run = (ds, sr, k) => {
+    setBusy(true); setErr("");
+    const opts = k === "notes" ? { hop: Math.floor(sr * 0.08) } : { hopSec: 0.25 };
+    setTimeout(async () => {                          // let "Analyzing…" paint first
+      try {
+        const raw = await analyzeAudioOffThread(ds, sr, k, opts);
+        setEvents((raw || []).map((e) => ({ label: e.symbol != null ? e.symbol : e.note, startSec: e.startSec, durSec: e.durSec })));
+      } catch (_) { setErr("Analysis failed on this file."); }
+      setBusy(false);
+    }, 30);
+  };
+
+  const onFile = async (e) => {
+    const f = e.target.files && e.target.files[0]; if (!f) return;
+    setErr(""); setName(f.name); setBusy(true); setEvents([]); stopPlay();
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) { setErr("Web Audio isn't available in this browser."); setBusy(false); return; }
+      const ab = await f.arrayBuffer();
+      const dctx = new AC();
+      const audioBuf = await new Promise((res, rej) => { const p = dctx.decodeAudioData(ab, res, rej); if (p && p.then) p.then(res, rej); });
+      try { dctx.close(); } catch (_) {}
+      const chs = audioBuf.numberOfChannels, n = audioBuf.length;
+      const mono = new Float32Array(n);
+      for (let c = 0; c < chs; c++) { const d = audioBuf.getChannelData(c); for (let i = 0; i < n; i++) mono[i] += d[i] / chs; }
+      const factor = Math.max(1, Math.floor(audioBuf.sampleRate / TARGET));
+      const dsLen = Math.floor(n / factor), ds = new Float32Array(dsLen);
+      for (let i = 0; i < dsLen; i++) { let v = 0; for (let j = 0; j < factor; j++) v += mono[i * factor + j]; ds[i] = v / factor; }
+      const sr = audioBuf.sampleRate / factor;
+      ref.current = { audioBuf, ds, sr };
+      setDur(audioBuf.duration);
+      run(ds, sr, kind);
+    } catch (_) { setErr("Couldn't read or decode that audio file."); setBusy(false); }
+  };
+
+  const switchKind = (k) => { setKind(k); const s = ref.current; if (s.ds) run(s.ds, s.sr, k); };
+
+  const play = () => {
+    const s = ref.current; if (!s.audioBuf) return;
+    if (playing) { stopPlay(); return; }
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      const ctx = new AC();
+      const src = ctx.createBufferSource(); src.buffer = s.audioBuf; src.connect(ctx.destination);
+      src.onended = () => { if (ref.current.src === src) stopPlay(); };
+      src.start(); s.ctx = ctx; s.src = src; s.startedAt = ctx.currentTime; setPlaying(true);
+      const loop = () => { const t = ctx.currentTime - s.startedAt; setPos(t); if (t <= s.audioBuf.duration) s.raf = requestAnimationFrame(loop); };
+      s.raf = requestAnimationFrame(loop);
+    } catch (_) { setErr("Playback failed."); stopPlay(); }
+  };
+
+  const fmt = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+  const activeIdx = events.findIndex((e) => pos >= e.startSec && pos < e.startSec + e.durSec);
+  return (
+    <section className="panel-rise" style={{ position: "relative", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18, maxWidth: 640, margin: "0 auto" }}>
+      <SectionLabel C={C}>AUDIO → CHART · isolated-stem recognition (experimental)</SectionLabel>
+      <div style={{ fontSize: 12, color: C.dim, lineHeight: 1.6, marginBottom: 12 }}>
+        Upload a <b>clean, isolated instrument stem</b> (one guitar / piano / bass — not a full mix). Decoded + analysed entirely on your device; nothing is uploaded. Chordal stems → chords; a single-note stem (bass/lead) → notes.
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 14 }}>
+        <label style={{ ...toggle(C), flex: "none", padding: "8px 16px", cursor: "pointer", borderColor: C.amber, color: C.amber }}>
+          ⬆ Upload audio
+          <input type="file" accept="audio/*" onChange={onFile} style={{ display: "none" }} />
+        </label>
+        <span style={{ display: "inline-flex", gap: 4 }}>
+          {[["chords", "Chords (guitar/piano)"], ["notes", "Notes (bass/lead)"]].map(([k, lbl]) => (
+            <button key={k} onClick={() => switchKind(k)} disabled={busy} style={{ ...chip(C), padding: "5px 10px", borderColor: kind === k ? C.cyan : C.border, color: kind === k ? C.cyan : C.dim }}>{lbl}</button>
+          ))}
+        </span>
+        {name && <span style={{ fontSize: 11, color: C.dim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 200 }}>{name}{dur ? ` · ${fmt(dur)}` : ""}</span>}
+      </div>
+
+      {busy && <div style={{ fontSize: 13, color: C.amber, marginBottom: 12 }}>⏳ Analyzing… (FFT over the whole stem)</div>}
+      {err && <div style={{ fontSize: 12, color: C.red, marginBottom: 12 }}>{err}</div>}
+
+      {!!events.length && (
+        <>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+            <button onClick={play} style={{ ...chip(C), padding: "5px 14px", borderColor: playing ? C.green : C.border, color: playing ? C.green : C.amber }}>{playing ? "■ Stop" : "▶ Play"}</button>
+            <span style={{ fontSize: 11, color: C.dim }}>{fmt(pos)} / {fmt(dur)} · {events.length} {kind === "notes" ? "notes" : "chords"}</span>
+          </div>
+          <div className="tdp-scroll" style={{ display: "flex", flexWrap: "wrap", gap: 6, maxHeight: 360, overflow: "auto", paddingRight: 4 }}>
+            {events.map((e, i) => (
+              <div key={i} title={`${fmt(e.startSec)} · ${e.durSec.toFixed(2)}s`} style={{ minWidth: 58, textAlign: "center", padding: "8px 6px", borderRadius: 8, border: `1px solid ${i === activeIdx ? C.amber : C.border}`, background: i === activeIdx ? `${C.amber}18` : C.bg }}>
+                <div style={{ fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: 15, color: i === activeIdx ? C.amber : C.cyan }}>{e.label}</div>
+                <div style={{ fontSize: 9, color: C.dim, marginTop: 2 }}>{fmt(e.startSec)}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{ fontSize: 11, color: C.dim, marginTop: 12, lineHeight: 1.6 }}>
+            First cut — a rough sketch to clean up, not a final chart. Best on clean stems; dense voicings / drums bleed will mislabel. (Mapping these into the editable chart + CSMPN export is the next step.)
+          </div>
+        </>
+      )}
     </section>
   );
 }

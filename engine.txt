@@ -2053,6 +2053,94 @@ function transcribeMonophonic(samples, sampleRate, opts = {}) {
   return notes.filter((n) => n.endSec - n.startSec >= minDurSec).map((n) => ({ midi: n.midi, note: n.note, startSec: +n.startSec.toFixed(4), durSec: +(n.endSec - n.startSec).toFixed(4) }));
 }
 
+/* ---- audio → chroma → CHORD (for clean isolated chordal stems) -------------
+ * Wave 3/4: extract chords from a CLEAN, isolated polyphonic stem (rhythm guitar,
+ * piano comping) — NOT a full mix. Pipeline: PCM → FFT → fold the spectrum into a
+ * 12-bin chromagram → peak-pick → the SAME chord engine (`recognise`). Pure +
+ * headless-testable (synthesized chords); only the MP3→PCM decode is browser-only
+ * (Web Audio `decodeAudioData`). HONEST LIMIT: works on clean stems; a full band
+ * mix (drums/vocals/bass) muddies the chroma — isolate the instrument first. A
+ * monophonic stem (bass/lead) should use `transcribeMonophonic` instead. */
+function _fft(re, im) {                                          // in-place iterative radix-2 (len = power of 2)
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) { const tr = re[i]; re[i] = re[j]; re[j] = tr; const ti = im[i]; im[i] = im[j]; im[j] = ti; }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = -2 * Math.PI / len, wr = Math.cos(ang), wi = Math.sin(ang), half = len >> 1;
+    for (let i = 0; i < n; i += len) {
+      let cr = 1, ci = 0;
+      for (let k = 0; k < half; k++) {
+        const ar = re[i + k + half], ai = im[i + k + half];
+        const vr = ar * cr - ai * ci, vi = ar * ci + ai * cr;
+        re[i + k + half] = re[i + k] - vr; im[i + k + half] = im[i + k] - vi;
+        re[i + k] += vr; im[i + k] += vi;
+        const ncr = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = ncr;
+      }
+    }
+  }
+}
+/* One frame of PCM → a max-normalised 12-bin chromagram. Hann window + FFT, fold
+ * each bin's magnitude into its pitch class; a light harmonic suppression knocks
+ * down the octave/fifth/maj-3rd overtone bleed that would fake chord tones. */
+function pcmToChroma(samples, sampleRate, opts = {}) {
+  let N = opts.fftSize || 4096;
+  while (N > samples.length && N > 256) N >>= 1;                 // shrink to fit short frames
+  const re = new Float64Array(N), im = new Float64Array(N);
+  for (let i = 0; i < N; i++) { const w = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (N - 1)); re[i] = (samples[i] || 0) * w; }
+  _fft(re, im);
+  const minF = opts.minFreq || 55, maxF = opts.maxFreq || 2000, C0 = 16.351597831287414;
+  const raw = new Array(12).fill(0);
+  for (let k = 1; k < N / 2; k++) {
+    const f = (k * sampleRate) / N;
+    if (f < minF || f > maxF) continue;
+    raw[((Math.round(12 * Math.log2(f / C0)) % 12) + 12) % 12] += Math.hypot(re[k], im[k]);
+  }
+  // harmonic suppression: a pc lit only because it's the 5th/maj-3rd overtone of a
+  // stronger pc below gets damped (its "parent" is a 5th below (p-7) or maj-3rd below
+  // (p-4) — those notes' 3rd/5th harmonics land on p).
+  const sup = opts.suppress != null ? opts.suppress : 0.3;
+  const chroma = raw.map((v, p) => Math.max(0, v - sup * Math.max(raw[((p - 7) % 12 + 12) % 12], raw[((p - 4) % 12 + 12) % 12])));
+  const mx = Math.max(...chroma) || 1;
+  return chroma.map((v) => v / mx);
+}
+/* One frame of PCM → recognised chord (via the engine). Peak-picks the chroma to a
+ * pitch-class set and runs `recognise`. Returns { symbol, result, chroma } or null. */
+function detectChord(samples, sampleRate, opts = {}) {
+  const chroma = pcmToChroma(samples, sampleRate, opts);
+  const thr = opts.pickThreshold != null ? opts.pickThreshold : 0.4;
+  const pcs = [];
+  for (let p = 0; p < 12; p++) if (chroma[p] >= thr) pcs.push(p);
+  if (pcs.length < 2) return null;
+  const result = recognise(pcs, makeMask(pcs), null);
+  if (!result || result.single) return null;
+  return { symbol: symbolOf(result, opts.useSharp !== false), result, chroma };
+}
+/* Slide detectChord over a whole (decoded) buffer and collapse consecutive same-
+ * chord frames into timed events { symbol, startSec, durSec }. The chord MVP for
+ * an isolated chordal stem. (Tempo/beat mapping into the score model is a later
+ * step — this returns time-based events.) */
+function transcribeChords(samples, sampleRate, opts = {}) {
+  const win = opts.window || 4096;
+  const hop = opts.hop || Math.floor(sampleRate * (opts.hopSec || 0.25));
+  const minDur = opts.minDurSec != null ? opts.minDurSec : 0.2;
+  const cover = Math.max(win, hop) / sampleRate;               // a frame represents its hop interval, not just its window
+  const events = [];
+  let cur = null;
+  for (let s = 0; s + win <= samples.length; s += hop) {
+    const frame = samples.subarray ? samples.subarray(s, s + win) : samples.slice(s, s + win);
+    const d = detectChord(frame, sampleRate, opts);
+    const t = s / sampleRate, sym = d ? d.symbol : null;
+    if (sym && cur && cur.symbol === sym) cur.endSec = t + cover;
+    else { if (cur) events.push(cur); cur = sym ? { symbol: sym, startSec: t, endSec: t + cover } : null; }
+  }
+  if (cur) events.push(cur);
+  return events.filter((e) => e.endSec - e.startSec >= minDur).map((e) => ({ symbol: e.symbol, startSec: +e.startSec.toFixed(3), durSec: +(e.endSec - e.startSec).toFixed(3) }));
+}
+
 
 /* ---- public surface ------------------------------------------------------
  * Every top-level engine binding is exported so the UI (TabDecoderPro.tsx),
@@ -2212,4 +2300,8 @@ export {
   midiToNoteName,
   detectPitch,
   transcribeMonophonic,
+  _fft,
+  pcmToChroma,
+  detectChord,
+  transcribeChords,
 };
