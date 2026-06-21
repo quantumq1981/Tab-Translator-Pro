@@ -193,6 +193,7 @@ import {
   transcribeMonophonic,
   _fft,
   pcmToChroma,
+  chordFromChroma,
   detectChord,
   transcribeChords,
   audioEventsToScore,
@@ -1276,7 +1277,7 @@ function AudioImport({ C, useSharp }) {
 
   const run = (ds, sr, k) => {
     setBusy(true); setErr("");
-    const opts = k === "notes" ? { hop: Math.floor(sr * 0.08) } : { hopSec: 0.25 };
+    const opts = k === "notes" ? { hop: Math.floor(sr * 0.08) } : { hopSec: 0.12, smoothSec: 0.5 };
     setTimeout(async () => {                          // let "Analyzing…" paint first
       try { setRaw((await analyzeAudioOffThread(ds, sr, k, opts)) || []); }
       catch (_) { setErr("Analysis failed on this file."); }

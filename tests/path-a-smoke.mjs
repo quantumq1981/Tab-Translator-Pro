@@ -666,6 +666,11 @@ const chords = eng.transcribeChords(cg, SR);
 expect(chords.some((c) => c.symbol === "C") && chords.some((c) => c.symbol === "G"), `transcribeChords C→G should yield C and G, got [${chords.map((c) => c.symbol)}]`);
 // events carry a voiced MIDI set (so the chart/export/playback work)
 expect(chords.every((c) => Array.isArray(c.midis) && c.midis.length >= 2), "transcribeChords events carry a voiced midis[]");
+// noise robustness: a clean sustained chord stays stable (not a flood of flips)
+const cev = eng.transcribeChords(chordSig([261.63, 329.63, 392.00], 1.2), SR);
+expect(cev.length >= 1 && cev.every((c) => c.symbol === "C"), `clean sustained C should stay stable "C", got [${cev.map((c) => c.symbol)}]`);
+// energy gate: silence → no chords (no garbage from a quiet/rest passage)
+expect(eng.transcribeChords(new Float32Array(SR), SR).length === 0, "silence → no chords (energy gate)");
 
 /* ---- audioEventsToScore: timed chord events → the shared score shape -------- */
 const aev = [
