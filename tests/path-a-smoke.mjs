@@ -664,6 +664,27 @@ cg.set(chordSig([261.63, 329.63, 392.00], 0.5), 0);
 cg.set(chordSig([196.00, 246.94, 293.66], 0.5), Math.floor(0.5 * SR));
 const chords = eng.transcribeChords(cg, SR);
 expect(chords.some((c) => c.symbol === "C") && chords.some((c) => c.symbol === "G"), `transcribeChords C→G should yield C and G, got [${chords.map((c) => c.symbol)}]`);
+// events carry a voiced MIDI set (so the chart/export/playback work)
+expect(chords.every((c) => Array.isArray(c.midis) && c.midis.length >= 2), "transcribeChords events carry a voiced midis[]");
+
+/* ---- audioEventsToScore: timed chord events → the shared score shape -------- */
+const aev = [
+  { symbol: "C", midis: [48, 52, 55], startSec: 0.0, durSec: 1.0 },
+  { symbol: "G", midis: [55, 59, 62], startSec: 1.0, durSec: 1.0 },
+  { symbol: "Am", midis: [57, 60, 64], startSec: 2.0, durSec: 2.0 },
+]; // at 120bpm (0.5s/beat, 4/4): C bar1 beat1, G bar1 beat3, Am bar2 beat1
+const asc = eng.audioEventsToScore(aev, { bpm: 120, beatsPerBar: 4 });
+expect(asc.source === "audio" && asc.tempo === 120, "audioEventsToScore tags source=audio + tempo");
+expect(asc.bars.length === 2, `expected 2 bars, got ${asc.bars.length}`);
+expect(asc.bars[0].events.map((e) => e.symbol).join(" ") === "C G", `bar1 expected "C G", got "${asc.bars[0].events.map((e) => e.symbol).join(" ")}"`);
+expect(asc.bars[0].events[0].beat === 0 && asc.bars[0].events[1].beat === 2, `bar1 beats expected 0 & 2, got ${asc.bars[0].events[0].beat} & ${asc.bars[0].events[1].beat}`);
+expect(asc.bars[1].events[0].symbol === "Am" && asc.bars[1].events[0].midis.length === 3, "bar2 = Am with voiced midis");
+// flows through the existing exporters (the whole point — audio → CSMPN handoff)
+const acsmpn = eng.scoreToCSMPN(asc, { title: "From Audio", tempo: 120 });
+expect(/Title: From Audio/.test(acsmpn), "audio score exports to CSMPN");
+expect(eng.scoreToMidi(asc, { tempo: 120 }) instanceof Uint8Array, "audio score exports to MIDI");
+// faster tempo (240bpm → 0.25s/beat) packs the same seconds into more bars
+expect(eng.audioEventsToScore(aev, { bpm: 240, beatsPerBar: 4 }).bars.length === 3, "bpm changes the beat grid (240bpm → 3 bars)");
 
 /* ---- single-note symbols carry NO "(single)" artifact (regression) -------
  * A one-pitch block recognises as the bare note name; the old engine appended

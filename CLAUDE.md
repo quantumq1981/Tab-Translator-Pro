@@ -1007,9 +1007,19 @@ Tuned defaults: `suppress 0.3`, `pickThreshold 0.4` (0.45 suppression over-dampe
 **off-thread** (`analyzeAudioOffThread` via `_engineRPC`, main-thread fallback) → a chord/
 note timeline with playback + a live highlight. **Device-only verification** (decode +
 playback can't be headless-tested). HONEST LIMIT: clean isolated stems = good editable
-sketch; dense voicings / a full mix mislabel. Next: map the events into the editable chart
-+ CSMPN export/handoff (needs a tempo/beat grid), and optional **two-stem fusion** (a bass
-stem for the root + a chordal stem for the quality).
+sketch; dense voicings / a full mix mislabel.
+
+**Audio → editable chart + export (2026-06-20).** A chordal stem no longer dead-ends at a
+timeline: **`audioEventsToScore(events, { bpm, beatsPerBar })`** (pure, tested) quantises
+the timed chord events onto a beat grid → the SAME score shape every parser emits
+(`source:"audio"`, carries voiced `midis` from `detectChord`/`recognise`). So the Audio
+mode renders the recognised stem through the **full `ChartPanel`** — Edit, transpose,
+**all 6 exporters, and the → Chord Sheet Maker Pro handoff** work for free. A **♩=bpm +
+time-sig control** re-quantises live (no re-analysis) so the user lines the bars up; no
+tempo *detection* yet (beat-tracking is the next DSP step). Tests: events at 120bpm →
+`C G | Am` with correct beats, voiced midis carried, exports to CSMPN/MIDI, and the bpm
+changes the bar count. Remaining: tempo/beat detection, and optional **two-stem fusion**
+(a bass stem for the root + a chordal stem for the quality).
 
 ## Path B (scans / photos) — OUT OF SCOPE
 

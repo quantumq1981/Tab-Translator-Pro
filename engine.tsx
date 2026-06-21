@@ -2108,7 +2108,8 @@ function pcmToChroma(samples, sampleRate, opts = {}) {
   return chroma.map((v) => v / mx);
 }
 /* One frame of PCM → recognised chord (via the engine). Peak-picks the chroma to a
- * pitch-class set and runs `recognise`. Returns { symbol, result, chroma } or null. */
+ * pitch-class set and runs `recognise`. Returns { symbol, midis, result, chroma } or
+ * null. `midis` is a clean voicing (root octave 4) so the chart/export/playback work. */
 function detectChord(samples, sampleRate, opts = {}) {
   const chroma = pcmToChroma(samples, sampleRate, opts);
   const thr = opts.pickThreshold != null ? opts.pickThreshold : 0.4;
@@ -2116,13 +2117,14 @@ function detectChord(samples, sampleRate, opts = {}) {
   for (let p = 0; p < 12; p++) if (chroma[p] >= thr) pcs.push(p);
   if (pcs.length < 2) return null;
   const result = recognise(pcs, makeMask(pcs), null);
-  if (!result || result.single) return null;
-  return { symbol: symbolOf(result, opts.useSharp !== false), result, chroma };
+  if (!result || result.single || !result.best) return null;
+  const rootMidi = 48 + result.best.root;
+  const midis = result.best.quality.intervals.map((i) => rootMidi + i);
+  return { symbol: symbolOf(result, opts.useSharp !== false), midis, result, chroma };
 }
 /* Slide detectChord over a whole (decoded) buffer and collapse consecutive same-
- * chord frames into timed events { symbol, startSec, durSec }. The chord MVP for
- * an isolated chordal stem. (Tempo/beat mapping into the score model is a later
- * step — this returns time-based events.) */
+ * chord frames into timed events { symbol, midis, startSec, durSec }. The chord MVP
+ * for an isolated chordal stem. `audioEventsToScore` maps these onto a beat grid. */
 function transcribeChords(samples, sampleRate, opts = {}) {
   const win = opts.window || 4096;
   const hop = opts.hop || Math.floor(sampleRate * (opts.hopSec || 0.25));
@@ -2135,10 +2137,43 @@ function transcribeChords(samples, sampleRate, opts = {}) {
     const d = detectChord(frame, sampleRate, opts);
     const t = s / sampleRate, sym = d ? d.symbol : null;
     if (sym && cur && cur.symbol === sym) cur.endSec = t + cover;
-    else { if (cur) events.push(cur); cur = sym ? { symbol: sym, startSec: t, endSec: t + cover } : null; }
+    else { if (cur) events.push(cur); cur = sym ? { symbol: sym, midis: d.midis, startSec: t, endSec: t + cover } : null; }
   }
   if (cur) events.push(cur);
-  return events.filter((e) => e.endSec - e.startSec >= minDur).map((e) => ({ symbol: e.symbol, startSec: +e.startSec.toFixed(3), durSec: +(e.endSec - e.startSec).toFixed(3) }));
+  return events.filter((e) => e.endSec - e.startSec >= minDur).map((e) => ({ symbol: e.symbol, midis: e.midis, startSec: +e.startSec.toFixed(3), durSec: +(e.endSec - e.startSec).toFixed(3) }));
+}
+/* Map timed chord events (from `transcribeChords`) onto a beat grid → the SAME score
+ * shape every parser emits, so an audio stem flows into the chart, exporters, CSMPN
+ * handoff, transpose, etc. Quantises each event's `startSec` to a beat at `bpm`
+ * (a "beat" = a quarter note); collapses to bars of `beatsPerBar`. No tempo detection
+ * yet — the caller supplies bpm (a tempo control / future beat-tracking). */
+function audioEventsToScore(events, opts = {}) {
+  const bpm = Math.max(20, Math.min(400, opts.bpm || 120));
+  const beatsPerBar = opts.beatsPerBar || 4;
+  const beatType = opts.beatType || 4;
+  const secPerBeat = 60 / bpm;
+  const placed = (events || []).filter((e) => e.symbol).map((e) => {
+    const onsetBeat = e.startSec / secPerBeat;                 // global beat position
+    return { symbol: e.symbol, midis: e.midis || [], onsetBeat: Math.max(0, onsetBeat), durBeat: Math.max(0.25, (e.durSec || secPerBeat) / secPerBeat) };
+  }).sort((a, b) => a.onsetBeat - b.onsetBeat);
+  const barsMap = new Map();                                   // barIndex -> events
+  for (const p of placed) {
+    const bar = Math.floor(p.onsetBeat / beatsPerBar + 1e-6);
+    const inBar = p.onsetBeat - bar * beatsPerBar;
+    if (!barsMap.has(bar)) barsMap.set(bar, []);
+    barsMap.get(bar).push({ symbol: p.symbol, midis: p.midis, qbeat: Math.max(0, Math.min(beatsPerBar - 1e-6, inBar)) });
+  }
+  const lastBar = barsMap.size ? Math.max(...barsMap.keys()) : -1;
+  const bars = [];
+  for (let b = 0; b <= lastBar; b++) {
+    const evs = (barsMap.get(b) || []).sort((a, b2) => a.qbeat - b2.qbeat);
+    evs.forEach((e, i) => { e.beat = Math.max(0, Math.min(beatsPerBar - 1, Math.round(e.qbeat))); });
+    for (let i = 1; i < evs.length; i++) if (evs[i].beat <= evs[i - 1].beat) evs[i].beat = Math.min(beatsPerBar - 1, evs[i - 1].beat + 1);
+    evs.forEach((e, i) => { e.durBeats = (i + 1 < evs.length ? evs[i + 1].beat : beatsPerBar) - e.beat; });
+    _fillTrueDur(evs, beatsPerBar);
+    bars.push({ number: b + 1, timeSig: [beatsPerBar, beatType], events: evs.map((e) => ({ symbol: e.symbol, midis: e.midis, beat: e.beat, durBeats: e.durBeats, qbeat: e.qbeat, qdur: e.qdur })) });
+  }
+  return { source: "audio", timeSig: [beatsPerBar, beatType], tempo: bpm, bars };
 }
 
 
@@ -2304,4 +2339,5 @@ export {
   pcmToChroma,
   detectChord,
   transcribeChords,
+  audioEventsToScore,
 };
