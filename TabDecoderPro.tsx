@@ -1304,7 +1304,7 @@ function AudioImport({ C, useSharp }) {
       ref.current = { audioBuf, ds, sr };
       setDur(audioBuf.duration);
       run(ds, sr, kind);
-    } catch (_) { setErr("Couldn't read or decode that audio file."); setBusy(false); }
+    } catch (_) { setErr("Couldn't decode audio from that file — try an audio file, or a video that has an audio track."); setBusy(false); }
   };
 
   const switchKind = (k) => { setKind(k); setOverrides({}); const s = ref.current; if (s.ds) run(s.ds, s.sr, k); };
@@ -1333,12 +1333,12 @@ function AudioImport({ C, useSharp }) {
     <section className="panel-rise" style={{ position: "relative", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18 }}>
       <SectionLabel C={C}>AUDIO → CHART · isolated-stem recognition (experimental)</SectionLabel>
       <div style={{ fontSize: 12, color: C.dim, lineHeight: 1.6, marginBottom: 12 }}>
-        Upload a <b>clean, isolated instrument stem</b> (one guitar / piano / bass — not a full mix). Decoded + analysed entirely on your device; nothing is uploaded. Chordal stems → a chord chart (export / send to Pro); a single-note stem (bass/lead) → notes.
+        Upload a <b>clean, isolated instrument stem</b> (one guitar / piano / bass — not a full mix) — an <b>audio file</b> (MP3/M4A/WAV) <b>or a video</b> (MP4/MOV; the audio track is extracted). Decoded + analysed entirely on your device; nothing is uploaded. Chordal stems → a chord chart (export / send to Pro); a single-note stem (bass/lead) → notes.
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 14 }}>
         <label style={{ ...toggle(C), flex: "none", padding: "8px 16px", cursor: "pointer", borderColor: C.amber, color: C.amber }}>
-          ⬆ Upload audio
-          <input type="file" accept="audio/*" onChange={onFile} style={{ display: "none" }} />
+          ⬆ Upload audio / video
+          <input type="file" accept="audio/*,video/*" onChange={onFile} style={{ display: "none" }} />
         </label>
         <span style={{ display: "inline-flex", gap: 4 }}>
           {[["chords", "Chords (guitar/piano)"], ["notes", "Notes (bass/lead)"]].map(([k, lbl]) => (

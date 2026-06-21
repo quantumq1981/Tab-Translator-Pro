@@ -1001,9 +1001,11 @@ chroma). Two regimes, both reusing what we already have:
 All pure + headless-tested (synthesized chords: C/Am/G7 detect correctly, a C-major
 chroma peaks at C/E/G, a C→G buffer transcribes to both; `_fft` peaks at the right bin).
 Tuned defaults: `suppress 0.3`, `pickThreshold 0.4` (0.45 suppression over-damped the real
-3rd/5th → power chords). **The only browser-only step is the MP3→PCM decode** (Web Audio
-`decodeAudioData`), wired in the **`AudioImport` component + "Audio 🎵" mode**
-(`TabDecoderPro.tsx`): upload → decode → mono + downsample to 16 kHz → analysis run
+3rd/5th → power chords). **The only browser-only step is the audio→PCM decode** (Web Audio
+`decodeAudioData`, which also extracts the audio track from a **video** container), wired in
+the **`AudioImport` component + "Audio 🎵" mode** (`TabDecoderPro.tsx`): the file `<input>`
+takes `accept="audio/*,video/*"` (MP3/M4A/WAV **and** MP4/MOV — the broad MIME wildcards
+avoid the iOS UTI grey-out gotcha); upload → decode → mono + downsample to 16 kHz → analysis run
 **off-thread** (`analyzeAudioOffThread` via `_engineRPC`, main-thread fallback) → a chord/
 note timeline with playback + a live highlight. **Device-only verification** (decode +
 playback can't be headless-tested). HONEST LIMIT: clean isolated stems = good editable
