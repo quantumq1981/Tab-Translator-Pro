@@ -1004,8 +1004,10 @@ Tuned defaults: `suppress 0.3`, `pickThreshold 0.4` (0.45 suppression over-dampe
 3rd/5th → power chords). **The only browser-only step is the audio→PCM decode** (Web Audio
 `decodeAudioData`, which also extracts the audio track from a **video** container), wired in
 the **`AudioImport` component + "Audio 🎵" mode** (`TabDecoderPro.tsx`): the file `<input>`
-takes `accept="audio/*,video/*"` (MP3/M4A/WAV **and** MP4/MOV — the broad MIME wildcards
-avoid the iOS UTI grey-out gotcha); upload → decode → mono + downsample to 16 kHz → analysis run
+has **NO `accept` filter** (same iOS lesson as the Guitar Pro upload — `accept` maps to UTIs
+and GREYS OUT valid MP3/M4A/WAV on iOS; even `audio/*,video/*` left only video selectable,
+so it's dropped and `decodeAudioData` validates instead — MP3/M4A/WAV audio + MP4/MOV video,
+audio track extracted); upload → decode → mono + downsample to 16 kHz → analysis run
 **off-thread** (`analyzeAudioOffThread` via `_engineRPC`, main-thread fallback) → a chord/
 note timeline with playback + a live highlight. **Device-only verification** (decode +
 playback can't be headless-tested). HONEST LIMIT: clean isolated stems = good editable
