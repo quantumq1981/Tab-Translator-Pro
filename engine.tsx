@@ -1955,6 +1955,104 @@ function playScore(score, bpm, { onEvent, onEnd } = {}) {
   return { stop() { timers.forEach(clearTimeout); clearTimeout(endTimer); try { ctx.close(); } catch (_) {} if (!done && onEnd) onEnd(); } };
 }
 
+/* ============================================================================
+ *  Wave 3 #11 — pitch detection → monophonic transcription (DSP foundation)
+ *  ---------------------------------------------------------------------------
+ *  PURE DSP (no Web Audio, no DOM → headless-testable with synthesized tones):
+ *  a monophonic fundamental-frequency detector (the YIN algorithm) + freq→MIDI
+ *  + a frame-by-frame transcriber that groups stable frames into note events.
+ *  The browser-only seam is the mic CAPTURE (getUserMedia + AudioContext →
+ *  Float32 frames); it feeds these pure functions, exactly like the PDF.js seam
+ *  feeds the parser. Practice mode (Wave 3 #12) compares detectPitch() output
+ *  against the chart's expected chord tones. iOS-first: zero deps, no WASM.
+ *  ------------------------------------------------------------------------- */
+
+/* MIDI ↔ frequency (A4 = 69 = 440 Hz, equal temperament). */
+function freqToMidi(freq) { return 69 + 12 * Math.log2(freq / 440); }
+function midiToFreq(midi) { return 440 * Math.pow(2, (midi - 69) / 12); }
+/* A MIDI number → scientific note name ("A4", "C#3"). Honours the ♯/♭ table. */
+function midiToNoteName(midi, useSharp = true) {
+  const m = Math.round(midi);
+  const names = useSharp ? NOTE_SHARP : NOTE_FLAT;
+  return names[((m % 12) + 12) % 12] + (Math.floor(m / 12) - 1);
+}
+
+/* detectPitch — YIN monophonic pitch detection on one frame of PCM samples.
+ * `samples` is a Float32Array / number[] in ~[-1,1]; returns the fundamental as
+ * { freq, midi (rounded), note, clarity } or null when no confident pitch.
+ * tau search covers ~[minFreq..maxFreq]; window must hold >1 period of minFreq
+ * (2048 @ 44.1k reaches down to ~E2). Steps: difference fn → cumulative-mean-
+ * normalised difference → absolute-threshold pick → parabolic interpolation. */
+function detectPitch(samples, sampleRate, opts = {}) {
+  const threshold = opts.threshold != null ? opts.threshold : 0.12;
+  const minFreq = opts.minFreq != null ? opts.minFreq : 65;     // ~C2
+  const maxFreq = opts.maxFreq != null ? opts.maxFreq : 1600;   // ~G6
+  const N = samples.length;
+  const tauMax = Math.min(Math.floor(N / 2), Math.floor(sampleRate / minFreq));
+  const tauMin = Math.max(2, Math.floor(sampleRate / maxFreq));
+  if (tauMax <= tauMin + 2) return null;
+  // 1) difference function d(tau)
+  const d = new Float64Array(tauMax + 1);
+  for (let tau = tauMin; tau <= tauMax; tau++) {
+    let sum = 0;
+    for (let j = 0; j + tau < N; j++) { const diff = samples[j] - samples[j + tau]; sum += diff * diff; }
+    d[tau] = sum;
+  }
+  // 2) cumulative mean normalised difference d'(tau)
+  const dp = new Float64Array(tauMax + 1);
+  dp[tauMin] = 1;
+  let running = 0;
+  for (let tau = tauMin; tau <= tauMax; tau++) {
+    running += d[tau];
+    dp[tau] = running > 0 ? d[tau] * (tau - tauMin + 1) / running : 1;
+  }
+  // 3) absolute threshold: first dip below `threshold` that is a local minimum
+  let tau = -1;
+  for (let t = tauMin + 1; t < tauMax; t++) {
+    if (dp[t] < threshold) { while (t + 1 <= tauMax && dp[t + 1] < dp[t]) t++; tau = t; break; }
+  }
+  if (tau === -1) {                                             // none below threshold → global min
+    let best = tauMin; for (let t = tauMin + 1; t <= tauMax; t++) if (dp[t] < dp[best]) best = t;
+    tau = best;
+    if (dp[tau] > 0.6) return null;                            // too unvoiced to trust
+  }
+  // 4) parabolic interpolation around tau for sub-sample precision
+  let betterTau = tau;
+  const x0 = tau > tauMin ? tau - 1 : tau, x2 = tau + 1 <= tauMax ? tau + 1 : tau;
+  if (x0 !== tau && x2 !== tau) {
+    const s0 = dp[x0], s1 = dp[tau], s2 = dp[x2], denom = 2 * (2 * s1 - s2 - s0);
+    if (denom !== 0) betterTau = tau + (s2 - s0) / denom;
+  }
+  const freq = sampleRate / betterTau;
+  if (freq < minFreq || freq > maxFreq) return null;
+  const clarity = Math.max(0, Math.min(1, 1 - dp[tau]));
+  const midi = Math.round(freqToMidi(freq));
+  return { freq, midi, note: midiToNoteName(midi, opts.useSharp !== false), clarity };
+}
+
+/* transcribeMonophonic — slide detectPitch over a whole PCM buffer and group
+ * consecutive frames of the same MIDI (above `minClarity`) into note events
+ * { midi, note, startSec, durSec }. The MVP of Wave 3 #11 (single line in →
+ * notes out). Rests (no confident pitch) break the current note. */
+function transcribeMonophonic(samples, sampleRate, opts = {}) {
+  const win = opts.window || 2048;
+  const hop = opts.hop || Math.floor(win / 2);
+  const minClarity = opts.minClarity != null ? opts.minClarity : 0.6;
+  const minDurSec = opts.minDurSec != null ? opts.minDurSec : 0.05;
+  const notes = [];
+  let cur = null;
+  for (let start = 0; start + win <= samples.length; start += hop) {
+    const frame = samples.subarray ? samples.subarray(start, start + win) : samples.slice(start, start + win);
+    const p = detectPitch(frame, sampleRate, opts);
+    const t = start / sampleRate;
+    const midi = p && p.clarity >= minClarity ? p.midi : null;
+    if (midi !== null && cur && cur.midi === midi) { cur.endSec = t + win / sampleRate; }
+    else { if (cur) notes.push(cur); cur = midi !== null ? { midi, note: midiToNoteName(midi, opts.useSharp !== false), startSec: t, endSec: t + win / sampleRate } : null; }
+  }
+  if (cur) notes.push(cur);
+  return notes.filter((n) => n.endSec - n.startSec >= minDurSec).map((n) => ({ midi: n.midi, note: n.note, startSec: +n.startSec.toFixed(4), durSec: +(n.endSec - n.startSec).toFixed(4) }));
+}
+
 
 /* ---- public surface ------------------------------------------------------
  * Every top-level engine binding is exported so the UI (TabDecoderPro.tsx),
@@ -2109,4 +2207,9 @@ export {
   scoreToMidi,
   scoreEventTimes,
   playScore,
+  freqToMidi,
+  midiToFreq,
+  midiToNoteName,
+  detectPitch,
+  transcribeMonophonic,
 };

@@ -186,6 +186,11 @@ import {
   scoreToMidi,
   scoreEventTimes,
   playScore,
+  freqToMidi,
+  midiToFreq,
+  midiToNoteName,
+  detectPitch,
+  transcribeMonophonic,
 } from "./engine.tsx";
 
 async function extractTokens(buf) {
