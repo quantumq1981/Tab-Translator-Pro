@@ -599,6 +599,39 @@ expect(eng.arbitrateChord(unsure, vec([0, 3, 7]), { minModel: 0.999 }).source ==
 expect(eng.arbitrateChord({ single: true }, vec([0])).source === "engine", "single-note -> engine");
 expect(eng.arbitrateChord(null, vec([0, 4, 7])).source === "engine", "null result -> engine");
 
+/* ---- Wave 3 #11: pitch detection (YIN) + monophonic transcription ----------
+ * Pure DSP — fed synthesized tones (the browser-only seam is mic capture). */
+const SR = 44100;
+const tone = (freq, secs, harmonics = [1, 0.5, 0.25]) => {
+  const n = Math.floor(secs * SR), a = new Float32Array(n);
+  for (let i = 0; i < n; i++) { let s = 0; harmonics.forEach((amp, h) => { s += amp * Math.sin(2 * Math.PI * freq * (h + 1) * i / SR); }); a[i] = s * 0.4; }
+  return a;
+};
+expect(Math.round(eng.freqToMidi(440)) === 69, "freqToMidi(440) = A4 = 69");
+expect(Math.abs(eng.midiToFreq(69) - 440) < 1e-9, "midiToFreq(69) = 440");
+expect(eng.midiToNoteName(69, true) === "A4" && eng.midiToNoteName(40, true) === "E2" && eng.midiToNoteName(60, true) === "C4", "midiToNoteName: 69→A4, 40→E2, 60→C4");
+// detect a clear A4 (with harmonics) — fundamental, not an overtone
+const a4 = eng.detectPitch(tone(440, 0.05), SR);
+expect(a4 && a4.midi === 69, `detectPitch A4 → midi 69, got ${a4 && a4.midi}`);
+expect(a4 && a4.clarity > 0.8, `A4 clarity should be high, got ${a4 && a4.clarity}`);
+// guitar low E2 (82.41 Hz) with strong harmonics — YIN must lock the fundamental, not 2×
+const e2 = eng.detectPitch(tone(82.41, 0.07), SR);
+expect(e2 && e2.midi === 40, `detectPitch E2 → midi 40, got ${e2 && e2.midi}`);
+// across the range
+for (const [f, m] of [[110, 45], [261.63, 60], [329.63, 64], [493.88, 71]]) {
+  const r = eng.detectPitch(tone(f, 0.05), SR);
+  expect(r && r.midi === m, `detectPitch ${f}Hz → midi ${m}, got ${r && r.midi}`);
+}
+// silence → no confident pitch
+expect(eng.detectPitch(new Float32Array(2048), SR) === null, "silence → no pitch");
+// monophonic transcription: A4 (0.3s) then C5 (0.3s) → two note events 69, 72
+const buf = new Float32Array(Math.floor(0.6 * SR));
+buf.set(tone(440, 0.3), 0); buf.set(tone(523.25, 0.3), Math.floor(0.3 * SR));
+const notes = eng.transcribeMonophonic(buf, SR);
+const tmidis = notes.map((n) => n.midi);
+expect(tmidis.includes(69) && tmidis.includes(72), `transcribe A4→C5 should yield 69 & 72, got [${tmidis}]`);
+expect(notes.every((n) => n.durSec > 0 && typeof n.note === "string"), "transcription notes carry positive durations + names");
+
 /* ---- single-note symbols carry NO "(single)" artifact (regression) -------
  * A one-pitch block recognises as the bare note name; the old engine appended
  * " (single)" to the symbol STRING, which leaked into every export + the chart

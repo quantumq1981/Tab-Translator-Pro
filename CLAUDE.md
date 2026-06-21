@@ -948,6 +948,30 @@ correctly, root-relative works, and the arbiter contract holds (confident engine
 overridden; unsure engine + confident model adopts; `minModel` gate respected;
 single/null bypass).
 
+## Wave 3 #11 — pitch detection → transcription (DSP foundation, 2026-06-20)
+
+The audio front-end's **pure DSP core**, built iOS-first (zero deps, no WASM). Lives in
+`engine.tsx` (React/DOM-free → headless-testable with synthesized tones):
+
+- **`detectPitch(samples, sampleRate, opts)`** — monophonic fundamental-frequency
+  detection via the **YIN** algorithm (difference fn → cumulative-mean-normalised
+  difference → absolute-threshold pick → parabolic interpolation). Returns
+  `{ freq, midi, note, clarity }` or `null`. YIN (not naive autocorrelation) ON PURPOSE:
+  it locks the **fundamental**, not a harmonic — verified on a low **E2 (82 Hz) with
+  strong overtones** decoding to MIDI 40, the classic octave-error trap.
+- **`transcribeMonophonic(samples, sampleRate, opts)`** — slides `detectPitch` over a
+  buffer and groups stable same-MIDI frames (above `minClarity`) into note events
+  `{ midi, note, startSec, durSec }`. The MVP: one line in → notes out.
+- **`freqToMidi` / `midiToFreq` / `midiToNoteName`** — equal-temperament helpers
+  (A4=69=440 Hz; note names honour the ♯/♭ table).
+
+**The browser-only seam is mic CAPTURE** (`getUserMedia` + `AudioContext` → Float32
+frames), exactly analogous to the PDF.js seam feeding the parser — it is **not built
+yet** (device-only, can't headless-test). The pure functions above are validated
+(`npm test`: A4/E2/A2/C4/E4/B4 detect to the right MIDI, silence → `null`, an A4→C5
+buffer transcribes to two notes 69 & 72). This is the shared substrate for **#12
+Practice mode** (compare `detectPitch` output against the chart's expected chord tones).
+
 ## Path B (scans / photos) — OUT OF SCOPE
 
 Raster tab (a photo or scanned page) has no text layer and needs an OMR/Vision
@@ -1098,7 +1122,11 @@ contract). Build strictly in this order; each wave depends on the prior.
     iOS/Pages COOP/COEP thread wall). **Pending:** swap the matmul body for a real
     `.onnx` (runtime-fetched asset, in the Wave-1 worker) + the display-only UI
     wiring.
-11. **Shared pitch-detection pipeline → monophonic transcription (MVP)**.
+11. **Shared pitch-detection pipeline → monophonic transcription (MVP)** — **DSP
+    foundation DONE 2026-06-20** (see "Wave 3 #11" section): pure-JS YIN
+    `detectPitch` + `transcribeMonophonic`, headless-tested with synthesized tones.
+    **Pending:** the browser-only mic-capture seam (getUserMedia + AudioContext) +
+    a live tuner/listen UI (device-only).
 12. **Practice mode** — match mic input against known expected chords (reuses #11).
 13. **AI arrangement** — optional upgrade over #8.
 
