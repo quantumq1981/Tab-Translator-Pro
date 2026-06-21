@@ -922,15 +922,19 @@ future model).
 **The model brain:** `scripts/train_chord_classifier.py` — a **dependency-free**
 (stdlib-only, seeded) trainer. (This container has no numpy/sklearn and can't
 pip-install, so it's hand-rolled; re-runnable to reproduce `CHORD_CLASSIFIER`.) It
-synthesises noisy/dropout root-relative weighted chromas and trains a model over the
-quality vocabulary. **Phase 2 step 2 (2026-06-20)** upgraded it from a linear softmax
-(8 classes, 89.5%) to a **2-layer MLP** (tanh hidden 16 → softmax) over **14
-qualities** (`maj·min·7·maj7·m7·dim·aug·sus4·6·m6·m7♭5·dim7·sus2·7sus4`) →
-**~86% held-out, 14-of-14 canonical voicings correct**. The MLP forward pass
-(`h = tanh(W1·x+b1); softmax(W2·h+b2)`) lives in `classifyChromaQuality`; **swapping
-to ORT later means replacing only that body** — the const shape (`W1/b1/W2/b2`),
-arbiter, readout and tests are the swap-stable boundary (proven: this very upgrade
-changed the topology without touching any of them).
+synthesises root-relative weighted chromas with **realistic audio-ish augmentation**
+(overtone bleed at the 5th/maj-3rd partials + dropped/spurious tones + per-sample gain)
+and trains a model over the quality vocabulary. It grew in three steps: linear softmax
+(8 classes, 89.5%) → 2-layer MLP over 14 qualities → **(Phase 3, 2026-06-20) a wider
+2-layer MLP (tanh hidden 28 → softmax) over the FULL 22 engine qualities**
+(`…add9·m(maj7)·6/9·9·m9·maj9·7♭9·7♯9`) → **~85% held-out, 22-of-22 canonical voicings
+correct**. The MLP forward pass (`h = tanh(W1·x+b1); softmax(W2·h+b2)`) lives in
+`classifyChromaQuality`; **swapping to ORT later means replacing only that body** — the
+const shape (`W1/b1/W2/b2`), arbiter, readout and tests are the swap-stable boundary
+(proven: these upgrades changed topology + vocab without touching any of them). On iOS
+the pure-JS matmul is the *optimal* end state for a model this size — no WASM download,
+no COOP/COEP wall, offline-robust — so ORT only earns its weight for a heavy future
+(audio) model.
 
 **Where it stands:** built, exported (`CHORD_CLASSIFIER`, `classifyChromaQuality`,
 `arbitrateChord`), unit-tested (all 14 canonical qualities classify correctly), and

@@ -573,11 +573,13 @@ expect(q([48, 52, 55, 57]) === "Am7/C", `{C E G A} stays Am7/C (m7 out-ranks the
  * The engine stays the ORACLE; the classifier is a gated second opinion. */
 const vec = (pcs) => { const v = new Array(12).fill(0); pcs.forEach((p) => { v[((p % 12) + 12) % 12] = 1; }); return v; };
 const reco = (midis) => { const n = eng.normalise(midis.map((m) => ({ midi: m }))); return eng.recognise(n.chroma, n.chordMask, n.bassPc); };
-// the classifier recognises every canonical (root-relative) quality in its 14-class vocab
+// the classifier recognises every canonical (root-relative) quality in its 22-class vocab
 const canon = [[[0, 4, 7], ""], [[0, 3, 7], "m"], [[0, 4, 7, 10], "7"], [[0, 4, 7, 11], "maj7"],
   [[0, 3, 7, 10], "m7"], [[0, 3, 6], "dim"], [[0, 4, 8], "aug"], [[0, 5, 7], "sus4"],
-  [[0, 4, 7, 9], "6"], [[0, 3, 7, 9], "m6"], [[0, 3, 6, 10], "m7♭5"], [[0, 3, 6, 9], "dim7"],
-  [[0, 2, 7], "sus2"], [[0, 5, 7, 10], "7sus4"]];
+  [[0, 2, 7], "sus2"], [[0, 4, 7, 9], "6"], [[0, 3, 7, 9], "m6"], [[0, 3, 6, 10], "m7♭5"],
+  [[0, 3, 6, 9], "dim7"], [[0, 5, 7, 10], "7sus4"], [[0, 2, 4, 7], "add9"], [[0, 3, 7, 11], "m(maj7)"],
+  [[0, 2, 4, 7, 9], "6/9"], [[0, 2, 4, 7, 10], "9"], [[0, 2, 3, 7, 10], "m9"], [[0, 2, 4, 7, 11], "maj9"],
+  [[0, 1, 4, 7, 10], "7♭9"], [[0, 3, 4, 7, 10], "7♯9"]];
 for (const [pcs, suf] of canon) {
   const got = eng.classifyChromaQuality(vec(pcs), 0).suffix;
   expect(got === suf, `classifier canonical {${pcs}} expected "${suf}", got "${got}"`);
