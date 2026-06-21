@@ -970,11 +970,18 @@ The audio front-end's **pure DSP core**, built iOS-first (zero deps, no WASM). L
   (A4=69=440 Hz; note names honour the ♯/♭ table).
 
 **The browser-only seam is mic CAPTURE** (`getUserMedia` + `AudioContext` → Float32
-frames), exactly analogous to the PDF.js seam feeding the parser — it is **not built
-yet** (device-only, can't headless-test). The pure functions above are validated
-(`npm test`: A4/E2/A2/C4/E4/B4 detect to the right MIDI, silence → `null`, an A4→C5
-buffer transcribes to two notes 69 & 72). This is the shared substrate for **#12
-Practice mode** (compare `detectPitch` output against the chart's expected chord tones).
+frames), exactly analogous to the PDF.js seam feeding the parser. It is now built as a
+**`LiveTuner` component + a "Tuner 🎤" mode** (2026-06-20, browser-only glue in
+`TabDecoderPro.tsx`; engine stays pure): a mic stream → `AnalyserNode`
+(`getFloatTimeDomainData`, fftSize 2048, byte fallback for old Safari) → the pure
+`detectPitch` on an rAF loop (throttled ~70 ms), rendering the live note, a ±50¢ tuning
+meter, frequency and clarity. Heavily feature-detected + `try/catch` (mic missing /
+permission denied → a clear message), `stop()` on unmount frees the stream + closes the
+context. **Device-only verification** (can't headless-test mic) — smoke-test on hardware.
+The pure DSP under it is validated (`npm test`: A4/E2/A2/C4/E4/B4 detect to the right
+MIDI, silence → `null`, an A4→C5 buffer transcribes to two notes 69 & 72). This is the
+shared substrate for **#12 Practice mode** (compare `detectPitch` output against the
+chart's expected chord tones).
 
 ## Path B (scans / photos) — OUT OF SCOPE
 
