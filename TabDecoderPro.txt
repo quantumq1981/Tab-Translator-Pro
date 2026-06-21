@@ -195,6 +195,7 @@ import {
   pcmToChroma,
   detectChord,
   transcribeChords,
+  audioEventsToScore,
 } from "./engine.tsx";
 
 async function extractTokens(buf) {
@@ -1254,7 +1255,10 @@ function AudioImport({ C, useSharp }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [kind, setKind] = useState("chords");        // chords | notes
-  const [events, setEvents] = useState([]);          // [{ label, startSec, durSec }]
+  const [raw, setRaw] = useState([]);                // raw engine events (chords: {symbol,midis,…}; notes: {note,…})
+  const [bpm, setBpm] = useState(120);
+  const [bpb, setBpb] = useState(4);                 // beats per bar
+  const [overrides, setOverrides] = useState({});
   const [dur, setDur] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [pos, setPos] = useState(0);
@@ -1274,17 +1278,15 @@ function AudioImport({ C, useSharp }) {
     setBusy(true); setErr("");
     const opts = k === "notes" ? { hop: Math.floor(sr * 0.08) } : { hopSec: 0.25 };
     setTimeout(async () => {                          // let "Analyzing…" paint first
-      try {
-        const raw = await analyzeAudioOffThread(ds, sr, k, opts);
-        setEvents((raw || []).map((e) => ({ label: e.symbol != null ? e.symbol : e.note, startSec: e.startSec, durSec: e.durSec })));
-      } catch (_) { setErr("Analysis failed on this file."); }
+      try { setRaw((await analyzeAudioOffThread(ds, sr, k, opts)) || []); }
+      catch (_) { setErr("Analysis failed on this file."); }
       setBusy(false);
     }, 30);
   };
 
   const onFile = async (e) => {
     const f = e.target.files && e.target.files[0]; if (!f) return;
-    setErr(""); setName(f.name); setBusy(true); setEvents([]); stopPlay();
+    setErr(""); setName(f.name); setBusy(true); setRaw([]); setOverrides({}); stopPlay();
     try {
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) { setErr("Web Audio isn't available in this browser."); setBusy(false); return; }
@@ -1305,7 +1307,7 @@ function AudioImport({ C, useSharp }) {
     } catch (_) { setErr("Couldn't read or decode that audio file."); setBusy(false); }
   };
 
-  const switchKind = (k) => { setKind(k); const s = ref.current; if (s.ds) run(s.ds, s.sr, k); };
+  const switchKind = (k) => { setKind(k); setOverrides({}); const s = ref.current; if (s.ds) run(s.ds, s.sr, k); };
 
   const play = () => {
     const s = ref.current; if (!s.audioBuf) return;
@@ -1321,13 +1323,17 @@ function AudioImport({ C, useSharp }) {
     } catch (_) { setErr("Playback failed."); stopPlay(); }
   };
 
+  // chords → a real score (re-quantised live as bpm / time-sig change); notes → a timeline
+  const audioScore = useMemo(() => (kind === "chords" && raw.length ? audioEventsToScore(raw, { bpm, beatsPerBar: bpb, useSharp }) : null), [kind, raw, bpm, bpb, useSharp]);
+  const noteEvents = kind === "notes" ? raw.map((e) => ({ label: e.note, startSec: e.startSec, durSec: e.durSec })) : [];
   const fmt = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
-  const activeIdx = events.findIndex((e) => pos >= e.startSec && pos < e.startSec + e.durSec);
+  const activeIdx = noteEvents.findIndex((e) => pos >= e.startSec && pos < e.startSec + e.durSec);
+
   return (
-    <section className="panel-rise" style={{ position: "relative", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18, maxWidth: 640, margin: "0 auto" }}>
+    <section className="panel-rise" style={{ position: "relative", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18 }}>
       <SectionLabel C={C}>AUDIO → CHART · isolated-stem recognition (experimental)</SectionLabel>
       <div style={{ fontSize: 12, color: C.dim, lineHeight: 1.6, marginBottom: 12 }}>
-        Upload a <b>clean, isolated instrument stem</b> (one guitar / piano / bass — not a full mix). Decoded + analysed entirely on your device; nothing is uploaded. Chordal stems → chords; a single-note stem (bass/lead) → notes.
+        Upload a <b>clean, isolated instrument stem</b> (one guitar / piano / bass — not a full mix). Decoded + analysed entirely on your device; nothing is uploaded. Chordal stems → a chord chart (export / send to Pro); a single-note stem (bass/lead) → notes.
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 14 }}>
         <label style={{ ...toggle(C), flex: "none", padding: "8px 16px", cursor: "pointer", borderColor: C.amber, color: C.amber }}>
@@ -1339,29 +1345,51 @@ function AudioImport({ C, useSharp }) {
             <button key={k} onClick={() => switchKind(k)} disabled={busy} style={{ ...chip(C), padding: "5px 10px", borderColor: kind === k ? C.cyan : C.border, color: kind === k ? C.cyan : C.dim }}>{lbl}</button>
           ))}
         </span>
-        {name && <span style={{ fontSize: 11, color: C.dim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 200 }}>{name}{dur ? ` · ${fmt(dur)}` : ""}</span>}
+        {name && <span style={{ fontSize: 11, color: C.dim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 180 }}>{name}{dur ? ` · ${fmt(dur)}` : ""}</span>}
       </div>
 
       {busy && <div style={{ fontSize: 13, color: C.amber, marginBottom: 12 }}>⏳ Analyzing… (FFT over the whole stem)</div>}
       {err && <div style={{ fontSize: 12, color: C.red, marginBottom: 12 }}>{err}</div>}
 
-      {!!events.length && (
+      {/* CHORDS → editable chart + export/handoff, with a tempo/meter grid control */}
+      {kind === "chords" && audioScore && (
+        <>
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10, marginBottom: 8, fontSize: 11, color: C.dim }}>
+            <button onClick={play} style={{ ...chip(C), padding: "4px 12px", borderColor: playing ? C.green : C.border, color: playing ? C.green : C.amber }}>{playing ? "■ Stop stem" : "▶ Play stem"}</button>
+            <span>{fmt(pos)} / {fmt(dur)}</span>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+              <button onClick={() => setBpm((b) => Math.max(40, b - 5))} style={{ ...chip(C), padding: "3px 8px" }}>−</button>
+              <span style={{ minWidth: 54, textAlign: "center", color: C.amber }}>♩={bpm}</span>
+              <button onClick={() => setBpm((b) => Math.min(240, b + 5))} style={{ ...chip(C), padding: "3px 8px" }}>+</button>
+            </span>
+            <select value={bpb} onChange={(e) => setBpb(+e.target.value)} style={{ ...chip(C), padding: "3px 8px", background: C.raised, cursor: "pointer" }}>
+              <option value={4}>4/4</option><option value={3}>3/4</option><option value={6}>6/8</option>
+            </select>
+            <span style={{ color: C.dim }}>set tempo so the bars line up</span>
+          </div>
+          <ChartPanel score={audioScore} title={name || "Audio stem"} meta={`${audioScore.bars.length} bars · ♩=${bpm} · from audio`} C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey="" onPick={() => {}} />
+          <div style={{ fontSize: 11, color: C.dim, marginTop: 10, lineHeight: 1.6 }}>
+            Rough sketch from a clean stem — tap <b>✎ Edit</b> to fix labels, set <b>♩=</b> so bars align, then <b>CSMPN</b> / <b>→ Chord Sheet Maker Pro</b> to send it on. Dense voicings / bleed will mislabel.
+          </div>
+        </>
+      )}
+
+      {/* NOTES → a simple note timeline */}
+      {kind === "notes" && !!noteEvents.length && (
         <>
           <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
             <button onClick={play} style={{ ...chip(C), padding: "5px 14px", borderColor: playing ? C.green : C.border, color: playing ? C.green : C.amber }}>{playing ? "■ Stop" : "▶ Play"}</button>
-            <span style={{ fontSize: 11, color: C.dim }}>{fmt(pos)} / {fmt(dur)} · {events.length} {kind === "notes" ? "notes" : "chords"}</span>
+            <span style={{ fontSize: 11, color: C.dim }}>{fmt(pos)} / {fmt(dur)} · {noteEvents.length} notes</span>
           </div>
           <div className="tdp-scroll" style={{ display: "flex", flexWrap: "wrap", gap: 6, maxHeight: 360, overflow: "auto", paddingRight: 4 }}>
-            {events.map((e, i) => (
-              <div key={i} title={`${fmt(e.startSec)} · ${e.durSec.toFixed(2)}s`} style={{ minWidth: 58, textAlign: "center", padding: "8px 6px", borderRadius: 8, border: `1px solid ${i === activeIdx ? C.amber : C.border}`, background: i === activeIdx ? `${C.amber}18` : C.bg }}>
+            {noteEvents.map((e, i) => (
+              <div key={i} title={`${fmt(e.startSec)} · ${e.durSec.toFixed(2)}s`} style={{ minWidth: 54, textAlign: "center", padding: "8px 6px", borderRadius: 8, border: `1px solid ${i === activeIdx ? C.amber : C.border}`, background: i === activeIdx ? `${C.amber}18` : C.bg }}>
                 <div style={{ fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: 15, color: i === activeIdx ? C.amber : C.cyan }}>{e.label}</div>
                 <div style={{ fontSize: 9, color: C.dim, marginTop: 2 }}>{fmt(e.startSec)}</div>
               </div>
             ))}
           </div>
-          <div style={{ fontSize: 11, color: C.dim, marginTop: 12, lineHeight: 1.6 }}>
-            First cut — a rough sketch to clean up, not a final chart. Best on clean stems; dense voicings / drums bleed will mislabel. (Mapping these into the editable chart + CSMPN export is the next step.)
-          </div>
+          <div style={{ fontSize: 11, color: C.dim, marginTop: 12, lineHeight: 1.6 }}>The bass/lead line (YIN). For a bass stem this traces the root movement of the tune.</div>
         </>
       )}
     </section>
