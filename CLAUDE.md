@@ -983,6 +983,34 @@ MIDI, silence → `null`, an A4→C5 buffer transcribes to two notes 69 & 72). T
 shared substrate for **#12 Practice mode** (compare `detectPitch` output against the
 chart's expected chord tones).
 
+## Audio → CHORDS from an isolated stem (2026-06-20)
+
+"Upload an isolated instrument stem → get a chord/note sketch." The owner's pro workflow
+already splits songs into stems (isolated guitar/piano/bass, drums ducked) — and isolation
+is exactly what makes audio→chords tractable (a full mix's drums/vocals/bass mud wreck the
+chroma). Two regimes, both reusing what we already have:
+
+- **Chordal stem** (rhythm guitar, piano comping) → **`transcribeChords`**: PCM → FFT
+  (`_fft`, pure radix-2) → fold the spectrum into a 12-bin **chromagram** (`pcmToChroma`,
+  with light octave/5th/maj-3rd **harmonic suppression** so overtones don't fake chord
+  tones) → peak-pick → the SAME `recognise` engine. `detectChord` is one frame;
+  `transcribeChords` slides + collapses to timed `{ symbol, startSec, durSec }` events.
+- **Monophonic stem** (bass, lead) → the existing **`transcribeMonophonic`** (YIN) →
+  the note line / root movement.
+
+All pure + headless-tested (synthesized chords: C/Am/G7 detect correctly, a C-major
+chroma peaks at C/E/G, a C→G buffer transcribes to both; `_fft` peaks at the right bin).
+Tuned defaults: `suppress 0.3`, `pickThreshold 0.4` (0.45 suppression over-damped the real
+3rd/5th → power chords). **The only browser-only step is the MP3→PCM decode** (Web Audio
+`decodeAudioData`), wired in the **`AudioImport` component + "Audio 🎵" mode**
+(`TabDecoderPro.tsx`): upload → decode → mono + downsample to 16 kHz → analysis run
+**off-thread** (`analyzeAudioOffThread` via `_engineRPC`, main-thread fallback) → a chord/
+note timeline with playback + a live highlight. **Device-only verification** (decode +
+playback can't be headless-tested). HONEST LIMIT: clean isolated stems = good editable
+sketch; dense voicings / a full mix mislabel. Next: map the events into the editable chart
++ CSMPN export/handoff (needs a tempo/beat grid), and optional **two-stem fusion** (a bass
+stem for the root + a chordal stem for the quality).
+
 ## Path B (scans / photos) — OUT OF SCOPE
 
 Raster tab (a photo or scanned page) has no text layer and needs an OMR/Vision
