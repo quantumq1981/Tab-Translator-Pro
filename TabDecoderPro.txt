@@ -1338,7 +1338,10 @@ function AudioImport({ C, useSharp }) {
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 14 }}>
         <label style={{ ...toggle(C), flex: "none", padding: "8px 16px", cursor: "pointer", borderColor: C.amber, color: C.amber }}>
           ⬆ Upload audio / video
-          <input type="file" accept="audio/*,video/*" onChange={onFile} style={{ display: "none" }} />
+          {/* NO accept filter on purpose: iOS maps accept→UTIs and GREYS OUT valid
+              audio files (MP3/M4A/WAV), leaving only video selectable. decodeAudioData
+              validates the file instead — same lesson as the Guitar Pro upload. */}
+          <input type="file" onChange={onFile} style={{ display: "none" }} />
         </label>
         <span style={{ display: "inline-flex", gap: 4 }}>
           {[["chords", "Chords (guitar/piano)"], ["notes", "Notes (bass/lead)"]].map(([k, lbl]) => (
