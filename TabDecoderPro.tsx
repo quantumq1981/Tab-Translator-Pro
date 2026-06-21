@@ -653,7 +653,7 @@ export default function TabDecoderPro() {
             <span style={{ color: C.dim, fontSize: 12, letterSpacing: 3 }}>TABTRANSLATOR PRO</span>
           </div>
           <div style={{ display: "flex", gap: 6 }}>
-            {[["manual", "Manual"], ["pdf", "PDF Chart"], ["xml", "MusicXML / GP"]].map(([m, lbl]) => (
+            {[["manual", "Manual"], ["pdf", "PDF Chart"], ["xml", "MusicXML / GP"], ["tuner", "Tuner 🎤"]].map(([m, lbl]) => (
               <button key={m} onClick={() => { setMode(m); clearSel(); }} style={{ ...toggle(C), padding: "6px 14px", flex: "none", ...(mode === m ? activeToggle(C) : {}) }}>
                 {lbl}
               </button>
@@ -668,6 +668,7 @@ export default function TabDecoderPro() {
           </div>
         )}
 
+        {mode === "tuner" ? <LiveTuner C={C} useSharp={useSharp} /> : (
         <div className={"tdp-cols" + (mode === "manual" ? " manual" : "")} style={{ position: "relative" }}>
           <section className="panel-rise" style={{ animationDelay: ".05s", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
             {mode === "manual" ? (
@@ -834,6 +835,7 @@ export default function TabDecoderPro() {
             )}
           </section>
         </div>
+        )}
 
         <footer style={{ position: "relative", marginTop: 18, fontSize: 11, color: C.dim, lineHeight: 1.6 }}>
           Engine: pure JS · masks derived via makeMask() · rotateRight() for root candidates · ranking score (−0.8·extra, −1.2·missing), Jaccard confidence ·
@@ -1129,6 +1131,100 @@ function ExportPanel({ exp, setExp, C, bpm, semis, copy, download, copied, downl
       {exp.fmt === "csmpn" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}><b>Chord Sheet Maker Pro</b>'s native fake-book source (one chord = one bar; <code>_</code> splits a bar) — also carries the real fingering (<code>{"{tab}"}</code>) and decoded strum rhythm (<code>{"{hybrid}"}</code>). Paste into Pro's editor, or use <b>→ Chord Sheet Maker Pro</b> to send it straight there.</div>}
       {exp.fmt === "csml" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}><b>ChordSlashML</b> — Pro's beat-slotted notation (<code>{"|"}</code> measures, <code>_</code> holds, <code>.</code> rests). Paste into Pro's <b>ChordSlashML</b> live editor.</div>}
     </div>
+  );
+}
+
+/* ---- Live tuner (Wave 3 #11 mic seam) ------------------------------------
+ * BROWSER-ONLY glue (engine stays pure): getUserMedia + AudioContext → Float32
+ * time-domain frames → the engine's pure YIN `detectPitch`, polled on rAF. This
+ * is the mic analogue of the PDF.js seam; it can't be headless-tested, so it's
+ * heavily feature-detected + try/catch'd and degrades to a clear message. Shows
+ * the live note, a ±50¢ tuning meter, frequency and clarity. Monophonic (one
+ * note at a time) — the foundation Practice mode (#12) will build on. */
+function LiveTuner({ C, useSharp }) {
+  const [listening, setListening] = useState(false);
+  const [pitch, setPitch] = useState(null);   // { note, freq, cents, clarity }
+  const [err, setErr] = useState("");
+  const ref = useRef({});
+
+  const stop = () => {
+    const s = ref.current;
+    if (s.raf) cancelAnimationFrame(s.raf);
+    if (s.stream) s.stream.getTracks().forEach((t) => { try { t.stop(); } catch (_) {} });
+    if (s.ctx && s.ctx.state !== "closed") { try { s.ctx.close(); } catch (_) {} }
+    ref.current = {};
+    setListening(false);
+  };
+  useEffect(() => stop, []); // stop on unmount
+
+  const start = async () => {
+    setErr("");
+    try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { setErr("Microphone access isn't available in this browser."); return; }
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) { setErr("Web Audio isn't available in this browser."); stream.getTracks().forEach((t) => t.stop()); return; }
+      const ctx = new AC();
+      if (ctx.state === "suspended") { try { await ctx.resume(); } catch (_) {} }
+      const srcNode = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 2048;
+      srcNode.connect(analyser);
+      const buf = new Float32Array(analyser.fftSize);
+      ref.current = { stream, ctx, analyser, buf };
+      setListening(true);
+      const tick = () => {
+        const s = ref.current; if (!s.analyser) return;
+        if (s.analyser.getFloatTimeDomainData) s.analyser.getFloatTimeDomainData(s.buf);
+        else { s.byte = s.byte || new Uint8Array(s.analyser.fftSize); s.analyser.getByteTimeDomainData(s.byte); for (let i = 0; i < s.buf.length; i++) s.buf[i] = (s.byte[i] - 128) / 128; }
+        const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
+        if (now - (s.last || 0) > 70) {                       // throttle UI updates
+          s.last = now;
+          const p = detectPitch(s.buf, s.ctx.sampleRate, { useSharp });
+          if (p && p.clarity > 0.7) {
+            const cents = Math.round((freqToMidi(p.freq) - p.midi) * 100);
+            setPitch({ note: p.note, freq: p.freq, cents, clarity: p.clarity });
+          }
+        }
+        s.raf = requestAnimationFrame(tick);
+      };
+      ref.current.raf = requestAnimationFrame(tick);
+    } catch (e) {
+      setErr(e && e.name === "NotAllowedError" ? "Microphone permission was denied — allow it in your browser settings and try again." : "Couldn't start the microphone.");
+      stop();
+    }
+  };
+
+  const inTune = pitch && Math.abs(pitch.cents) <= 5;
+  const centsColor = !pitch ? C.dim : inTune ? C.green : Math.abs(pitch.cents) <= 15 ? C.amber : C.red;
+  return (
+    <section className="panel-rise" style={{ position: "relative", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 20, maxWidth: 560, margin: "0 auto" }}>
+      <SectionLabel C={C}>LIVE TUNER · monophonic (YIN pitch detection)</SectionLabel>
+      <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: "26px 16px", textAlign: "center", marginBottom: 14 }}>
+        <div style={{ fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: 64, lineHeight: 1, color: pitch ? C.cyan : C.dim, textShadow: pitch ? `0 0 26px ${C.cyan}55` : "none" }}>
+          {pitch ? pitch.note : listening ? "…" : "—"}
+        </div>
+        {pitch && <div style={{ marginTop: 10, fontSize: 12, color: C.dim }}>{pitch.freq.toFixed(1)} Hz · {pitch.cents > 0 ? "+" : ""}{pitch.cents}¢ · clarity {Math.round(pitch.clarity * 100)}%</div>}
+        {!pitch && listening && <div style={{ marginTop: 10, fontSize: 12, color: C.dim }}>Listening… play a single note.</div>}
+      </div>
+
+      {/* ±50¢ tuning meter */}
+      <div style={{ position: "relative", height: 14, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 6, overflow: "hidden" }}>
+        <div style={{ position: "absolute", left: "50%", top: 0, bottom: 0, width: 2, background: C.border, transform: "translateX(-50%)" }} />
+        {pitch && <div style={{ position: "absolute", top: 1, bottom: 1, width: 6, borderRadius: 3, background: centsColor, left: `calc(${50 + Math.max(-50, Math.min(50, pitch.cents))}% - 3px)`, transition: "left .08s linear, background .1s" }} />}
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: C.dim, marginBottom: 18 }}><span>♭ −50¢</span><span style={{ color: inTune ? C.green : C.dim }}>{inTune ? "IN TUNE" : "0"}</span><span>+50¢ ♯</span></div>
+
+      <div style={{ textAlign: "center" }}>
+        <button onClick={listening ? stop : start} style={{ ...toggle(C), display: "inline-block", flex: "none", padding: "10px 26px", fontSize: 14, ...(listening ? activeToggle(C) : {}), borderColor: listening ? C.green : C.border, color: listening ? C.green : C.text }}>
+          {listening ? "■ Stop" : "🎤 Listen"}
+        </button>
+      </div>
+      {err && <div style={{ marginTop: 12, color: C.red, fontSize: 12, textAlign: "center" }}>{err}</div>}
+      <div style={{ marginTop: 16, fontSize: 11, color: C.dim, lineHeight: 1.6, textAlign: "center" }}>
+        Pure-JS YIN detection — locks the fundamental, not an overtone. Best with a clean single note (a tuner / melody line), not full chords. Needs mic permission; nothing leaves your device.
+      </div>
+    </section>
   );
 }
 
