@@ -655,11 +655,22 @@ export default function TabDecoderPro() {
         .tdp-cols{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:16px;}
         .tdp-cols.manual{grid-template-columns:minmax(0,1fr) minmax(0,1fr);}
         @media (max-width:760px){.tdp-cols,.tdp-cols.manual{grid-template-columns:1fr;}}
+        @media print {
+          /* scroll boxes only print their visible slice → everything below the fold
+             was being cut off. Expand them so the whole chart prints. */
+          .tdp-scroll{max-height:none!important;overflow:visible!important;}
+          .tdp-cols,.tdp-cols.manual{grid-template-columns:1fr!important;}
+          .no-print{display:none!important;}
+          /* keep the styled colours on paper + don't split a bar/card across pages */
+          *{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important;}
+          .meas,.tdp-bar{break-inside:avoid;page-break-inside:avoid;}
+          textarea.tdp-scroll{height:auto!important;}
+        }
       `}</style>
 
       <div style={{ position: "relative", maxWidth: 1100, margin: "0 auto", padding: "20px 16px 40px" }}>
-        <div style={{ position: "absolute", inset: 0, pointerEvents: "none", background: "radial-gradient(120% 60% at 50% -10%, rgba(233,162,75,.10), transparent 60%)" }} />
-        <div style={{ position: "absolute", inset: 0, pointerEvents: "none", opacity: .35, backgroundImage: "repeating-linear-gradient(0deg, rgba(255,255,255,.015) 0 1px, transparent 1px 3px)" }} />
+        <div className="no-print" style={{ position: "absolute", inset: 0, pointerEvents: "none", background: "radial-gradient(120% 60% at 50% -10%, rgba(233,162,75,.10), transparent 60%)" }} />
+        <div className="no-print" style={{ position: "absolute", inset: 0, pointerEvents: "none", opacity: .35, backgroundImage: "repeating-linear-gradient(0deg, rgba(255,255,255,.015) 0 1px, transparent 1px 3px)" }} />
 
         <header className="panel-rise" style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12, marginBottom: 16 }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
@@ -851,7 +862,7 @@ export default function TabDecoderPro() {
         </div>
         )}
 
-        <footer style={{ position: "relative", marginTop: 18, fontSize: 11, color: C.dim, lineHeight: 1.6 }}>
+        <footer className="no-print" style={{ position: "relative", marginTop: 18, fontSize: 11, color: C.dim, lineHeight: 1.6 }}>
           Engine: pure JS · masks derived via makeMask() · rotateRight() for root candidates · ranking score (−0.8·extra, −1.2·missing), Jaccard confidence ·
           Path A: PDF.js text-position reconstruction (string / column / measure geometry) → same engine → one-chord-per-bar collapse.
         </footer>
@@ -976,7 +987,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
         <span style={{ color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 220 }}>{title}</span>
         <span>{meta}{semis ? ` · ${semis > 0 ? "+" : ""}${semis} st` : ""}{key ? ` · key ${keyName(key, useSharp)}` : ""}</span>
       </div>
-      <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+      <div className="no-print" style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
         {[["chart", "Chart"], ["grid", "Grid"]].map(([v, lbl]) => (
           <button key={v} onClick={() => setView(v)} style={{ ...chip(C), padding: "3px 9px", borderColor: view === v ? C.amber : C.border, color: view === v ? C.amber : C.dim }}>{lbl}</button>
         ))}
@@ -1059,7 +1070,7 @@ function LeadSheetView({ score, C, overrides, setOverrides, editMode, editKey, s
           const sigChanged = !prevSig || prevSig[0] !== sig[0] || prevSig[1] !== sig[1];
           prevSig = sig;
           return (
-            <div key={bar.number} style={{ position: "relative", borderLeft: `2px solid ${C.border}`, padding: "16px 8px 6px 10px", minHeight: 44 }}>
+            <div key={bar.number} className="tdp-bar" style={{ position: "relative", borderLeft: `2px solid ${C.border}`, padding: "16px 8px 6px 10px", minHeight: 44 }}>
               <span style={{ position: "absolute", top: 2, left: 10, fontSize: 9, color: C.dim }}>{bar.number}</span>
               {sigChanged && <span style={{ position: "absolute", top: 2, right: 6, fontSize: 9, color: C.amber }}>{sig.join("/")}</span>}
               <div style={{ display: "grid", gridTemplateColumns: `repeat(${sig[0]}, 1fr)`, alignItems: "center", columnGap: 2, minHeight: 24 }}>
