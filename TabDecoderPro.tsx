@@ -645,6 +645,7 @@ export default function TabDecoderPro() {
         @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap');
         @keyframes glowpulse {0%{transform:scale(.97);opacity:0;}100%{transform:scale(1);opacity:1;}}
         @keyframes rise {from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
+        @keyframes pulse {0%,100%{opacity:1;}50%{opacity:.25;}}
         .panel-rise{animation:rise .5s cubic-bezier(.2,.7,.2,1) both;}
         .chord-pop{animation:glowpulse .35s ease-out;}
         .led{transition:background .18s ease,box-shadow .18s ease,color .18s ease;}
@@ -678,7 +679,7 @@ export default function TabDecoderPro() {
             <span style={{ color: C.dim, fontSize: 12, letterSpacing: 3 }}>TABTRANSLATOR PRO</span>
           </div>
           <div style={{ display: "flex", gap: 6 }}>
-            {[["manual", "Manual"], ["pdf", "PDF Chart"], ["xml", "MusicXML / GP"], ["audio", "Audio 🎵"], ["tuner", "Tuner 🎤"]].map(([m, lbl]) => (
+            {[["manual", "Manual"], ["pdf", "PDF Chart"], ["xml", "MusicXML / GP"], ["audio", "Audio 🎵"], ["lyrics", "Lyrics 🎙️"], ["tuner", "Tuner 🎤"]].map(([m, lbl]) => (
               <button key={m} onClick={() => { setMode(m); clearSel(); }} style={{ ...toggle(C), padding: "6px 14px", flex: "none", ...(mode === m ? activeToggle(C) : {}) }}>
                 {lbl}
               </button>
@@ -693,7 +694,7 @@ export default function TabDecoderPro() {
           </div>
         )}
 
-        {mode === "tuner" ? <LiveTuner C={C} useSharp={useSharp} /> : mode === "audio" ? <AudioImport C={C} useSharp={useSharp} /> : (
+        {mode === "tuner" ? <LiveTuner C={C} useSharp={useSharp} /> : mode === "lyrics" ? <LyricsCapture C={C} /> : mode === "audio" ? <AudioImport C={C} useSharp={useSharp} /> : (
         <div className={"tdp-cols" + (mode === "manual" ? " manual" : "")} style={{ position: "relative" }}>
           <section className="panel-rise" style={{ animationDelay: ".05s", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
             {mode === "manual" ? (
@@ -1248,6 +1249,139 @@ function LiveTuner({ C, useSharp }) {
       {err && <div style={{ marginTop: 12, color: C.red, fontSize: 12, textAlign: "center" }}>{err}</div>}
       <div style={{ marginTop: 16, fontSize: 11, color: C.dim, lineHeight: 1.6, textAlign: "center" }}>
         Pure-JS YIN detection — locks the fundamental, not an overtone. Best with a clean single note (a tuner / melody line), not full chords. Needs mic permission; nothing leaves your device.
+      </div>
+    </section>
+  );
+}
+
+/* ---- Lyrics capture (live speech-to-text via the Web Speech API) -----------
+ * BROWSER-ONLY glue (engine stays pure — there is NO DSP for words; lyrics are
+ * automatic speech recognition, a trained model). We use the browser's built-in
+ * `SpeechRecognition`, so there is zero model download and nothing to bundle.
+ *
+ * HONEST LIMITS (surfaced in the UI, not hidden):
+ *  - It listens to the LIVE MICROPHONE, not an uploaded file — the standard Web
+ *    Speech API has no file input. Workflow: play the song out loud on any
+ *    speaker; this transcribes the vocals the mic hears.
+ *  - NOT supported on iOS Safari (the app's primary target) — feature-detected
+ *    with a clear message there. Works in Chrome / desktop Safari / Edge.
+ *  - On Chrome the audio is sent to Google's servers for recognition (the engine
+ *    is the browser's, not ours) — so it is NOT fully on-device. Stated in-panel.
+ *  - Accuracy is conversational-speech ASR over sung, music-bedded vocals — a
+ *    rough draft you clean up, not a karaoke-perfect transcript.
+ * Can't be headless-tested (live mic + browser ASR) — device only. */
+function LyricsCapture({ C }) {
+  const [listening, setListening] = useState(false);
+  const [finalText, setFinalText] = useState("");
+  const [interim, setInterim] = useState("");
+  const [err, setErr] = useState("");
+  const [lang, setLang] = useState("en-US");
+  const [copied, setCopied] = useState(false);
+  const ref = useRef({});
+
+  const SR = (typeof window !== "undefined") && (window.SpeechRecognition || window.webkitSpeechRecognition);
+  const supported = !!SR;
+
+  const stop = () => {
+    const s = ref.current;
+    s.wantStop = true;
+    if (s.rec) { try { s.rec.stop(); } catch (_) {} }
+    setListening(false); setInterim("");
+  };
+  useEffect(() => stop, []); // stop + release the mic on unmount
+
+  const start = () => {
+    setErr("");
+    if (!supported) { setErr("Live lyrics capture isn't supported in this browser (notably iOS Safari). Try Chrome, Edge or desktop Safari."); return; }
+    try {
+      const rec = new SR();
+      rec.continuous = true;       // keep going across pauses
+      rec.interimResults = true;   // show words as they're heard
+      rec.lang = lang;
+      ref.current = { rec, wantStop: false };
+      rec.onresult = (e) => {
+        let live = "", done = "";
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          const r = e.results[i];
+          if (r.isFinal) done += r[0].transcript; else live += r[0].transcript;
+        }
+        if (done.trim()) setFinalText((t) => (t ? t.replace(/\s+$/, "") + "\n" : "") + done.trim());
+        setInterim(live);
+      };
+      rec.onerror = (ev) => {
+        const k = ev && ev.error;
+        if (k === "no-speech" || k === "aborted") return;                 // benign; onend auto-restarts
+        if (k === "not-allowed" || k === "service-not-allowed") { setErr("Microphone permission was denied — allow it in your browser settings and try again."); stop(); }
+        else setErr("Speech recognition error: " + (k || "unknown") + ".");
+      };
+      rec.onend = () => {
+        const s = ref.current;
+        if (s.wantStop || !s.rec) { setInterim(""); setListening(false); return; }
+        try { s.rec.start(); } catch (_) {}                               // Web Speech ends on silence — restart to capture a whole song
+      };
+      rec.start();
+      setListening(true);
+    } catch (_) { setErr("Couldn't start speech recognition."); stop(); }
+  };
+
+  const restart = () => { stop(); setTimeout(start, 120); };               // apply a language change to a live session
+  const clear = () => { setFinalText(""); setInterim(""); };
+  const copy = () => {
+    const txt = finalText.trim(); if (!txt) return;
+    try { navigator.clipboard.writeText(txt); setCopied(true); setTimeout(() => setCopied(false), 1200); } catch (_) {}
+  };
+  const download = () => {
+    const txt = finalText.trim(); if (!txt) return;
+    try {
+      const blob = new Blob([txt + "\n"], { type: "text/plain" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a"); a.href = url; a.download = "lyrics.txt";
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    } catch (_) {}
+  };
+
+  const LANGS = [["en-US", "English (US)"], ["en-GB", "English (UK)"], ["es-ES", "Español"], ["fr-FR", "Français"], ["de-DE", "Deutsch"], ["it-IT", "Italiano"], ["pt-BR", "Português"], ["ja-JP", "日本語"]];
+
+  return (
+    <section className="panel-rise" style={{ position: "relative", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 20, maxWidth: 620, margin: "0 auto" }}>
+      <SectionLabel C={C}>LYRICS CAPTURE · live speech-to-text (Web Speech API)</SectionLabel>
+      <div style={{ fontSize: 12, color: C.dim, lineHeight: 1.6, marginBottom: 14 }}>
+        Play the song out loud on any speaker and tap <b>Listen</b> — this transcribes the vocals your mic hears, live. It uses your <b>browser's built-in</b> speech recognition (no model download). Best on clean, vocal-forward audio; treat the result as a draft to tidy.
+      </div>
+
+      {!supported ? (
+        <div style={{ fontSize: 13, color: C.amber, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: 16, lineHeight: 1.6 }}>
+          Live lyrics capture isn't available in this browser — the Web Speech API is unsupported here (notably <b>iOS Safari</b>). It works in <b>Chrome</b>, <b>Edge</b> and <b>desktop Safari</b>.
+        </div>
+      ) : (
+        <>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 14 }}>
+            <button onClick={listening ? stop : start} style={{ ...toggle(C), flex: "none", padding: "9px 22px", fontSize: 14, ...(listening ? activeToggle(C) : {}), borderColor: listening ? C.red : C.amber, color: listening ? C.red : C.amber }}>
+              {listening ? "■ Stop" : "🎙️ Listen"}
+            </button>
+            <select value={lang} onChange={(e) => { setLang(e.target.value); if (listening) restart(); }} style={{ ...chip(C), padding: "7px 10px", cursor: "pointer" }}>
+              {LANGS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+            </select>
+            {listening && <span style={{ fontSize: 12, color: C.red, display: "inline-flex", alignItems: "center", gap: 6 }}><span style={{ width: 8, height: 8, borderRadius: "50%", background: C.red, display: "inline-block", animation: "pulse 1s infinite" }} />Listening…</span>}
+          </div>
+
+          <div style={{ minHeight: 140, maxHeight: 300, overflowY: "auto", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: 14, fontSize: 14, lineHeight: 1.7, color: C.text, whiteSpace: "pre-wrap", marginBottom: 12 }}>
+            {finalText ? finalText : !listening && <span style={{ color: C.dim }}>Transcribed lyrics will appear here…</span>}
+            {interim && <span style={{ color: C.dim }}>{finalText ? " " : ""}{interim}</span>}
+          </div>
+
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            <button onClick={copy} disabled={!finalText.trim()} style={{ ...chip(C), padding: "6px 14px", opacity: finalText.trim() ? 1 : 0.4, color: copied ? C.green : C.text, borderColor: copied ? C.green : C.border }}>{copied ? "✓ Copied" : "Copy"}</button>
+            <button onClick={download} disabled={!finalText.trim()} style={{ ...chip(C), padding: "6px 14px", opacity: finalText.trim() ? 1 : 0.4 }}>Download .txt</button>
+            <button onClick={clear} disabled={!finalText.trim() && !interim} style={{ ...chip(C), padding: "6px 14px", opacity: (finalText.trim() || interim) ? 1 : 0.4, color: C.dim }}>Clear</button>
+          </div>
+        </>
+      )}
+
+      {err && <div style={{ marginTop: 12, color: C.red, fontSize: 12 }}>{err}</div>}
+      <div style={{ marginTop: 16, fontSize: 11, color: C.dim, lineHeight: 1.6 }}>
+        Note: in Chrome the audio is sent to Google's speech servers for recognition (the recognizer is the browser's, not this app) — so unlike the rest of Tab Translator, lyrics capture isn't fully on-device. Needs mic permission.
       </div>
     </section>
   );
