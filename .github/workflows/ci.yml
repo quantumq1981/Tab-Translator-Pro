@@ -1,0 +1,31 @@
+name: CI
+
+# Runs the headless test harness on every push and pull request. The deploy
+# workflow (pages.yml) also gates on this, but pages.yml only runs on main —
+# this gives pre-merge signal on PRs.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # tests/ has no lockfile (the app itself is zero-dependency), so use
+      # `npm install` rather than `npm ci`.
+      - name: Install test deps
+        run: npm install
+        working-directory: tests
+      - name: Run tests
+        run: npm test
+        working-directory: tests

@@ -19,7 +19,27 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Headless test harness (tests/) validates the recognition engine + parsers
+  # before anything is published. Deploy is gated on this passing.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # tests/ has no lockfile (the app itself is zero-dependency), so use
+      # `npm install` rather than `npm ci`.
+      - name: Install test deps
+        run: npm install
+        working-directory: tests
+      - name: Run tests
+        run: npm test
+        working-directory: tests
+
   deploy:
+    needs: test
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
