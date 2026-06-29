@@ -53,6 +53,7 @@ jobs:
           cp index.html _site/
           cp engine.tsx _site/
           cp TabDecoderPro.tsx _site/
+          cp bandmgtpro-theme.css _site/
 
       # enablement: true turns Pages on (source = GitHub Actions) using the
       # workflow's `pages: write` permission, so no manual Settings toggle is
