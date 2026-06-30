@@ -655,6 +655,17 @@ bloating the monolith. Lifting `semis`/transpose state out to the parent for per
   the *transposed* score, so what you hear matches what's shown. The scheduler is
   unit-tested; the Web Audio glue itself is browser-only (smoke-test on hardware,
   same category as the PDF.js worker).
+- **Reference audio** (🎵 Reference audio / ▶ Play with chart, 2026-06-20): attach a
+  real recording (e.g. an isolated-vocal stem) and play it back while the chart's
+  **exact** (notated MusicXML/GP or recognised) harmonies **highlight in sync** — the
+  "score is ground truth, audio is the reference" idea. Reuses the pure
+  `scoreEventTimes(tscore, bpm)` as the beat→seconds map (computed once at play start);
+  an rAF loop sets `playKey` to the event active at `ctx.currentTime`, so the existing
+  chart highlight follows the recording. Nudge ♩= until it lines up (linear tempo map;
+  DTW auto-alignment is the future upgrade). Browser-only glue (engine stays pure;
+  decode/playback are device-only) — no new engine surface, just `scoreEventTimes`.
+  This is the v1 substrate for the score+audio pairing → alignment → personalized
+  vocal-harmony training roadmap.
 
 `midiToAbc`/`abcDur` invariants: middle C (C4 = 60) is ABC `C`, C5 is `c`; ABC
 duration is a reduced fraction of `L:1/4` (`durBeats·4/beatType`), so simple
