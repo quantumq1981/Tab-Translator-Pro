@@ -891,6 +891,10 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   const [playing, setPlaying] = useState(false);
   const [playKey, setPlayKey] = useState("");
   const player = useRef(null);
+  const [refName, setRefName] = useState("");      // reference-audio (a recording to play along with the chart)
+  const [refPlaying, setRefPlaying] = useState(false);
+  const [refErr, setRefErr] = useState("");
+  const refAudio = useRef({});
 
   const [showRoman, setShowRoman] = useState(false);
   const [simplify, setSimplify] = useState(false);
@@ -911,13 +915,50 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
 
   useEffect(() => { setBpm(score.tempo || 100); }, [score.tempo]);
   const stopPlay = () => { if (player.current) { player.current.stop(); player.current = null; } setPlaying(false); setPlayKey(""); };
-  useEffect(() => stopPlay, []); // stop on unmount
-  useEffect(() => { stopPlay(); }, [score, semis]); // stop if the music changes underneath playback
+  const stopRef = () => { const s = refAudio.current; if (s.raf) cancelAnimationFrame(s.raf); if (s.src) { try { s.src.stop(); } catch (_) {} s.src = null; } if (s.ctx && s.ctx.state !== "closed") { try { s.ctx.close(); } catch (_) {} s.ctx = null; } s.raf = null; setRefPlaying(false); setPlayKey(""); };
+  useEffect(() => () => { stopPlay(); stopRef(); }, []); // stop on unmount
+  useEffect(() => { stopPlay(); stopRef(); }, [score, semis]); // stop if the music changes underneath playback
   const togglePlay = () => {
     if (playing) { stopPlay(); return; }
+    stopRef();
     const ctl = playScore(tscore, bpm, { onEvent: setPlayKey, onEnd: () => { setPlaying(false); setPlayKey(""); player.current = null; } });
     if (!ctl) return; // no Web Audio
     player.current = ctl; setPlaying(true);
+  };
+  /* Reference audio: play a real recording (e.g. the isolated-vocal stem) WHILE the
+   * chart's exact (notated/recognised) harmonies highlight in sync. The beat→seconds
+   * map is the pure scoreEventTimes at the current ♩=bpm — so nudge the tempo until
+   * the highlight tracks the recording. Browser-only glue (engine stays pure). */
+  const attachRef = async (e) => {
+    const f = e.target.files && e.target.files[0]; if (!f) return;
+    setRefErr(""); stopRef();
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext; if (!AC) { setRefErr("Web Audio isn't available."); return; }
+      const ab = await f.arrayBuffer(); const dctx = new AC();
+      const buf = await new Promise((res, rej) => { const p = dctx.decodeAudioData(ab, res, rej); if (p && p.then) p.then(res, rej); });
+      try { dctx.close(); } catch (_) {}
+      refAudio.current = { ...refAudio.current, buf }; setRefName(f.name);
+    } catch (_) { setRefErr("Couldn't decode that audio file."); }
+  };
+  const toggleRef = () => {
+    const s = refAudio.current;
+    if (refPlaying) { stopRef(); return; }
+    if (!s.buf) return;
+    stopPlay(); // don't run the synth at the same time
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      const ctx = new AC(); const src = ctx.createBufferSource(); src.buffer = s.buf; src.connect(ctx.destination);
+      const times = scoreEventTimes(tscore, bpm).events; // beat→sec map at this tempo
+      src.onended = () => { if (refAudio.current.src === src) stopRef(); };
+      src.start(); s.ctx = ctx; s.src = src; s.startedAt = ctx.currentTime; setRefPlaying(true);
+      const loop = () => {
+        const t = ctx.currentTime - s.startedAt;
+        let key = ""; for (const ev of times) { if (t >= ev.start && t < ev.start + ev.dur) { key = ev.key; break; } }
+        setPlayKey(key);
+        if (t <= s.buf.duration) s.raf = requestAnimationFrame(loop);
+      };
+      s.raf = requestAnimationFrame(loop);
+    } catch (_) { setRefErr("Playback failed."); stopRef(); }
   };
   const bumpBpm = (d) => setBpm((b) => Math.max(40, Math.min(240, b + d)));
   const symOf = (bar, e) => { const v = overrides[`${bar.number}.${e.beat}`]; return v != null ? v : e.symbol; };
@@ -1029,6 +1070,20 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
           <button onClick={sendToPro} title="Open this chart in Chord Sheet Maker Pro (native CSMPN handoff)"
             style={{ ...chip(C), padding: "3px 10px", borderColor: sent ? C.green : C.amber, color: sent ? C.green : C.amber, fontWeight: 600 }}>{sent ? "opening Pro ✓" : "→ Chord Sheet Maker Pro"}</button>
         </span>
+      </div>
+
+      <div className="no-print" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, marginBottom: 10, fontSize: 11, color: C.dim }}>
+        <label style={{ ...chip(C), padding: "4px 10px", cursor: "pointer" }}>
+          🎵 Reference audio
+          <input type="file" onChange={attachRef} style={{ display: "none" }} />
+        </label>
+        {refName && <>
+          <button onClick={toggleRef} title="play the recording with the chart highlighting in sync (set ♩= so it lines up)"
+            style={{ ...chip(C), padding: "4px 12px", borderColor: refPlaying ? C.green : C.border, color: refPlaying ? C.green : C.amber }}>{refPlaying ? "■ Stop audio" : "▶ Play with chart"}</button>
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 180 }}>{refName}</span>
+          <span style={{ color: C.dim }}>· nudge ♩= to line it up</span>
+        </>}
+        {refErr && <span style={{ color: C.red }}>{refErr}</span>}
       </div>
 
       {melodic && !simplify && <MelodicNudge C={C} onSimplify={() => setSimplify(true)} />}
