@@ -637,7 +637,10 @@ export default function TabDecoderPro() {
   const applyPreset = (p) => { setTuningName(p.tuning); setTab(p.tab); setBlockIdx(0); };
 
   const C = { bg: "#0b0e10", panel: "#14181b", raised: "#1b2024", border: "#2a3036",
-    text: "#e6e1d7", dim: "#8a8f8c", amber: "#e9a24b", cyan: "#57d1d6", red: "#e06c75", green: "#98c379" };
+    text: "#e6e1d7", dim: "#8a8f8c", amber: "#ff6b35", cyan: "#57d1d6", red: "#e06c75", green: "#98c379" };
+    // amber = BandMgtPro family orange (#ff6b35, bright — legible on this dark UI);
+    // the brand accent token, unified with the family. The confidence-scale amber
+    // (confColor above) stays #e9a24b: it's a semantic status color, not the brand.
 
   return (
     <div style={{ background: C.bg, color: C.text, minHeight: "100%", fontFamily: "'IBM Plex Mono', ui-monospace, monospace" }}>
@@ -652,7 +655,7 @@ export default function TabDecoderPro() {
         .tdp-scroll::-webkit-scrollbar{width:8px;height:8px;}
         .tdp-scroll::-webkit-scrollbar-thumb{background:#2a3036;border-radius:8px;}
         textarea::placeholder{color:#5a605d;}
-        .meas:hover{border-color:#e9a24b88!important;}
+        .meas:hover{border-color:#ff6b3588!important;}
         .tdp-cols{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:16px;}
         .tdp-cols.manual{grid-template-columns:minmax(0,1fr) minmax(0,1fr);}
         @media (max-width:760px){.tdp-cols,.tdp-cols.manual{grid-template-columns:1fr;}}
