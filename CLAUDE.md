@@ -661,11 +661,22 @@ bloating the monolith. Lifting `semis`/transpose state out to the parent for per
   "score is ground truth, audio is the reference" idea. Reuses the pure
   `scoreEventTimes(tscore, bpm)` as the beat→seconds map (computed once at play start);
   an rAF loop sets `playKey` to the event active at `ctx.currentTime`, so the existing
-  chart highlight follows the recording. Nudge ♩= until it lines up (linear tempo map;
-  DTW auto-alignment is the future upgrade). Browser-only glue (engine stays pure;
-  decode/playback are device-only) — no new engine surface, just `scoreEventTimes`.
-  This is the v1 substrate for the score+audio pairing → alignment → personalized
-  vocal-harmony training roadmap.
+  chart highlight follows the recording. Two sync modes: **♩= linear tempo map**, or
+  **🎯 Auto-align (DTW)** — see below. Browser-only glue (engine stays pure;
+  decode/playback are device-only). Substrate for the personalized vocal-harmony
+  training roadmap.
+- **DTW auto-sync** (`alignPcmToScore`, 2026-06-20): automatic audio↔score alignment so
+  the highlight tracks the recording with **no manual ♩=**, and through tempo drift /
+  rubato a linear map can't. Pure + headless-tested: match the audio's chroma sequence
+  (`pcmChromaSequence`) against the score's expected chroma (`scoreChromaSequence`, one
+  vector per event) via **Dynamic Time Warping** (`_dtw`, cosine distance `_cosDist`) →
+  the lowest-cost monotonic path → **sec→event-key segments** the playhead follows. Run
+  **off-thread** (`alignPcmToScoreOffThread` via `_engineRPC`, main-thread fallback); the
+  UI downsamples the attached audio to 16 kHz for it. Validated (`npm test`): identical
+  seqs → zero-cost diagonal, a time-stretched copy aligns end-to-end, and synthesized
+  audio played with UNEVEN timing (C 1.0s / G 0.4s / Am 1.4s) maps each region to the
+  right chart event. Only the PCM decode is device-only. This is also the labeling step
+  for the future on-device personalized-harmony training (aligned audio→notated pairs).
 
 `midiToAbc`/`abcDur` invariants: middle C (C4 = 60) is ABC `C`, C5 is `c`; ABC
 duration is a reduced fraction of `L:1/4` (`durBeats·4/beatType`), so simple
