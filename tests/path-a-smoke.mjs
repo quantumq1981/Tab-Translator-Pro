@@ -691,6 +691,41 @@ expect(eng.scoreToMidi(asc, { tempo: 120 }) instanceof Uint8Array, "audio score 
 // faster tempo (240bpm → 0.25s/beat) packs the same seconds into more bars
 expect(eng.audioEventsToScore(aev, { bpm: 240, beatsPerBar: 4 }).bars.length === 3, "bpm changes the beat grid (240bpm → 3 bars)");
 
+/* ---- DTW audio↔score auto-sync -------------------------------------------- */
+// _dtw finds a monotonic path; identical sequences → diagonal, zero cost
+{
+  const d = (a, b) => Math.abs(a - b);
+  const r = eng._dtw([1, 2, 3], [1, 2, 3], d);
+  expect(r.cost === 0 && r.path.length >= 3 && r.path[0][0] === 0 && r.path[r.path.length - 1][1] === 2, "dtw identical → zero-cost diagonal");
+  // a stretched copy still aligns start→start, end→end
+  const r2 = eng._dtw([1, 2, 3], [1, 1, 2, 3, 3], d);
+  expect(r2.path[0][0] === 0 && r2.path[0][1] === 0 && r2.path[r2.path.length - 1][0] === 2 && r2.path[r2.path.length - 1][1] === 4, "dtw aligns a time-stretched copy end-to-end");
+}
+// scoreChromaSequence reflects each event's pitch classes + carries its key
+{
+  const sc = { timeSig: [4, 4], bars: [{ number: 1, events: [{ symbol: "C", beat: 0, midis: [48, 52, 55] }, { symbol: "G", beat: 2, midis: [55, 59, 62] }] }] };
+  const seq = eng.scoreChromaSequence(sc);
+  expect(seq.length === 2 && seq[0].key === "1.0" && seq[1].key === "1.2", "scoreChromaSequence carries event keys");
+  expect(seq[0].chroma[0] > 0 && seq[0].chroma[4] > 0 && seq[0].chroma[7] > 0, "C event chroma lights C/E/G");
+}
+// end-to-end DTW: a score C|G|Am vs synthesized audio played with UNEVEN timing
+// (C 1.0s, G 0.4s, Am 1.4s) — the alignment must map each region to the right event key
+{
+  const score = { timeSig: [4, 4], bars: [
+    { number: 1, events: [{ symbol: "C", beat: 0, midis: [48, 52, 55] }, { symbol: "G", beat: 2, midis: [55, 59, 62] }] },
+    { number: 2, events: [{ symbol: "Am", beat: 0, midis: [57, 60, 64] }] },
+  ] };
+  const buf = new Float32Array(Math.floor(2.8 * SR));
+  buf.set(chordSig([261.63, 329.63, 392.00], 1.0), 0);                      // C
+  buf.set(chordSig([196.00, 246.94, 293.66], 0.4), Math.floor(1.0 * SR));   // G (short)
+  buf.set(chordSig([220.00, 261.63, 329.63], 1.4), Math.floor(1.4 * SR));   // Am (long)
+  const segs = eng.alignPcmToScore(buf, SR, score, { hopSec: 0.1 });
+  const keyAt = (t) => { let k = null; for (const s of segs) { if (s.sec <= t) k = s.key; else break; } return k; };
+  expect(keyAt(0.5) === "1.0", `align: 0.5s should map to C (1.0), got ${keyAt(0.5)}`);
+  expect(keyAt(1.2) === "1.2", `align: 1.2s should map to G (1.2), got ${keyAt(1.2)}`);
+  expect(keyAt(2.3) === "2.0", `align: 2.3s should map to Am (2.0), got ${keyAt(2.3)}`);
+}
+
 /* ---- single-note symbols carry NO "(single)" artifact (regression) -------
  * A one-pitch block recognises as the bare note name; the old engine appended
  * " (single)" to the symbol STRING, which leaked into every export + the chart

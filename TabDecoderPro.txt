@@ -197,6 +197,11 @@ import {
   detectChord,
   transcribeChords,
   audioEventsToScore,
+  _cosDist,
+  _dtw,
+  scoreChromaSequence,
+  pcmChromaSequence,
+  alignPcmToScore,
 } from "./engine.tsx";
 
 async function extractTokens(buf) {
@@ -373,6 +378,11 @@ async function analyzeAudioOffThread(samples, sr, kind, opts = {}) {
   const fn = kind === "notes" ? "transcribeMonophonic" : "transcribeChords";
   try { return await _engineRPC(fn, [samples, sr, opts]); }
   catch (_) { return (kind === "notes" ? transcribeMonophonic : transcribeChords)(samples, sr, opts); }
+}
+/* DTW audio↔score alignment off-thread (heavy: FFTs + DP), main-thread fallback. */
+async function alignPcmToScoreOffThread(samples, sr, score, opts = {}) {
+  try { return await _engineRPC("alignPcmToScore", [samples, sr, score, opts]); }
+  catch (_) { return alignPcmToScore(samples, sr, score, opts); }
 }
 
 /* ========================================================================== */
@@ -897,6 +907,8 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   const [refName, setRefName] = useState("");      // reference-audio (a recording to play along with the chart)
   const [refPlaying, setRefPlaying] = useState(false);
   const [refErr, setRefErr] = useState("");
+  const [alignSegs, setAlignSegs] = useState(null); // DTW sec→key segments (null = linear tempo map)
+  const [aligning, setAligning] = useState(false);
   const refAudio = useRef({});
 
   const [showRoman, setShowRoman] = useState(false);
@@ -920,7 +932,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   const stopPlay = () => { if (player.current) { player.current.stop(); player.current = null; } setPlaying(false); setPlayKey(""); };
   const stopRef = () => { const s = refAudio.current; if (s.raf) cancelAnimationFrame(s.raf); if (s.src) { try { s.src.stop(); } catch (_) {} s.src = null; } if (s.ctx && s.ctx.state !== "closed") { try { s.ctx.close(); } catch (_) {} s.ctx = null; } s.raf = null; setRefPlaying(false); setPlayKey(""); };
   useEffect(() => () => { stopPlay(); stopRef(); }, []); // stop on unmount
-  useEffect(() => { stopPlay(); stopRef(); }, [score, semis]); // stop if the music changes underneath playback
+  useEffect(() => { stopPlay(); stopRef(); setAlignSegs(null); }, [score, semis]); // music changed → stop + drop the stale alignment
   const togglePlay = () => {
     if (playing) { stopPlay(); return; }
     stopRef();
@@ -934,14 +946,28 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
    * the highlight tracks the recording. Browser-only glue (engine stays pure). */
   const attachRef = async (e) => {
     const f = e.target.files && e.target.files[0]; if (!f) return;
-    setRefErr(""); stopRef();
+    setRefErr(""); setAlignSegs(null); stopRef();
     try {
       const AC = window.AudioContext || window.webkitAudioContext; if (!AC) { setRefErr("Web Audio isn't available."); return; }
       const ab = await f.arrayBuffer(); const dctx = new AC();
       const buf = await new Promise((res, rej) => { const p = dctx.decodeAudioData(ab, res, rej); if (p && p.then) p.then(res, rej); });
       try { dctx.close(); } catch (_) {}
-      refAudio.current = { ...refAudio.current, buf }; setRefName(f.name);
+      // downsampled mono copy for DTW alignment (16k is plenty for chroma)
+      const chs = buf.numberOfChannels, n = buf.length, mono = new Float32Array(n);
+      for (let c = 0; c < chs; c++) { const d = buf.getChannelData(c); for (let i = 0; i < n; i++) mono[i] += d[i] / chs; }
+      const factor = Math.max(1, Math.floor(buf.sampleRate / 16000)), dsLen = Math.floor(n / factor), ds = new Float32Array(dsLen);
+      for (let i = 0; i < dsLen; i++) { let v = 0; for (let j = 0; j < factor; j++) v += mono[i * factor + j]; ds[i] = v / factor; }
+      refAudio.current = { ...refAudio.current, buf, ds, dsr: buf.sampleRate / factor }; setRefName(f.name);
     } catch (_) { setRefErr("Couldn't decode that audio file."); }
+  };
+  const autoAlign = () => {
+    const s = refAudio.current; if (!s.ds) return;
+    setAligning(true); setRefErr("");
+    setTimeout(async () => {                                   // let "aligning…" paint
+      try { const segs = await alignPcmToScoreOffThread(s.ds, s.dsr, tscore, { hopSec: 0.25 }); setAlignSegs(segs && segs.length ? segs : null); if (!segs || !segs.length) setRefErr("Couldn't auto-align — use ♩= instead."); }
+      catch (_) { setRefErr("Auto-align failed — use ♩= instead."); }
+      setAligning(false);
+    }, 30);
   };
   const toggleRef = () => {
     const s = refAudio.current;
@@ -951,12 +977,15 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
     try {
       const AC = window.AudioContext || window.webkitAudioContext;
       const ctx = new AC(); const src = ctx.createBufferSource(); src.buffer = s.buf; src.connect(ctx.destination);
-      const times = scoreEventTimes(tscore, bpm).events; // beat→sec map at this tempo
+      const times = scoreEventTimes(tscore, bpm).events; // linear beat→sec map (fallback / when not auto-aligned)
+      const segs = alignSegs;                            // DTW sec→key segments (when auto-aligned)
       src.onended = () => { if (refAudio.current.src === src) stopRef(); };
       src.start(); s.ctx = ctx; s.src = src; s.startedAt = ctx.currentTime; setRefPlaying(true);
       const loop = () => {
         const t = ctx.currentTime - s.startedAt;
-        let key = ""; for (const ev of times) { if (t >= ev.start && t < ev.start + ev.dur) { key = ev.key; break; } }
+        let key = "";
+        if (segs) { for (const sg of segs) { if (sg.sec <= t) key = sg.key || ""; else break; } }   // DTW alignment
+        else { for (const ev of times) { if (t >= ev.start && t < ev.start + ev.dur) { key = ev.key; break; } } } // linear
         setPlayKey(key);
         if (t <= s.buf.duration) s.raf = requestAnimationFrame(loop);
       };
@@ -1081,10 +1110,12 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
           <input type="file" onChange={attachRef} style={{ display: "none" }} />
         </label>
         {refName && <>
-          <button onClick={toggleRef} title="play the recording with the chart highlighting in sync (set ♩= so it lines up)"
+          <button onClick={toggleRef} title="play the recording with the chart highlighting in sync"
             style={{ ...chip(C), padding: "4px 12px", borderColor: refPlaying ? C.green : C.border, color: refPlaying ? C.green : C.amber }}>{refPlaying ? "■ Stop audio" : "▶ Play with chart"}</button>
-          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 180 }}>{refName}</span>
-          <span style={{ color: C.dim }}>· nudge ♩= to line it up</span>
+          <button onClick={autoAlign} disabled={aligning} title="automatically align the recording to the chart (DTW) — no ♩= needed"
+            style={{ ...chip(C), padding: "4px 12px", borderColor: alignSegs ? C.green : C.border, color: aligning ? C.dim : alignSegs ? C.green : C.cyan }}>{aligning ? "aligning…" : alignSegs ? "🎯 auto-synced ✓" : "🎯 Auto-align"}</button>
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 160 }}>{refName}</span>
+          <span style={{ color: C.dim }}>{alignSegs ? "· following the recording" : "· Auto-align, or nudge ♩="}</span>
         </>}
         {refErr && <span style={{ color: C.red }}>{refErr}</span>}
       </div>

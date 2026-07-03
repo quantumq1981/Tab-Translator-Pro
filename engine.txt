@@ -2202,6 +2202,65 @@ function audioEventsToScore(events, opts = {}) {
   return { source: "audio", timeSig: [beatsPerBar, beatType], tempo: bpm, bars };
 }
 
+/* ---- audio ↔ score alignment (DTW auto-sync) ------------------------------
+ * Line a real recording up to a score automatically (no manual ♩=): match the
+ * audio's chroma sequence against the score's expected chroma via Dynamic Time
+ * Warping, which finds the lowest-cost MONOTONIC path — so it tracks tempo drift
+ * / rubato that a linear tempo map can't. Pure + headless-testable (synthesized
+ * audio); only the PCM decode is browser-only. The chart's existing highlight
+ * then follows the recording via the returned sec→event-key segments. */
+function _cosDist(a, b) {                                     // cosine distance of two chroma vectors (0 = identical)
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  if (na === 0 || nb === 0) return 1;                          // no info (rest / silence) → neutral cost
+  return 1 - dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+function _dtw(A, B, dist) {                                   // classic DP; returns { path:[[i,j]…], cost }
+  const n = A.length, m = B.length;
+  const D = Array.from({ length: n + 1 }, () => new Float64Array(m + 1).fill(Infinity));
+  D[0][0] = 0;
+  for (let i = 1; i <= n; i++) for (let j = 1; j <= m; j++) {
+    const c = dist(A[i - 1], B[j - 1]);
+    D[i][j] = c + Math.min(D[i - 1][j], D[i][j - 1], D[i - 1][j - 1]);
+  }
+  const path = []; let i = n, j = m;
+  while (i > 0 && j > 0) { path.push([i - 1, j - 1]); const a = D[i - 1][j], b = D[i][j - 1], c = D[i - 1][j - 1]; if (c <= a && c <= b) { i--; j--; } else if (a <= b) i--; else j--; }
+  path.reverse();
+  return { path, cost: D[n][m] };
+}
+/* Score → one normalised chroma vector per event, tagged with its chart key. */
+function scoreChromaSequence(score) {
+  const seq = [];
+  for (const bar of score.bars || []) for (const e of bar.events || []) {
+    const ch = new Array(12).fill(0);
+    for (const mm of e.midis || []) ch[((mm % 12) + 12) % 12] += 1;
+    const mx = Math.max(...ch) || 1;
+    seq.push({ chroma: ch.map((v) => v / mx), key: `${bar.number}.${e.beat}` });
+  }
+  return seq;
+}
+/* PCM → a chroma frame per hop (the audio side of the alignment). */
+function pcmChromaSequence(samples, sampleRate, opts = {}) {
+  const win = opts.window || 4096, hop = opts.hop || Math.floor(sampleRate * (opts.hopSec || 0.25));
+  const seq = [];
+  for (let s = 0; s + win <= samples.length; s += hop) seq.push(pcmToChroma(samples.subarray ? samples.subarray(s, s + win) : samples.slice(s, s + win), sampleRate, opts));
+  return seq;
+}
+/* Align decoded PCM to a score → sec→event-key SEGMENTS (key changes only), so the
+ * chart highlight can follow the recording. Heavy (FFTs + DTW) → run off-thread. */
+function alignPcmToScore(samples, sampleRate, score, opts = {}) {
+  const hopSec = opts.hopSec != null ? opts.hopSec : 0.25;
+  const audioSeq = pcmChromaSequence(samples, sampleRate, { ...opts, hop: Math.floor(sampleRate * hopSec) });
+  const scoreSeq = scoreChromaSequence(score);
+  if (!audioSeq.length || !scoreSeq.length) return [];
+  const { path } = _dtw(audioSeq, scoreSeq.map((s) => s.chroma), _cosDist);
+  const frameKey = new Array(audioSeq.length).fill(null);
+  for (const [ai, sj] of path) if (frameKey[ai] == null) frameKey[ai] = scoreSeq[sj].key; // first (earliest) score match per audio frame
+  const segs = []; let last = " ";
+  for (let f = 0; f < frameKey.length; f++) { const k = frameKey[f] != null ? frameKey[f] : (segs.length ? segs[segs.length - 1].key : null); if (k !== last) { segs.push({ sec: +(f * hopSec).toFixed(3), key: k }); last = k; } }
+  return segs;
+}
+
 
 /* ---- public surface ------------------------------------------------------
  * Every top-level engine binding is exported so the UI (TabDecoderPro.tsx),
@@ -2367,4 +2426,9 @@ export {
   detectChord,
   transcribeChords,
   audioEventsToScore,
+  _cosDist,
+  _dtw,
+  scoreChromaSequence,
+  pcmChromaSequence,
+  alignPcmToScore,
 };
