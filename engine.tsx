@@ -2239,11 +2239,17 @@ function scoreChromaSequence(score) {
   }
   return seq;
 }
-/* PCM → a chroma frame per hop (the audio side of the alignment). */
+/* PCM → a chroma frame per hop (the audio side of the alignment). Each frame carries
+ * its RMS `energy` too, so the aligner can gate silence — pcmToChroma normalises every
+ * frame to unit max, which turns silence into a full-magnitude NOISE chroma. */
 function pcmChromaSequence(samples, sampleRate, opts = {}) {
   const win = opts.window || 4096, hop = opts.hop || Math.floor(sampleRate * (opts.hopSec || 0.25));
   const seq = [];
-  for (let s = 0; s + win <= samples.length; s += hop) seq.push(pcmToChroma(samples.subarray ? samples.subarray(s, s + win) : samples.slice(s, s + win), sampleRate, opts));
+  for (let s = 0; s + win <= samples.length; s += hop) {
+    const frame = samples.subarray ? samples.subarray(s, s + win) : samples.slice(s, s + win);
+    let e = 0; for (let i = 0; i < frame.length; i++) e += frame[i] * frame[i];
+    seq.push({ chroma: pcmToChroma(frame, sampleRate, opts), energy: Math.sqrt(e / frame.length) });
+  }
   return seq;
 }
 /* Align decoded PCM to a score → sec→event-key SEGMENTS (key changes only), so the
@@ -2253,11 +2259,24 @@ function alignPcmToScore(samples, sampleRate, score, opts = {}) {
   const audioSeq = pcmChromaSequence(samples, sampleRate, { ...opts, hop: Math.floor(sampleRate * hopSec) });
   const scoreSeq = scoreChromaSequence(score);
   if (!audioSeq.length || !scoreSeq.length) return [];
-  const { path } = _dtw(audioSeq, scoreSeq.map((s) => s.chroma), _cosDist);
-  const frameKey = new Array(audioSeq.length).fill(null);
-  for (const [ai, sj] of path) if (frameKey[ai] == null) frameKey[ai] = scoreSeq[sj].key; // first (earliest) score match per audio frame
+  const maxE = Math.max(...audioSeq.map((f) => f.energy)) || 1;
+  const gate = (opts.energyGate != null ? opts.energyGate : 0.08) * maxE;
+  let lo = 0, hi = audioSeq.length - 1;
+  while (lo <= hi && audioSeq[lo].energy < gate) lo++;             // trim leading silence
+  while (hi >= lo && audioSeq[hi].energy < gate) hi--;            // trim trailing silence
+  if (lo > hi) return [];                                          // all silence -> nothing to align
+  const Z = new Array(12).fill(0);                                // interior silent frame -> neutral (no vote)
+  const audioMat = []; for (let f = lo; f <= hi; f++) audioMat.push(audioSeq[f].energy < gate ? Z : audioSeq[f].chroma);
+  const { path } = _dtw(audioMat, scoreSeq.map((s) => s.chroma), _cosDist);
+  const subKey = new Array(audioMat.length).fill(null);
+  for (const [ai, sj] of path) if (subKey[ai] == null && audioSeq[lo + ai].energy >= gate) subKey[ai] = scoreSeq[sj].key; // first (earliest) score match per active frame
   const segs = []; let last = " ";
-  for (let f = 0; f < frameKey.length; f++) { const k = frameKey[f] != null ? frameKey[f] : (segs.length ? segs[segs.length - 1].key : null); if (k !== last) { segs.push({ sec: +(f * hopSec).toFixed(3), key: k }); last = k; } }
+  for (let f = 0; f < audioSeq.length; f++) {
+    let k;
+    if (f < lo || f > hi) k = null;                               // trimmed silence -> no highlight
+    else k = subKey[f - lo] != null ? subKey[f - lo] : (segs.length ? segs[segs.length - 1].key : null); // sustain through a brief interior gap
+    if (k !== last) { segs.push({ sec: +(f * hopSec).toFixed(3), key: k }); last = k; }
+  }
   return segs;
 }
 

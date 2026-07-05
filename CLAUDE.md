@@ -677,6 +677,19 @@ bloating the monolith. Lifting `semis`/transpose state out to the parent for per
   audio played with UNEVEN timing (C 1.0s / G 0.4s / Am 1.4s) maps each region to the
   right chart event. Only the PCM decode is device-only. This is also the labeling step
   for the future on-device personalized-harmony training (aligned audio→notated pairs).
+  - **Energy gate (2026-07-05):** a real recording has a silent lead-in / trailing silence
+    (count-in, room tone, applause). `pcmToChroma` normalises EVERY frame to unit max, so
+    silence becomes a full-magnitude NOISE chroma — and DTW's fixed endpoints (frame 0 →
+    event 0, frame N → event M) would force that silence onto the FIRST/LAST chord and
+    shift the whole alignment. So `alignPcmToScore` now gates on **RMS energy** (same idea
+    the sibling `transcribeChords` already used): `pcmChromaSequence` carries each frame's
+    `energy`; the aligner **trims** leading/trailing silence before DTW so the endpoints
+    anchor to real music, and nulls any interior silent frame (a mid-song pause → rest →
+    no highlight; it also passes a **zero vector** into the DTW so it can't drag the warp
+    toward a wrong chord). Silent regions become **null-key segments** (highlight cleared).
+    `energyGate` defaults to `0.08·maxEnergy`. Guarded by a `npm test` regression: a synth
+    take with a **0.6 s silent lead-in** maps the lead-in to `null` and still resolves C/Am
+    to the right events once the music starts.
 
 `midiToAbc`/`abcDur` invariants: middle C (C4 = 60) is ABC `C`, C5 is `c`; ABC
 duration is a reduced fraction of `L:1/4` (`durBeats·4/beatType`), so simple
