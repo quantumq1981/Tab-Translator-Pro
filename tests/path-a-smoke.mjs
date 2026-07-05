@@ -719,11 +719,12 @@ expect(eng.audioEventsToScore(aev, { bpm: 240, beatsPerBar: 4 }).bars.length ===
   buf.set(chordSig([261.63, 329.63, 392.00], 1.0), 0);                      // C
   buf.set(chordSig([196.00, 246.94, 293.66], 0.4), Math.floor(1.0 * SR));   // G (short)
   buf.set(chordSig([220.00, 261.63, 329.63], 1.4), Math.floor(1.4 * SR));   // Am (long)
-  const segs = eng.alignPcmToScore(buf, SR, score, { hopSec: 0.1 });
+  const { segments: segs, confidence } = eng.alignPcmToScore(buf, SR, score, { hopSec: 0.1 });
   const keyAt = (t) => { let k = null; for (const s of segs) { if (s.sec <= t) k = s.key; else break; } return k; };
   expect(keyAt(0.5) === "1.0", `align: 0.5s should map to C (1.0), got ${keyAt(0.5)}`);
   expect(keyAt(1.2) === "1.2", `align: 1.2s should map to G (1.2), got ${keyAt(1.2)}`);
   expect(keyAt(2.3) === "2.0", `align: 2.3s should map to Am (2.0), got ${keyAt(2.3)}`);
+  expect(confidence > 0.3, `align: a clean matching take should have decent confidence, got ${confidence}`);
 }
 // energy gate: a real recording has a SILENT lead-in (count-in / room tone). Without a
 // gate, pcmToChroma normalises that silence into a noise chroma and DTW's fixed endpoints
@@ -739,11 +740,35 @@ expect(eng.audioEventsToScore(aev, { bpm: 240, beatsPerBar: 4 }).bars.length ===
   buf.set(chordSig([261.63, 329.63, 392.00], 1.0), Math.floor(lead * SR));  // C
   buf.set(chordSig([196.00, 246.94, 293.66], 0.4), Math.floor((lead + 1.0) * SR)); // G (short)
   buf.set(chordSig([220.00, 261.63, 329.63], 1.4), Math.floor((lead + 1.4) * SR)); // Am (long)
-  const segs = eng.alignPcmToScore(buf, SR, score, { hopSec: 0.1 });
+  const { segments: segs } = eng.alignPcmToScore(buf, SR, score, { hopSec: 0.1 });
   const keyAt = (t) => { let k = null; for (const s of segs) { if (s.sec <= t) k = s.key; else break; } return k; };
   expect(keyAt(0.2) === null, `align: silent lead-in should NOT highlight a chord, got ${keyAt(0.2)}`);
   expect(keyAt(lead + 0.5) === "1.0", `align: C after the lead-in should map to 1.0, got ${keyAt(lead + 0.5)}`);
   expect(keyAt(lead + 2.3) === "2.0", `align: Am after the lead-in should map to 2.0, got ${keyAt(lead + 2.3)}`);
+}
+// duration-weight: a longer event spans MORE DTW columns (~1/beat of its qdur), and the
+// bass pc is emphasised, so the warp knows how long a chord should sound + matches better.
+{
+  const sc = { timeSig: [4, 4], bars: [{ number: 1, events: [
+    { symbol: "C", beat: 0, durBeats: 3, qbeat: 0, qdur: 3, midis: [48, 52, 55] },
+    { symbol: "G", beat: 3, durBeats: 1, qbeat: 3, qdur: 1, midis: [55, 59, 62] },
+  ] }] };
+  const seq = eng.scoreChromaSequence(sc);
+  const cCols = seq.filter((s) => s.key === "1.0").length, gCols = seq.filter((s) => s.key === "1.3").length;
+  expect(cCols === 3 && gCols === 1, `duration-weight: 3-beat C → 3 cols, 1-beat G → 1 col, got ${cCols}/${gCols}`);
+  const cCol = seq.find((s) => s.key === "1.0").chroma;   // C bass (pc 0) emphasised over the 3rd (pc 4)
+  expect(cCol[0] > cCol[4], `bass emphasis: C root (pc0) should weigh more than the 3rd (pc4), got ${cCol[0]} vs ${cCol[4]}`);
+}
+// confidence: the same audio matches its own score better than a pitch-disjoint one, so a
+// wrong stem / wrong chart reads as LOW confidence → the UI can fall back to the ♩= map.
+{
+  const good = { timeSig: [4, 4], bars: [{ number: 1, events: [{ symbol: "C", beat: 0, midis: [48, 52, 55] }] }] };
+  const bad = { timeSig: [4, 4], bars: [{ number: 1, events: [{ symbol: "F#", beat: 0, midis: [54, 58, 61] }] }] }; // tritone away, disjoint pcs
+  const audio = chordSig([261.63, 329.63, 392.00], 1.0); // C
+  const g = eng.alignPcmToScore(audio, SR, good, { hopSec: 0.1 });
+  const b = eng.alignPcmToScore(audio, SR, bad, { hopSec: 0.1 });
+  expect(g.confidence > b.confidence, `confidence: C-audio matches C-score better than F#-score (${g.confidence} vs ${b.confidence})`);
+  expect(b.confidence < 0.3, `confidence: total pitch mismatch → low confidence, got ${b.confidence}`);
 }
 
 /* ---- single-note symbols carry NO "(single)" artifact (regression) -------

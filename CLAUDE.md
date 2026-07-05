@@ -690,6 +690,29 @@ bloating the monolith. Lifting `semis`/transpose state out to the parent for per
     `energyGate` defaults to `0.08·maxEnergy`. Guarded by a `npm test` regression: a synth
     take with a **0.6 s silent lead-in** maps the lead-in to `null` and still resolves C/Am
     to the right events once the music starts.
+  - **Accuracy + confidence (2026-07-05):** three additive upgrades so the warp matches real
+    recordings better and stays honest. **`alignPcmToScore` now returns `{ segments, confidence }`**
+    (was a bare segments array) — callers destructure `.segments`; the UI reverts to the linear
+    ♩= map when `confidence` is low.
+    - **Duration-weighted score columns** — `scoreChromaSequence` emits **~1 DTW column per beat
+      of each event's `qdur`** (was one column per event regardless of length) + **emphasises the
+      bass pc (usually the root) and its 5th**, so the warp knows how long a chord should sound
+      (the rubato/tempo-drift case) and the chroma looks like a real chord (root loud). This makes
+      the returned sequence longer with repeated keys — the segment builder collapses them, so
+      downstream is unchanged.
+    - **Audio-chroma smoothing** — the aligner averages each frame's chroma over ±`smoothHalf`
+      (default 1 = 3-frame window) **non-gated** neighbours before DTW, killing per-frame jitter
+      at chord edges (the smoothing `transcribeChords` had, which the raw `pcmChromaSequence`
+      lacked). Silence never bleeds in (gated neighbours skipped).
+    - **Confidence + auto-fallback** — `confidence` = mean cosine similarity over the matched,
+      **non-silent** frames (silence excluded so a lead-out can't tank it). The UI adopts the DTW
+      segments only when `confidence ≥ 0.35`, else it keeps the ♩= map and says the match was weak
+      — so a wrong stem / wrong chart no longer silently mis-highlights. Measured margins are wide:
+      a clean matching take reads **~0.94**, a tritone-disjoint chart **~0.02**.
+    - Guarded by `npm test`: a 3-beat event spans 3 columns / 1-beat spans 1, the bass pc outweighs
+      the 3rd, the matched take reads high confidence and a pitch-disjoint chart reads `< 0.3`, and
+      the existing uneven-timing + silent-lead-in mappings stay byte-identical (smoothing didn't
+      shift them).
 
 `midiToAbc`/`abcDur` invariants: middle C (C4 = 60) is ABC `C`, C5 is `c`; ABC
 duration is a reduced fraction of `L:1/4` (`durBeats·4/beatType`), so simple

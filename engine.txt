@@ -2228,14 +2228,31 @@ function _dtw(A, B, dist) {                                   // classic DP; ret
   path.reverse();
   return { path, cost: D[n][m] };
 }
-/* Score → one normalised chroma vector per event, tagged with its chart key. */
+/* Score → chroma columns for the DTW, tagged with each event's chart key. Two priors
+ * make the warp match a real recording better:
+ *  - EMPHASIS: the bass (lowest midi, usually the root) and its perfect 5th are weighted
+ *    up, so the vector looks like a real chord's chroma (root loud, 5th present) instead
+ *    of a flat presence mask — sharpens the cosine match.
+ *  - DURATION: a longer event spans MORE columns (~1 per beat of its qdur), so DTW lets
+ *    it absorb proportionally more audio frames. Without this a whole note and an eighth
+ *    each got one column and the warp had no sense of how long a chord should sound —
+ *    exactly the rubato/tempo-drift case auto-sync exists for. */
 function scoreChromaSequence(score) {
   const seq = [];
   for (const bar of score.bars || []) for (const e of bar.events || []) {
     const ch = new Array(12).fill(0);
-    for (const mm of e.midis || []) ch[((mm % 12) + 12) % 12] += 1;
+    const midis = e.midis || [];
+    for (const mm of midis) ch[((mm % 12) + 12) % 12] += 1;
+    if (midis.length) {
+      const bass = ((Math.min(...midis) % 12) + 12) % 12;
+      ch[bass] += 0.6; ch[(bass + 7) % 12] += 0.3;          // root + fifth emphasis
+    }
     const mx = Math.max(...ch) || 1;
-    seq.push({ chroma: ch.map((v) => v / mx), key: `${bar.number}.${e.beat}` });
+    const chroma = ch.map((v) => v / mx);
+    const key = `${bar.number}.${e.beat}`;
+    const dur = e.qdur != null ? e.qdur : (e.durBeats != null ? e.durBeats : 1);
+    const reps = Math.max(1, Math.round(dur));               // duration-weight the column count
+    for (let r = 0; r < reps; r++) seq.push({ chroma, key });
   }
   return seq;
 }
@@ -2252,32 +2269,54 @@ function pcmChromaSequence(samples, sampleRate, opts = {}) {
   }
   return seq;
 }
-/* Align decoded PCM to a score → sec→event-key SEGMENTS (key changes only), so the
- * chart highlight can follow the recording. Heavy (FFTs + DTW) → run off-thread. */
+/* Align decoded PCM to a score → { segments: sec→event-key (key changes only), confidence
+ * 0..1 }. The chart highlight follows `segments`; the UI reverts to the linear ♩= map when
+ * `confidence` is low (wrong stem / bad match). Heavy (FFTs + DTW) → run off-thread. */
 function alignPcmToScore(samples, sampleRate, score, opts = {}) {
   const hopSec = opts.hopSec != null ? opts.hopSec : 0.25;
   const audioSeq = pcmChromaSequence(samples, sampleRate, { ...opts, hop: Math.floor(sampleRate * hopSec) });
   const scoreSeq = scoreChromaSequence(score);
-  if (!audioSeq.length || !scoreSeq.length) return [];
+  if (!audioSeq.length || !scoreSeq.length) return { segments: [], confidence: 0 };
   const maxE = Math.max(...audioSeq.map((f) => f.energy)) || 1;
   const gate = (opts.energyGate != null ? opts.energyGate : 0.08) * maxE;
   let lo = 0, hi = audioSeq.length - 1;
   while (lo <= hi && audioSeq[lo].energy < gate) lo++;             // trim leading silence
   while (hi >= lo && audioSeq[hi].energy < gate) hi--;            // trim trailing silence
-  if (lo > hi) return [];                                          // all silence -> nothing to align
-  const Z = new Array(12).fill(0);                                // interior silent frame -> neutral (no vote)
-  const audioMat = []; for (let f = lo; f <= hi; f++) audioMat.push(audioSeq[f].energy < gate ? Z : audioSeq[f].chroma);
-  const { path } = _dtw(audioMat, scoreSeq.map((s) => s.chroma), _cosDist);
+  if (lo > hi) return { segments: [], confidence: 0 };            // all silence -> nothing to align
+  const Z = new Array(12).fill(0);                                // gated frame -> neutral (no vote)
+  // Smooth the audio chroma over a few frames (kills per-frame jitter at chord edges);
+  // only average NON-gated neighbours so silence can't bleed a rest into a chord.
+  const half = opts.smoothHalf != null ? opts.smoothHalf : 1;
+  const smooth = (f) => {
+    if (audioSeq[f].energy < gate) return Z;
+    const acc = new Array(12).fill(0); let cnt = 0;
+    for (let g = Math.max(lo, f - half); g <= Math.min(hi, f + half); g++) {
+      if (audioSeq[g].energy < gate) continue;
+      const c = audioSeq[g].chroma; for (let p = 0; p < 12; p++) acc[p] += c[p]; cnt++;
+    }
+    return cnt ? acc.map((v) => v / cnt) : Z;
+  };
+  const audioMat = []; for (let f = lo; f <= hi; f++) audioMat.push(smooth(f));
+  const scoreMat = scoreSeq.map((s) => s.chroma);
+  const { path } = _dtw(audioMat, scoreMat, _cosDist);
   const subKey = new Array(audioMat.length).fill(null);
-  for (const [ai, sj] of path) if (subKey[ai] == null && audioSeq[lo + ai].energy >= gate) subKey[ai] = scoreSeq[sj].key; // first (earliest) score match per active frame
-  const segs = []; let last = " ";
+  // Confidence = mean cosine SIMILARITY over the matched, non-silent frames (silence is
+  // excluded so a long lead-out can't tank it). Poor match -> the UI falls back to the map.
+  let costSum = 0, costN = 0;
+  for (const [ai, sj] of path) {
+    if (audioSeq[lo + ai].energy < gate) continue;
+    if (subKey[ai] == null) subKey[ai] = scoreSeq[sj].key;       // first (earliest) score match per active frame
+    costSum += _cosDist(audioMat[ai], scoreMat[sj]); costN++;
+  }
+  const confidence = costN ? Math.max(0, 1 - costSum / costN) : 0;
+  const segments = []; let last = " ";
   for (let f = 0; f < audioSeq.length; f++) {
     let k;
     if (f < lo || f > hi) k = null;                               // trimmed silence -> no highlight
-    else k = subKey[f - lo] != null ? subKey[f - lo] : (segs.length ? segs[segs.length - 1].key : null); // sustain through a brief interior gap
-    if (k !== last) { segs.push({ sec: +(f * hopSec).toFixed(3), key: k }); last = k; }
+    else k = subKey[f - lo] != null ? subKey[f - lo] : (segments.length ? segments[segments.length - 1].key : null); // sustain through a brief interior gap
+    if (k !== last) { segments.push({ sec: +(f * hopSec).toFixed(3), key: k }); last = k; }
   }
-  return segs;
+  return { segments, confidence: +confidence.toFixed(3) };
 }
 
 
