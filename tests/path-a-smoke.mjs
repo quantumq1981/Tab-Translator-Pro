@@ -725,6 +725,26 @@ expect(eng.audioEventsToScore(aev, { bpm: 240, beatsPerBar: 4 }).bars.length ===
   expect(keyAt(1.2) === "1.2", `align: 1.2s should map to G (1.2), got ${keyAt(1.2)}`);
   expect(keyAt(2.3) === "2.0", `align: 2.3s should map to Am (2.0), got ${keyAt(2.3)}`);
 }
+// energy gate: a real recording has a SILENT lead-in (count-in / room tone). Without a
+// gate, pcmToChroma normalises that silence into a noise chroma and DTW's fixed endpoints
+// force the FIRST chord onto it — so the lead-in must resolve to null (no highlight), and
+// the chords still map correctly once the music starts (shifted by the lead-in length).
+{
+  const score = { timeSig: [4, 4], bars: [
+    { number: 1, events: [{ symbol: "C", beat: 0, midis: [48, 52, 55] }, { symbol: "G", beat: 2, midis: [55, 59, 62] }] },
+    { number: 2, events: [{ symbol: "Am", beat: 0, midis: [57, 60, 64] }] },
+  ] };
+  const lead = 0.6;                                                          // silent lead-in
+  const buf = new Float32Array(Math.floor((lead + 2.8) * SR));
+  buf.set(chordSig([261.63, 329.63, 392.00], 1.0), Math.floor(lead * SR));  // C
+  buf.set(chordSig([196.00, 246.94, 293.66], 0.4), Math.floor((lead + 1.0) * SR)); // G (short)
+  buf.set(chordSig([220.00, 261.63, 329.63], 1.4), Math.floor((lead + 1.4) * SR)); // Am (long)
+  const segs = eng.alignPcmToScore(buf, SR, score, { hopSec: 0.1 });
+  const keyAt = (t) => { let k = null; for (const s of segs) { if (s.sec <= t) k = s.key; else break; } return k; };
+  expect(keyAt(0.2) === null, `align: silent lead-in should NOT highlight a chord, got ${keyAt(0.2)}`);
+  expect(keyAt(lead + 0.5) === "1.0", `align: C after the lead-in should map to 1.0, got ${keyAt(lead + 0.5)}`);
+  expect(keyAt(lead + 2.3) === "2.0", `align: Am after the lead-in should map to 2.0, got ${keyAt(lead + 2.3)}`);
+}
 
 /* ---- single-note symbols carry NO "(single)" artifact (regression) -------
  * A one-pitch block recognises as the bare note name; the old engine appended
