@@ -735,18 +735,24 @@ Tempo: …            ← opts.tempo (omitted if absent)
 Tuning: …           ← score.tuning (Drop D / Standard…; omitted for PDF charts)
 Capo: n             ← score.capo (GP3/4/5; omitted when 0)
 
-- Chart             ← one CSMPN section marker
-Bb7 Bb7_A7_D7 Eb6 % ← bars are WHITESPACE-separated, 4/row; one bar = one token
+- Chart                   ← one CSMPN section marker
+Bb7 | Bb7_A7_D7 | Eb6 | % ← bars delimited by `|`, `||` at section/chart end; 4/row
 ```
 
-**CSMPN grammar — get the bar separator right (this was a real bug):** CSMP's
-`parseBarStructures` (chord-sheet-maker-pro/chordProcessing.js) tokenises a bar line
-on **whitespace** — *each whitespace token is one bar*. So a multi-chord bar **must**
-join its chords with `_` (`Bb7_A7_D7`); joining with a space (the old output `| C | Am F | G |`)
-made `Am` and `F` parse as **two separate bars**. Bars are now space-separated single
-tokens; `%` collapses a bar that repeats the previous one (simile); an empty bar is `N.C.`.
-Verified by parsing the output through CSMP's actual `parseCSMPN` + `parseBarStructures`
-(`Bb7 % Eb7_Eo7` → `["Bb7","%","Eb7_Eo7"]`).
+**CSMPN grammar — the native chordsheet.com syntax (updated 2026-07-06):** the export
+now emits the finishing app's **native chordsheet.com bar syntax** (CSMP Sprint 18) so a
+decoded chart reads identically to a chart authored by hand in chordsheet.com's language —
+matching CSMP's own GP-importer house style. Bars are delimited by **explicit barline
+tokens**: `|` between bars, `||` a double/section-end bar, `|:`/`:|` a repeat, `|]` a final
+bar. CSMP's `parseBarStructures` (chord-sheet-maker-pro/chordProcessing.js) **filters every
+barline token** (`isBarlineToken`) and takes each whitespace token between them as a bar, so
+a multi-chord bar **must still** join its chords with `_` (`Bb7_A7_D7`) — a space would make
+them separate bars (that space-vs-`_` distinction was the original real bug; joining with `_`
+is what makes `Bb7_A7_D7` one bar regardless of the surrounding `|`). `%` collapses a bar
+that repeats the previous one (simile); an empty bar is `N.C.`; `1.`/`2.` prefix an ending
+bar. Verified end-to-end through CSMP's actual `parseCSMPN` + `parseBarStructures` with
+**zero warnings** — `|: C | G :|` + `1. Am | 2. F ||` → 4 bars `[C,G,Am,F]`, 2 markers,
+repeat + 1./2. endings captured; `C | % | N.C. | G_Am |` → `["C","%","N.C.","G_Am","F"]`.
 
 **Family enharmonic default (2026-06-14):** the engine's DEFAULT spelling
 (`useSharp=true`, the "Default ♯♭" toggle) is the family-wide table **`C C# D Eb E F
