@@ -964,7 +964,12 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
     const s = refAudio.current; if (!s.ds) return;
     setAligning(true); setRefErr("");
     setTimeout(async () => {                                   // let "aligning…" paint
-      try { const segs = await alignPcmToScoreOffThread(s.ds, s.dsr, tscore, { hopSec: 0.25 }); setAlignSegs(segs && segs.length ? segs : null); if (!segs || !segs.length) setRefErr("Couldn't auto-align — use ♩= instead."); }
+      try {
+        const res = await alignPcmToScoreOffThread(s.ds, s.dsr, tscore, { hopSec: 0.25 });
+        const segs = res && res.segments, conf = res ? res.confidence : 0;
+        if (segs && segs.length && conf >= 0.35) setAlignSegs(segs);           // good enough → follow the recording
+        else { setAlignSegs(null); setRefErr(segs && segs.length ? `Auto-align match was weak (${Math.round(conf * 100)}%) — nudge ♩= instead.` : "Couldn't auto-align — use ♩= instead."); }
+      }
       catch (_) { setRefErr("Auto-align failed — use ♩= instead."); }
       setAligning(false);
     }, 30);
