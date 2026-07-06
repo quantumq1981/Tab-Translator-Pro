@@ -175,10 +175,11 @@ expect(/^Time: 4\/4$/m.test(csmpn), "CSMPN should carry the Time header");
 expect(/^Tempo: 120$/m.test(csmpn), "CSMPN should carry the Tempo header");
 expect(/^Key: C$/m.test(csmpn), "CSMPN should carry the detected key");
 expect(/^- Chart$/m.test(csmpn), "CSMPN should emit a section marker");
-// CSMPN fakebook grammar: ONE bar = ONE whitespace token; a multi-chord bar joins
-// chords with `_` (Bb7_A7), NOT spaces (which CSMP's parseBarStructures would read as
-// separate bars). mx bar1 = {C,G} → "C_G"; bar2 override A7; bar3 F.
-expect(/^C_G A7 F$/m.test(csmpn), `CSMPN bars: multi-chord bar must use _ (got:\n${csmpn})`);
+// CSMPN native (chordsheet.com) grammar: bars are delimited by explicit `|` barlines
+// (`||` at the section/chart end), and a multi-chord bar joins chords with `_` (Bb7_A7),
+// NOT spaces (which CSMP's parseBarStructures would read as separate bars). mx bar1 =
+// {C,G} → "C_G"; bar2 override A7; bar3 F; last bar closes with `||`.
+expect(/^C_G \| A7 \| F \|\|$/m.test(csmpn), `CSMPN bars: pipe-delimited, multi-chord bar uses _ (got:\n${csmpn})`);
 // round-trip: feed the CSMPN bars back as MusicXML-free text — the chord grid survives.
 expect(!/\{start_of_grid\}/.test(csmpn), "CSMPN must NOT use ChordPro grid directives (native pipe bars only)");
 

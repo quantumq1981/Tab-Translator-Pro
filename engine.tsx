@@ -1634,23 +1634,35 @@ function scoreToCSMPN(score, opts = {}) {
   if (opts.tempo) out.push(`Tempo: ${Math.round(opts.tempo)}`);
   _csmPerfHeaders(score, opts).forEach((l) => out.push(l));
   out.push("");
-  // CSMPN fakebook grammar: ONE bar = ONE whitespace token (parseBarStructures splits
-  // on whitespace → each token is a bar). Multiple chords in a bar are joined with `_`
-  // (Bb7_A7) — NOT spaces, which would make them separate bars. `|:`/`:|` are repeat
-  // barline tokens; `1.`/`2.` mark endings; `- Name` starts a section; `%` repeats the
-  // previous bar; an empty bar is `N.C.`. ~4 bars/row.
-  const hasSections = score.bars.some((bar) => bar.section);
+  // CSMPN native (chordsheet.com) grammar: bars are delimited by explicit barline
+  // tokens — `|` between bars, `||` a double/section-end bar, `|:`/`:|` a repeat, `|]`
+  // a final bar (parseBarStructures filters every barline token and takes each
+  // whitespace token between them as a bar). Multiple chords in a bar are joined with
+  // `_` (Bb7_A7) — a space would make them separate bars. `1.`/`2.` mark endings; a
+  // `- Name` line starts a section; `%` repeats the previous bar (simile); an empty bar
+  // is `N.C.`. ~4 bars/row, matching CSMP's own GP-importer house style. This mirrors
+  // the finishing app's Sprint 18 native syntax so a decoded chart reads identically to
+  // a chart authored by hand in chordsheet.com's language.
+  const bars = score.bars;
+  const hasSections = bars.some((bar) => bar.section);
+  // A bar closes its section when the next bar opens a new one (`section` label rides
+  // only on a section's first bar) or it is the last bar → its right barline is `||`.
+  const sectionEnd = (idx) => idx === bars.length - 1 || !!(bars[idx + 1] && bars[idx + 1].section);
   let row = [], prevCell = null, curSection = null, n = 0;
   const flush = () => { if (row.length) { out.push(row.join(" ")); row = []; } };
   if (!hasSections) out.push("- Chart");
-  score.bars.forEach((bar) => {
+  bars.forEach((bar, idx) => {
     if (hasSections && bar.section && bar.section !== curSection) { flush(); out.push("- " + bar.section); curSection = bar.section; prevCell = null; n = 0; }
-    if (bar.repeatStart) row.push("|:");
-    if (bar.ending) row.push(bar.ending + ".");
     let cell = bar.events.length ? bar.events.map((e) => _csmpnSym(_ovSym(bar, e, ov))).join("_") : "N.C.";
     if (cell !== "N.C." && cell === prevCell) cell = "%"; else prevCell = cell;
-    row.push(cell);
-    if (bar.repeatEnd) row.push(":|");
+    // one bar segment = optional `|:` open, optional `1.`/`2.` ending, the chord cell,
+    // then a right barline (`:|` repeat-close wins, else `||` at a section end, else `|`).
+    const seg = [];
+    if (bar.repeatStart) seg.push("|:");
+    if (bar.ending) seg.push(bar.ending + ".");
+    seg.push(cell);
+    seg.push(bar.repeatEnd ? ":|" : sectionEnd(idx) ? "||" : "|");
+    row.push(seg.join(" "));
     if (++n % 4 === 0) { flush(); }
   });
   flush();
