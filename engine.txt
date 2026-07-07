@@ -2116,6 +2116,61 @@ function _fft(re, im) {                                          // in-place ite
     }
   }
 }
+/* Inverse FFT via the conjugation trick: ifft(x) = conj(fft(conj(x)))/N. In-place. */
+function _ifft(re, im) {
+  const n = re.length;
+  for (let i = 0; i < n; i++) im[i] = -im[i];
+  _fft(re, im);
+  for (let i = 0; i < n; i++) { re[i] = re[i] / n; im[i] = -im[i] / n; }
+}
+
+/* ---- center-channel (vocal) isolation ------------------------------------
+ * Lead + backing vocals are almost always mixed to the CENTER (equal in L and R),
+ * while guitars/keys/etc. are panned to the sides — so isolating the center pulls a
+ * usable vocal stem with zero deps (no model), the classic karaoke/azimuth trick done
+ * right in the spectral domain. Per STFT bin we weight by how "centered" it is:
+ *   coherence = 2|L||R| / (|L|²+|R|²)   → 1 when the channel magnitudes match, 0 when
+ *                                          the bin lives on one side (panned)
+ *   phase     = max(0, Re(L·conj R)/(|L||R|))  → 1 in-phase (mono/center), 0 out-of-phase
+ * center_bin = coherence·phase^panExp · (L+R)/2, then overlap-add ISTFT back to time.
+ * Pure DSP (reuses _fft/_ifft) → headless-testable with synthesized stereo. HONEST
+ * LIMIT: centered NON-vocal content (kick/bass/snare) leaks in — a mild high-pass
+ * (opts.minFreq) trims the low end; a real full-mix separator is an ML model (Wave 4).
+ * Feeds the SAME transcribeChords/recognise path, so an isolated vocal stem charts its
+ * sung harmony with no new plumbing. */
+function extractCenter(left, right, sampleRate, opts = {}) {
+  const N = opts.fftSize || 4096, hop = opts.hop || (N >> 2);    // 75% overlap
+  const panExp = opts.panExp != null ? opts.panExp : 1;
+  const minF = opts.minFreq || 0, maxF = opts.maxFreq || sampleRate / 2;
+  const len = Math.min(left.length, right.length);
+  if (!len) return new Float32Array(0);
+  const win = new Float64Array(N);
+  for (let i = 0; i < N; i++) win[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (N - 1));
+  const out = new Float64Array(len), wsum = new Float64Array(len);
+  const lr = new Float64Array(N), li = new Float64Array(N), rr = new Float64Array(N), ri = new Float64Array(N);
+  const eps = 1e-9;
+  for (let s = 0; s + N <= len + hop; s += hop) {
+    for (let i = 0; i < N; i++) { const p = s + i; const w = win[i]; lr[i] = p < len ? (left[p] || 0) * w : 0; li[i] = 0; rr[i] = p < len ? (right[p] || 0) * w : 0; ri[i] = 0; }
+    _fft(lr, li); _fft(rr, ri);
+    for (let k = 0; k < N; k++) {
+      const f = (Math.min(k, N - k) * sampleRate) / N;           // fold to real frequency
+      let g = 0;
+      if (f >= minF && f <= maxF) {
+        const magL = Math.hypot(lr[k], li[k]), magR = Math.hypot(rr[k], ri[k]);
+        const denom = magL * magR + eps;
+        const phase = Math.max(0, (lr[k] * rr[k] + li[k] * ri[k]) / denom);      // cos(Δphase), ≥0
+        const coh = (2 * magL * magR) / (magL * magL + magR * magR + eps);      // magnitude match
+        g = coh * Math.pow(phase, panExp);
+      }
+      lr[k] = g * (lr[k] + rr[k]) * 0.5; li[k] = g * (li[k] + ri[k]) * 0.5;     // weighted mid
+    }
+    _ifft(lr, li);
+    for (let i = 0; i < N; i++) { const p = s + i; if (p < len) { out[p] += lr[i] * win[i]; wsum[p] += win[i] * win[i]; } }
+  }
+  const res = new Float32Array(len);
+  for (let i = 0; i < len; i++) res[i] = wsum[i] > eps ? out[i] / wsum[i] : 0;
+  return res;
+}
 /* One frame of PCM → a max-normalised 12-bin chromagram. Hann window + FFT, fold
  * each bin's magnitude into its pitch class; a light harmonic suppression knocks
  * down the octave/fifth/maj-3rd overtone bleed that would fake chord tones. */
@@ -2514,6 +2569,8 @@ export {
   detectPitch,
   transcribeMonophonic,
   _fft,
+  _ifft,
+  extractCenter,
   pcmToChroma,
   chordFromChroma,
   detectChord,

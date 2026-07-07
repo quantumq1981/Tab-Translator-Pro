@@ -693,6 +693,25 @@ expect(cev.length >= 1 && cev.every((c) => c.symbol === "C"), `clean sustained C
 // energy gate: silence → no chords (no garbage from a quiet/rest passage)
 expect(eng.transcribeChords(new Float32Array(SR), SR).length === 0, "silence → no chords (energy gate)");
 
+/* ---- center-channel (vocal) isolation ------------------------------------
+ * Vocals sit in the CENTER (equal L/R); instruments are panned. extractCenter keeps the
+ * centered content and drops the panned content, spectral-domain — the zero-dep karaoke
+ * trick, so an isolated vocal stem can be charted for its sung harmony. */
+{
+  const tone = (freq, secs, amp = 0.4) => { const n = Math.floor(secs * SR), a = new Float32Array(n); for (let i = 0; i < n; i++) a[i] = amp * Math.sin(2 * Math.PI * freq * i / SR); return a; };
+  const A = tone(440, 1.2), E = tone(329.63, 1.2);              // A4 (centered), E4 (panned left)
+  const L = new Float32Array(A.length), R = new Float32Array(A.length);
+  for (let i = 0; i < A.length; i++) { L[i] = A[i] + E[i]; R[i] = A[i]; } // A centered, E only in L
+  const out = eng.extractCenter(L, R, SR);
+  const ch = eng.pcmToChroma(out.subarray(4096, 8192), SR);
+  expect(out.length === L.length, `extractCenter preserves length, got ${out.length} vs ${L.length}`);
+  expect(ch[9] > 0.9 && ch[4] < 0.15, `center isolation keeps A (pc9=${ch[9].toFixed(2)}) and drops panned E (pc4=${ch[4].toFixed(2)})`);
+  // identity: a purely centered signal (L==R) reconstructs ~unchanged (center weight ~1)
+  const id = eng.extractCenter(A, A, SR);
+  let eIn = 0, eOut = 0; for (let i = 4096; i < 8192; i++) { eIn += A[i] * A[i]; eOut += id[i] * id[i]; }
+  expect(eOut / eIn > 0.9 && eOut / eIn < 1.1, `centered-only signal reconstructs ~unchanged, energy ratio ${(eOut / eIn).toFixed(3)}`);
+}
+
 /* ---- audioEventsToScore: timed chord events → the shared score shape -------- */
 const aev = [
   { symbol: "C", midis: [48, 52, 55], startSec: 0.0, durSec: 1.0 },

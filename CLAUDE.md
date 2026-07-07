@@ -1090,6 +1090,38 @@ note timeline with playback + a live highlight. **Device-only verification** (de
 playback can't be headless-tested). HONEST LIMIT: clean isolated stems = good editable
 sketch; dense voicings / a full mix mislabel.
 
+### Center-channel (vocal) isolation — score sung harmony from a full mix (2026-07-07)
+
+For scoring **vocal harmony parts** without an external stem splitter: lead + backing
+vocals are almost always mixed to the **center** (equal in L and R) while instruments are
+panned to the sides, so isolating the center pulls a usable vocal stem — the classic
+karaoke/azimuth trick, done right in the spectral domain, **zero deps / no model**.
+
+- **`extractCenter(left, right, sampleRate, opts)`** (pure engine, reuses `_fft` + a new
+  **`_ifft`** = conjugation trick): STFT (Hann, 75% overlap) → per-bin **center weight** →
+  overlap-add ISTFT back to time. The weight is `coherence · phase^panExp` where
+  `coherence = 2|L||R|/(|L|²+|R|²)` (→1 when the channel magnitudes match, →0 when the bin
+  is panned to one side) and `phase = max(0, Re(L·conj R)/(|L||R|))` (→1 in-phase/mono,
+  →0 out-of-phase); the kept spectrum is that weight × the mid `(L+R)/2`. `opts.minFreq`
+  is a mild high-pass to trim centered kick/bass leak.
+- **Feeds the SAME `transcribeChords`/`recognise` path** — an isolated vocal chart is just
+  the existing Audio-mode pipeline run on the center-extracted signal, so Edit / all 6
+  exporters / the Pro handoff work for free. No new plumbing.
+- **UI (`AudioImport`, browser-only glue):** the decode path now keeps **both channels**
+  (downsampled to 16 kHz) instead of pre-downmixing; a **🎤 Isolate vocals** toggle runs
+  `extractCenterOffThread` (via `_engineRPC`, main-thread fallback — pure DSP, DOMParser-free
+  so it's worker-safe) → the analysis buffer becomes the isolated center. Toggling re-runs
+  without re-decoding (cached L/R). Playback stays the original mix (we only reconstruct the
+  16 kHz analysis signal, not a full-rate stem).
+- **Validated (`npm test`):** synthesized stereo with a **centered A4** + a **panned-left
+  E4** → `extractCenter` keeps A (chroma pc9 > 0.9) and **drops the panned E** (pc4 < 0.15),
+  and a purely centered signal reconstructs ~unchanged (energy ratio ~1.0, proves the ISTFT
+  normalisation). Decode/playback stay device-only.
+- **HONEST LIMIT:** center extraction is an approximation — **centered non-vocal content
+  (kick/snare/bass) leaks in**, and a mono file is a near-passthrough. True separation from
+  any mix is an ML model (Demucs/MDX-class) = a Wave-4 bet against the iOS/Pages no-WASM-
+  threads wall. This is the zero-dep 80/20 that works today on centered-vocal mixes.
+
 **Audio → editable chart + export (2026-06-20).** A chordal stem no longer dead-ends at a
 timeline: **`audioEventsToScore(events, { bpm, beatsPerBar })`** (pure, tested) quantises
 the timed chord events onto a beat grid → the SAME score shape every parser emits

@@ -195,6 +195,7 @@ import {
   _fft,
   pcmToChroma,
   chordFromChroma,
+  extractCenter,
   detectChord,
   transcribeChords,
   audioEventsToScore,
@@ -384,6 +385,11 @@ async function analyzeAudioOffThread(samples, sr, kind, opts = {}) {
 async function alignPcmToScoreOffThread(samples, sr, score, opts = {}) {
   try { return await _engineRPC("alignPcmToScore", [samples, sr, score, opts]); }
   catch (_) { return alignPcmToScore(samples, sr, score, opts); }
+}
+/* Center-channel (vocal) isolation off-thread (heavy: STFT/ISTFT), main-thread fallback. */
+async function extractCenterOffThread(left, right, sr, opts = {}) {
+  try { return await _engineRPC("extractCenter", [left, right, sr, opts]); }
+  catch (_) { return extractCenter(left, right, sr, opts); }
 }
 
 /* ========================================================================== */
@@ -1498,6 +1504,7 @@ function AudioImport({ C, useSharp }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [kind, setKind] = useState("chords");        // chords | notes
+  const [isolate, setIsolate] = useState(false);     // center-channel (vocal) isolation before analysis
   const [raw, setRaw] = useState([]);                // raw engine events (chords: {symbol,midis,…}; notes: {note,…})
   const [bpm, setBpm] = useState(120);
   const [bpb, setBpb] = useState(4);                 // beats per bar
@@ -1537,20 +1544,36 @@ function AudioImport({ C, useSharp }) {
       const dctx = new AC();
       const audioBuf = await new Promise((res, rej) => { const p = dctx.decodeAudioData(ab, res, rej); if (p && p.then) p.then(res, rej); });
       try { dctx.close(); } catch (_) {}
-      const chs = audioBuf.numberOfChannels, n = audioBuf.length;
-      const mono = new Float32Array(n);
-      for (let c = 0; c < chs; c++) { const d = audioBuf.getChannelData(c); for (let i = 0; i < n; i++) mono[i] += d[i] / chs; }
+      const chs = audioBuf.numberOfChannels;
       const factor = Math.max(1, Math.floor(audioBuf.sampleRate / TARGET));
-      const dsLen = Math.floor(n / factor), ds = new Float32Array(dsLen);
-      for (let i = 0; i < dsLen; i++) { let v = 0; for (let j = 0; j < factor; j++) v += mono[i * factor + j]; ds[i] = v / factor; }
       const sr = audioBuf.sampleRate / factor;
-      ref.current = { audioBuf, ds, sr };
+      // Downsample each channel to ~16k (plenty for chroma) so the STFT isolation + the
+      // analysis both stay light. Keep L/R so we can center-extract on demand.
+      const dsChan = (d) => { const L = Math.floor(d.length / factor), o = new Float32Array(L); for (let i = 0; i < L; i++) { let v = 0; for (let j = 0; j < factor; j++) v += d[i * factor + j]; o[i] = v / factor; } return o; };
+      const l = audioBuf.getChannelData(0);
+      const r = chs >= 2 ? audioBuf.getChannelData(1) : l;
+      const L16 = dsChan(l), R16 = dsChan(r);
+      const mono = new Float32Array(L16.length);
+      for (let i = 0; i < L16.length; i++) mono[i] = (L16[i] + R16[i]) / 2;
+      ref.current = { audioBuf, L16, R16, mono, sr, stereo: chs >= 2 };
       setDur(audioBuf.duration);
-      run(ds, sr, kind);
+      prepare(isolate, kind);
     } catch (_) { setErr("Couldn't decode audio from that file — try an audio file, or a video that has an audio track."); setBusy(false); }
   };
 
-  const switchKind = (k) => { setKind(k); setOverrides({}); const s = ref.current; if (s.ds) run(s.ds, s.sr, k); };
+  // Build the analysis buffer (center-extracted vocals when isolate is on + the file is
+  // stereo, else the plain mono downmix), cache it, then run the recogniser on it.
+  const prepare = async (iso, k) => {
+    const s = ref.current; if (!s.mono) return;
+    if (iso && s.stereo) {
+      setBusy(true); setErr("");
+      try { s.cur = await extractCenterOffThread(s.L16, s.R16, s.sr, { minFreq: 100 }); }
+      catch (_) { s.cur = s.mono; }
+    } else s.cur = s.mono;
+    run(s.cur, s.sr, k);
+  };
+  const switchKind = (k) => { setKind(k); setOverrides({}); const s = ref.current; if (s.cur) run(s.cur, s.sr, k); };
+  const toggleIsolate = () => { const v = !isolate; setIsolate(v); setOverrides({}); prepare(v, kind); };
 
   const play = () => {
     const s = ref.current; if (!s.audioBuf) return;
@@ -1576,7 +1599,7 @@ function AudioImport({ C, useSharp }) {
     <section className="panel-rise" style={{ position: "relative", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18 }}>
       <SectionLabel C={C}>AUDIO → CHART · isolated-stem recognition (experimental)</SectionLabel>
       <div style={{ fontSize: 12, color: C.dim, lineHeight: 1.6, marginBottom: 12 }}>
-        Upload a <b>clean, isolated instrument stem</b> (one guitar / piano / bass — not a full mix) — an <b>audio file</b> (MP3/M4A/WAV) <b>or a video</b> (MP4/MOV; the audio track is extracted). Decoded + analysed entirely on your device; nothing is uploaded. Chordal stems → a chord chart (export / send to Pro); a single-note stem (bass/lead) → notes.
+        Upload a <b>clean, isolated instrument stem</b> (one guitar / piano / bass) — an <b>audio file</b> (MP3/M4A/WAV) <b>or a video</b> (MP4/MOV; the audio track is extracted). Decoded + analysed entirely on your device; nothing is uploaded. Chordal stems → a chord chart (export / send to Pro); a single-note stem (bass/lead) → notes. For a <b>full stereo mix</b>, tap <b>🎤 Isolate vocals</b> to center-extract the vocal (where lead + backing harmony usually sit) before charting — the zero-download karaoke trick.
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 14 }}>
         <label style={{ ...toggle(C), flex: "none", padding: "8px 16px", cursor: "pointer", borderColor: C.amber, color: C.amber }}>
@@ -1591,6 +1614,8 @@ function AudioImport({ C, useSharp }) {
             <button key={k} onClick={() => switchKind(k)} disabled={busy} style={{ ...chip(C), padding: "5px 10px", borderColor: kind === k ? C.cyan : C.border, color: kind === k ? C.cyan : C.dim }}>{lbl}</button>
           ))}
         </span>
+        <button onClick={toggleIsolate} disabled={busy} title="isolate the center channel (where vocals usually sit) before analysing — for scoring sung harmony from a full mix"
+          style={{ ...chip(C), padding: "5px 10px", borderColor: isolate ? C.green : C.border, color: isolate ? C.green : C.dim }}>{isolate ? "🎤 Vocals isolated ✓" : "🎤 Isolate vocals"}</button>
         {name && <span style={{ fontSize: 11, color: C.dim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 180 }}>{name}{dur ? ` · ${fmt(dur)}` : ""}</span>}
       </div>
 
