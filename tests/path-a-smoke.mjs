@@ -712,6 +712,32 @@ expect(eng.transcribeChords(new Float32Array(SR), SR).length === 0, "silence →
   expect(eOut / eIn > 0.9 && eOut / eIn < 1.1, `centered-only signal reconstructs ~unchanged, energy ratio ${(eOut / eIn).toFixed(3)}`);
 }
 
+/* ---- harmonicClarity + the A/B (mix vs isolated) --------------------------
+ * The per-file yardstick for whether center-extraction actually cleans up the harmony
+ * (and thus whether a heavy ML separator would be worth its download): clarity = mean
+ * chroma participation ratio, high for a clean chord, low for noise/mud. The A/B reads
+ * clarity of the raw downmix vs. the isolated center — isolation should RAISE it when the
+ * mud is panned/incoherent (which extractCenter removes). */
+{
+  const tone = (freq, secs, amp = 0.4) => { const n = Math.floor(secs * SR), a = new Float32Array(n); for (let i = 0; i < n; i++) a[i] = amp * Math.sin(2 * Math.PI * freq * i / SR); return a; };
+  const hz = (m) => 440 * Math.pow(2, (m - 69) / 12);
+  const triad = new Float32Array(Math.floor(1.5 * SR));
+  for (const m of [48, 52, 55]) { const t = tone(hz(m), 1.5, 0.4); for (let i = 0; i < t.length; i++) triad[i] += t[i]; }
+  const noise = new Float32Array(triad.length); for (let i = 0; i < noise.length; i++) noise[i] = (Math.random() * 2 - 1) * 0.5; // broadband mud (drums/bleed)
+  const clClean = eng.harmonicClarity(triad, SR);
+  const mud = new Float32Array(triad.length); for (let i = 0; i < mud.length; i++) mud[i] = triad[i] + noise[i];
+  const clMud = eng.harmonicClarity(mud, SR);
+  expect(clClean > clMud, `clarity: a clean triad (${clClean}) reads higher than the same triad + noise (${clMud})`);
+  expect(eng.harmonicClarity(noise, SR) < clClean, "clarity: broadband noise reads lower than a clean chord");
+  expect(eng.harmonicClarity(new Float32Array(SR), SR) === 0, "clarity: silence → 0 (energy gate)");
+  // A/B: centered triad + LEFT-panned noise → isolation should raise clarity vs the downmix
+  const L = mud, R = triad;                                    // noise only in L (panned)
+  const mono = new Float32Array(L.length); for (let i = 0; i < L.length; i++) mono[i] = (L[i] + R[i]) / 2;
+  const iso = eng.extractCenter(L, R, SR);
+  const clMix = eng.harmonicClarity(mono, SR), clIso = eng.harmonicClarity(iso, SR);
+  expect(clIso > clMix, `A/B: isolating the center raises clarity vs the downmix (iso ${clIso} > mix ${clMix})`);
+}
+
 /* ---- audioEventsToScore: timed chord events → the shared score shape -------- */
 const aev = [
   { symbol: "C", midis: [48, 52, 55], startSec: 0.0, durSec: 1.0 },

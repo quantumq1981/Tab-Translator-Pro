@@ -2256,6 +2256,37 @@ function transcribeChords(samples, sampleRate, opts = {}) {
   if (cur) events.push(cur);
   return events.filter((e) => e.endSec - e.startSec >= minDur).map((e) => ({ symbol: e.symbol, midis: e.midis, startSec: +e.startSec.toFixed(3), durSec: +(e.endSec - e.startSec).toFixed(3) }));
 }
+/* harmonicClarity — how legible the harmony in a signal is, 0..1. Per energy-gated frame,
+ * the chroma's **inverse participation ratio** `pr = (Σc)²/Σc²` is the effective number of
+ * lit pitch classes; clarity `(12−pr)/11` → ~1 when energy sits in one/few pcs (a clean
+ * chord) and → 0 when it's spread flat across all 12 (drums/bleed/reverb mud). Mean over
+ * active frames. This is the A/B yardstick for whether center-extraction actually cleans up
+ * a given file (compare the clarity of the raw downmix vs. the isolated center) — and, by
+ * extension, whether a heavy ML separator would even be worth its download. It's a RELATIVE
+ * gauge: a clean synth triad reads ~0.44 (spectral leakage sets a floor), noise ~0.19, so
+ * the DELTA between two versions of the same signal is the read, not the absolute value.
+ * Pure (reuses pcmToChroma). */
+function harmonicClarity(samples, sampleRate, opts = {}) {
+  const win = opts.window || 4096, hop = opts.hop || Math.floor(sampleRate * (opts.hopSec || 0.12));
+  const frames = [];
+  for (let s = 0; s + win <= samples.length; s += hop) {
+    const frame = samples.subarray ? samples.subarray(s, s + win) : samples.slice(s, s + win);
+    let e = 0; for (let i = 0; i < frame.length; i++) e += frame[i] * frame[i];
+    frames.push({ chroma: pcmToChroma(frame, sampleRate, opts), energy: Math.sqrt(e / frame.length) });
+  }
+  if (!frames.length) return 0;
+  const maxE = Math.max(...frames.map((f) => f.energy)) || 1;
+  const gate = (opts.energyGate != null ? opts.energyGate : 0.08) * maxE;
+  let sum = 0, n = 0;
+  for (const f of frames) {
+    if (f.energy < gate) continue;
+    let s1 = 0, s2 = 0; for (const v of f.chroma) { s1 += v; s2 += v * v; }
+    if (s2 <= 1e-12) continue;
+    const pr = (s1 * s1) / s2;                          // effective # of active pitch classes
+    sum += Math.max(0, Math.min(1, (12 - pr) / 11)); n++;
+  }
+  return n ? +(sum / n).toFixed(4) : 0;
+}
 /* Map timed chord events (from `transcribeChords`) onto a beat grid → the SAME score
  * shape every parser emits, so an audio stem flows into the chart, exporters, CSMPN
  * handoff, transpose, etc. Quantises each event's `startSec` to a beat at `bpm`
@@ -2575,6 +2606,7 @@ export {
   chordFromChroma,
   detectChord,
   transcribeChords,
+  harmonicClarity,
   audioEventsToScore,
   _cosDist,
   _dtw,

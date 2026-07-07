@@ -1122,6 +1122,31 @@ karaoke/azimuth trick, done right in the spectral domain, **zero deps / no model
   any mix is an ML model (Demucs/MDX-class) = a Wave-4 bet against the iOS/Pages no-WASM-
   threads wall. This is the zero-dep 80/20 that works today on centered-vocal mixes.
 
+#### A/B clarity — is isolation (or a heavy separator) worth it on THIS file? (2026-07-07)
+
+Before betting on a 166 MB Demucs/MDX ONNX model, **measure whether even the free
+center-extraction helps a given file** — that answer gates whether the ML path is worth
+pursuing at all. **`harmonicClarity(samples, sampleRate, opts)`** (pure, reuses `pcmToChroma`)
+scores how legible a signal's harmony is, 0..1: per energy-gated frame it takes the chroma's
+**inverse participation ratio** `pr = (Σc)²/Σc²` (the effective # of lit pitch classes) →
+`(12−pr)/11`, meaned over active frames. A clean chord concentrates energy in a few pcs
+(high); drums/bleed/reverb spread it flat across 12 (low). It's a **RELATIVE** gauge — a
+clean synth triad reads ~0.44 (spectral leakage sets a floor), noise ~0.19 — so the **delta**
+between two versions of the same signal is the read, not the absolute.
+
+- **UI (`AudioImport`):** a **⚖ A/B clarity** button (stereo files only) runs
+  `harmonicClarityOffThread` on the raw downmix vs. the center-extracted signal and shows
+  both + the % delta with a verdict: isolation helps here (worth 🎤, and if it's still not
+  clean enough that's the case where a heavy separator might pay off) / isn't improving
+  clarity (vocal not centered or already clean — a separator likely wouldn't help either).
+- **Validated (`npm test`):** a clean triad reads higher than the same triad + broadband
+  noise, noise reads lower than a chord, silence → 0, and the A/B on a **centered triad +
+  left-panned noise** confirms `harmonicClarity(extractCenter(L,R)) > harmonicClarity(downmix)`
+  — i.e. the metric detects isolation removing the panned mud.
+- **Purpose:** this is the decision instrument for the Demucs question — run it on real
+  material first; if center-extraction already clears the harmony, the heavy model isn't
+  needed; if isolation helps but isn't enough, that's the evidence to justify the ML bet.
+
 **Audio → editable chart + export (2026-06-20).** A chordal stem no longer dead-ends at a
 timeline: **`audioEventsToScore(events, { bpm, beatsPerBar })`** (pure, tested) quantises
 the timed chord events onto a beat grid → the SAME score shape every parser emits

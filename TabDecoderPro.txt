@@ -196,6 +196,7 @@ import {
   pcmToChroma,
   chordFromChroma,
   extractCenter,
+  harmonicClarity,
   detectChord,
   transcribeChords,
   audioEventsToScore,
@@ -390,6 +391,11 @@ async function alignPcmToScoreOffThread(samples, sr, score, opts = {}) {
 async function extractCenterOffThread(left, right, sr, opts = {}) {
   try { return await _engineRPC("extractCenter", [left, right, sr, opts]); }
   catch (_) { return extractCenter(left, right, sr, opts); }
+}
+/* Harmonic-clarity metric off-thread (FFT pass), main-thread fallback. */
+async function harmonicClarityOffThread(samples, sr, opts = {}) {
+  try { return await _engineRPC("harmonicClarity", [samples, sr, opts]); }
+  catch (_) { return harmonicClarity(samples, sr, opts); }
 }
 
 /* ========================================================================== */
@@ -1505,6 +1511,7 @@ function AudioImport({ C, useSharp }) {
   const [err, setErr] = useState("");
   const [kind, setKind] = useState("chords");        // chords | notes
   const [isolate, setIsolate] = useState(false);     // center-channel (vocal) isolation before analysis
+  const [ab, setAb] = useState(null);                // { mix, iso } harmonic-clarity A/B, or "busy"
   const [raw, setRaw] = useState([]);                // raw engine events (chords: {symbol,midis,…}; notes: {note,…})
   const [bpm, setBpm] = useState(120);
   const [bpb, setBpb] = useState(4);                 // beats per bar
@@ -1536,7 +1543,7 @@ function AudioImport({ C, useSharp }) {
 
   const onFile = async (e) => {
     const f = e.target.files && e.target.files[0]; if (!f) return;
-    setErr(""); setName(f.name); setBusy(true); setRaw([]); setOverrides({}); stopPlay();
+    setErr(""); setName(f.name); setBusy(true); setRaw([]); setOverrides({}); setAb(null); stopPlay();
     try {
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) { setErr("Web Audio isn't available in this browser."); setBusy(false); return; }
@@ -1574,6 +1581,17 @@ function AudioImport({ C, useSharp }) {
   };
   const switchKind = (k) => { setKind(k); setOverrides({}); const s = ref.current; if (s.cur) run(s.cur, s.sr, k); };
   const toggleIsolate = () => { const v = !isolate; setIsolate(v); setOverrides({}); prepare(v, kind); };
+  // A/B: does center-extraction actually clean up THIS file's harmony? Compare the
+  // harmonic clarity of the raw downmix vs. the isolated center (the delta is the read).
+  const runAB = async () => {
+    const s = ref.current; if (!s.mono || !s.stereo) return;
+    setAb("busy");
+    try {
+      const iso = await extractCenterOffThread(s.L16, s.R16, s.sr, { minFreq: 100 });
+      const [mix, isoC] = await Promise.all([harmonicClarityOffThread(s.mono, s.sr), harmonicClarityOffThread(iso, s.sr)]);
+      setAb({ mix, iso: isoC });
+    } catch (_) { setAb(null); }
+  };
 
   const play = () => {
     const s = ref.current; if (!s.audioBuf) return;
@@ -1616,11 +1634,27 @@ function AudioImport({ C, useSharp }) {
         </span>
         <button onClick={toggleIsolate} disabled={busy} title="isolate the center channel (where vocals usually sit) before analysing — for scoring sung harmony from a full mix"
           style={{ ...chip(C), padding: "5px 10px", borderColor: isolate ? C.green : C.border, color: isolate ? C.green : C.dim }}>{isolate ? "🎤 Vocals isolated ✓" : "🎤 Isolate vocals"}</button>
+        {ref.current.stereo && <button onClick={runAB} disabled={busy || ab === "busy"} title="does isolating the center actually clean up THIS file's harmony? compares chroma clarity of the mix vs. the isolated center"
+          style={{ ...chip(C), padding: "5px 10px", borderColor: C.border, color: C.dim }}>{ab === "busy" ? "measuring…" : "⚖ A/B clarity"}</button>}
         {name && <span style={{ fontSize: 11, color: C.dim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 180 }}>{name}{dur ? ` · ${fmt(dur)}` : ""}</span>}
       </div>
 
       {busy && <div style={{ fontSize: 13, color: C.amber, marginBottom: 12 }}>⏳ Analyzing… (FFT over the whole stem)</div>}
       {err && <div style={{ fontSize: 12, color: C.red, marginBottom: 12 }}>{err}</div>}
+
+      {/* A/B clarity readout: is center-extraction worth it on THIS file? */}
+      {ab && ab !== "busy" && (() => {
+        const helps = ab.iso - ab.mix > 0.02;
+        const pct = ab.mix > 0 ? Math.round(((ab.iso - ab.mix) / ab.mix) * 100) : 0;
+        return (
+          <div style={{ fontSize: 12, color: C.dim, marginBottom: 12, padding: "8px 12px", background: C.raised, border: `1px solid ${helps ? C.green : C.border}`, borderRadius: 8, lineHeight: 1.6 }}>
+            <b style={{ color: C.text }}>Harmony clarity</b> — mix <b style={{ color: C.amber }}>{ab.mix.toFixed(3)}</b> · isolated <b style={{ color: helps ? C.green : C.amber }}>{ab.iso.toFixed(3)}</b> ({pct >= 0 ? "+" : ""}{pct}%).{" "}
+            {helps
+              ? <span style={{ color: C.green }}>Isolation cleans up the harmony here — worth using 🎤. (If it's still not clean enough, that's the case where a heavy ML separator might pay off.)</span>
+              : <span>Isolation isn't improving clarity on this file — the vocal may not be centered, or it's already clean. A heavy ML separator likely wouldn't help either.</span>}
+          </div>
+        );
+      })()}
 
       {/* CHORDS → editable chart + export/handoff, with a tempo/meter grid control */}
       {kind === "chords" && audioScore && (
