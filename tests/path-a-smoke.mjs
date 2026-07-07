@@ -132,6 +132,26 @@ const sv = simp.bars.slice(0, 8).map((b) => (b.events[0] ? b.events[0].symbol : 
 expect(sv === "E A A E E A A E", `simplified verse expected "E A A E E A A E", got "${sv}"`);
 expect(simp.bars[0].events[0].beat === 0 && simp.bars[0].events[0].durBeats === 4, "simplified bar = one downbeat chord filling the bar");
 
+/* ---- isMelodicScore: auto-Simplify gate for arpeggiated / single-note charts -- */
+// A block-harmony chart (Blue Sky PDF, all multi-note voicings) is NOT melodic.
+expect(eng.isMelodicScore(score) === false, "block-harmony chart should not read as melodic");
+expect(eng.melodicFraction(score) < 0.5, "Blue Sky single-note fraction should be < 0.5");
+// An arpeggiated bar (each event one note) reads as melodic → auto-Simplify.
+const arpScore = { timeSig: [4, 4], bars: [{ number: 1, events: [
+  { symbol: "B", beat: 0, durBeats: 1, midis: [59] }, { symbol: "Ab", beat: 1, durBeats: 1, midis: [56] },
+  { symbol: "F#", beat: 2, durBeats: 1, midis: [54] }, { symbol: "B", beat: 3, durBeats: 1, midis: [59] },
+] }] };
+expect(eng.isMelodicScore(arpScore) === true, "an all-single-note (arpeggiated) chart should read as melodic");
+expect(eng.melodicFraction(arpScore) === 1, "a pure single-note chart is 100% melodic");
+// too few events → not melodic (avoids over-triggering on a tiny chart)
+expect(eng.isMelodicScore({ timeSig: [4, 4], bars: [{ number: 1, events: [{ symbol: "B", beat: 0, durBeats: 4, midis: [59] }] }] }) === false, "a single-event chart is below the minEvents gate");
+// a mixed chart under threshold stays non-melodic (block chords dominate)
+const mixed = { timeSig: [4, 4], bars: [{ number: 1, events: [
+  { symbol: "C", beat: 0, durBeats: 1, midis: [48, 52, 55] }, { symbol: "G", beat: 1, durBeats: 1, midis: [55, 59, 62] },
+  { symbol: "A", beat: 2, durBeats: 1, midis: [57] }, { symbol: "F", beat: 3, durBeats: 1, midis: [53, 57, 60] },
+] }] };
+expect(eng.isMelodicScore(mixed) === false, "a mostly-block-chord chart (25% single) is not melodic");
+
 /* ---- Path C: MusicXML import (explicit meter + tuning + rhythm) ----------- */
 const xml = fs.readFileSync(path.join(here, "fixtures", "sample.musicxml"), "utf8");
 const mx = eng.parseMusicXML(xml, true);
