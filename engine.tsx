@@ -499,6 +499,27 @@ function simplifyScore(score, useSharp) {
   return { ...score, bars, simplified: true };
 }
 
+/* ---- melodic detection: "mostly single notes" → a line, not block harmony ----
+ * An arpeggiated / single-note part (a lead line, a plucked/arpeggiated rhythm
+ * guitar, a single-note PDF head) recognises one "chord" per note, so its bars come
+ * out over-quartered (Bb_Ab_F#_B …). `isMelodicScore` is the shared, pure test the UI
+ * uses BOTH to nudge AND to auto-enable Simplify (1 chord/bar) so such a chart exports
+ * / hands off as a clean fakebook. `melodicFraction` returns the raw single-note ratio.
+ * Kept in the pure engine (not the UI) so it's the single source of the threshold and
+ * headless-testable. Default gate: ≥4 events AND ≥50% of them single-note. */
+function melodicFraction(score) {
+  let total = 0, single = 0;
+  (score.bars || []).forEach((b) => (b.events || []).forEach((e) => { total++; if (e.midis && e.midis.length === 1) single++; }));
+  return total ? single / total : 0;
+}
+function isMelodicScore(score, opts = {}) {
+  const minEvents = opts.minEvents != null ? opts.minEvents : 4;
+  const threshold = opts.threshold != null ? opts.threshold : 0.5;
+  let total = 0;
+  (score.bars || []).forEach((b) => (b.events || []).forEach(() => total++));
+  return total >= minEvents && melodicFraction(score) >= threshold;
+}
+
 /* ---- arrange: procedural rhythm generator (Roadmap Wave 2 #8) --------------
  * Turns a recognised HARMONIC chart (chords on their beats) into a rhythmic
  * ARRANGEMENT by stamping a comping/strum template across each bar — each hit
@@ -2365,6 +2386,8 @@ export {
   _fillTrueDur,
   buildScore,
   simplifyScore,
+  melodicFraction,
+  isMelodicScore,
   STEP_SEMI,
   _xEls,
   _xFirst,

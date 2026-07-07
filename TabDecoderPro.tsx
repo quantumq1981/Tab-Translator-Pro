@@ -66,6 +66,7 @@ import {
   _fillTrueDur,
   buildScore,
   simplifyScore,
+  isMelodicScore,
   STEP_SEMI,
   _xEls,
   _xFirst,
@@ -912,23 +913,25 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   const refAudio = useRef({});
 
   const [showRoman, setShowRoman] = useState(false);
-  const [simplify, setSimplify] = useState(false);
+  // "Mostly single notes" → the chart is a melodic line (an arpeggiated part / a
+  // single-note PDF/tab head), not block harmony. Simplify (1 chord/bar) duration-weights
+  // each bar's notes into one inferred chord — the right tool there — so it's AUTO-ENABLED
+  // for a melodic chart (a densely arpeggiated GP part would otherwise export "quartered",
+  // a chord per note), with the raw per-onset view one toggle away.
+  const melodic = useMemo(() => isMelodicScore(score), [score]);
+  const [simplify, setSimplify] = useState(() => isMelodicScore(score));
   const [arrange, setArrange] = useState("off"); // off | block | quarters | eighths | shuffle
 
   const simp = useMemo(() => (simplify ? simplifyScore(score, useSharp) : score), [simplify, score, useSharp]);
   const base = useMemo(() => (arrange === "off" ? simp : arrangeScore(simp, arrange)), [simp, arrange]);
   const tscore = useMemo(() => transposeScore(base, semis, useSharp), [base, semis, useSharp]);
   const key = useMemo(() => analyzeKey(tscore), [tscore]);
-  // "Mostly single notes" → the chart is a melodic line (e.g. a single-note PDF/tab
-  // head), not block harmony. Simplify (1 chord/bar) duration-weights each bar's notes
-  // into one inferred chord, which is the right tool there — so nudge the user to it.
-  const melodic = useMemo(() => {
-    let total = 0, single = 0;
-    score.bars.forEach((b) => b.events.forEach((e) => { total++; if (e.midis && e.midis.length === 1) single++; }));
-    return total >= 4 && single / total >= 0.5;
-  }, [score]);
 
   useEffect(() => { setBpm(score.tempo || 100); }, [score.tempo]);
+  // Re-apply the melodic auto-default whenever a new score loads (upload / part switch /
+  // decode / restore) — a melodic part auto-simplifies, a block-harmony part reverts to
+  // per-onset. Mid-session the user's manual toggle stands until the next score change.
+  useEffect(() => { setSimplify(isMelodicScore(score)); }, [score]);
   const stopPlay = () => { if (player.current) { player.current.stop(); player.current = null; } setPlaying(false); setPlayKey(""); };
   const stopRef = () => { const s = refAudio.current; if (s.raf) cancelAnimationFrame(s.raf); if (s.src) { try { s.src.stop(); } catch (_) {} s.src = null; } if (s.ctx && s.ctx.state !== "closed") { try { s.ctx.close(); } catch (_) {} s.ctx = null; } s.raf = null; setRefPlaying(false); setPlayKey(""); };
   useEffect(() => () => { stopPlay(); stopRef(); }, []); // stop on unmount

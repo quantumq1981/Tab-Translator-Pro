@@ -571,19 +571,28 @@ bloating the monolith. Lifting `semis`/transpose state out to the parent for per
   weights each pitch class by the total duration it sounds, keeps the strong ones
   (drops passing tones), takes the bass from the **structural** tones (so a brief
   low melody note can't fake a slash), and runs that chroma through the engine →
-  one chord per bar. Default OFF (Blue Sky / clean charts stay per-onset). Honest
+  one chord per bar. **AUTO-ENABLED for a melodic chart** (see below), OFF for block
+  harmony (Blue Sky / clean charts stay per-onset). Honest
   limits: **rootless** / heavily-altered jazz voicings (e.g. Steely Dan) won't always
   match a lead sheet — Edit + Transpose cover the gaps, and MusicXML import is the
   high-fidelity route. (The common extensions `7♭9`/`7♯9`/`9`/`m9`/`maj9`/`add9`/`6/9`/
   `m(maj7)` ARE now modelled in `QUALITIES` — see Invariant 1.)
-  - **Melodic-chart nudge** (`melodic` memo in `ChartPanel`): when **≥50%** of the
-    chart's events are single-note (`midis.length === 1`, over ≥4 events), the chart
-    is a melodic line (a single-note PDF/tab head, or a lead part), not block harmony
-    — so an amber hint banner offers a **Turn on Simplify** button. Gated on `!simplify`
-    (disappears once enabled). Validated against real files: Blue Sky's PDF chord
-    chart and GP rhythm-guitar part read 0% single → no nudge; Blue Sky's lead part
-    and Anthropology's bebop head read 100% → nudge shows. No false positives on the
-    validated chord charts.
+  - **Melodic detection + auto-Simplify** (`isMelodicScore`/`melodicFraction` in
+    `engine.tsx`, the shared pure test; `melodic` memo in `ChartPanel`): a chart is
+    "melodic" when **≥50%** of its events are single-note (`midis.length === 1`, over
+    **≥4** events) — an arpeggiated part, a lead line, or a single-note PDF/tab head,
+    not block harmony. Such a chart would otherwise export "quartered" (one chord per
+    arpeggio note, e.g. `B_Ab_F#_B …`), so **Simplify is turned ON automatically** (the
+    `simplify` state lazy-inits from `isMelodicScore(score)` and re-applies on every
+    score change — upload / part switch / decode / restore), with the raw per-onset view
+    **one toggle away**. Because export / handoff derive from the `simplify` state
+    (`simp → base → tscore`), the CSMPN/CSML/handoff a melodic chart sends is the clean
+    fakebook. When the user manually toggles Simplify **off** on a melodic chart the
+    amber **Turn on Simplify** nudge (gated on `melodic && !simplify`) reappears to offer
+    it back. Validated (`npm test`): Blue Sky's block chart reads < 50% single → not
+    melodic (Simplify stays off); an all-single-note (arpeggiated) chart reads 100% →
+    melodic (auto-on); a 1-event chart is below the `minEvents` gate; a mostly-block
+    chart (25% single) is not melodic. No false positives on the validated chord charts.
 - **Arrange** (`arrangeScore(score, template)`, Roadmap Wave 2 #8): the inverse of
   Simplify — turns a *harmonic* chart into a rhythmic **arrangement** by stamping a
   comping/strum template across each bar; each hit carries the chord **sounding at
