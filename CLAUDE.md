@@ -1090,6 +1090,19 @@ note timeline with playback + a live highlight. **Device-only verification** (de
 playback can't be headless-tested). HONEST LIMIT: clean isolated stems = good editable
 sketch; dense voicings / a full mix mislabel.
 
+**Simple (no-extensions) mode — audio over-labelling fix (2026-07-08).** Polyphonic audio
+(esp. **3-part vocal harmony**) lights 4+ pitch classes per frame, so `recognise` reaches for
+9ths/6-9/maj9/etc. and a plain **G · Em · F · Am** chorus comes back as **Gadd9 · Em9 · Fmaj9
+· Am9** mush (validated on a real isolated-vocal stem of "25 or 6 to 4"). Fix: `recognise`
+gained an **opt-in `opts.maxRank`** that skips qualities above a `rank` (basic triads/7ths/6/
+sus are ranks ≤14; the jazz extensions add9/m(maj7)/6-9/9/m9/maj9/7♭9/7♯9 are ≥15). **DEFAULT
+is undefined → zero filtering, so the tab/PDF/GP/XML oracle stays byte-identical** (the whole
+validated corpus is untouched — guarded by a test). It threads `recognise` → `chordFromChroma`
+→ `transcribeChords`; the Audio panel's **△ Simple** toggle passes `maxRank:14`, collapsing the
+over-labelled soup back to the real skeleton. This is the fast, honest half-fix for vocal
+harmony; the real answer is polyphonic per-voice note transcription (a chord *label* still
+can't name the 3 sung notes — that's the next build).
+
 ### Center-channel (vocal) isolation — score sung harmony from a full mix (2026-07-07)
 
 For scoring **vocal harmony parts** without an external stem splitter: lead + backing

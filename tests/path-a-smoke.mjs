@@ -589,6 +589,22 @@ expect(q([48, 51, 55, 58]) === "Cm7", `m7 must stay Cm7 (not m9), got ${q([48, 5
 // doesn't change this; the assertion just guards that 6/9 didn't start grabbing plain 6ths.
 expect(q([48, 52, 55, 57]) === "Am7/C", `{C E G A} stays Am7/C (m7 out-ranks the enharmonic 6; 6/9 must not override), got ${q([48, 52, 55, 57])}`);
 
+/* ---- opt-in `maxRank` triad/7th bias (audio over-labelling fix) -----------
+ * Polyphonic vocal/instrument chroma lights 4+ pcs, so the scorer over-labels 9ths/
+ * extensions. `recognise(..., { maxRank })` caps complexity (basic chords ≤14, jazz
+ * extensions ≥15) — OPT-IN so the tab/PDF/GP/XML oracle stays byte-identical. */
+{
+  const pcs = [0, 2, 4, 7, 10];                                 // C D E G Bb = C9
+  const def = eng.recognise(pcs, eng.makeMask(pcs), null);      // default (no opts)
+  expect(def.best.quality.suffix === "9", `default still recognises the 9 (oracle unchanged), got "${def.best.quality.suffix}"`);
+  const cap = eng.recognise(pcs, eng.makeMask(pcs), null, { maxRank: 14 });
+  expect(cap.best.quality.rank <= 14 && cap.best.quality.suffix !== "9", `maxRank 14 drops the extension (got rank ${cap.best.quality.rank} "${cap.best.quality.suffix}")`);
+  // flows through chordFromChroma → transcribeChords (the audio path)
+  const ch = new Array(12).fill(0); for (const p of pcs) ch[p] = 1;
+  expect(eng.chordFromChroma(ch, {}).symbol === "C9", "chordFromChroma default → C9");
+  expect(eng.chordFromChroma(ch, { maxRank: 14 }).symbol !== "C9", "chordFromChroma maxRank 14 → not C9");
+}
+
 /* ---- Wave 3 #10: chord-quality classifier + confidence-gated arbiter -------
  * Pure-JS 2-layer MLP brain (weights code-gen'd by scripts/train_chord_classifier.py).
  * The engine stays the ORACLE; the classifier is a gated second opinion. */
