@@ -1515,6 +1515,7 @@ function AudioImport({ C, useSharp }) {
   const [raw, setRaw] = useState([]);                // raw engine events (chords: {symbol,midis,…}; notes: {note,…})
   const [bpm, setBpm] = useState(120);
   const [bpb, setBpb] = useState(4);                 // beats per bar
+  const [simple, setSimple] = useState(false);       // triad/7th bias (no 9th/extension over-labels) — good for vocal harmony
   const [overrides, setOverrides] = useState({});
   const [dur, setDur] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -1533,7 +1534,7 @@ function AudioImport({ C, useSharp }) {
 
   const run = (ds, sr, k) => {
     setBusy(true); setErr("");
-    const opts = k === "notes" ? { hop: Math.floor(sr * 0.08) } : { hopSec: 0.12, smoothSec: 0.5 };
+    const opts = k === "notes" ? { hop: Math.floor(sr * 0.08) } : { hopSec: 0.12, smoothSec: 0.5, ...(simple ? { maxRank: 14 } : {}) };
     setTimeout(async () => {                          // let "Analyzing…" paint first
       try { setRaw((await analyzeAudioOffThread(ds, sr, k, opts)) || []); }
       catch (_) { setErr("Analysis failed on this file."); }
@@ -1580,6 +1581,9 @@ function AudioImport({ C, useSharp }) {
     run(s.cur, s.sr, k);
   };
   const switchKind = (k) => { setKind(k); setOverrides({}); const s = ref.current; if (s.cur) run(s.cur, s.sr, k); };
+  // Re-analyse when the Simple (no-extensions) toggle flips — `run` reads the fresh `simple`.
+  const simpleRef = useRef(simple);
+  useEffect(() => { if (simpleRef.current !== simple) { simpleRef.current = simple; const s = ref.current; if (s.cur) run(s.cur, s.sr, kind); } }, [simple]);
   const toggleIsolate = () => { const v = !isolate; setIsolate(v); setOverrides({}); prepare(v, kind); };
   // A/B: does center-extraction actually clean up THIS file's harmony? Compare the
   // harmonic clarity of the raw downmix vs. the isolated center (the delta is the read).
@@ -1634,6 +1638,8 @@ function AudioImport({ C, useSharp }) {
         </span>
         <button onClick={toggleIsolate} disabled={busy} title="isolate the center channel (where vocals usually sit) before analysing — for scoring sung harmony from a full mix"
           style={{ ...chip(C), padding: "5px 10px", borderColor: isolate ? C.green : C.border, color: isolate ? C.green : C.dim }}>{isolate ? "🎤 Vocals isolated ✓" : "🎤 Isolate vocals"}</button>
+        {kind === "chords" && <button onClick={() => { setSimple((v) => !v); setOverrides({}); }} disabled={busy} title="bias to plain triads / 7ths — stops dense/vocal audio being over-labelled with 9ths & extensions"
+          style={{ ...chip(C), padding: "5px 10px", borderColor: simple ? C.cyan : C.border, color: simple ? C.cyan : C.dim }}>{simple ? "△ Simple ✓" : "△ Simple"}</button>}
         {ref.current.stereo && <button onClick={runAB} disabled={busy || ab === "busy"} title="does isolating the center actually clean up THIS file's harmony? compares chroma clarity of the mix vs. the isolated center"
           style={{ ...chip(C), padding: "5px 10px", borderColor: C.border, color: C.dim }}>{ab === "busy" ? "measuring…" : "⚖ A/B clarity"}</button>}
         {name && <span style={{ fontSize: 11, color: C.dim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 180 }}>{name}{dur ? ` · ${fmt(dur)}` : ""}</span>}

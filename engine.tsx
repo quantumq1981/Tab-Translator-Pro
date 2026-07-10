@@ -123,13 +123,19 @@ function normalise(notes) {
   const chroma = [...new Set(notes.map((nN) => nN.midi % 12))].sort((a, b) => a - b);
   return { chroma, chordMask: makeMask(chroma), bassPc: bassMidi % 12, bassMidi };
 }
-function recognise(chroma, chordMask, bassPc) {
+function recognise(chroma, chordMask, bassPc, opts = {}) {
   if (chroma.length === 0) return null;
   if (chroma.length === 1) return { roots: chroma[0], single: true, candidates: [], bassPc };
   const candidates = [];
   for (const root of chroma) {
     const transposed = rotateRight(chordMask, root);
     for (const q of QUALITIES) {
+      // Opt-in: cap chord complexity by `rank` (basic triads/7ths/6/sus ≤14, jazz
+      // extensions add9/9/m9/maj9/6-9/7♭9/7♯9/m(maj7) ≥15). DEFAULT is undefined → no
+      // filtering, so the oracle stays byte-identical for tab/PDF/GP/XML recognition;
+      // only the audio path opts in (polyphonic vocal/instrument chroma over-labels
+      // extensions — the 3 voices light 4+ pcs, so the scorer reaches for a 9th).
+      if (opts.maxRank != null && q.rank > opts.maxRank) continue;
       const inter = popcount(transposed & q.mask);
       const extra = popcount(transposed & ~q.mask & 0xfff);
       const missing = popcount(q.mask & ~transposed & 0xfff);
@@ -2203,7 +2209,7 @@ function chordFromChroma(chroma, opts = {}) {
   const pcs = [];
   for (let p = 0; p < 12; p++) if (chroma[p] >= thr) pcs.push(p);
   if (pcs.length < 2) return null;
-  const result = recognise(pcs, makeMask(pcs), null);
+  const result = recognise(pcs, makeMask(pcs), null, opts);   // opts.maxRank flows through (triad bias for audio)
   if (!result || result.single || !result.best) return null;
   const rootMidi = 48 + result.best.root;
   const midis = result.best.quality.intervals.map((i) => rootMidi + i);
