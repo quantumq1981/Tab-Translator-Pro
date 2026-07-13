@@ -2327,6 +2327,76 @@ function audioEventsToScore(events, opts = {}) {
   return { source: "audio", timeSig: [beatsPerBar, beatType], tempo: bpm, bars };
 }
 
+/* ============================================================================
+ *  ML note transcription (basic-pitch-style) — the drop-in decoder + seam
+ *  ---------------------------------------------------------------------------
+ *  WHY: pure-JS multi-F0 CANNOT reliably transcribe dense/balanced vocal harmony
+ *  (evidenced — see CLAUDE.md "Polyphonic transcription"). The honest path to the
+ *  actual per-voice NOTES is a small ML note-transcription model (Spotify's
+ *  `basic-pitch`, ~a few MB ONNX — nothing like Demucs's 166 MB). The model itself
+ *  is a browser-only, device-only, must-be-hosted seam; but the HALF of the pipeline
+ *  that turns its output into notes/score is PURE and headless-testable, so it lives
+ *  here, drop-in ready. When a model is hosted + wired, only the inference glue
+ *  (audio → the model's harmonic-CQT input → onset/frame matrices) remains.
+ *
+ *  Contract the model must satisfy (matches basic-pitch's outputs):
+ *    model(pcm, sampleRate, opts) → { onsets, frames, frameRate, minMidi }
+ *      onsets / frames : T×P activation matrices in [0,1] (T time frames, P pitches
+ *                        from `minMidi`); frameRate = frames per second.
+ *  ------------------------------------------------------------------------- */
+
+/* Note-creation post-processing (faithful to basic-pitch's output_to_notes_polyphonic):
+ * each onset peak above threshold starts a note; it's extended forward while the frame
+ * activation stays lit; short blips are dropped. Pure → tested with synthetic matrices. */
+function notesFromActivations(onsets, frames, opts = {}) {
+  const T = frames.length; if (!T) return [];
+  const P = frames[0].length;
+  const minMidi = opts.minMidi != null ? opts.minMidi : 21;    // A0 (basic-pitch's lowest)
+  const frameRate = opts.frameRate || 100;
+  const onsetThr = opts.onsetThresh != null ? opts.onsetThresh : 0.5;
+  const frameThr = opts.frameThresh != null ? opts.frameThresh : 0.3;
+  const minFrames = Math.max(1, Math.round((opts.minDurSec != null ? opts.minDurSec : 0.12) * frameRate));
+  const used = frames.map(() => new Uint8Array(P));
+  const notes = [];
+  for (let t = 0; t < T; t++) for (let p = 0; p < P; p++) {
+    const o = onsets[t][p];
+    if (o < onsetThr) continue;
+    if ((t > 0 && onsets[t - 1][p] > o) || (t < T - 1 && onsets[t + 1][p] > o)) continue; // local-max onset in time
+    if (used[t][p]) continue;
+    let e = t;
+    while (e < T && frames[e][p] >= frameThr && !used[e][p]) { used[e][p] = 1; e++; }
+    const durFrames = e - t;
+    if (durFrames >= minFrames) notes.push({ midi: minMidi + p, startSec: +(t / frameRate).toFixed(3), durSec: +(durFrames / frameRate).toFixed(3), amp: +o.toFixed(3) });
+  }
+  notes.sort((a, b) => a.startSec - b.startSec || a.midi - b.midi);
+  return notes;
+}
+/* Note events → the shared score shape (so the ML transcription flows through the chart,
+ * all 6 exporters, transpose, playback and the Pro handoff for free). Notes whose onsets
+ * fall within `onsetGrid` sec collapse into one simultaneous voicing (a beat's chord). */
+function polyNotesToScore(notes, opts = {}) {
+  const grid = opts.onsetGrid || 0.12, useSharp = opts.useSharp !== false;
+  const cols = [];
+  for (const n of (notes || []).slice().sort((a, b) => a.startSec - b.startSec)) {
+    let c = cols.length && Math.abs(cols[cols.length - 1].startSec - n.startSec) < grid ? cols[cols.length - 1] : null;
+    if (!c) { c = { startSec: n.startSec, midis: [], durSec: 0 }; cols.push(c); }
+    c.midis.push(n.midi); c.durSec = Math.max(c.durSec, n.durSec);
+  }
+  const events = cols.map((c) => ({ symbol: symbolForMidis(c.midis, useSharp), midis: c.midis.slice().sort((a, b) => a - b), startSec: c.startSec, durSec: c.durSec }));
+  const score = audioEventsToScore(events, opts);
+  score.source = "ml";                                          // tag the provenance
+  return score;
+}
+/* Orchestrator: run a pluggable note MODEL over PCM, decode → notes + score. The model is
+ * the ONLY device-only/hosted piece; everything downstream is the pure, tested path. */
+async function transcribeWithNoteModel(pcm, sampleRate, model, opts = {}) {
+  if (typeof model !== "function") throw new Error("no note model configured");
+  const out = await model(pcm, sampleRate, opts);
+  if (!out || !out.frames || !out.onsets) return { notes: [], score: null };
+  const notes = notesFromActivations(out.onsets, out.frames, { frameRate: out.frameRate, minMidi: out.minMidi, ...opts });
+  return { notes, score: polyNotesToScore(notes, opts) };
+}
+
 /* ---- audio ↔ score alignment (DTW auto-sync) ------------------------------
  * Line a real recording up to a score automatically (no manual ♩=): match the
  * audio's chroma sequence against the score's expected chroma via Dynamic Time
@@ -2614,6 +2684,9 @@ export {
   transcribeChords,
   harmonicClarity,
   audioEventsToScore,
+  notesFromActivations,
+  polyNotesToScore,
+  transcribeWithNoteModel,
   _cosDist,
   _dtw,
   scoreChromaSequence,
