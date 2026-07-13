@@ -773,6 +773,33 @@ expect(eng.scoreToMidi(asc, { tempo: 120 }) instanceof Uint8Array, "audio score 
 // faster tempo (240bpm → 0.25s/beat) packs the same seconds into more bars
 expect(eng.audioEventsToScore(aev, { bpm: 240, beatsPerBar: 4 }).bars.length === 3, "bpm changes the beat grid (240bpm → 3 bars)");
 
+/* ---- ML note-transcription decoder (basic-pitch-style, pure half) ----------
+ * Pure-JS multi-F0 can't reliably transcribe dense vocal harmony, so the real path is a
+ * hosted ML model. The model is a device-only seam, but the decode (activation matrices →
+ * note events → score) is pure + tested here so it's drop-in ready. */
+{
+  const T = 100, P = 88, minMidi = 21, fr = 100;
+  const onsets = Array.from({ length: T }, () => new Float32Array(P));
+  const frames = Array.from({ length: T }, () => new Float32Array(P));
+  for (const midi of [60, 64, 67]) { const p = midi - minMidi; onsets[0][p] = 0.9; for (let t = 0; t < T; t++) frames[t][p] = 0.8; } // C major held 1s
+  const notes = eng.notesFromActivations(onsets, frames, { frameRate: fr, minMidi });
+  expect(notes.length === 3 && notes.map((n) => n.midi).join(",") === "60,64,67", `decode: held C major → C4/E4/G4, got [${notes.map((n) => n.midi)}]`);
+  expect(notes[0].startSec === 0 && Math.abs(notes[0].durSec - 1) < 0.02, `decode: note spans the held second, got ${notes[0].startSec}/${notes[0].durSec}`);
+  // a blip shorter than minDur is dropped
+  const ob = Array.from({ length: T }, () => new Float32Array(P)), fb = Array.from({ length: T }, () => new Float32Array(P));
+  ob[0][39] = 0.9; for (let t = 0; t < 3; t++) fb[t][39] = 0.8;   // 3 frames = 0.03s < 0.12s
+  expect(eng.notesFromActivations(ob, fb, { frameRate: fr, minMidi }).length === 0, "decode: sub-minDur blip is dropped");
+  // notes → the shared score shape (source ml), one voicing = C
+  const score = eng.polyNotesToScore(notes, { bpm: 120, beatsPerBar: 4 });
+  expect(score.source === "ml" && score.bars[0].events[0].symbol === "C" && score.bars[0].events[0].midis.join(",") === "60,64,67", "polyNotesToScore → ml score, C voicing carries its notes");
+  // orchestrator runs a pluggable (fake) model then decodes
+  const fake = async () => ({ onsets, frames, frameRate: fr, minMidi });
+  const r = await eng.transcribeWithNoteModel(new Float32Array(1000), 16000, fake, { bpm: 120 });
+  expect(r.notes.length === 3 && r.score.source === "ml", "transcribeWithNoteModel: pluggable model → decoded notes + ml score");
+  let threw = false; try { await eng.transcribeWithNoteModel(new Float32Array(10), 16000, null); } catch (_) { threw = true; }
+  expect(threw, "transcribeWithNoteModel throws a clear error when no model is configured");
+}
+
 /* ---- DTW audio↔score auto-sync -------------------------------------------- */
 // _dtw finds a monotonic path; identical sequences → diagonal, zero cost
 {

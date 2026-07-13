@@ -197,6 +197,7 @@ import {
   chordFromChroma,
   extractCenter,
   harmonicClarity,
+  transcribeWithNoteModel,
   detectChord,
   transcribeChords,
   audioEventsToScore,
@@ -1512,6 +1513,7 @@ function AudioImport({ C, useSharp }) {
   const [kind, setKind] = useState("chords");        // chords | notes
   const [isolate, setIsolate] = useState(false);     // center-channel (vocal) isolation before analysis
   const [ab, setAb] = useState(null);                // { mix, iso } harmonic-clarity A/B, or "busy"
+  const [mlScore, setMlScore] = useState(null);      // ML note-transcription result (basic-pitch), when a model is wired
   const [raw, setRaw] = useState([]);                // raw engine events (chords: {symbol,midis,…}; notes: {note,…})
   const [bpm, setBpm] = useState(120);
   const [bpb, setBpb] = useState(4);                 // beats per bar
@@ -1544,7 +1546,7 @@ function AudioImport({ C, useSharp }) {
 
   const onFile = async (e) => {
     const f = e.target.files && e.target.files[0]; if (!f) return;
-    setErr(""); setName(f.name); setBusy(true); setRaw([]); setOverrides({}); setAb(null); stopPlay();
+    setErr(""); setName(f.name); setBusy(true); setRaw([]); setOverrides({}); setAb(null); setMlScore(null); stopPlay();
     try {
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) { setErr("Web Audio isn't available in this browser."); setBusy(false); return; }
@@ -1585,6 +1587,20 @@ function AudioImport({ C, useSharp }) {
   const simpleRef = useRef(simple);
   useEffect(() => { if (simpleRef.current !== simple) { simpleRef.current = simple; const s = ref.current; if (s.cur) run(s.cur, s.sr, kind); } }, [simple]);
   const toggleIsolate = () => { const v = !isolate; setIsolate(v); setOverrides({}); prepare(v, kind); };
+  /* Per-voice ML note transcription (basic-pitch). Pure-JS multi-F0 can't do dense vocal
+   * harmony, so this runs a PLUGGABLE, hosted model — `window.TTP_NOTE_MODEL(pcm, sr)` →
+   * { onsets, frames, frameRate, minMidi } — then the pure engine decoder turns it into a
+   * chart. No model wired yet → a clear message (the model + iOS inference is the device-
+   * only, must-be-hosted seam; the decode/score half is done + tested). */
+  const voices = async () => {
+    const s = ref.current; if (!s.cur) { setErr("Upload audio first."); return; }
+    const model = typeof window !== "undefined" ? window.TTP_NOTE_MODEL : null;
+    if (typeof model !== "function") { setErr("Per-voice note transcription needs an ML note model (basic-pitch) — not configured on this build. See docs/ML-NOTES.md."); return; }
+    setBusy(true); setErr(""); setMlScore(null);
+    try { const { score } = await transcribeWithNoteModel(s.cur, s.sr, model, { bpm, beatsPerBar: bpb, useSharp }); setMlScore(score); }
+    catch (e) { setErr("Note transcription failed: " + (e && e.message ? e.message : "unknown")); }
+    setBusy(false);
+  };
   // A/B: does center-extraction actually clean up THIS file's harmony? Compare the
   // harmonic clarity of the raw downmix vs. the isolated center (the delta is the read).
   const runAB = async () => {
@@ -1640,6 +1656,8 @@ function AudioImport({ C, useSharp }) {
           style={{ ...chip(C), padding: "5px 10px", borderColor: isolate ? C.green : C.border, color: isolate ? C.green : C.dim }}>{isolate ? "🎤 Vocals isolated ✓" : "🎤 Isolate vocals"}</button>
         {kind === "chords" && <button onClick={() => { setSimple((v) => !v); setOverrides({}); }} disabled={busy} title="bias to plain triads / 7ths — stops dense/vocal audio being over-labelled with 9ths & extensions"
           style={{ ...chip(C), padding: "5px 10px", borderColor: simple ? C.cyan : C.border, color: simple ? C.cyan : C.dim }}>{simple ? "△ Simple ✓" : "△ Simple"}</button>}
+        {kind === "chords" && <button onClick={voices} disabled={busy} title="per-VOICE note transcription (the actual sung notes, not just a chord) via a pluggable ML model — for dense vocal harmony"
+          style={{ ...chip(C), padding: "5px 10px", borderColor: mlScore ? C.green : C.border, color: mlScore ? C.green : C.dim }}>🎼 Voices (ML)</button>}
         {ref.current.stereo && <button onClick={runAB} disabled={busy || ab === "busy"} title="does isolating the center actually clean up THIS file's harmony? compares chroma clarity of the mix vs. the isolated center"
           style={{ ...chip(C), padding: "5px 10px", borderColor: C.border, color: C.dim }}>{ab === "busy" ? "measuring…" : "⚖ A/B clarity"}</button>}
         {name && <span style={{ fontSize: 11, color: C.dim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 180 }}>{name}{dur ? ` · ${fmt(dur)}` : ""}</span>}
@@ -1661,6 +1679,14 @@ function AudioImport({ C, useSharp }) {
           </div>
         );
       })()}
+
+      {/* VOICES (ML) → the per-voice note transcription, rendered through the shared chart */}
+      {mlScore && (
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 11, color: C.green, marginBottom: 6 }}>🎼 Per-voice note transcription (ML) — the actual sung notes, editable + exportable like any chart.</div>
+          <ChartPanel score={mlScore} title={(name || "Vocals") + " · voices"} meta={`${mlScore.bars.length} bars · from ML notes`} C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey="" onPick={() => {}} />
+        </div>
+      )}
 
       {/* CHORDS → editable chart + export/handoff, with a tempo/meter grid control */}
       {kind === "chords" && audioScore && (

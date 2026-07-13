@@ -1103,6 +1103,33 @@ over-labelled soup back to the real skeleton. This is the fast, honest half-fix 
 harmony; the real answer is polyphonic per-voice note transcription (a chord *label* still
 can't name the 3 sung notes — that's the next build).
 
+### Per-voice note transcription — pure-JS ceiling + the ML seam (2026-07-10)
+
+**Pure-JS multi-F0/melody transcription of dense vocal harmony was tried and DOES NOT work —
+do not re-derive it.** ~7 approaches (harmonic-salience multi-F0 + iterative subtraction +
+temporal tracking + note-grouping; predominant/top-voice melody + octave correction) were
+prototyped against a real isolated **3-part** vocal stem. Findings (full write-up in
+`docs/ML-NOTES.md`): multi-F0 gives clean triads on *some* sustained frames but often
+octave-spread pairs / semitone clusters / fragmentation; melody has no single dominant line
+on a **balanced** stack (argmax jumps voices, "highest" catches harmonics an octave up,
+octave-snap over-corrects down). **Conclusion:** pure-JS recovers pitch *classes* reliably
+(hence chords work) but **not octaves or voice separation** — the pure-JS ceiling is the
+chord skeleton (Simple mode). Note-level per-voice transcription needs an ML model.
+
+**The ML path (Spotify `basic-pitch`) — the PURE half is built + tested, the model is a
+hosted/device-only seam.** `basic-pitch` is a ~few-MB note model (not a 166 MB separator), so
+the ONNX/iOS bet is winnable. `engine.tsx` ships the drop-in decode half (pure, headless-
+tested): **`notesFromActivations`** (onset/frame activation matrices → note events, faithful
+basic-pitch note-creation), **`polyNotesToScore`** (note stacks → the shared `source:"ml"`
+score, so chart/exporters/handoff work for free), and **`transcribeWithNoteModel(pcm, sr,
+model, opts)`** (orchestrator over a pluggable model). The UI's **🎼 Voices (ML)** button
+(Audio mode) calls it with `window.TTP_NOTE_MODEL` when present, else shows a clear "not
+configured" message. **Remaining (can't be done from this sandbox — HF is proxy-blocked, no
+device):** host the model, write the browser-only `window.TTP_NOTE_MODEL` inference glue
+(onnxruntime-web + the harmonic-CQT input features → matrices), smoke-test on device. `npm
+test` guards the decode: held C major → C4/E4/G4 notes, sub-minDur blips dropped, notes →
+`ml` score with the C voicing, orchestrator runs a fake model + throws with no model.
+
 ### Center-channel (vocal) isolation — score sung harmony from a full mix (2026-07-07)
 
 For scoring **vocal harmony parts** without an external stem splitter: lead + backing
