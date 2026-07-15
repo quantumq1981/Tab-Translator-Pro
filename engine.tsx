@@ -2016,6 +2016,37 @@ function midiToNoteName(midi, useSharp = true) {
   return names[((m % 12) + 12) % 12] + (Math.floor(m / 12) - 1);
 }
 
+/* ---- staff layout (digital staff view) -------------------------------------
+ * Pure pitch→staff-position math for the UI's SVG staff renderer (the musician-
+ * friendly display of an extracted note line). The spelling tables already
+ * encode the letter each pitch class sits on (a sharp keeps its letter's line —
+ * C#4 sits on C4's position; a flat keeps ITS letter — Bb3 sits on B3's), so
+ * the diatonic index is just octave·7 + letter. */
+const _LETTER_DIAT = { C: 0, D: 1, E: 2, F: 3, G: 4, A: 5, B: 6 };
+function midiToStaffPos(midi, useSharp = true) {
+  const m = Math.round(midi);
+  const name = (useSharp ? NOTE_SHARP : NOTE_FLAT)[((m % 12) + 12) % 12];
+  const letter = name[0], acc = name.length > 1 ? name[1] : "";
+  const octave = Math.floor(m / 12) - 1;
+  return { letter, acc, octave, name: name + octave, diat: octave * 7 + _LETTER_DIAT[letter] };
+}
+/* staffLayout — lay a list of MIDI notes on a treble or bass staff. Picks the
+ * clef from the median pitch (below G3 → bass; a vocal/lead line reads treble,
+ * a bass stem reads bass) unless opts.clef forces one. Each note's `step` is
+ * counted from the clef's BOTTOM LINE (treble E4 / bass G2), +1 per line-or-
+ * space up — so staff lines are even steps 0..8 and ledger lines fall out of
+ * step < 0 / step > 8. Pure → headless-testable; the SVG glue stays in the UI. */
+function staffLayout(midis, useSharp = true, opts = {}) {
+  const clean = (midis || []).map((m) => Math.round(m)).filter((m) => Number.isFinite(m));
+  const clef = opts.clef || (clean.length && median(clean) < 55 ? "bass" : "treble");
+  const refDiat = clef === "bass" ? 2 * 7 + 4 /* G2 */ : 4 * 7 + 2 /* E4 */;
+  const notes = clean.map((m) => {
+    const p = midiToStaffPos(m, useSharp);
+    return { midi: m, step: p.diat - refDiat, acc: p.acc, name: p.name };
+  });
+  return { clef, notes };
+}
+
 /* detectPitch — YIN monophonic pitch detection on one frame of PCM samples.
  * `samples` is a Float32Array / number[] in ~[-1,1]; returns the fundamental as
  * { freq, midi (rounded), note, clarity } or null when no confident pitch.
@@ -2673,6 +2704,8 @@ export {
   freqToMidi,
   midiToFreq,
   midiToNoteName,
+  midiToStaffPos,
+  staffLayout,
   detectPitch,
   transcribeMonophonic,
   _fft,
