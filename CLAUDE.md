@@ -1056,6 +1056,51 @@ MIDI, silence → `null`, an A4→C5 buffer transcribes to two notes 69 & 72). T
 shared substrate for **#12 Practice mode** (compare `detectPitch` output against the
 chart's expected chord tones).
 
+### StaffView — extracted note lines on a real staff (2026-07-15)
+
+The Notes (bass/lead/vocal) results were a flat card list — musically illegible for
+"which notes did it hear". Now they render on a **digital staff** first, cards (with
+timestamps) second. Split along the usual seam:
+
+- **Engine (pure, headless-tested):** `midiToStaffPos(midi, useSharp)` → `{ letter,
+  acc, octave, name, diat }` — the spelling tables already encode the letter each pc
+  sits on (C#4 keeps C4's line, Bb3 keeps B3's), so `diat = octave·7 + letter`.
+  `staffLayout(midis, useSharp, opts)` → `{ clef, notes:[{midi, step, acc, name}] }`;
+  `step` counts from the clef's **bottom line** (treble E4 / bass G2), +1 per
+  line-or-space, so staff lines are even steps 0–8 and ledger lines fall out of
+  step < 0 / > 8. Clef auto-picks **bass below G3 (median)**, `opts.clef` overrides.
+- **UI (`StaffView` in TabDecoderPro.tsx, SVG only, no own math):** even left→right
+  spacing (a *reading* view, not a proportional timeline), ♯/♭ accidentals, ledger
+  lines, note-name captions, active-playback highlight + auto-scroll-into-view.
+  Wired into the Audio panel's Notes view; `noteEvents` now carries `midi`.
+- `npm test` covers the layout math (E4=step 0, middle C=−2, F5=8, C#/Db spelling,
+  bass-register clef pick, override, empty input). Reuse it for any future melody
+  view (ML voices, practice mode).
+
+### Lyrics capture — honest status + mic-level meter (2026-07-15, bug fix)
+
+The reported failure: the panel said "Listening…" while capturing nothing.
+`SpeechRecognition` gives **zero feedback about the input signal**, and the old
+`onend` auto-restart was `try { rec.start() } catch {}` — Chrome throws
+`InvalidStateError` on an immediate re-start, so the session could die silently
+behind a live-looking UI. Three rails now (all in `LyricsCapture`, browser-only):
+
+- **Level meter** — a parallel `getUserMedia` + `AnalyserNode` tap (same seam as
+  LiveTuner) renders a live RMS bar next to "Listening…". Optional: if it can't
+  start, recognition still runs. On an `audio-capture` error the meter stream is
+  released so the recognizer can claim the mic.
+- **Two distinct diagnostics** — level ≈ 0 for >3 s → "no sound is reaching the
+  microphone" (wrong input device / muted); repeated `no-speech` **with** signal →
+  "sound arrives but the recognizer can't parse singing" (ASR is built for talking;
+  suggest vocal-forward source / isolated stem). This separation is the point of
+  the meter — don't collapse the two messages.
+- **Restart that can't lie** — `onend` restarts async; on failure it rebuilds a
+  fresh recognizer (`makeRec()`); if that fails too it surfaces an error and drops
+  the listening state instead of pretending. `onresult` resets the no-speech count.
+
+Device-only (live mic + browser ASR) — smoke-test on hardware; `npm test` covers the
+transpile + module-split contracts.
+
 ## Audio → CHORDS from an isolated stem (2026-06-20)
 
 "Upload an isolated instrument stem → get a chord/note sketch." The owner's pro workflow

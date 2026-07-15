@@ -671,6 +671,31 @@ const tmidis = notes.map((n) => n.midi);
 expect(tmidis.includes(69) && tmidis.includes(72), `transcribe A4→C5 should yield 69 & 72, got [${tmidis}]`);
 expect(notes.every((n) => n.durSec > 0 && typeof n.note === "string"), "transcription notes carry positive durations + names");
 
+/* ---- staff layout (digital staff view math) --------------------------------
+ * Pure pitch→position math for the UI's SVG staff (StaffView). Steps count
+ * from the clef's bottom line (treble E4 / bass G2), +1 per line-or-space. */
+{
+  const e4 = eng.midiToStaffPos(64);
+  expect(e4.letter === "E" && e4.acc === "" && e4.octave === 4 && e4.diat === 30 && e4.name === "E4", `midiToStaffPos E4, got ${JSON.stringify(e4)}`);
+  const cs4 = eng.midiToStaffPos(61);
+  expect(cs4.letter === "C" && cs4.acc === "#" && cs4.diat === 28, `C#4 spells C + ♯ on C4's position, got ${JSON.stringify(cs4)}`);
+  const db4 = eng.midiToStaffPos(61, false);
+  expect(db4.letter === "D" && db4.acc === "b" && db4.diat === 29, `flats: 61 spells Db4 on D4's position, got ${JSON.stringify(db4)}`);
+  const bb3 = eng.midiToStaffPos(58);
+  expect(bb3.letter === "B" && bb3.acc === "b" && bb3.octave === 3, `family default spells 58 as Bb3, got ${JSON.stringify(bb3)}`);
+  const t = eng.staffLayout([64, 60, 66, 77]); // E4 C4 F#4 F5 → a vocal register → treble
+  expect(t.clef === "treble", `vocal register picks treble clef, got ${t.clef}`);
+  expect(t.notes[0].step === 0, `E4 = treble bottom line (step 0), got ${t.notes[0].step}`);
+  expect(t.notes[1].step === -2, `middle C = first ledger below treble (step −2), got ${t.notes[1].step}`);
+  expect(t.notes[2].step === 1 && t.notes[2].acc === "#", `F#4 = bottom space + ♯, got ${JSON.stringify(t.notes[2])}`);
+  expect(t.notes[3].step === 8, `F5 = treble top line (step 8), got ${t.notes[3].step}`);
+  const b = eng.staffLayout([40, 45, 43]); // E2 A2 G2 → a bass register → bass clef
+  expect(b.clef === "bass", `bass register picks bass clef, got ${b.clef}`);
+  expect(b.notes[2].step === 0, `G2 = bass bottom line (step 0), got ${b.notes[2].step}`);
+  expect(eng.staffLayout([40], true, { clef: "treble" }).clef === "treble", "clef override is honoured");
+  expect(eng.staffLayout([]).notes.length === 0, "empty note list → empty layout");
+}
+
 /* ---- audio → chroma → CHORD (clean isolated chordal stem) ------------------
  * Pure DSP: FFT → 12-bin chromagram → the SAME chord engine. Fed synthesized
  * chord tones (each note + 2 harmonics, like a real instrument). The MP3→PCM

@@ -190,6 +190,8 @@ import {
   freqToMidi,
   midiToFreq,
   midiToNoteName,
+  midiToStaffPos,
+  staffLayout,
   detectPitch,
   transcribeMonophonic,
   _fft,
@@ -1387,50 +1389,123 @@ function LyricsCapture({ C }) {
   const [err, setErr] = useState("");
   const [lang, setLang] = useState("en-US");
   const [copied, setCopied] = useState(false);
+  const [level, setLevel] = useState(0);       // live mic RMS (0..~0.5) — proof sound is reaching the mic
+  const [quiet, setQuiet] = useState(false);   // level ~0 for several seconds while "listening" → warn
+  const [noWords, setNoWords] = useState(false); // sound IS arriving but ASR finds no words → explain
   const ref = useRef({});
 
   const SR = (typeof window !== "undefined") && (window.SpeechRecognition || window.webkitSpeechRecognition);
   const supported = !!SR;
 
+  /* Level meter: a parallel getUserMedia + AnalyserNode tap (same seam as
+   * LiveTuner). SpeechRecognition gives ZERO feedback about the input signal —
+   * this is what lets the panel tell "mic is dead / wrong input device" apart
+   * from "sound arrives but the recognizer can't parse singing". Optional: if
+   * it can't start, recognition still runs without it. */
+  const stopMeter = () => {
+    const s = ref.current;
+    if (s.raf) { cancelAnimationFrame(s.raf); s.raf = null; }
+    if (s.stream) { s.stream.getTracks().forEach((t) => { try { t.stop(); } catch (_) {} }); s.stream = null; }
+    if (s.ctx && s.ctx.state !== "closed") { try { s.ctx.close(); } catch (_) {} }
+    s.ctx = null; s.an = null;
+    setLevel(0); setQuiet(false);
+  };
+  const startMeter = async () => {
+    try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) { stream.getTracks().forEach((t) => { try { t.stop(); } catch (_) {} }); return; }
+      const ctx = new AC();
+      if (ctx.state === "suspended") { try { await ctx.resume(); } catch (_) {} }
+      const an = ctx.createAnalyser(); an.fftSize = 1024;
+      ctx.createMediaStreamSource(stream).connect(an);
+      const buf = new Float32Array(an.fftSize);
+      Object.assign(ref.current, { stream, ctx, an, buf, quietMs: 0, lastT: 0, uiT: 0 });
+      const tick = () => {
+        const s = ref.current; if (!s.an) return;
+        if (s.an.getFloatTimeDomainData) s.an.getFloatTimeDomainData(s.buf);
+        else { s.byte = s.byte || new Uint8Array(s.an.fftSize); s.an.getByteTimeDomainData(s.byte); for (let i = 0; i < s.buf.length; i++) s.buf[i] = (s.byte[i] - 128) / 128; }
+        let sum = 0; for (let i = 0; i < s.buf.length; i++) sum += s.buf[i] * s.buf[i];
+        const rms = Math.sqrt(sum / s.buf.length);
+        const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
+        const dt = s.lastT ? now - s.lastT : 0; s.lastT = now;
+        s.quietMs = rms < 0.01 ? (s.quietMs || 0) + dt : 0;   // ~silence at the mic
+        if (now - (s.uiT || 0) > 90) { s.uiT = now; setLevel(rms); setQuiet(s.quietMs > 3000); }
+        s.raf = requestAnimationFrame(tick);
+      };
+      ref.current.raf = requestAnimationFrame(tick);
+    } catch (_) {} // meter is a diagnostic extra — recognition runs without it
+  };
+
   const stop = () => {
     const s = ref.current;
     s.wantStop = true;
     if (s.rec) { try { s.rec.stop(); } catch (_) {} }
-    setListening(false); setInterim("");
+    stopMeter();
+    setListening(false); setInterim(""); setNoWords(false);
   };
   useEffect(() => stop, []); // stop + release the mic on unmount
 
+  /* Build a wired recognizer. Split out so the onend auto-restart can fall back
+   * to a FRESH instance — Chrome can throw InvalidStateError on an immediate
+   * re-start(), and the old silent `catch {}` left the session dead behind a
+   * "Listening…" light (the reported bug). */
+  const makeRec = () => {
+    const rec = new SR();
+    rec.continuous = true;       // keep going across pauses
+    rec.interimResults = true;   // show words as they're heard
+    rec.lang = lang;
+    rec.onresult = (e) => {
+      let live = "", done = "";
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const r = e.results[i];
+        if (r.isFinal) done += r[0].transcript; else live += r[0].transcript;
+      }
+      if (done.trim() || live.trim()) { ref.current.noSpeech = 0; setNoWords(false); }
+      if (done.trim()) setFinalText((t) => (t ? t.replace(/\s+$/, "") + "\n" : "") + done.trim());
+      setInterim(live);
+    };
+    rec.onerror = (ev) => {
+      const k = ev && ev.error;
+      if (k === "no-speech") {                                          // recognizer heard nothing it calls speech; onend auto-restarts
+        const s = ref.current; s.noSpeech = (s.noSpeech || 0) + 1;
+        if (s.noSpeech >= 2) setNoWords(true);                          // recurring → tell the user why nothing appears
+        return;
+      }
+      if (k === "aborted") return;                                      // benign; onend auto-restarts
+      if (k === "audio-capture") { stopMeter(); return; }               // mic busy — free our meter tap so the recognizer can grab it; onend retries
+      if (k === "not-allowed" || k === "service-not-allowed") { setErr("Microphone permission was denied — allow it in your browser settings and try again."); stop(); }
+      else setErr("Speech recognition error: " + (k || "unknown") + ".");
+    };
+    rec.onend = () => {
+      const s = ref.current;
+      if (s.wantStop || s.rec !== rec) { if (s.wantStop) { setInterim(""); setListening(false); } return; }
+      // Web Speech ends on silence — restart to capture a whole song. Restart
+      // async, and on failure rebuild the recognizer; if THAT fails, say so
+      // instead of leaving a dead session that claims to be listening.
+      setTimeout(() => {
+        const s2 = ref.current;
+        if (s2.wantStop || s2.rec !== rec) return;
+        try { rec.start(); }
+        catch (_) {
+          try { const fresh = makeRec(); s2.rec = fresh; fresh.start(); }
+          catch (__) { setErr("Speech recognition stopped and couldn't restart — tap Listen to start again."); setListening(false); setInterim(""); }
+        }
+      }, 120);
+    };
+    return rec;
+  };
+
   const start = () => {
-    setErr("");
+    setErr(""); setNoWords(false);
     if (!supported) { setErr("Live lyrics capture isn't supported in this browser (notably iOS Safari). Try Chrome, Edge or desktop Safari."); return; }
     try {
-      const rec = new SR();
-      rec.continuous = true;       // keep going across pauses
-      rec.interimResults = true;   // show words as they're heard
-      rec.lang = lang;
-      ref.current = { rec, wantStop: false };
-      rec.onresult = (e) => {
-        let live = "", done = "";
-        for (let i = e.resultIndex; i < e.results.length; i++) {
-          const r = e.results[i];
-          if (r.isFinal) done += r[0].transcript; else live += r[0].transcript;
-        }
-        if (done.trim()) setFinalText((t) => (t ? t.replace(/\s+$/, "") + "\n" : "") + done.trim());
-        setInterim(live);
-      };
-      rec.onerror = (ev) => {
-        const k = ev && ev.error;
-        if (k === "no-speech" || k === "aborted") return;                 // benign; onend auto-restarts
-        if (k === "not-allowed" || k === "service-not-allowed") { setErr("Microphone permission was denied — allow it in your browser settings and try again."); stop(); }
-        else setErr("Speech recognition error: " + (k || "unknown") + ".");
-      };
-      rec.onend = () => {
-        const s = ref.current;
-        if (s.wantStop || !s.rec) { setInterim(""); setListening(false); return; }
-        try { s.rec.start(); } catch (_) {}                               // Web Speech ends on silence — restart to capture a whole song
-      };
+      const rec = makeRec();
+      ref.current = { rec, wantStop: false, noSpeech: 0 };
       rec.start();
       setListening(true);
+      startMeter();              // fire-and-forget; failure just means no level bar
     } catch (_) { setErr("Couldn't start speech recognition."); stop(); }
   };
 
@@ -1474,7 +1549,26 @@ function LyricsCapture({ C }) {
               {LANGS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
             </select>
             {listening && <span style={{ fontSize: 12, color: C.red, display: "inline-flex", alignItems: "center", gap: 6 }}><span style={{ width: 8, height: 8, borderRadius: "50%", background: C.red, display: "inline-block", animation: "pulse 1s infinite" }} />Listening…</span>}
+            {listening && (
+              <span title="live microphone input level — if this doesn't move, no sound is reaching the mic" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <span style={{ position: "relative", width: 90, height: 8, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 4, overflow: "hidden", display: "inline-block" }}>
+                  <span style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: `${Math.min(100, Math.round(level * 400))}%`, background: level > 0.01 ? C.green : C.dim, transition: "width .09s linear" }} />
+                </span>
+                <span style={{ fontSize: 10, color: level > 0.01 ? C.green : C.dim }}>mic</span>
+              </span>
+            )}
           </div>
+
+          {listening && quiet && (
+            <div style={{ fontSize: 12, color: C.amber, background: C.bg, border: `1px solid ${C.amber}`, borderRadius: 8, padding: "8px 12px", marginBottom: 12, lineHeight: 1.6 }}>
+              ⚠ <b>No sound is reaching the microphone.</b> The recognizer is running but has nothing to hear — check which input device your browser is using (site mic settings / OS sound input), that the mic isn't muted, and that the song is playing out loud near it.
+            </div>
+          )}
+          {listening && !quiet && noWords && (
+            <div style={{ fontSize: 12, color: C.dim, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, padding: "8px 12px", marginBottom: 12, lineHeight: 1.6 }}>
+              🎤 Sound is reaching the mic, but the recognizer hasn't caught any <i>words</i> yet — browser speech recognition is built for talking and struggles with singing over instruments. Try a vocal-forward section, turn the vocal up (or use an isolated-vocal stem), and move the speaker closer to the mic.
+            </div>
+          )}
 
           <div style={{ minHeight: 140, maxHeight: 300, overflowY: "auto", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: 14, fontSize: 14, lineHeight: 1.7, color: C.text, whiteSpace: "pre-wrap", marginBottom: 12 }}>
             {finalText ? finalText : !listening && <span style={{ color: C.dim }}>Transcribed lyrics will appear here…</span>}
@@ -1494,6 +1588,66 @@ function LyricsCapture({ C }) {
         Note: in Chrome the audio is sent to Google's speech servers for recognition (the recognizer is the browser's, not this app) — so unlike the rest of Tab Translator, lyrics capture isn't fully on-device. Needs mic permission.
       </div>
     </section>
+  );
+}
+
+/* ---- StaffView — an extracted note line on a real musical staff ------------
+ * Presentational SVG only: all pitch→staff-position math is the engine's pure
+ * `staffLayout` (headless-tested); this just draws it. Notes are laid left→right
+ * in played order with even spacing — a READING view for the musician (the
+ * timeline cards keep the timestamps). Clef is auto-picked from the register
+ * (vocal/lead → treble, bass stem → bass); ledger lines and ♯/♭ accidentals
+ * follow the family spelling. The active playback note is highlighted and kept
+ * scrolled into view. */
+function StaffView({ events, activeIdx, C, useSharp }) {
+  const boxRef = useRef(null);
+  const layout = useMemo(() => staffLayout(events.map((e) => e.midi), useSharp), [events, useSharp]);
+  const STEP = 7, DX = 34, LEFT = 56, PAD = 12, LABEL_H = 20;
+  const steps = layout.notes.map((n) => n.step);
+  const maxStep = (steps.length ? Math.max(8, ...steps) : 8) + 2;
+  const minStep = (steps.length ? Math.min(0, ...steps) : 0) - 2;
+  const yOf = (s) => PAD + (maxStep - s) * STEP;
+  const width = LEFT + events.length * DX + 24;
+  const height = yOf(minStep) + LABEL_H;
+  useEffect(() => {                                  // follow playback: keep the active note in view
+    const el = boxRef.current;
+    if (!el || activeIdx < 0) return;
+    const x = LEFT + activeIdx * DX;
+    if (x < el.scrollLeft + 40 || x > el.scrollLeft + el.clientWidth - 60) el.scrollLeft = Math.max(0, x - el.clientWidth / 2);
+  }, [activeIdx]);
+  if (!layout.notes.length) return null;
+  const ledgers = (step) => {                        // even steps outside the 0..8 staff body
+    const out = [];
+    for (let s = -2; s >= step; s -= 2) out.push(s);
+    for (let s = 10; s <= step; s += 2) out.push(s);
+    return out;
+  };
+  return (
+    <div>
+      <div style={{ fontSize: 10, letterSpacing: 2, color: C.dim, marginBottom: 4 }}>
+        STAFF · {layout.clef === "bass" ? "BASS CLEF" : "TREBLE CLEF"} (auto from register)
+      </div>
+      <div ref={boxRef} className="tdp-scroll" style={{ overflowX: "auto", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, marginBottom: 10 }}>
+        <svg width={width} height={height} style={{ display: "block" }}>
+          {[0, 2, 4, 6, 8].map((s) => <line key={s} x1={6} y1={yOf(s)} x2={width - 6} y2={yOf(s)} stroke={C.border} strokeWidth={1} />)}
+          <text x={10} y={layout.clef === "bass" ? yOf(6) + STEP : yOf(2)} fontSize={40} fill={C.dim} dominantBaseline="middle">{layout.clef === "bass" ? "𝄢" : "𝄞"}</text>
+          {layout.notes.map((n, i) => {
+            const x = LEFT + i * DX, y = yOf(n.step), active = i === activeIdx;
+            const color = active ? C.amber : C.cyan;
+            const ev = events[i];
+            return (
+              <g key={i}>
+                <title>{`${n.name} · ${ev.startSec.toFixed(2)}s · ${ev.durSec.toFixed(2)}s`}</title>
+                {ledgers(n.step).map((s) => <line key={s} x1={x - 10} y1={yOf(s)} x2={x + 10} y2={yOf(s)} stroke={C.border} strokeWidth={1} />)}
+                {n.acc && <text x={x - 15} y={y} fontSize={13} fill={color} dominantBaseline="middle" textAnchor="middle">{n.acc === "#" ? "♯" : "♭"}</text>}
+                <ellipse cx={x} cy={y} rx={6.4} ry={4.7} fill={color} style={active ? { filter: `drop-shadow(0 0 5px ${C.amber})` } : undefined} />
+                <text x={x} y={height - 6} fontSize={9} fill={active ? C.amber : C.dim} textAnchor="middle" fontFamily="'IBM Plex Mono', monospace">{n.name}</text>
+              </g>
+            );
+          })}
+        </svg>
+      </div>
+    </div>
   );
 }
 
@@ -1629,7 +1783,7 @@ function AudioImport({ C, useSharp }) {
 
   // chords → a real score (re-quantised live as bpm / time-sig change); notes → a timeline
   const audioScore = useMemo(() => (kind === "chords" && raw.length ? audioEventsToScore(raw, { bpm, beatsPerBar: bpb, useSharp }) : null), [kind, raw, bpm, bpb, useSharp]);
-  const noteEvents = kind === "notes" ? raw.map((e) => ({ label: e.note, startSec: e.startSec, durSec: e.durSec })) : [];
+  const noteEvents = kind === "notes" ? raw.map((e) => ({ label: e.note, midi: e.midi, startSec: e.startSec, durSec: e.durSec })) : [];
   const fmt = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
   const activeIdx = noteEvents.findIndex((e) => pos >= e.startSec && pos < e.startSec + e.durSec);
 
@@ -1718,6 +1872,7 @@ function AudioImport({ C, useSharp }) {
             <button onClick={play} style={{ ...chip(C), padding: "5px 14px", borderColor: playing ? C.green : C.border, color: playing ? C.green : C.amber }}>{playing ? "■ Stop" : "▶ Play"}</button>
             <span style={{ fontSize: 11, color: C.dim }}>{fmt(pos)} / {fmt(dur)} · {noteEvents.length} notes</span>
           </div>
+          <StaffView events={noteEvents} activeIdx={activeIdx} C={C} useSharp={useSharp} />
           <div className="tdp-scroll" style={{ display: "flex", flexWrap: "wrap", gap: 6, maxHeight: 360, overflow: "auto", paddingRight: 4 }}>
             {noteEvents.map((e, i) => (
               <div key={i} title={`${fmt(e.startSec)} · ${e.durSec.toFixed(2)}s`} style={{ minWidth: 54, textAlign: "center", padding: "8px 6px", borderRadius: 8, border: `1px solid ${i === activeIdx ? C.amber : C.border}`, background: i === activeIdx ? `${C.amber}18` : C.bg }}>
@@ -1726,7 +1881,7 @@ function AudioImport({ C, useSharp }) {
               </div>
             ))}
           </div>
-          <div style={{ fontSize: 11, color: C.dim, marginTop: 12, lineHeight: 1.6 }}>The bass/lead line (YIN). For a bass stem this traces the root movement of the tune.</div>
+          <div style={{ fontSize: 11, color: C.dim, marginTop: 12, lineHeight: 1.6 }}>The bass/lead line (YIN) on a real staff — clef auto-picked from the register, ♯/♭ per the spelling toggle. For an isolated-vocal stem this traces the (loudest) sung line; for a bass stem, the root movement. The cards above carry the timestamps.</div>
         </>
       )}
     </section>
