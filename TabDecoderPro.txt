@@ -662,11 +662,12 @@ export default function TabDecoderPro() {
   const confColor = conf >= 0.999 ? "#98c379" : conf >= 0.7 ? "#57d1d6" : "#e9a24b";
   const applyPreset = (p) => { setTuningName(p.tuning); setTab(p.tab); setBlockIdx(0); };
 
-  const C = { bg: "#0b0e10", panel: "#14181b", raised: "#1b2024", border: "#2a3036",
-    text: "#e6e1d7", dim: "#8a8f8c", amber: "#ff6b35", cyan: "#57d1d6", red: "#e06c75", green: "#98c379" };
-    // amber = BandMgtPro family orange (#ff6b35, bright — legible on this dark UI);
-    // the brand accent token, unified with the family. The confidence-scale amber
-    // (confColor above) stays #e9a24b: it's a semantic status color, not the brand.
+  const C = { bg: "#0b0b0f", panel: "#17171d", raised: "#22222b", border: "#33333d",
+    text: "#efe9dc", dim: "#9aa0a6", amber: "#ff6b35", chord: "#ffd9c7", cyan: "#57d1d6", red: "#e06c75", green: "#98c379" };
+    // Family 1 "stage" palette (dark). amber = BandMgtPro family orange (#ff6b35,
+    // the brand accent) and chord = the warm family chord tone (#ffd9c7). The cyan /
+    // red / green and the confidence-scale amber (confColor above, #e9a24b) stay as
+    // semantic status colors, not the brand.
 
   return (
     <div style={{ background: C.bg, color: C.text, minHeight: "100%", fontFamily: "'IBM Plex Mono', ui-monospace, monospace" }}>
@@ -679,7 +680,7 @@ export default function TabDecoderPro() {
         .chord-pop{animation:glowpulse .35s ease-out;}
         .led{transition:background .18s ease,box-shadow .18s ease,color .18s ease;}
         .tdp-scroll::-webkit-scrollbar{width:8px;height:8px;}
-        .tdp-scroll::-webkit-scrollbar-thumb{background:#2a3036;border-radius:8px;}
+        .tdp-scroll::-webkit-scrollbar-thumb{background:#33333d;border-radius:8px;}
         textarea::placeholder{color:#5a605d;}
         .meas:hover{border-color:#ff6b3588!important;}
         .tdp-cols{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:16px;}
@@ -699,9 +700,6 @@ export default function TabDecoderPro() {
       `}</style>
 
       <div style={{ position: "relative", maxWidth: 1100, margin: "0 auto", padding: "20px 16px 40px" }}>
-        <div className="no-print" style={{ position: "absolute", inset: 0, pointerEvents: "none", background: "radial-gradient(120% 60% at 50% -10%, rgba(233,162,75,.10), transparent 60%)" }} />
-        <div className="no-print" style={{ position: "absolute", inset: 0, pointerEvents: "none", opacity: .35, backgroundImage: "repeating-linear-gradient(0deg, rgba(255,255,255,.015) 0 1px, transparent 1px 3px)" }} />
-
         <header className="panel-rise" style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12, marginBottom: 16 }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
             <span style={{ fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: 22, letterSpacing: 1 }}>TAB<span style={{ color: C.amber }}>·</span>DECODER</span>
@@ -830,7 +828,7 @@ export default function TabDecoderPro() {
           <section className="panel-rise" style={{ animationDelay: ".1s", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
             <SectionLabel C={C}>{mode !== "manual" && (selFrets || selMidis) ? "CHORD READOUT" : "LIVE READOUT"}</SectionLabel>
             <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: "22px 16px", textAlign: "center", marginBottom: 14 }}>
-              <div key={symbol} className="chord-pop" style={{ fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: 54, lineHeight: 1, color: C.cyan, textShadow: `0 0 26px ${C.cyan}55` }}>{symbol}</div>
+              <div key={symbol} className="chord-pop" style={{ fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: 54, lineHeight: 1, color: C.chord }}>{symbol}</div>
               {result && result.isSlash && <div style={{ marginTop: 8, fontSize: 11, letterSpacing: 2, color: C.red }}>SLASH CHORD · BASS ≠ ROOT</div>}
             </div>
 
@@ -1339,7 +1337,7 @@ function LiveTuner({ C, useSharp }) {
     <section className="panel-rise" style={{ position: "relative", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 20, maxWidth: 560, margin: "0 auto" }}>
       <SectionLabel C={C}>LIVE TUNER · monophonic (YIN pitch detection)</SectionLabel>
       <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: "26px 16px", textAlign: "center", marginBottom: 14 }}>
-        <div style={{ fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: 64, lineHeight: 1, color: pitch ? C.cyan : C.dim, textShadow: pitch ? `0 0 26px ${C.cyan}55` : "none" }}>
+        <div style={{ fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: 64, lineHeight: 1, color: pitch ? C.cyan : C.dim }}>
           {pitch ? pitch.note : listening ? "…" : "—"}
         </div>
         {pitch && <div style={{ marginTop: 10, fontSize: 12, color: C.dim }}>{pitch.freq.toFixed(1)} Hz · {pitch.cents > 0 ? "+" : ""}{pitch.cents}¢ · clarity {Math.round(pitch.clarity * 100)}%</div>}
