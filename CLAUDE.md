@@ -1277,6 +1277,26 @@ C G Am F." --title "Demo Tune"`. Exported + headless-tested (prompt carries key 
 progression, flags quoted, jazz style only on extended harmony, quote-escaping, long
 progression capped). UI wiring (a "Generate audio ↗" copy button) is the follow-on.
 
+### UI wiring of the three music-skill ideas (2026-07-24, browser-only)
+
+The three ideas from the skill review are now wired into `TabDecoderPro.tsx` (browser-only
+glue; the engine cores above stay pure). Guarded by the transpile + import-contract tests;
+device smoke-test is the remaining step (React render can't be headless-tested).
+
+1. **Describe readout** — a `describe` memo (`describeScore(tscore, …)`) renders a subtle
+   pill row under `ChartPanel`'s meta line: `COMPLEXITY · N chords` + the human tags
+   (`major key`, `jazz / extended harmony`, `waltz (3/4)`, …). Recomputes through the
+   simplify→arrange→transpose chain, so it always describes what's on screen.
+2. **Generate audio ↗** — a new `"music"` branch in `doExport` runs `scoreToMusicPrompt`
+   and shows the `listenhub music generate …` command in the existing `ExportPanel` (reuses
+   its copy/download plumbing; downloads as `.sh`). A button sits with the "send elsewhere"
+   actions next to **→ Chord Sheet Maker Pro**, with a panel hint explaining the CLI runs
+   in the user's own terminal (Node + login).
+3. **Stem round-trip hint** — the Audio panel intro now points users at a
+   `listenhub music stem` split as the ideal isolated-stem input, and frames the existing
+   **⚖ A/B clarity** button as the "did the separation actually help?" gate. No new code
+   path — the stem drops into the same `transcribeChords`/`extractCenter` pipeline.
+
 ### DSP Hann-window memo (bottleneck cleanup, 2026-07-24)
 
 `pcmToChroma` (called once per hop by `transcribeChords` / `harmonicClarity` /

@@ -172,6 +172,8 @@ import {
   _csmlBeats,
   _ordinal,
   scoreToCSML,
+  describeScore,
+  scoreToMusicPrompt,
   _STEP_ALTER_SHARP,
   _STEP_ALTER_FLAT,
   _pcStepAlter,
@@ -939,6 +941,10 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   const base = useMemo(() => (arrange === "off" ? simp : arrangeScore(simp, arrange)), [simp, arrange]);
   const tscore = useMemo(() => transposeScore(base, semis, useSharp), [base, semis, useSharp]);
   const key = useMemo(() => analyzeKey(tscore), [tscore]);
+  // A local, zero-dep analog of the ListenHub music skill's `describe` — a one-glance
+  // summary (complexity + human tags) of whatever the chart currently is (post
+  // simplify/arrange/transpose). Pure metadata; never touches recognition.
+  const describe = useMemo(() => describeScore(tscore, { useSharp, title }), [tscore, useSharp, title]);
 
   useEffect(() => { setBpm(score.tempo || 100); }, [score.tempo]);
   // Re-apply the melodic auto-default whenever a new score loads (upload / part switch /
@@ -1022,13 +1028,14 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
       : fmt === "musicxml" ? scoreToMusicXML(tscore, opts)
       : fmt === "csmpn" ? scoreToCSMPN(tscore, opts)
       : fmt === "csml" ? scoreToCSML(tscore, opts)
+      : fmt === "music" ? scoreToMusicPrompt(tscore, opts).command
       : scoreToChordPro(tscore, opts);
     setExp({ fmt, text }); setCopied(false); setDownloaded(false);
   };
   const copy = () => { try { navigator.clipboard.writeText(exp.text); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch (_) {} };
   // Download the generated export as a real file. Extension/MIME per format so it
   // opens in the right tool (.musicxml → MuseScore/Guitar Pro, .abc → ABC players).
-  const _EXPORT_EXT = { abc: "abc", musicxml: "musicxml", chordpro: "chordpro", csmpn: "csmpn", csml: "csml", midi: "mid" };
+  const _EXPORT_EXT = { abc: "abc", musicxml: "musicxml", chordpro: "chordpro", csmpn: "csmpn", csml: "csml", midi: "mid", music: "sh" };
   const _EXPORT_MIME = { musicxml: "application/vnd.recordare.musicxml+xml", midi: "audio/midi" };
   const download = () => {
     try {
@@ -1082,6 +1089,15 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
         <span style={{ color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 220 }}>{title}</span>
         <span>{meta}{semis ? ` · ${semis > 0 ? "+" : ""}${semis} st` : ""}{key ? ` · key ${keyName(key, useSharp)}` : ""}</span>
       </div>
+      {describe && describe.tags.length > 0 && (
+        <div className="no-print" title="a local read of this chart (the music skill's `describe`, on-device)"
+          style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 5, margin: "0 0 8px", fontSize: 10, color: C.dim }}>
+          <span style={{ letterSpacing: 1.5, textTransform: "uppercase", color: C.dim }}>{describe.complexity} · {describe.uniqueChords} chord{describe.uniqueChords === 1 ? "" : "s"}</span>
+          {describe.tags.map((t, i) => (
+            <span key={i} style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 999, padding: "1px 8px", color: C.dim, whiteSpace: "nowrap" }}>{t}</span>
+          ))}
+        </div>
+      )}
       <div className="no-print" style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
         {[["chart", "Chart"], ["grid", "Grid"]].map(([v, lbl]) => (
           <button key={v} onClick={() => setView(v)} style={{ ...chip(C), padding: "3px 9px", borderColor: view === v ? C.amber : C.border, color: view === v ? C.amber : C.dim }}>{lbl}</button>
@@ -1120,6 +1136,8 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
             <button key={f} onClick={() => doExport(f)} style={{ ...chip(C), padding: "3px 9px", borderColor: exp && exp.fmt === f ? C.cyan : C.border, color: exp && exp.fmt === f ? C.cyan : C.dim }}>{lbl}</button>
           ))}
           <span style={{ width: 1, alignSelf: "stretch", background: C.border, margin: "0 2px" }} />
+          <button onClick={() => doExport("music")} title="Turn this chart into a ready-to-run `listenhub music generate` command (ListenHub / Mureka AI music CLI) — recognize → generate"
+            style={{ ...chip(C), padding: "3px 9px", borderColor: exp && exp.fmt === "music" ? C.cyan : C.border, color: exp && exp.fmt === "music" ? C.cyan : C.dim }}>🎵 Generate audio ↗</button>
           <button onClick={sendToPro} title="Open this chart in Chord Sheet Maker Pro (native CSMPN handoff)"
             style={{ ...chip(C), padding: "3px 10px", borderColor: sent ? C.green : C.amber, color: sent ? C.green : C.amber, fontWeight: 600 }}>{sent ? "opening Pro ✓" : "→ Chord Sheet Maker Pro"}</button>
         </span>
@@ -1247,7 +1265,7 @@ function ExportPanel({ exp, setExp, C, bpm, semis, copy, download, copied, downl
   return (
     <div style={{ marginTop: 12 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-        <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim }}>EXPORT · {exp.fmt === "abc" ? "ABC NOTATION" : exp.fmt === "musicxml" ? "MUSICXML" : exp.fmt === "midi" ? "MIDI FILE" : exp.fmt === "csmpn" ? "CSMPN" : exp.fmt === "csml" ? "CHORDSLASHML" : "CHORDPRO"}</span>
+        <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim }}>EXPORT · {exp.fmt === "abc" ? "ABC NOTATION" : exp.fmt === "musicxml" ? "MUSICXML" : exp.fmt === "midi" ? "MIDI FILE" : exp.fmt === "csmpn" ? "CSMPN" : exp.fmt === "csml" ? "CHORDSLASHML" : exp.fmt === "music" ? "LISTENHUB · GENERATE AUDIO" : "CHORDPRO"}</span>
         <span style={{ display: "inline-flex", gap: 6 }}>
           {!exp.bytes && <button onClick={copy} style={{ ...chip(C), padding: "3px 9px", borderColor: copied ? C.green : C.border, color: copied ? C.green : C.dim }}>{copied ? "copied ✓" : "copy"}</button>}
           <button onClick={download} title={`download as .${extOf(exp.fmt)}`} style={{ ...chip(C), padding: "3px 9px", borderColor: downloaded ? C.green : C.border, color: downloaded ? C.green : C.cyan }}>{downloaded ? "saved ✓" : "⬇ download"}</button>
@@ -1266,6 +1284,7 @@ function ExportPanel({ exp, setExp, C, bpm, semis, copy, download, copied, downl
       {exp.fmt === "musicxml" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>Save as <b>.musicxml</b> and open in MuseScore / Guitar Pro — carries chord symbols + notes + meter. Round-trips back into this app.</div>}
       {exp.fmt === "csmpn" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}><b>Chord Sheet Maker Pro</b>'s native fake-book source (one chord = one bar; <code>_</code> splits a bar) — also carries the real fingering (<code>{"{tab}"}</code>) and decoded strum rhythm (<code>{"{hybrid}"}</code>). Paste into Pro's editor, or use <b>→ Chord Sheet Maker Pro</b> to send it straight there.</div>}
       {exp.fmt === "csml" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}><b>ChordSlashML</b> — Pro's beat-slotted notation (<code>{"|"}</code> measures, <code>_</code> holds, <code>.</code> rests). Paste into Pro's <b>ChordSlashML</b> live editor.</div>}
+      {exp.fmt === "music" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>A ready-to-run <b>ListenHub / Mureka</b> command (<code>@marswave/listenhub-cli</code>, <code>npm i -g</code>, Node ≥ 20) that turns this chart's key / tempo / meter / progression into a prompt for a fresh AI track. The CLI needs Node + login, so it runs in <b>your</b> terminal — <b>copy</b> it, then <code>listenhub auth login</code> once and paste. The <b>recognize → generate</b> half of the pipeline.</div>}
     </div>
   );
 }
@@ -1790,6 +1809,7 @@ function AudioImport({ C, useSharp }) {
       <SectionLabel C={C}>AUDIO → CHART · isolated-stem recognition (experimental)</SectionLabel>
       <div style={{ fontSize: 12, color: C.dim, lineHeight: 1.6, marginBottom: 12 }}>
         Upload a <b>clean, isolated instrument stem</b> (one guitar / piano / bass) — an <b>audio file</b> (MP3/M4A/WAV) <b>or a video</b> (MP4/MOV; the audio track is extracted). Decoded + analysed entirely on your device; nothing is uploaded. Chordal stems → a chord chart (export / send to Pro); a single-note stem (bass/lead) → notes. For a <b>full stereo mix</b>, tap <b>🎤 Isolate vocals</b> to center-extract the vocal (where lead + backing harmony usually sit) before charting — the zero-download karaoke trick.
+        <br /><span style={{ color: C.dim }}>Already have real stems? A <b>ListenHub / Mureka</b> <code>listenhub music stem --audio song.mp3</code> split (per-instrument stems) drops straight in here — that separated stem is the cleanest possible input. <b>⚖ A/B clarity</b> tells you whether the separation actually helped before you commit to charting it.</span>
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 14 }}>
         <label style={{ ...toggle(C), flex: "none", padding: "8px 16px", cursor: "pointer", borderColor: C.amber, color: C.amber }}>
