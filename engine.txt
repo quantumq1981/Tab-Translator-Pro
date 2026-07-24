@@ -1591,6 +1591,51 @@ function describeScore(score, opts = {}) {
     bars: bars.length, events, uniqueChords, chords, sections, melodic, complexity, tags,
   };
 }
+/* scoreToMusicPrompt — the recognize→generate bridge to the ListenHub **music** skill
+ * (`@marswave/listenhub-cli`, a Node-only shell CLI: `listenhub music generate`). The app
+ * is zero-server / client-side and the CLI needs Node + auth, so it can't run IN the app —
+ * instead this turns a decoded chart into a ready-to-run `music generate` command the user
+ * pastes into THEIR ListenHub environment. Pure: derives a natural-language `--prompt` from
+ * `describeScore` (key / tempo / meter / harmony tags) + a collapsed chord-progression
+ * digest, an honest `--style` (only when the harmony signals it), and shell-safe quoting.
+ * Returns { prompt, style, title, instrumental, command, describe }. `opts`: title, style,
+ * instrumental, maxChords, tempo, useSharp. */
+function scoreToMusicPrompt(score, opts = {}) {
+  const d = describeScore(score, opts);
+  // progression digest: symbols across bars, consecutive duplicates collapsed, capped
+  const maxChords = opts.maxChords != null ? opts.maxChords : 24;
+  const seq = [];
+  for (const b of (score && score.bars) || []) for (const e of b.events || []) {
+    const s = e.symbol;
+    if (!s || s === "—") continue;
+    if (!seq.length || seq[seq.length - 1] !== s) seq.push(s);
+  }
+  const shown = seq.slice(0, maxChords);
+  const progression = shown.join(" ") + (seq.length > maxChords ? " …" : "");
+  // honest style: only assert a genre the harmony actually signals
+  const style = opts.style != null ? opts.style
+    : (d.tags.includes("jazz / extended harmony") ? "jazz" : null);
+  const parts = [];
+  parts.push(`A ${d.complexity} chord progression`);
+  if (d.key) parts.push(`in ${d.key}`);
+  const meta = [];
+  if (d.tempo) meta.push(`${d.tempo} BPM`);
+  if (d.timeSig) meta.push(`${d.timeSig} time`);
+  if (meta.length) parts.push(`(${meta.join(", ")})`);
+  const descriptors = d.tags.filter((t) => !/^\d+ sections$/.test(t));
+  let prompt = parts.join(" ");
+  if (descriptors.length) prompt += ` — ${descriptors.join(", ")}`;
+  if (progression) prompt += `. Follow these chord changes: ${progression}`;
+  prompt += ".";
+  const title = opts.title || (score && score.title) || null;
+  const instrumental = !!opts.instrumental;
+  const q = (s) => '"' + String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+  let command = `listenhub music generate --prompt ${q(prompt)}`;
+  if (style) command += ` --style ${q(style)}`;
+  if (title) command += ` --title ${q(title)}`;
+  if (instrumental) command += ` --instrumental`;
+  return { prompt, style, title, instrumental, command, describe: d };
+}
 
 /* ---- exporters: a score → ChordPro grid / ABC (chords + playable notes) ----
  * Both accept an `overrides` map ({ "<bar>.<beat>": "Symbol" }) so user edits
@@ -2794,4 +2839,5 @@ export {
   pcmChromaSequence,
   alignPcmToScore,
   describeScore,
+  scoreToMusicPrompt,
 };

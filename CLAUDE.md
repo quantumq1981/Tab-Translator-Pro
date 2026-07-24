@@ -1259,6 +1259,24 @@ tested (fixture → C major / 4 chords / simple; a 9th/♭9 chart → "jazz / ex
 empty score safe). Drop-in ready for a chart "info" readout and a richer CSMP/handoff
 header — UI wiring is the device-verify follow-on.
 
+### `scoreToMusicPrompt` — recognize→generate bridge to the ListenHub music CLI (2026-07-24)
+
+The **music** skill runs on `@marswave/listenhub-cli` — a **Node ≥20 shell CLI** (OAuth /
+API-key auth, `--json` output, no browser or JS API). It therefore **cannot run inside**
+this zero-server / client-side app. The honest bridge is an **export**, not an embed:
+`scoreToMusicPrompt(score, opts)` turns a decoded chart into a **ready-to-run
+`listenhub music generate` command** the user pastes into THEIR ListenHub environment.
+Pure — builds a natural-language `--prompt` from `describeScore` (key / tempo / meter /
+harmony tags) + a collapsed chord-progression digest, an **honest `--style`** (only when
+the harmony actually signals it, e.g. extended → `jazz`), a `--title`, an opt-in
+`--instrumental`, with **shell-safe quoting** (double-quotes in fields are escaped so a
+chord/title can't break out). Returns `{ prompt, style, title, instrumental, command,
+describe }`. Example: `C G | Am | F` → `listenhub music generate --prompt "A simple chord
+progression in C (120 BPM, 4/4 time) — major key, triadic. Follow these chord changes:
+C G Am F." --title "Demo Tune"`. Exported + headless-tested (prompt carries key +
+progression, flags quoted, jazz style only on extended harmony, quote-escaping, long
+progression capped). UI wiring (a "Generate audio ↗" copy button) is the follow-on.
+
 ### DSP Hann-window memo (bottleneck cleanup, 2026-07-24)
 
 `pcmToChroma` (called once per hop by `transcribeChords` / `harmonicClarity` /

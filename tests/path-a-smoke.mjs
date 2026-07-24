@@ -832,6 +832,28 @@ expect(eng.audioEventsToScore(aev, { bpm: 240, beatsPerBar: 4 }).bars.length ===
   expect(eng.describeScore({ bars: [] }).bars === 0, "describeScore handles an empty score");
 }
 
+/* ---- scoreToMusicPrompt: recognize→generate bridge to the ListenHub music CLI ----
+ * Pure: chart → a ready-to-run `listenhub music generate` command (the CLI is Node-only
+ * + auth'd, so it can't run IN the zero-server app — the user pastes this into theirs). */
+{
+  const m = eng.scoreToMusicPrompt(mx, { title: "Demo Tune" });     // C G | Am | F, C major
+  expect(/^listenhub music generate --prompt "/.test(m.command), `command starts with the CLI invocation, got: ${m.command}`);
+  expect(m.prompt.includes("in C") && m.prompt.includes("C G Am F"), `prompt carries key + progression, got: ${m.prompt}`);
+  expect(m.command.includes('--title "Demo Tune"'), "title flag is included + quoted");
+  expect(!m.command.includes("--instrumental"), "instrumental flag omitted by default");
+  expect(eng.scoreToMusicPrompt(mx, { instrumental: true }).command.includes("--instrumental"), "instrumental flag added when opted in");
+  // honest style: a plain triadic chart asserts no genre; a 9th/♭9 chart → jazz
+  expect(m.style === null && !m.command.includes("--style"), "no --style asserted for a plain major/triadic chart");
+  const jazzScore = { timeSig: [4, 4], bars: [{ number: 1, events: [{ symbol: "Cmaj9", beat: 0, durBeats: 2, midis: [48] }, { symbol: "Am9", beat: 2, durBeats: 2, midis: [57] }] }, { number: 2, events: [{ symbol: "Dm9", beat: 0, durBeats: 2, midis: [50] }, { symbol: "G7♭9", beat: 2, durBeats: 2, midis: [55] }] }] };
+  const jm = eng.scoreToMusicPrompt(jazzScore);
+  expect(jm.style === "jazz" && jm.command.includes('--style "jazz"'), `extended harmony → --style jazz, got ${jm.style}`);
+  // shell-safety: a symbol with a double-quote can't break out of the quoting
+  const evil = { timeSig: [4, 4], title: 'A"B', bars: [{ number: 1, events: [{ symbol: 'C', beat: 0, durBeats: 4, midis: [48] }] }] };
+  expect(eng.scoreToMusicPrompt(evil).command.includes('\\"'), "double-quotes in fields are escaped");
+  // progression digest caps long charts
+  expect(eng.scoreToMusicPrompt(score, { maxChords: 6 }).prompt.includes("…"), "long progression is capped with an ellipsis");
+}
+
 /* ---- ML note-transcription decoder (basic-pitch-style, pure half) ----------
  * Pure-JS multi-F0 can't reliably transcribe dense vocal harmony, so the real path is a
  * hosted ML model. The model is a device-only seam, but the decode (activation matrices →
