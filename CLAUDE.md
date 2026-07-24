@@ -1244,6 +1244,33 @@ tempo *detection* yet (beat-tracking is the next DSP step). Tests: events at 120
 changes the bar count. Remaining: tempo/beat detection, and optional **two-stem fusion**
 (a bass stem for the root + a chordal stem for the quality).
 
+### `describeScore` — local chart summary (music-skill `describe` analog, 2026-07-24)
+
+The ListenHub **music** skill (Music/skill.md — the Mureka toolkit: generate / remix /
+stem / recognize / **describe**) has one analysis capability the app had no local analog
+of: **`describe`** (a description + tags/genres for a file). `describeScore(score, opts)`
+is the zero-dep, pure, reads-only local version — it gathers the ingredients the engine
+already computes (key via `analyzeKey`/`keyName`, meter, tempo, tuning, capo, the chord
+vocabulary with per-symbol counts, section list, melodic flag) into one at-a-glance
+summary + human `tags` (`major/minor key`, `waltz (3/4)`, `jazz / extended harmony`,
+`triadic`, `slash / inversions`, …) and a `complexity` verdict. **It's metadata ABOUT a
+score, never recognition — it cannot touch the validated corpus.** Exported + headless-
+tested (fixture → C major / 4 chords / simple; a 9th/♭9 chart → "jazz / extended";
+empty score safe). Drop-in ready for a chart "info" readout and a richer CSMP/handoff
+header — UI wiring is the device-verify follow-on.
+
+### DSP Hann-window memo (bottleneck cleanup, 2026-07-24)
+
+`pcmToChroma` (called once per hop by `transcribeChords` / `harmonicClarity` /
+`pcmChromaSequence` — thousands of frames per song, the substrate under every audio
+feature: chroma recognition, center-channel isolation, A/B clarity, DTW auto-sync) used
+to recompute an N-point Hann window (N cosines) on **every** call. The window depends
+only on N, so it's now memoised (`_hann(N)`, cached per length); `extractCenter` shares
+the same helper (was an inline duplicate). **Byte-identical output** (same expression,
+same order) — guarded by the existing audio regression tests (C/Am/G7 detection, C-major
+chroma peaks, clarity ordering) plus a direct `_hann` formula/cache-identity test. Pure
+efficiency win on the mobile-Safari path these features target.
+
 ## Path B (scans / photos) — OUT OF SCOPE
 
 Raster tab (a photo or scanned page) has no text layer and needs an OMR/Vision

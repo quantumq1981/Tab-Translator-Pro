@@ -798,6 +798,40 @@ expect(eng.scoreToMidi(asc, { tempo: 120 }) instanceof Uint8Array, "audio score 
 // faster tempo (240bpm → 0.25s/beat) packs the same seconds into more bars
 expect(eng.audioEventsToScore(aev, { bpm: 240, beatsPerBar: 4 }).bars.length === 3, "bpm changes the beat grid (240bpm → 3 bars)");
 
+/* ---- _hann memo: byte-identical window, cached per length --------------------
+ * The DSP core memoises the Hann window (pcmToChroma / extractCenter share it). The
+ * memo must return values identical to the formula, and hand back the SAME cached
+ * instance for a repeated N (so no per-frame recompute). The audio tests above
+ * (C/Am/G7 detection, C-major chroma peaks, clarity) are the real byte-identical guard. */
+{
+  const w = eng._hann(2048);
+  expect(w.length === 2048, "_hann(2048) has length 2048");
+  expect(Math.abs(w[0] - 0) < 1e-12 && Math.abs(w[1024] - 1) < 1e-5 && Math.abs(w[2047] - 0) < 1e-12, "_hann matches the Hann formula (ends 0, centre ≈ 1)");
+  const ref = 0.5 - 0.5 * Math.cos((2 * Math.PI * 500) / (2048 - 1));
+  expect(Math.abs(w[500] - ref) < 1e-15, "_hann value is byte-identical to the inline formula");
+  expect(eng._hann(2048) === w, "_hann returns the SAME cached instance for a repeated N (no recompute)");
+}
+
+/* ---- describeScore: local analog of the music skill's `describe` -------------
+ * A pure, reads-only summary ABOUT a decoded chart — gathers key/meter/tempo/chord
+ * vocabulary/tags the engine already computes. Can't touch recognition (metadata only). */
+{
+  const d = eng.describeScore(mx, { title: "Demo", tempo: 120 });   // fixture: C G | Am | F, C major, bar3 3/4
+  expect(d.title === "Demo" && d.key === "C", `describeScore key → C, got ${d.key}`);
+  expect(d.bars === 3 && d.events === 4, `describeScore counts 3 bars / 4 events, got ${d.bars}/${d.events}`);
+  expect(d.uniqueChords === 4 && d.chords.length === 4, `describeScore vocab = 4 unique chords, got ${d.uniqueChords}`);
+  expect(d.chords[0] && typeof d.chords[0].count === "number", "describeScore chords carry counts");
+  expect(d.tags.includes("major key"), `describeScore tags a major key, got [${d.tags}]`);
+  expect(d.complexity === "simple", `describeScore reads a 4-chord triad chart as simple, got ${d.complexity}`);
+  // Blue Sky (mostly block triads + a couple F#m7, E major) reads major, NOT jazz/extended
+  const dbs = eng.describeScore(score);
+  expect(dbs.key === "E" && dbs.tags.includes("major key") && !dbs.tags.includes("jazz / extended harmony"), `Blue Sky describe → E major, not extended, got ${dbs.key}/[${dbs.tags}]`);
+  const jazz = { timeSig: [4, 4], bars: [{ number: 1, events: [{ symbol: "Cmaj9", beat: 0, durBeats: 2, midis: [48] }, { symbol: "Am9", beat: 2, durBeats: 2, midis: [57] }] }, { number: 2, events: [{ symbol: "Dm9", beat: 0, durBeats: 2, midis: [50] }, { symbol: "G7♭9", beat: 2, durBeats: 2, midis: [55] }] }] };
+  expect(eng.describeScore(jazz).tags.includes("jazz / extended harmony"), "describeScore flags extended (9th/♭9) harmony as jazz");
+  // empty / malformed score is safe (reads-only, no throw)
+  expect(eng.describeScore({ bars: [] }).bars === 0, "describeScore handles an empty score");
+}
+
 /* ---- ML note-transcription decoder (basic-pitch-style, pure half) ----------
  * Pure-JS multi-F0 can't reliably transcribe dense vocal harmony, so the real path is a
  * hosted ML model. The model is a device-only seam, but the decode (activation matrices →

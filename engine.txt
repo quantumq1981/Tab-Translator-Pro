@@ -1536,6 +1536,61 @@ function keyName(key, useSharp) {
   if (!key) return null;
   return (useSharp ? NOTE_SHARP : NOTE_FLAT)[key.tonic] + (key.mode === "minor" ? "m" : "");
 }
+/* describeScore — a local, zero-dep analog of the music skill's `describe` command (which
+ * returns a description + tags/genres/instruments for an audio file). The app already
+ * computes every ingredient — key, meter, tempo, tuning, chord vocabulary — so this just
+ * gathers them into one at-a-glance summary ABOUT a decoded chart. Pure + reads-only, so
+ * it can NEVER touch the validated recognition corpus (it's metadata, not recognition).
+ * Returns { title, key, keyConfidence, tempo, timeSig, tuning, capo, bars, events,
+ * uniqueChords, chords:[{symbol,count}], sections, melodic, complexity, tags }. A natural
+ * home for a chart "info" readout and a richer CSMP/handoff header. */
+function describeScore(score, opts = {}) {
+  const useSharp = opts.useSharp !== false;
+  const bars = (score && score.bars) || [];
+  const counts = new Map();
+  const sections = [];
+  let events = 0, ext = 0, sevenths = 0, slashes = 0;
+  for (const b of bars) {
+    if (b.section) sections.push(b.section);
+    for (const e of b.events || []) {
+      events++;
+      const sym = e.symbol;
+      if (!sym || sym === "—") continue;
+      counts.set(sym, (counts.get(sym) || 0) + 1);
+      if (String(sym).includes("/")) slashes++;
+      const suf = (_parseSym(sym).suffix) || "";
+      if (/9|11|13|add|maj7|6\/9|m\(maj7\)|♭9|♯9/.test(suf)) ext++;
+      if (/7/.test(suf)) sevenths++;
+    }
+  }
+  const chords = [...counts.entries()].map(([symbol, count]) => ({ symbol, count }))
+    .sort((a, b) => b.count - a.count || String(a.symbol).localeCompare(String(b.symbol)));
+  const uniqueChords = chords.length;
+  const key = analyzeKey(score);
+  const timeSig = score && score.timeSig ? `${score.timeSig[0]}/${score.timeSig[1]}` : null;
+  const melodic = isMelodicScore(score);
+  const extRatio = events ? ext / events : 0;
+  const complexity = uniqueChords <= 4 && extRatio < 0.1 ? "simple"
+    : (uniqueChords <= 8 && extRatio < 0.25 ? "moderate" : "complex");
+  const tags = [];
+  if (key) tags.push(key.mode === "minor" ? "minor key" : "major key");
+  if (timeSig === "3/4") tags.push("waltz (3/4)");
+  else if (score && score.timeSig && score.timeSig[1] === 8 && score.timeSig[0] % 3 === 0) tags.push("compound meter");
+  else if (timeSig && timeSig !== "4/4") tags.push(`${timeSig} time`);
+  if (extRatio >= 0.25) tags.push("jazz / extended harmony");
+  else if (events && sevenths / events >= 0.3) tags.push("seventh chords");
+  else if (ext === 0 && sevenths === 0 && events) tags.push("triadic");
+  if (slashes >= Math.max(2, events * 0.15)) tags.push("slash / inversions");
+  if (melodic) tags.push("melodic / single-note line");
+  return {
+    title: opts.title || null,
+    key: keyName(key, useSharp),
+    keyConfidence: key ? +key.confidence.toFixed(2) : null,
+    tempo: (score && score.tempo) || opts.tempo || null,
+    timeSig, tuning: (score && score.tuning) || null, capo: (score && score.capo) || 0,
+    bars: bars.length, events, uniqueChords, chords, sections, melodic, complexity, tags,
+  };
+}
 
 /* ---- exporters: a score → ChordPro grid / ABC (chords + playable notes) ----
  * Both accept an `overrides` map ({ "<bar>.<beat>": "Symbol" }) so user edits
@@ -2160,6 +2215,18 @@ function _ifft(re, im) {
   _fft(re, im);
   for (let i = 0; i < n; i++) { re[i] = re[i] / n; im[i] = -im[i] / n; }
 }
+/* Memoised Hann window, keyed by length N. The analysis paths (transcribeChords /
+ * harmonicClarity / pcmChromaSequence) call pcmToChroma once per hop — thousands of
+ * frames per song — and each call used to recompute N cosines for the window. The
+ * window depends only on N, so cache it: byte-identical values, N transcendental calls
+ * saved per frame (the dominant cost after the FFT). Guarded by the audio regression
+ * tests (C/Am/G7 detection, C-major chroma peaks) — output is unchanged, only faster. */
+const _hannCache = new Map();
+function _hann(N) {
+  let w = _hannCache.get(N);
+  if (!w) { w = new Float64Array(N); for (let i = 0; i < N; i++) w[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (N - 1)); _hannCache.set(N, w); }
+  return w;
+}
 
 /* ---- center-channel (vocal) isolation ------------------------------------
  * Lead + backing vocals are almost always mixed to the CENTER (equal in L and R),
@@ -2181,8 +2248,7 @@ function extractCenter(left, right, sampleRate, opts = {}) {
   const minF = opts.minFreq || 0, maxF = opts.maxFreq || sampleRate / 2;
   const len = Math.min(left.length, right.length);
   if (!len) return new Float32Array(0);
-  const win = new Float64Array(N);
-  for (let i = 0; i < N; i++) win[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (N - 1));
+  const win = _hann(N);
   const out = new Float64Array(len), wsum = new Float64Array(len);
   const lr = new Float64Array(N), li = new Float64Array(N), rr = new Float64Array(N), ri = new Float64Array(N);
   const eps = 1e-9;
@@ -2215,7 +2281,8 @@ function pcmToChroma(samples, sampleRate, opts = {}) {
   let N = opts.fftSize || 4096;
   while (N > samples.length && N > 256) N >>= 1;                 // shrink to fit short frames
   const re = new Float64Array(N), im = new Float64Array(N);
-  for (let i = 0; i < N; i++) { const w = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (N - 1)); re[i] = (samples[i] || 0) * w; }
+  const win = _hann(N);
+  for (let i = 0; i < N; i++) re[i] = (samples[i] || 0) * win[i];
   _fft(re, im);
   const minF = opts.minFreq || 55, maxF = opts.maxFreq || 2000, C0 = 16.351597831287414;
   const raw = new Array(12).fill(0);
@@ -2710,6 +2777,7 @@ export {
   transcribeMonophonic,
   _fft,
   _ifft,
+  _hann,
   extractCenter,
   pcmToChroma,
   chordFromChroma,
@@ -2725,4 +2793,5 @@ export {
   scoreChromaSequence,
   pcmChromaSequence,
   alignPcmToScore,
+  describeScore,
 };
