@@ -666,8 +666,8 @@ export default function TabDecoderPro() {
 
   const C = { bg: "#0b0b0f", panel: "#17171d", raised: "#22222b", border: "#33333d",
     text: "#efe9dc", dim: "#9aa0a6", amber: "#ff6b35", chord: "#ffd9c7", cyan: "#57d1d6", red: "#e06c75", green: "#98c379" };
-    // Family 1 "stage" palette (dark). amber = BandMgtPro family orange (#ff6b35,
-    // the brand accent) and chord = the warm family chord tone (#ffd9c7). The cyan /
+    // Family 1 "stage" palette (dark). amber = the brand orange (#ff6b35) and
+    // chord = the warm family chord tone (#ffd9c7). The cyan /
     // red / green and the confidence-scale amber (confColor above, #e9a24b) stay as
     // semantic status colors, not the brand.
 
