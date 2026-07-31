@@ -1032,6 +1032,32 @@ expect(/__TTP_ENGINE_URL__/.test(uiSrc) && /new Worker\(/.test(uiSrc) && /type:\
 expect(/FICHIER GUITAR PRO/.test(uiSrc) && /ptab/.test(uiSrc), "worker routing must be gated to DOMParser-free formats (GP3/4/5 + Power Tab)");
 expect(/parseScoreOffThread/.test(uiSrc) && /return parseGuitarProOrXML\(/.test(uiSrc), "off-thread parse must fall back to the same main-thread engine call");
 
+/* ---- estimateSpacing: scale-invariant + noise-robust --------------------
+ * Both the Wild Night ("no tab detected") and Confirmation ("wrong key/voicings")
+ * bugs were ONE root cause: a 4× Guitar-Pro / alphaTab PDF export where the true
+ * string-line spacing is ~37.5pt. The old "median of the smaller half, capped
+ * <20pt" returned 7 when no gap fell under 20 (Wild Night → 0 systems) and was
+ * dragged down to text-baseline noise (~3.5) when small jitter gaps existed
+ * (Confirmation → mis-clustered → wrong key/voicings). The mode-of-gaps estimate
+ * recovers the true spacing at any scale, immune to that noise. */
+const synthStaff = (top, spacing, sysGap, systems) => {
+  const ys = [];
+  for (let s = 0; s < systems; s++) {
+    const base = top + s * (spacing * 5 + sysGap);
+    for (let i = 0; i < 6; i++) ys.push(+(base + i * spacing).toFixed(1));
+  }
+  return ys;
+};
+const sp1x = eng.estimateSpacing(synthStaff(50, 7, 200, 3));
+expect(Math.abs(sp1x - 7) < 1, `estimateSpacing 1× export: expected ~7pt, got ${sp1x}`);
+const sp4x = eng.estimateSpacing(synthStaff(100, 37.5, 296, 3));
+expect(Math.abs(sp4x - 37.5) < 2,
+  `estimateSpacing 4× export (Wild Night): expected ~37.5pt, got ${sp4x} — the <20pt cap used to force 7 → 0 systems`);
+// header/text jitter adds a few tiny gaps (0.6/3.5) that the old smaller-half median chased
+const sp4xNoisy = eng.estimateSpacing(synthStaff(100, 37.5, 296, 3).concat([60, 60.6, 64.1, 67.6]));
+expect(Math.abs(sp4xNoisy - 37.5) < 3,
+  `estimateSpacing 4× + noise (Confirmation): expected ~37.5pt, got ${sp4xNoisy} — noise gaps used to drag it to ~3.5 → wrong key`);
+
 /* ---- report -------------------------------------------------------------- */
 console.log(`module split: UI imports ${imported.length}/${exported.length} engine exports, 0 missing · engine.tsx pure`);
 console.log(`PDF.js ${pdfjsLib.version} · ${pages} pages · ${tokens.length} tokens`);
