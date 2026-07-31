@@ -262,6 +262,34 @@ tab carries no tuning we read yet — adding tuning detection is a clean future
 task). One chord per bar unless the harmony changes mid-bar, in which case the
 bar shows the sequence (e.g. `E A`).
 
+### estimateSpacing — mode-of-gaps, scale-invariant (2026-07-31 fix)
+
+**Two real-file bugs, one root cause.** A user's **Van Morrison – Wild Night** PDF read
+"No tab measures detected · 0 bars · 0 systems" (it clearly has tab), and a **Confirmation
+(UG Pro / Parker)** PDF rendered garbage in the wrong key (`E · Bm/D · B · Bm7/A · F# · D`,
+"key Em" — should be F major: `F | Dm7 G7 | Cm7 F7 | Bb7 | …`). Both are 4× Guitar-Pro /
+alphaTab exports (page 4209×2976pt) where the **true string-line spacing is ~37.5pt**.
+
+The old `estimateSpacing` took the *median of the smaller half of gaps, capped `<20pt`*.
+That cap is an absolute assumption that breaks at scale: Wild Night has **no** gap under
+20pt → it fell back to `7` → every threshold ~10× too small → 0 systems. Confirmation had
+a few sub-pixel/text-baseline noise gaps (0.6, 3.5) → the smaller-half median chased them
+down to `~3.5` → mis-clustering → wrong chords/key.
+
+**Fix:** `estimateSpacing` now returns the **modal gap** — cluster near-equal gaps (within
+12%) and take the biggest cluster's median. A staff repeats its line spacing 5×(systems)
+times, so it *dominates* the histogram; noise gaps and the large system/page gaps are rare.
+Verified on the real files: the modal gap is **37.5 in both** (Wild ×12, Confirmation ×20).
+After the fix: Wild Night → **78 bars** detected; Confirmation → the correct **F-major
+changes** (`F | Dm7 G7 | Cm7 F7 | Bb7 | Am7 D7 | Gm7 C7 | F | Fmaj7 …`). It is **scale-
+invariant** — recovers ~7pt on a 1× export (Blue Sky unchanged, 165 bars) and ~37.5pt at
+4×. Guarded by three `npm test` assertions (1× / 4× / 4×-with-noise → the right spacing).
+
+**Still partial (documented honest limits, not this bug):** a dense fingerstyle transcription
+like Wild Night yields many chords per bar (Path A names what is *written*, per-bar); and
+Confirmation captures ~17 of its systems (sparse/`high-e`-silent systems still hit the string-
+anchoring limit below). The *recognition scale* — the reported defect — is now correct.
+
 ### Known limit — string anchoring fails when a system never plays the high e
 
 `topY` (the high-e line) is anchored to the **highest digit row** in a system.
