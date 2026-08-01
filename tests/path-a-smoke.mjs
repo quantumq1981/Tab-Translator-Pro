@@ -1058,6 +1058,35 @@ const sp4xNoisy = eng.estimateSpacing(synthStaff(100, 37.5, 296, 3).concat([60, 
 expect(Math.abs(sp4xNoisy - 37.5) < 3,
   `estimateSpacing 4× + noise (Confirmation): expected ~37.5pt, got ${sp4xNoisy} — noise gaps used to drag it to ~3.5 → wrong key`);
 
+/* ---- real-file regression: the two reported PDFs (2026-07-31) ------------
+ * The user's actual Tab Decoder failures, committed as fixtures (the
+ * fixture-loop principle). Both are 4× Guitar-Pro / alphaTab exports the old
+ * estimateSpacing mis-scaled — Wild Night to 0 systems, Confirmation to a
+ * wrong-key mess. These pin the fixed behaviour against the real bytes. */
+const fx = (name) => new Uint8Array(fs.readFileSync(path.join(here, "fixtures", name)));
+const barsOf = (ch) => ch.measures.map((m) => {
+  const s = m.columns.map((c) => eng.symbolForFrets(c.frets, true));
+  return s.filter((x, i) => i === 0 || x !== s[i - 1]).join(" ");
+});
+
+// Wild Night: read "0 bars · 0 systems · no tab detected" before the fix.
+const { tokens: wnTok } = await extractTokens(fx("wild-night.pdf"));
+const wnChart = eng.buildChart(wnTok);
+expect(wnChart.systemsFound > 0 && wnChart.measures.length > 0,
+  `Wild Night: expected the tab to be detected, got ${wnChart.systemsFound} systems / ${wnChart.measures.length} bars (was 0/0)`);
+
+// Confirmation (UG Pro): rendered in Em with bar 1 = "E" before the fix; it is F major.
+const { tokens: cfTok } = await extractTokens(fx("confirmation-ugpro.pdf"));
+const cfChart = eng.buildChart(cfTok);
+const cfBars = barsOf(cfChart);
+const cfKey = eng.keyName(eng.analyzeKey(eng.buildScore(cfChart, true)), true);
+expect(cfChart.measures.length > 0, `Confirmation: expected bars, got ${cfChart.measures.length}`);
+expect(cfBars[0]?.split(" ")[0] === "F", `Confirmation bar 1 should start on F, got "${cfBars[0]}" (was "E")`);
+expect(cfKey === "F", `Confirmation key should be F, got ${cfKey} (was Em)`);
+const cfAll = cfBars.join(" ");
+expect(["Dm7", "G7", "Cm7", "F7", "Bb7"].every((ch) => cfAll.includes(ch)),
+  `Confirmation should show the F-major ii-V changes, got: ${cfAll}`);
+
 /* ---- report -------------------------------------------------------------- */
 console.log(`module split: UI imports ${imported.length}/${exported.length} engine exports, 0 missing · engine.tsx pure`);
 console.log(`PDF.js ${pdfjsLib.version} · ${pages} pages · ${tokens.length} tokens`);
@@ -1075,6 +1104,8 @@ console.log(`GP5 (.gp5): Anthropology v5.00 "${anth5.parts[1].name}" ${anth5Bars
 console.log(`GP6 (.gpx): Yardbird "${yard6.parts[1].name}" ${yard6Bars} · The Weight key-of-A chords · My Favorite Things ${mft6NonEmpty} piano bars`);
 console.log(`PTB (.ptb): tune open-strings ${tuneSyms} · House of the Rising Sun ${hotrs.bars[0].timeSig.join("/")} Am-arpeggio "${hotrsBar1}" (${hotrs.bars.length} bars)`);
 console.log(`ABC: ${abc.trim().split("\n").pop()}`);
+console.log(`4× exports (reported bugs): Wild Night ${wnChart.systemsFound} systems / ${wnChart.measures.length} bars (was 0/0) · ` +
+  `Confirmation key ${cfKey} (was Em) ${cfBars.slice(0, 7).join(" | ")}`);
 
 if (fails.length) {
   console.error("\nFAIL:\n  " + fails.join("\n  "));
