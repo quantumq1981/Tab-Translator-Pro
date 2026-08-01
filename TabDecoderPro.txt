@@ -666,8 +666,8 @@ export default function TabDecoderPro() {
 
   const C = { bg: "#0b0b0f", panel: "#17171d", raised: "#22222b", border: "#33333d",
     text: "#efe9dc", dim: "#9aa0a6", amber: "#ff6b35", chord: "#ffd9c7", cyan: "#57d1d6", red: "#e06c75", green: "#98c379" };
-    // Family 1 "stage" palette (dark). amber = BandMgtPro family orange (#ff6b35,
-    // the brand accent) and chord = the warm family chord tone (#ffd9c7). The cyan /
+    // Family 1 "stage" palette (dark). amber = the brand orange (#ff6b35) and
+    // chord = the warm family chord tone (#ffd9c7). The cyan /
     // red / green and the confidence-scale amber (confColor above, #e9a24b) stay as
     // semantic status colors, not the brand.
 
@@ -1707,7 +1707,9 @@ function AudioImport({ C, useSharp }) {
 
   const run = (ds, sr, k) => {
     setBusy(true); setErr("");
-    const opts = k === "notes" ? { hop: Math.floor(sr * 0.08) } : { hopSec: 0.12, smoothSec: 0.5, ...(simple ? { maxRank: 14 } : {}) };
+    // recoverGaps: re-read the spans the main pass left unlabelled at a lower threshold
+    // (guarded by confidence + gap length) so a chart isn't littered with false N.C. bars.
+    const opts = k === "notes" ? { hop: Math.floor(sr * 0.08) } : { hopSec: 0.12, smoothSec: 0.5, recoverGaps: true, ...(simple ? { maxRank: 14 } : {}) };
     setTimeout(async () => {                          // let "Analyzing…" paint first
       try { setRaw((await analyzeAudioOffThread(ds, sr, k, opts)) || []); }
       catch (_) { setErr("Analysis failed on this file."); }

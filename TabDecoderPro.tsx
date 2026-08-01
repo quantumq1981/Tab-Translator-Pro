@@ -1707,7 +1707,9 @@ function AudioImport({ C, useSharp }) {
 
   const run = (ds, sr, k) => {
     setBusy(true); setErr("");
-    const opts = k === "notes" ? { hop: Math.floor(sr * 0.08) } : { hopSec: 0.12, smoothSec: 0.5, ...(simple ? { maxRank: 14 } : {}) };
+    // recoverGaps: re-read the spans the main pass left unlabelled at a lower threshold
+    // (guarded by confidence + gap length) so a chart isn't littered with false N.C. bars.
+    const opts = k === "notes" ? { hop: Math.floor(sr * 0.08) } : { hopSec: 0.12, smoothSec: 0.5, recoverGaps: true, ...(simple ? { maxRank: 14 } : {}) };
     setTimeout(async () => {                          // let "Analyzing…" paint first
       try { setRaw((await analyzeAudioOffThread(ds, sr, k, opts)) || []); }
       catch (_) { setErr("Analysis failed on this file."); }
