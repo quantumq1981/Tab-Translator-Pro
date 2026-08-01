@@ -798,6 +798,68 @@ expect(eng.scoreToMidi(asc, { tempo: 120 }) instanceof Uint8Array, "audio score 
 // faster tempo (240bpm → 0.25s/beat) packs the same seconds into more bars
 expect(eng.audioEventsToScore(aev, { bpm: 240, beatsPerBar: 4 }).bars.length === 3, "bpm changes the beat grid (240bpm → 3 bars)");
 
+/* ---- held chords fill their bars (a sustain is NOT "no chord") ---------------
+ * Keying bars off ONSETS alone made every bar inside a multi-bar hold export as a
+ * false `N.C.` — on a real stem at 160bpm that was 9 of 14 N.C. bars. A bar with no
+ * onset but covered by a sustaining event now carries that event (flagged `held`), so
+ * scoreToCSMPN collapses it to `%` (simile) and playback/MIDI/ABC sustain. A bar NO
+ * event covers stays empty: genuinely unlabelled must stay honestly N.C. */
+const hev = [
+  { symbol: "C", midis: [48, 52, 55], startSec: 0, durSec: 8 },   // 4 bars at 120bpm
+  { symbol: "G", midis: [43, 47, 50], startSec: 8, durSec: 2 },
+  // 10–12s: nothing — a real hole
+  { symbol: "F", midis: [41, 45, 48], startSec: 12, durSec: 2 },
+];
+const hsc = eng.audioEventsToScore(hev, { bpm: 120, beatsPerBar: 4 });
+const hcells = hsc.bars.map((b) => b.events.map((e) => e.symbol).join("_") || "(empty)");
+expect(hcells.join(" | ") === "C | C | C | C | G | (empty) | F",
+  `held-chord bars expected "C | C | C | C | G | (empty) | F", got "${hcells.join(" | ")}"`);
+expect(hsc.bars[1]?.events[0]?.held === true && !hsc.bars[0]?.events[0]?.held, "sustained bars are flagged held; the onset bar is not");
+expect(hsc.bars[5]?.events.length === 0, "a bar no event covers stays empty (honest N.C.)");
+const hcs = eng.scoreToCSMPN(hsc, { title: "H", tab: false, hybrid: false });
+expect((hcs.match(/%/g) || []).length === 3, `three held bars should export as three % similes, got ${(hcs.match(/%/g) || []).length}`);
+expect(/N\.C\./.test(hcs), "the genuinely uncovered bar still exports as N.C.");
+
+/* ---- recoverChordGaps: guarded second look at unlabelled spans ---------------
+ * Opt-in. Must (a) leave every existing caller byte-identical when off, (b) refuse
+ * silence, (c) refuse gaps too short to strand a bar, and (d) never emit a run
+ * shorter than the main pass's own blip filter. Measured on a real stem (Peg), the
+ * whole-gap-average version scored 0.33–0.44 and recovered nothing useful; per-frame
+ * labelling inside the gap recovers the stable spans without chord soup. */
+const gapSig = new Float32Array(SR * 3);
+{ // C major for 0..1s and 2..3s; the middle second is silence
+  const put = (t0, t1) => { for (let i = t0 * SR; i < t1 * SR; i++) for (const f of [261.63, 329.63, 392.0]) gapSig[i] += Math.sin((2 * Math.PI * f * i) / SR) / 3; };
+  put(0, 1); put(2, 3);
+}
+const gOff = eng.transcribeChords(gapSig, SR, { hopSec: 0.12, smoothSec: 0.5 });
+const gOn = eng.transcribeChords(gapSig, SR, { hopSec: 0.12, smoothSec: 0.5, recoverGaps: true });
+expect(JSON.stringify(gOff) === JSON.stringify(gOn), "a silent gap is never 'recovered' — a rest stays a rest");
+expect(eng.transcribeChords(gapSig, SR, { hopSec: 0.12, smoothSec: 0.5, recoverGaps: true, recoverMinGapSec: 0.1, recoverMinVoiced: 0.99 }).length === gOff.length,
+  "the voiced-fraction guard also refuses the silent span on its own");
+// A flickering span (label changes every frame) must recover NOTHING — those 1-frame
+// runs are exactly the chord soup that made the first version of this unusable. Driven
+// through recoverChordGaps directly with synthetic frames so the flicker is exact.
+const chromaOf = (pcs) => { const c = new Array(12).fill(0.02); for (const p of pcs) c[p] = 1; return c; };
+const flick = [], steady = [];
+for (let i = 0; i < 24; i++) {
+  const t = +(i * 0.12).toFixed(3);
+  flick.push({ t, energy: 1, chroma: chromaOf(i % 2 ? [0, 4, 7] : [7, 11, 2]) });   // C ↔ G every frame
+  steady.push({ t, energy: 1, chroma: chromaOf([0, 4, 7]) });                        // held C
+}
+const noSmooth = { smoothSec: 0.12, minDurSec: 0.4, recoverMinGapSec: 0.1, recoverMinConfidence: 0 };
+expect(eng.recoverChordGaps([], flick, 0.1, 0.256, noSmooth).length === 0,
+  "a span whose label flickers every frame recovers nothing (no 1-frame chord soup)");
+const rSteady = eng.recoverChordGaps([], steady, 0.1, 0.256, noSmooth);
+expect(rSteady.length === 1 && rSteady[0].symbol === "C" && rSteady[0].recovered === true,
+  `a steady span recovers one flagged event, got ${JSON.stringify(rSteady)}`);
+// The confidence floor is real: a smeared span (all 12 pcs lit — drum/reverb mud) is
+// nameable only with low confidence, so the DEFAULT floor refuses it and it stays N.C.
+const mud = steady.map((f) => ({ ...f, chroma: new Array(12).fill(1) }));
+expect(eng.recoverChordGaps([], mud, 0.1, 0.256, { smoothSec: 0.12, minDurSec: 0.4, recoverMinGapSec: 0.1 }).length === 0,
+  "a chromatically smeared span is refused by the default recoverMinConfidence (stays N.C.)");
+expect(eng.recoverChordGaps([], mud, 0.1, 0.256, { ...noSmooth, recoverMinConfidence: 0 }).length > 0,
+  "…and that refusal is the confidence floor doing it, not the span being unnameable");
+
 /* ---- _hann memo: byte-identical window, cached per length --------------------
  * The DSP core memoises the Hann window (pcmToChroma / extractCenter share it). The
  * memo must return values identical to the formula, and hand back the SAME cached

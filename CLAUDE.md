@@ -1272,6 +1272,58 @@ tempo *detection* yet (beat-tracking is the next DSP step). Tests: events at 120
 changes the bar count. Remaining: tempo/beat detection, and optional **two-stem fusion**
 (a bass stem for the root + a chordal stem for the quality).
 
+#### Killing the false N.C. bars (2026-08-01)
+
+An audio-decoded chart came back littered with `N.C.` bars. Diagnosed against the real
+Peg stem, they were **two unrelated bugs**, neither of them "the audio had no harmony":
+
+**1. A sustain was exported as "no chord" (`audioEventsToScore`).** Bars were keyed off
+chord **onsets** only, so every bar inside a multi-bar hold had no event and exported as
+`N.C.` — at 160 bpm that was **9 of 14** N.C. bars. A bar with no onset but *covered* by a
+sustaining event now carries that event at beat 0, flagged `held`. `scoreToCSMPN` then
+collapses it to `%` (simile) via its existing prev-cell rule, and playback/MIDI/ABC
+sustain instead of dropping to silence. A bar **no** event covers is still left empty —
+genuinely unlabelled must stay honestly N.C. Unconditional (it's a data-loss bug, not a
+feature).
+
+**2. `recoverChordGaps`** (new, **opt-in** via `recoverGaps`; the Audio panel passes it) —
+a guarded second look at the spans the main pass left unlabelled. Most are not silence:
+the chord's 3rd/5th sat under `pickThreshold` (0.4) after harmonic suppression, or the run
+lost the sub-`minDurSec` blip filter.
+
+The **design mistake worth not repeating**: v1 averaged the chroma over the *whole* gap.
+A gap is often 2–3 s and spans a chord CHANGE, so the average is a blend of two chords —
+Peg's five surviving gaps scored **0.33–0.44** confidence, below any honest floor, and
+recovered nothing. It now re-labels the gap **frame by frame** with the same smoothed
+sliding window the main pass uses, then collapses runs; the constituent runs read
+0.55–0.75. Guardrails (each revert-tested — removing it fails a specific test):
+- the span must carry real sound (`recoverMinVoiced` of non-gated frames) → a rest stays a rest;
+- the smoothing window is **clamped inside the gap**, so a neighbour's chroma can never
+  bleed across the boundary and be re-emitted as "recovered";
+- each run must clear `recoverMinConfidence` (mean Jaccard, 0.45) **and** last at least
+  `minDurSec` — the *same* blip filter the main pass applies, so recovery can never emit a
+  label the primary path would have discarded;
+- only gaps ≥ `recoverMinGapSec` (1.5 s) are considered. A short gap just leaves the
+  previous chord ringing — it never stranded a bar, so filling it buys nothing and costs a
+  spurious change. **Without this guard Peg went 227 → 341 chord slots** (bars like
+  `Bb7_Bb7_A7_A_E7sus4_Bb7_C7`) to remove five N.C. bars — unusable.
+
+Measured on the real Peg stem (the user's own isolated-instrument split), both fixes:
+
+| bpm | N.C. bars before → after | chord slots before → after |
+|-----|--------------------------|----------------------------|
+| 100 | 5 → **1**  | 227 → 233 |
+| 110 | 6 → **1**  | 228 → 233 |
+| 120 | 5 → **3**  | 227 → 232 |
+| 140 | 11 → **3** | 233 → 236 |
+| 160 | 17 → **5** | 239 → 243 |
+
+~70–80% fewer N.C. bars for ~2% more chord slots, and **zero** remaining N.C. bars are
+held-over — every survivor is a span where the chroma genuinely never settles (the label
+flips every 0.26 s). **That is the honest floor: naming those would be inventing.** Do not
+chase them by lowering the confidence floor or the min-duration — that is exactly the
+chord-soup regression measured above.
+
 ### `describeScore` — local chart summary (music-skill `describe` analog, 2026-07-24)
 
 The ListenHub **music** skill (Music/skill.md — the Mureka toolkit: generate / remix /
