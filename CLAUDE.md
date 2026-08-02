@@ -1324,6 +1324,68 @@ flips every 0.26 s). **That is the honest floor: naming those would be inventing
 chase them by lowering the confidence floor or the min-duration — that is exactly the
 chord-soup regression measured above.
 
+### Beat tracking + beat-synchronous Viterbi decoding (2026-08-02)
+
+The two things the audio decoder was missing that every serious chord-recognition
+system has. Both pure DSP/DP — no model, no deps, iOS-safe.
+
+**1. Beat tracking (`detectBeats`).** There was NO tempo detection: `audioEventsToScore`
+quantised onto a grid the user dialled in by hand, so the whole bar structure hung off a
+guess — the SAME Peg analysis gave 5 N.C. bars at 120bpm and 17 at 160bpm, identical
+audio and chords. Classic Ellis pipeline: spectral-flux `onsetEnvelope` →
+`estimateTempo` (autocorrelation × a log-Gaussian tempo prior, which is what stops it
+locking to half/double time) → `trackBeats` (DP over onset strength + a log-ratio
+tempo-deviation penalty). Reads **117.7bpm on Peg, whose .gp4 says 117** (0.6% error).
+
+  **The load-bearing detail:** the onset envelope is normalised to **unit std**. That is
+  not cosmetic — `tightness` trades onset strength against tempo steadiness, so they must
+  share a scale. Un-normalised, a loud mix makes onset strength dwarf the penalty and the
+  DP packs beats at half the period: Peg *reported* 117bpm while laying **685 beats in
+  240s (=171bpm)**. Guarded by a test that asserts beat spacing matches reported tempo.
+
+**2. Beat-synchronous chroma + Viterbi (`transcribeChordsBeatSync`).** The sliding path
+labels each window independently and collapses identical neighbours — nothing in it knows
+chords LAST, which is why an ambiguous span flips every 0.26s (`Bb7 · C#7 · Bb7 · E7 ·
+Edim · Eb7 …`, no run confident). No confidence floor fixes that; the problem isn't the
+threshold, it's that there's no continuity model. So: average chroma **between beats**
+(`beatSegments`) and decode the whole sequence with **Viterbi** over (root × quality)
+states plus a no-chord state (`viterbiChords`). Transition is uniform-except-self, so the
+recursion is O(T·S) not O(T·S²). Every chord boundary lands on a beat by construction.
+
+**3. Bass-register chroma for the ROOT.** `beatSegments` computes a SECOND chroma over
+40–250Hz with no harmonic suppression. The summed full-spectrum chroma says which pitch
+classes sound but not which is the root; the bass says exactly that. Emission = cosine to
+the chord template + `bassWeight` × (bass evidence for that root). **Too much hurts** —
+the bass walks and plays passing tones; measured optimum 0.15 (0.4 and 0.6 both regress).
+
+**Measured — the honest way.** Ground truth is the real `Steely Dan - Peg.gp4` rhythm
+guitar, **time-aligned to the MP3 with the existing DTW aligner** (confidence 0.70, well
+above the 0.35 adoption bar), then sampled every 0.1s MIREX-style:
+
+| method | covered | root % | majmin % | events |
+|---|---|---|---|---|
+| sliding window | 61% | 25.8 | 24.8 | 231 |
+| **beat-sync + Viterbi** | **100%** | **38.7** | **35.8** | 226 |
+
++50% relative root accuracy, +44% majmin, and full coverage. Tuned defaults
+`changePenalty 0.08` / `bassWeight 0.15` come from sweeping both against that metric.
+
+**Do not tune against "% of decoded time that is a chord the tune actually uses"** — that
+metric *rewards over-smoothing* (one 62-second `Em7` scores brilliantly on it). It's why
+the first sweep looked best at `changePenalty 0.28`, which produced 32 events for a
+240-second track. Only the time-aligned frame-level metric distinguishes them.
+
+**`analyzeAudioChords`** is the panel entry point: beat-sync with an automatic
+sliding-window fallback when no pulse is found, returning `{ events, bpm, beats, method }`
+— so **the ♩= control is filled in from the audio** instead of guessed. Runs off-thread
+(`analyzeChordsOffThread`, main-thread fallback). ~2s for a 4-minute stem in Node.
+
+**Honest limits.** This does not rescue a dense full mix — the Wagner prelude labels 96%
+of its duration but the vocabulary histogram still reads like mush being force-named.
+Isolated stems remain the sweet spot. And 38.7% root accuracy is well under the 70–80%
+published systems reach on pop: the remaining gap is a key/harmony prior, downbeat
+detection, and the fact that the ground truth here is one partial rhythm-guitar part.
+
 ### `describeScore` — local chart summary (music-skill `describe` analog, 2026-07-24)
 
 The ListenHub **music** skill (Music/skill.md — the Mureka toolkit: generate / remix /

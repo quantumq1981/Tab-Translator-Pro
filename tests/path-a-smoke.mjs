@@ -820,6 +820,116 @@ const hcs = eng.scoreToCSMPN(hsc, { title: "H", tab: false, hybrid: false });
 expect((hcs.match(/%/g) || []).length === 3, `three held bars should export as three % similes, got ${(hcs.match(/%/g) || []).length}`);
 expect(/N\.C\./.test(hcs), "the genuinely uncovered bar still exports as N.C.");
 
+/* ---- beat tracking: onset envelope → tempo → DP beat path --------------------
+ * The decoder had no tempo detection at all, so the bar grid hung off a hand-dialled
+ * ♩= — the SAME Peg analysis gave 5 N.C. bars at 120bpm and 17 at 160bpm. Validated
+ * here on a synthesized click at a known tempo; the real-file check is Peg, whose .gp4
+ * says 117bpm and which the tracker reads as 117.7 (0.6% error). */
+{
+  const bpmTrue = 120, clickSec = 12, spb = 60 / bpmTrue;
+  const click = new Float32Array(SR * clickSec);
+  const tick = (at, amp, freq) => { for (let i = 0; i < SR * 0.03 && at + i < click.length; i++) click[at + i] += amp * Math.sin((2 * Math.PI * freq * i) / SR) * Math.exp(-i / (SR * 0.006)); };
+  for (let beat = 0; beat * spb < clickSec; beat++) {
+    tick(Math.floor(beat * spb * SR), 1.0, 1200);
+    // Softer OFF-beat eighths. Without them the signal is too clean to catch the real
+    // failure: un-normalised, the DP is tempted onto every sub-beat onset, which is how
+    // Peg came out reporting 117bpm while laying beats at 171bpm.
+    tick(Math.floor((beat + 0.5) * spb * SR), 0.45, 900);
+  }
+  const bt = eng.detectBeats(click, SR);
+  expect(Math.abs(bt.bpm - bpmTrue) / bpmTrue < 0.05, `beat tracker should find ~${bpmTrue}bpm, got ${bt.bpm}`);
+  // the beat COUNT must agree with the reported tempo — they came apart before the
+  // onset envelope was normalised (Peg reported 117bpm while laying beats at 171bpm)
+  const implied = ((bt.beats.length - 1) / (bt.beats[bt.beats.length - 1] - bt.beats[0])) * 60;
+  expect(Math.abs(implied - bt.bpm) / bt.bpm < 0.05, `beat spacing (${implied.toFixed(1)}bpm) must match the reported tempo (${bt.bpm})`);
+  expect(bt.beats.every((t, i) => i === 0 || t > bt.beats[i - 1]), "beat times are strictly increasing");
+  expect(eng.detectBeats(new Float32Array(256), SR).beats.length === 0, "too-short input yields no beats, not a crash");
+}
+
+/* ---- beat-synchronous chroma + Viterbi ---------------------------------------
+ * The sliding path labels each window independently, so an ambiguous span flips label
+ * every 0.26s. Averaging chroma BETWEEN BEATS and decoding the whole sequence with a
+ * change penalty fixes that. Measured on the real Peg stem against a DTW-time-aligned
+ * Peg.gp4 (confidence 0.70): root accuracy 25.8% -> 38.7%, coverage 61% -> 100%. */
+{
+  // C major for 4 beats then G major for 4, at 120bpm (0.5s/beat)
+  const bpmT = 120, beat = 60 / bpmT, sig = new Float32Array(SR * 8);
+  const add = (t0, t1, freqs) => { for (let i = t0 * SR; i < t1 * SR && i < sig.length; i++) for (const f of freqs) sig[i] += Math.sin((2 * Math.PI * f * i) / SR) / freqs.length; };
+  add(0, 4, [261.63, 329.63, 392.0]);
+  add(4, 8, [392.0, 493.88, 587.33]);
+  const beats = []; for (let t = 0; t < 8; t += beat) beats.push(t);
+  const segs = eng.beatSegments(sig, SR, beats, {});
+  expect(segs.length === beats.length - 1, `one segment per beat gap, got ${segs.length} for ${beats.length} beats`);
+  expect(segs[0].bass && segs[0].bass.length === 12, "segments carry a separate bass-register chroma (root evidence)");
+  const ev = Array.from(eng.transcribeChordsBeatSync(sig, SR, { beats }));
+  expect(ev.some((e) => e.symbol === "C") && ev.some((e) => e.symbol === "G"), `beat-sync should decode C then G, got [${ev.map((e) => e.symbol)}]`);
+  // every boundary lands ON a beat — that's the structural point of beat-sync
+  const onBeat = (t) => beats.some((b) => Math.abs(b - t) < 1e-6);
+  expect(ev.every((e) => onBeat(e.startSec)), `every chord change starts on a beat, got [${ev.map((e) => e.startSec)}]`);
+  // Viterbi continuity: a passing tone on one beat must NOT flip the label. (Level
+  // matters — at 0.9 against chord partials of 0.33 the "passing tone" IS the loudest
+  // thing on the beat and flipping is correct; 0.25 is a realistic passing note.)
+  const noisy = new Float32Array(sig);
+  for (let i = Math.floor(2 * SR); i < Math.floor(2.5 * SR); i++) noisy[i] += Math.sin((2 * Math.PI * 466.16 * i) / SR) * 0.25;  // stray Bb
+  const nev = Array.from(eng.transcribeChordsBeatSync(noisy, SR, { beats }));
+  expect(nev.length <= ev.length + 1, `a passing tone must not shatter the decode (got ${nev.length} events vs ${ev.length})`);
+  // the change penalty is real: crank it and the whole clip collapses to one chord
+  const glued = Array.from(eng.transcribeChordsBeatSync(sig, SR, { beats, changePenalty: 5 }));
+  expect(glued.length === 1, `a huge change penalty should yield a single chord, got ${glued.length}`);
+
+  /* The bass register decides the ROOT. C6 and Am7 are the SAME four pitch classes —
+   * the upper chroma cannot tell them apart, only the bass note can. This is the case
+   * the separate bass chroma exists for, and it's the same ambiguity that makes the
+   * Tristan chord read as Abm6/F instead of Fm7b5. */
+  const upper = [261.63, 329.63, 392.0, 440.0];                 // C4 E4 G4 A4
+  const withBass = (bassHz) => {
+    const s = new Float32Array(SR * 4);
+    for (let i = 0; i < s.length; i++) {
+      for (const f of upper) s[i] += Math.sin((2 * Math.PI * f * i) / SR) / 6;
+      s[i] += Math.sin((2 * Math.PI * bassHz * i) / SR) * 0.5;
+    }
+    return s;
+  };
+  const bts = [0, 1, 2, 3, 4];
+  const rootOf = (sym) => (sym || "").replace(/^([A-G][#b]?).*$/, "$1");
+  // minFreq:100 keeps the bass note OUT of the main chroma, so the bass band is the
+  // only root evidence — otherwise the bass leaks into the main chroma and the test
+  // passes for the wrong reason (it did, first time round).
+  const iso = { beats: bts, maxRank: 14, minFreq: 100 };
+  const overC = Array.from(eng.transcribeChordsBeatSync(withBass(65.41), SR, iso));   // C2
+  const overA = Array.from(eng.transcribeChordsBeatSync(withBass(55.0), SR, iso));    // A1
+  expect(rootOf(overC[0] && overC[0].symbol) !== rootOf(overA[0] && overA[0].symbol),
+    `same pitch classes over a different bass must give a different root, got ${overC[0] && overC[0].symbol} vs ${overA[0] && overA[0].symbol}`);
+  const flatC = Array.from(eng.transcribeChordsBeatSync(withBass(65.41), SR, { ...iso, bassWeight: 0 }));
+  const flatA = Array.from(eng.transcribeChordsBeatSync(withBass(55.0), SR, { ...iso, bassWeight: 0 }));
+  expect(rootOf(flatC[0] && flatC[0].symbol) === rootOf(flatA[0] && flatA[0].symbol),
+    `with the bass evidence off the two collapse to one reading, got ${flatC[0] && flatC[0].symbol} vs ${flatA[0] && flatA[0].symbol}`);
+  // …and the bass band itself measures what it claims: its chroma peaks on the bass
+  // note. (Note the bass pitch also lands in the MAIN chroma — minFreq is 55Hz — so
+  // "switch the bass weight off and the two collapse" is NOT a valid test of the
+  // mechanism; this is.)
+  const peakPc = (v) => { let b = 0; for (let p = 1; p < 12; p++) if (v[p] > v[b]) b = p; return b; };
+  expect(peakPc(eng.beatSegments(withBass(65.41), SR, bts, {})[0].bass) === 0, "bass chroma peaks on C for a C2 bass");
+  expect(peakPc(eng.beatSegments(withBass(55.0), SR, bts, {})[0].bass) === 9, "bass chroma peaks on A for an A1 bass");
+}
+
+/* ---- analyzeAudioChords: the panel entry point returns chords AND tempo ------ */
+{
+  const bpmT = 120, sig = new Float32Array(SR * 6);
+  for (let i = 0; i < sig.length; i++) for (const f of [261.63, 329.63, 392.0]) sig[i] += Math.sin((2 * Math.PI * f * i) / SR) / 3;
+  for (let beat = 0; beat * 0.5 < 6; beat++) {                                  // add a click track so beats exist
+    const at = Math.floor(beat * 0.5 * SR);
+    for (let i = 0; i < SR * 0.02 && at + i < sig.length; i++) sig[at + i] += Math.sin((2 * Math.PI * 1500 * i) / SR) * Math.exp(-i / (SR * 0.004));
+  }
+  const r = eng.analyzeAudioChords(sig, SR);
+  expect(Array.isArray(r.events) && r.events.length > 0, "analyzeAudioChords returns events");
+  expect(r.method === "beat-sync" || r.method === "sliding", `method is reported, got ${r.method}`);
+  expect(r.method !== "beat-sync" || Math.abs(r.bpm - bpmT) / bpmT < 0.1, `beat-sync path reports the tempo (~${bpmT}), got ${r.bpm}`);
+  // no beat grid (pure silence) must still produce a result via the sliding fallback
+  const quiet = eng.analyzeAudioChords(new Float32Array(SR), SR);
+  expect(Array.isArray(quiet.events), "falls back rather than throwing when there is no pulse");
+}
+
 /* ---- adaptive energy gate: quiet passages are music, not silence -------------
  * A gate fixed at a fraction of the GLOBAL peak assumes one level for the whole
  * recording. On real wide-dynamic material (a Wagner prelude, peak ~28x the opening)
