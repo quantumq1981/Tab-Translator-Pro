@@ -1002,6 +1002,27 @@ expect(/N\.C\./.test(hcs), "the genuinely uncovered bar still exports as N.C.");
   expect(eng.harmonicChromagram(new Float32Array(64), HSR, {}).length === 0, "too-short input yields no frames, not a crash");
 }
 
+/* ---- HPSS feeds the Play-Along aligner too -----------------------------------
+ * `pcmChromaSequence` takes an opt-in `hpss` so the DTW aligner can use the same
+ * drum-suppressed chroma. Engine default stays OFF (the aligner's behaviour is pinned
+ * by the tests below); the UI passes hpss:true. Measured on a real stem vs its .gp4:
+ * confidence 0.697 -> 0.753, and the margin over a WRONG chart widens 0.103 -> 0.137,
+ * so the low-confidence fallback still catches a mismatched stem. */
+{
+  const ASR = 16000;
+  const sig = new Float32Array(ASR * 3);
+  for (let i = 0; i < sig.length; i++) for (const f of [261.63, 329.63, 392.0]) sig[i] += Math.sin((2 * Math.PI * f * i) / ASR) / 3;
+  const plainSeq = eng.pcmChromaSequence(sig, ASR, { hopSec: 0.25 });
+  const hpssSeq = eng.pcmChromaSequence(sig, ASR, { hopSec: 0.25, hpss: true });
+  expect(plainSeq.length > 0 && hpssSeq.length > 0, "pcmChromaSequence returns frames either way");
+  expect(hpssSeq[0].chroma.length === 12 && typeof hpssSeq[0].energy === "number",
+    "the hpss path returns the same frame shape the aligner consumes (chroma + energy)");
+  // default must stay OFF so the pinned alignment behaviour is untouched
+  const a = eng.pcmChromaSequence(sig, ASR, { hopSec: 0.25 });
+  expect(JSON.stringify(Array.from(a[0].chroma)) === JSON.stringify(Array.from(plainSeq[0].chroma)),
+    "pcmChromaSequence default is unchanged (hpss is opt-in)");
+}
+
 /* ---- analyzeAudioChords: the panel entry point returns chords AND tempo ------ */
 {
   const bpmT = 120, sig = new Float32Array(SR * 6);

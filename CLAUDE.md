@@ -1454,6 +1454,40 @@ not a global optimum.
 sort into a preallocated buffer instead of `slice()+sort(comparator)` took it from 11.2s
 to **3.2s**, byte-identical output — no per-call allocation, no comparator dispatch.
 
+#### HPSS also feeds the Play-Along aligner (2026-08-02)
+
+`pcmChromaSequence` takes an opt-in `hpss`, so the DTW aligner behind Play-Along can use
+the same drum-suppressed chroma. Engine default stays **off** (the aligner's behaviour is
+pinned by tests); the UI call site passes `hpss:true`.
+
+Measured on the real Peg stem against its `.gp4`:
+
+| chart | plain | HPSS |
+|---|---|---|
+| correct (rhythm guitar) | 0.697 | **0.753** |
+| Electric Piano | 0.656 | 0.696 |
+| Bass guitar | 0.522 | 0.568 |
+| transposed +6 (wrong) | 0.504 | 0.483 |
+| transposed +1 (wrong) | 0.594 | 0.616 |
+| **margin (correct − best wrong)** | 0.103 | **0.137** |
+
+The margin widening is the part that matters — raising the true match alone would be
+worthless if it raised false matches equally.
+
+**Known limit, pre-existing and NOT introduced by HPSS:** a *near-miss* chart (the same
+tune transposed a semitone) scores **0.616**, well above the 0.35 adoption threshold. So
+the confidence gate catches a wholly wrong stem but not a near-miss. Raising the gate to
+~0.65 would separate them on this file, but that is tuned on one file and risks rejecting
+genuine-but-noisier takes — left alone deliberately; revisit with more real material.
+
+#### Viterbi parameters were re-swept after HPSS and did NOT move
+
+Worth recording so it isn't redone: `changePenalty 0.08`, `bassWeight 0.15`, `keyWeight
+0.1` are all still at their optima on the cleaner post-HPSS chroma. One number did change
+meaning though — **`bassWeight:0` now costs 9 points** (53.0% → 43.8% root), where before
+HPSS the bass term was worth ~3. Drum suppression makes the bass band far more
+informative, so the two changes compound.
+
 #### Tuning correction was measured and is NOT worth it
 
 Recordings drift from A=440, which would smear chroma bins. Measured deviation via
