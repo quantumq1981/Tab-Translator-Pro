@@ -1391,6 +1391,36 @@ weak (`keyMinConfidence` 0.5), so a modulating tune isn't forced into one key. P
 at the tuned `keyWeight` 0.1. Modest but consistent and free — and `analyzeAudioChords`
 returns the detected `key` for the UI.
 
+#### Narrow half-diminished bass rule + inversions in the beat-sync path (2026-08-02)
+
+**`m6` vs `m7♭5`.** A minor-6 and the half-diminished 7th a minor-3rd below are the SAME
+four pitch classes (`Am6` = A C E F# = `F#m7♭5`), and `m6` (rank 10) out-ranked `m7♭5`
+(rank 12) — so the m6 reading always won. The **Tristan chord** (F B D# G#) read
+`Abm6/F` instead of `Fø7`, and B D F A read `Dm6/B` instead of `Bø7`.
+
+`recognise` now takes a **deliberately narrow** bass-priority tie-break: when the chord
+reads as `m6` AND the bass is exactly root+9 (i.e. it is in root position as a half-
+diminished), it is relabelled `m7♭5` on the bass. Only that one pair, only that one bass
+relation, so no other quality's ranking moves — verified: major/m7/maj7/7/dim7 and the
+long-standing `{C,E,G,A}`/C → `Am7/C` reading are all unchanged, and root-position `Am6`
+/`Cm6` stay put. `opts.halfDimBass:false` restores the old behaviour.
+
+This **deliberately changed two pinned corpus expectations** (Yardbird `Am6/F#` →
+`F#m7♭5`, `Gm6/E` → `Em7♭5`). Both are the correct jazz reading — the iiø of a minor
+ii–V — and `Am6/F#` is what a naive analyser emits.
+
+**Inversions in beat-sync.** The sliding path produced slash chords (via `recognise`'s
+bass rule) but `transcribeChordsBeatSync` emitted plain root-position symbols — a real
+loss for a fake book. It now names the inversion from the run's dominant bass pitch
+class, **only when that pc is a chord tone**, which is what stops a walking/passing bass
+inventing a slash. 58 of Peg's 222 events carry an inversion. `opts.slash:false` disables.
+
+**Bass resolution depends on the sample rate — don't test this at 44.1k.** The panel
+downsamples to 16k before analysis; a 4096-pt FFT gives 3.9Hz bins there but 10.8Hz at
+44.1k, where E2 (82.4Hz) and F2 (87.3Hz) fall in the SAME bin and the bass band cannot
+tell them apart. A fixture written at this test file's 44.1k SR reports an E2 bass as F —
+a property of the fixture, not the code. The inversion tests pin 16k for that reason.
+
 #### Downbeat detection was tried and DOES NOT work with pure-DSP cues — don't re-derive it
 
 Beat tracking finds the pulse but not where **bar one** is, so barlines can sit a beat or
