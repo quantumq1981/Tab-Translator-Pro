@@ -965,6 +965,43 @@ expect(/N\.C\./.test(hcs), "the genuinely uncovered bar still exports as N.C.");
   expect(peakPc(eng.beatSegments(withBass(55.0), SR, bts, {})[0].bass) === 9, "bass chroma peaks on A for an A1 bass");
 }
 
+/* ---- HPSS: drums out of the chroma before recognition ------------------------
+ * Sustained pitched content is HORIZONTAL in a spectrogram, transients are VERTICAL,
+ * so a median along time estimates the harmonic part and a median along frequency the
+ * percussive one. Standard preprocessing for chord recognition — drums dump broadband
+ * energy into every chroma bin, and a kick/snare on the downbeat is exactly where a
+ * chord is most likely to be read. Measured on the real Peg stem against time-aligned
+ * ground truth: root 40.2% -> 53.0%, majmin 37.4% -> 51.4%. */
+{
+  const HSR = 16000, dur = 4;
+  // C major under repeated broadband transients ("drums"). Bursts must be FREQUENT
+  // enough that a typical frame overlaps one — with sparse bursts most frames are clean
+  // and the test passes with HPSS disabled, proving nothing (it did).
+  const noisy = new Float32Array(HSR * dur);
+  for (let i = 0; i < noisy.length; i++) for (const f of [261.63, 329.63, 392.0]) noisy[i] += Math.sin((2 * Math.PI * f * i) / HSR) / 3;
+  for (let beat = 0; beat * 0.25 < dur; beat++) {
+    const at = Math.floor(beat * 0.25 * HSR);
+    for (let i = 0; i < HSR * 0.08 && at + i < noisy.length; i++) noisy[at + i] += (Math.random() * 2 - 1) * 3 * Math.exp(-i / (HSR * 0.02));
+  }
+  // Mean share of chroma energy sitting on the ACTUAL chord tones, over every frame.
+  // Averaging over all frames (not one hand-picked one) is what makes this discriminate.
+  const inChordFrac = (frames) => {
+    let tot = 0;
+    for (const fr of frames) {
+      const c = Array.from(fr.chroma);
+      const sum = c.reduce((a, b) => a + b, 0) || 1;
+      tot += (c[0] + c[4] + c[7]) / sum;
+    }
+    return tot / (frames.length || 1);
+  };
+  const withHpss = eng.harmonicChromagram(noisy, HSR, { hopSec: 0.12 });
+  const plain = eng.beatSegments(noisy, HSR, Array.from({ length: 17 }, (_, i) => i * 0.25), { hpss: false });
+  expect(withHpss.length > 0 && withHpss[0].chroma.length === 12, "harmonicChromagram returns 12-bin chroma frames");
+  const fH = inChordFrac(withHpss), fP = inChordFrac(plain);
+  expect(fH > fP + 0.1, `HPSS should concentrate chroma on the real chord tones (got ${fH.toFixed(3)} vs unfiltered ${fP.toFixed(3)})`);
+  expect(eng.harmonicChromagram(new Float32Array(64), HSR, {}).length === 0, "too-short input yields no frames, not a crash");
+}
+
 /* ---- analyzeAudioChords: the panel entry point returns chords AND tempo ------ */
 {
   const bpmT = 120, sig = new Float32Array(SR * 6);

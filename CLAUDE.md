@@ -1367,6 +1367,7 @@ above the 0.35 adoption bar), then sampled every 0.1s MIREX-style:
 | sliding window | 61% | 25.8 | 24.8 | 231 |
 | **beat-sync + Viterbi** | **100%** | **38.7** | **35.8** | 226 |
 | **+ key prior** | **100%** | **40.2** | **37.4** | 222 |
+| **+ HPSS** | **100%** | **53.0** | **51.4** | 132 |
 
 +50% relative root accuracy, +44% majmin, and full coverage. Tuned defaults
 `changePenalty 0.08` / `bassWeight 0.15` come from sweeping both against that metric.
@@ -1420,6 +1421,45 @@ downsamples to 16k before analysis; a 4096-pt FFT gives 3.9Hz bins there but 10.
 44.1k, where E2 (82.4Hz) and F2 (87.3Hz) fall in the SAME bin and the bass band cannot
 tell them apart. A fixture written at this test file's 44.1k SR reports an E2 bass as F —
 a property of the fixture, not the code. The inversion tests pin 16k for that reason.
+
+#### HPSS — drums out of the chroma before recognition (2026-08-02)
+
+The single biggest remaining pure-DSP win. Sustained pitched content forms HORIZONTAL
+ridges in a spectrogram; transients form VERTICAL ones. So a median along **time**
+estimates the harmonic part, a median along **frequency** the percussive part, and a
+soft Wiener mask splits them (Fitzgerald 2010). Drums otherwise dump broadband energy
+into every chroma bin — and a kick/snare on the downbeat is exactly where a chord label
+is most likely to be read.
+
+`harmonicChromagram` does this and folds straight to chroma — **no resynthesis**, since
+we only ever need the chroma. That also makes it *cheaper* than the per-frame path it
+replaces, which recomputed an FFT per frame anyway. Default on for beat-sync
+(`hpss:false` opts out).
+
+| | root % | majmin % | events |
+|---|---|---|---|
+| before HPSS | 40.2 | 37.4 | 222 |
+| **with HPSS** | **53.0** | **51.4** | 132 |
+
+Note the event count also settles to 132 over 240s = 0.55 changes/s, right at the
+one-chord-per-bar rate for a 117bpm 4/4 tune — cleaner chroma lets Viterbi hold.
+
+**Kernel sizes were SWEPT, not guessed, and that mattered enormously.** The naive
+defaults (0.4s time kernel / 17 bins) gave 42%; the plateau is **tk ≈ 21–23 frames
+(~2.5s) / kf ≈ 9 bins** → 53%. The time kernel is stored in SECONDS (`hpssTimeSec`) so
+it adapts to `hopSec`. Swept on ONE file, so treat the exact numbers as a plateau centre,
+not a global optimum.
+
+**Performance:** the median is the hot path (~1M calls for a 4-minute track). Insertion
+sort into a preallocated buffer instead of `slice()+sort(comparator)` took it from 11.2s
+to **3.2s**, byte-identical output — no per-call allocation, no comparator dispatch.
+
+#### Tuning correction was measured and is NOT worth it
+
+Recordings drift from A=440, which would smear chroma bins. Measured deviation via
+parabolic-interpolated spectral peaks: Peg **−4.9 cents**, blues **−7.2**, Wagner
+**+3.5**. All far inside a semitone (100 cents), so the nearest-semitone binning is
+unaffected. Don't build tuning correction for this material.
 
 #### Downbeat detection was tried and DOES NOT work with pure-DSP cues — don't re-derive it
 
