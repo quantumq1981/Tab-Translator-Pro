@@ -1366,6 +1366,8 @@ above the 0.35 adoption bar), then sampled every 0.1s MIREX-style:
 |---|---|---|---|---|
 | sliding window | 61% | 25.8 | 24.8 | 231 |
 | **beat-sync + Viterbi** | **100%** | **38.7** | **35.8** | 226 |
+| **+ key prior** | **100%** | **40.2** | **37.4** | 222 |
+| **+ HPSS** | **100%** | **53.0** | **51.4** | 132 |
 
 +50% relative root accuracy, +44% majmin, and full coverage. Tuned defaults
 `changePenalty 0.08` / `bassWeight 0.15` come from sweeping both against that metric.
@@ -1379,6 +1381,118 @@ the first sweep looked best at `changePenalty 0.28`, which produced 32 events fo
 sliding-window fallback when no pulse is found, returning `{ events, bpm, beats, method }`
 — so **the ♩= control is filled in from the audio** instead of guessed. Runs off-thread
 (`analyzeChordsOffThread`, main-thread fallback). ~2s for a 4-minute stem in Node.
+
+**4. Key prior (second pass).** A tune mostly uses chords built from its scale. Decode
+once, read the key off THAT with the existing validated `analyzeKey`, then re-decode with
+a diatonic bonus scored as the FRACTION of the chord's pitch classes in the key's scale —
+no chord-function table, so it handles 7ths/extensions and *tips* rather than bans (a real
+secondary dominant still wins if the audio supports it). Skipped when the key reading is
+weak (`keyMinConfidence` 0.5), so a modulating tune isn't forced into one key. Peg reads
+**E minor, confidence 0.88**; measured gain root **38.7% → 40.2%**, majmin 35.8% → 37.4%
+at the tuned `keyWeight` 0.1. Modest but consistent and free — and `analyzeAudioChords`
+returns the detected `key` for the UI.
+
+#### Narrow half-diminished bass rule + inversions in the beat-sync path (2026-08-02)
+
+**`m6` vs `m7♭5`.** A minor-6 and the half-diminished 7th a minor-3rd below are the SAME
+four pitch classes (`Am6` = A C E F# = `F#m7♭5`), and `m6` (rank 10) out-ranked `m7♭5`
+(rank 12) — so the m6 reading always won. The **Tristan chord** (F B D# G#) read
+`Abm6/F` instead of `Fø7`, and B D F A read `Dm6/B` instead of `Bø7`.
+
+`recognise` now takes a **deliberately narrow** bass-priority tie-break: when the chord
+reads as `m6` AND the bass is exactly root+9 (i.e. it is in root position as a half-
+diminished), it is relabelled `m7♭5` on the bass. Only that one pair, only that one bass
+relation, so no other quality's ranking moves — verified: major/m7/maj7/7/dim7 and the
+long-standing `{C,E,G,A}`/C → `Am7/C` reading are all unchanged, and root-position `Am6`
+/`Cm6` stay put. `opts.halfDimBass:false` restores the old behaviour.
+
+This **deliberately changed two pinned corpus expectations** (Yardbird `Am6/F#` →
+`F#m7♭5`, `Gm6/E` → `Em7♭5`). Both are the correct jazz reading — the iiø of a minor
+ii–V — and `Am6/F#` is what a naive analyser emits.
+
+**Inversions in beat-sync.** The sliding path produced slash chords (via `recognise`'s
+bass rule) but `transcribeChordsBeatSync` emitted plain root-position symbols — a real
+loss for a fake book. It now names the inversion from the run's dominant bass pitch
+class, **only when that pc is a chord tone**, which is what stops a walking/passing bass
+inventing a slash. 58 of Peg's 222 events carry an inversion. `opts.slash:false` disables.
+
+**Bass resolution depends on the sample rate — don't test this at 44.1k.** The panel
+downsamples to 16k before analysis; a 4096-pt FFT gives 3.9Hz bins there but 10.8Hz at
+44.1k, where E2 (82.4Hz) and F2 (87.3Hz) fall in the SAME bin and the bass band cannot
+tell them apart. A fixture written at this test file's 44.1k SR reports an E2 bass as F —
+a property of the fixture, not the code. The inversion tests pin 16k for that reason.
+
+#### HPSS — drums out of the chroma before recognition (2026-08-02)
+
+The single biggest remaining pure-DSP win. Sustained pitched content forms HORIZONTAL
+ridges in a spectrogram; transients form VERTICAL ones. So a median along **time**
+estimates the harmonic part, a median along **frequency** the percussive part, and a
+soft Wiener mask splits them (Fitzgerald 2010). Drums otherwise dump broadband energy
+into every chroma bin — and a kick/snare on the downbeat is exactly where a chord label
+is most likely to be read.
+
+`harmonicChromagram` does this and folds straight to chroma — **no resynthesis**, since
+we only ever need the chroma. That also makes it *cheaper* than the per-frame path it
+replaces, which recomputed an FFT per frame anyway. Default on for beat-sync
+(`hpss:false` opts out).
+
+| | root % | majmin % | events |
+|---|---|---|---|
+| before HPSS | 40.2 | 37.4 | 222 |
+| **with HPSS** | **53.0** | **51.4** | 132 |
+
+Note the event count also settles to 132 over 240s = 0.55 changes/s, right at the
+one-chord-per-bar rate for a 117bpm 4/4 tune — cleaner chroma lets Viterbi hold.
+
+**Kernel sizes were SWEPT, not guessed, and that mattered enormously.** The naive
+defaults (0.4s time kernel / 17 bins) gave 42%; the plateau is **tk ≈ 21–23 frames
+(~2.5s) / kf ≈ 9 bins** → 53%. The time kernel is stored in SECONDS (`hpssTimeSec`) so
+it adapts to `hopSec`. Swept on ONE file, so treat the exact numbers as a plateau centre,
+not a global optimum.
+
+**Performance:** the median is the hot path (~1M calls for a 4-minute track). Insertion
+sort into a preallocated buffer instead of `slice()+sort(comparator)` took it from 11.2s
+to **3.2s**, byte-identical output — no per-call allocation, no comparator dispatch.
+
+#### Tuning correction was measured and is NOT worth it
+
+Recordings drift from A=440, which would smear chroma bins. Measured deviation via
+parabolic-interpolated spectral peaks: Peg **−4.9 cents**, blues **−7.2**, Wagner
+**+3.5**. All far inside a semitone (100 cents), so the nearest-semitone binning is
+unaffected. Don't build tuning correction for this material.
+
+#### Downbeat detection was tried and DOES NOT work with pure-DSP cues — don't re-derive it
+
+Beat tracking finds the pulse but not where **bar one** is, so barlines can sit a beat or
+two off even when the chords are right. Two principled cues were implemented and measured
+against real files; **both are near-chance, and the work was reverted rather than shipped.**
+
+1. **Harmonic cue** ("chords change on downbeats"). Measured phase distribution of chord
+   changes across the 4 beat positions on the Peg stem:
+   - our decoded chords: **26% / 16% / 31% / 27%** (25% = chance)
+   - the **time-aligned ground-truth** `.gp4` chords: **22% / 20% / 29% / 30%**
+
+   The premise is simply false for this music — Peg's harmonic rhythm puts changes on
+   beat 3 as often as beat 1. Note the ground truth is barely better than our decode, so
+   this is NOT a "our chords are too noisy" problem; the cue itself carries no phase.
+
+2. **Percussive cue** (downbeats are louder). Per-beat band energy by phase, same file:
+   - kick 40–120 Hz: 73/99/**100**/74 → peak at phase 2
+   - low 120–250 Hz: 87/**100**/97/91 → peak at phase 1
+   - snare/hat 2–6 kHz: 98/98/91/**100** → peak at phase 3
+
+   Three bands, three different answers. No coherent downbeat.
+
+Across all three real files the resulting confidence was Peg **0.081**, Wagner **0.027**,
+blues **0.286** — and the blues "success" is a false positive: its change distribution
+(22/19/30/29) is no better than the others, the score just cleared an arbitrary threshold
+on the energy term. A confident-but-wrong barline is **worse than none**, because it
+shifts every bar in the chart.
+
+**Conclusion:** modern downbeat trackers are learned models (RNN/CNN over spectral flux +
+chroma), not DSP heuristics, and that is why. If downbeats are wanted, that is the route —
+along the same seam as the `basic-pitch` note model. Do not bolt a phase-guesser onto the
+beat tracker.
 
 **Honest limits.** This does not rescue a dense full mix — the Wagner prelude labels 96%
 of its duration but the vocabulary histogram still reads like mush being force-named.

@@ -534,7 +534,12 @@ const yard6 = await eng.parseGPX(new Uint8Array(fs.readFileSync(path.join(repo, 
 expect(yard6.source === "gp" && yard6.tempo === 224 && yard6.tuning === "Standard", `GP6 Yardbird expected tempo 224 / Standard, got ${yard6.tempo} / ${yard6.tuning}`);
 expect(yard6.bars.length === 17, `GP6 Yardbird expected 17 bars, got ${yard6.bars.length}`);
 const yard6Bars = yard6.bars.slice(1, 7).map((b) => [...new Set(b.events.map((e) => e.symbol))].join(" ")).join(" | ");
-expect(yard6Bars === "Em7 | Am6/F# Ebaug/B | Em7 | C#aug/A | Dm7 | Gm6/E C#aug/A", `GP6 Yardbird "simple chords" (String+Fret) unexpected: "${yard6Bars}"`);
+// Bars 2 and 6 were `Am6/F#` and `Gm6/E` before the narrow half-diminished bass rule.
+// Same pitch classes either way (Am6 = A C E F# = F#m7♭5); with the bass ON the m7♭5
+// root, `F#m7♭5` / `Em7♭5` is the reading every jazz lead sheet uses — the iiø of a
+// minor ii–V — and `Am6/F#` is what a naive analyzer emits. This expectation was
+// deliberately updated; see the halfDimBass rule in recognise().
+expect(yard6Bars === "Em7 | F#m7♭5 Ebaug/B | Em7 | C#aug/A | Dm7 | Em7♭5 C#aug/A", `GP6 Yardbird "simple chords" (String+Fret) unexpected: "${yard6Bars}"`);
 // The Weight — String+Fret guitar, key of A (recognizable chords)
 const weight6 = await eng.parseGPX(new Uint8Array(fs.readFileSync(path.join(repo, "band-the_weight.gpx"))), true, 0);
 expect(weight6.bars[0].events.some((e) => e.symbol === "C#m") && weight6.bars[0].events.some((e) => e.symbol === "F#m"), `GP6 The Weight bar 1 expected C#m + F#m, got ${weight6.bars[0].events.map((e) => e.symbol).join(" ")}`);
@@ -820,6 +825,27 @@ const hcs = eng.scoreToCSMPN(hsc, { title: "H", tab: false, hybrid: false });
 expect((hcs.match(/%/g) || []).length === 3, `three held bars should export as three % similes, got ${(hcs.match(/%/g) || []).length}`);
 expect(/N\.C\./.test(hcs), "the genuinely uncovered bar still exports as N.C.");
 
+/* ---- narrow half-diminished bass rule + beat-sync inversions -----------------
+ * m6 and the m7♭5 a minor-3rd below are the same four pitch classes, and m6 (rank 10)
+ * out-ranked m7♭5 (rank 12), so the Tristan chord read `Abm6/F` instead of `Fø7`. When
+ * the BASS is the m7♭5 root the half-diminished reading is the one every lead sheet
+ * uses. Deliberately narrow — only m6-vs-m7♭5, only when the bass is exactly root+9. */
+{
+  expect(eng.symbolForMidis([53, 59, 63, 68], true) === "Fm7♭5", `Tristan chord F B D# G# should read Fm7♭5, got ${eng.symbolForMidis([53, 59, 63, 68], true)}`);
+  expect(eng.symbolForMidis([59, 62, 65, 69], true) === "Bm7♭5", `B D F A should read Bm7♭5, got ${eng.symbolForMidis([59, 62, 65, 69], true)}`);
+  // a genuine ROOT-POSITION m6 must not move
+  expect(eng.symbolForMidis([57, 60, 64, 66], true) === "Am6", `root-position Am6 must stay Am6, got ${eng.symbolForMidis([57, 60, 64, 66], true)}`);
+  expect(eng.symbolForMidis([60, 63, 67, 69], true) === "Cm6", `root-position Cm6 must stay Cm6, got ${eng.symbolForMidis([60, 63, 67, 69], true)}`);
+  // nothing else shifts — including the long-standing {C,E,G,A}/C → Am7/C reading
+  expect(eng.symbolForMidis([60, 64, 67, 69], true) === "Am7/C", "the C6/Am7 enharmonic reading is unchanged");
+  for (const [midis, want] of [[[60, 64, 67], "C"], [[57, 60, 64, 67], "Am7"], [[60, 64, 67, 71], "Cmaj7"], [[60, 64, 67, 70], "C7"], [[60, 63, 66, 69], "Cdim7"]]) {
+    expect(eng.symbolForMidis(midis, true) === want, `${want} must be unchanged, got ${eng.symbolForMidis(midis, true)}`);
+  }
+  // opt-out restores the old reading
+  expect(eng.symbolOf(eng.recognise([3, 5, 8, 11], eng.makeMask([3, 5, 8, 11]), 5, { halfDimBass: false }), true) === "Abm6/F",
+    "halfDimBass:false restores the previous m6 reading");
+}
+
 /* ---- beat tracking: onset envelope → tempo → DP beat path --------------------
  * The decoder had no tempo detection at all, so the bar grid hung off a hand-dialled
  * ♩= — the SAME Peg analysis gave 5 N.C. bars at 120bpm and 17 at 160bpm. Validated
@@ -904,6 +930,32 @@ expect(/N\.C\./.test(hcs), "the genuinely uncovered bar still exports as N.C.");
   const flatA = Array.from(eng.transcribeChordsBeatSync(withBass(55.0), SR, { ...iso, bassWeight: 0 }));
   expect(rootOf(flatC[0] && flatC[0].symbol) === rootOf(flatA[0] && flatA[0].symbol),
     `with the bass evidence off the two collapse to one reading, got ${flatC[0] && flatC[0].symbol} vs ${flatA[0] && flatA[0].symbol}`);
+  /* Inversions. The sliding path emitted slash chords and beat-sync did not — plain
+   * root-position symbols only, a real loss for a fake book. A chord-tone bass now
+   * names the inversion; a NON-chord-tone (passing) bass must not invent one. */
+  /* 16kHz, NOT this file's 44.1k SR — and that is load-bearing, not incidental. The
+   * audio panel downsamples to 16k before analysis, and bass resolution depends on it:
+   * a 4096-pt FFT gives 3.9Hz bins at 16k but 10.8Hz at 44.1k, where E2 (82.4Hz) and
+   * F2 (87.3Hz) land in the SAME bin and the bass band cannot tell them apart. Written
+   * at 44.1k this fixture reports the E2 bass as F — a property of the fixture's rate,
+   * not of the code under test. */
+  const BSR = 16000;
+  const triadOver = (bassHz) => {
+    const s = new Float32Array(BSR * 4);
+    for (let i = 0; i < s.length; i++) {
+      for (const f of [261.63, 329.63, 392.0]) s[i] += Math.sin((2 * Math.PI * f * i) / BSR) / 6;   // C E G
+      s[i] += Math.sin((2 * Math.PI * bassHz * i) / BSR) * 0.5;
+    }
+    return s;
+  };
+  const bBeats = [0, 1, 2, 3, 4];
+  const overE = Array.from(eng.transcribeChordsBeatSync(triadOver(82.41), BSR, { beats: bBeats, maxRank: 14 }));  // E2 = chord tone
+  expect(overE[0] && /\/E$/.test(overE[0].symbol), `a chord-tone bass should name the inversion, got ${overE[0] && overE[0].symbol}`);
+  const overF = Array.from(eng.transcribeChordsBeatSync(triadOver(87.31), BSR, { beats: bBeats, maxRank: 14 }));  // F2 = NOT a chord tone
+  expect(overF[0] && !/\/F$/.test(overF[0].symbol), `a passing (non-chord-tone) bass must not invent a slash, got ${overF[0] && overF[0].symbol}`);
+  expect(Array.from(eng.transcribeChordsBeatSync(triadOver(82.41), BSR, { beats: bBeats, maxRank: 14, slash: false }))
+    .every((e) => !e.symbol.includes("/")), "slash:false suppresses inversions");
+
   // …and the bass band itself measures what it claims: its chroma peaks on the bass
   // note. (Note the bass pitch also lands in the MAIN chroma — minFreq is 55Hz — so
   // "switch the bass weight off and the two collapse" is NOT a valid test of the
@@ -911,6 +963,43 @@ expect(/N\.C\./.test(hcs), "the genuinely uncovered bar still exports as N.C.");
   const peakPc = (v) => { let b = 0; for (let p = 1; p < 12; p++) if (v[p] > v[b]) b = p; return b; };
   expect(peakPc(eng.beatSegments(withBass(65.41), SR, bts, {})[0].bass) === 0, "bass chroma peaks on C for a C2 bass");
   expect(peakPc(eng.beatSegments(withBass(55.0), SR, bts, {})[0].bass) === 9, "bass chroma peaks on A for an A1 bass");
+}
+
+/* ---- HPSS: drums out of the chroma before recognition ------------------------
+ * Sustained pitched content is HORIZONTAL in a spectrogram, transients are VERTICAL,
+ * so a median along time estimates the harmonic part and a median along frequency the
+ * percussive one. Standard preprocessing for chord recognition — drums dump broadband
+ * energy into every chroma bin, and a kick/snare on the downbeat is exactly where a
+ * chord is most likely to be read. Measured on the real Peg stem against time-aligned
+ * ground truth: root 40.2% -> 53.0%, majmin 37.4% -> 51.4%. */
+{
+  const HSR = 16000, dur = 4;
+  // C major under repeated broadband transients ("drums"). Bursts must be FREQUENT
+  // enough that a typical frame overlaps one — with sparse bursts most frames are clean
+  // and the test passes with HPSS disabled, proving nothing (it did).
+  const noisy = new Float32Array(HSR * dur);
+  for (let i = 0; i < noisy.length; i++) for (const f of [261.63, 329.63, 392.0]) noisy[i] += Math.sin((2 * Math.PI * f * i) / HSR) / 3;
+  for (let beat = 0; beat * 0.25 < dur; beat++) {
+    const at = Math.floor(beat * 0.25 * HSR);
+    for (let i = 0; i < HSR * 0.08 && at + i < noisy.length; i++) noisy[at + i] += (Math.random() * 2 - 1) * 3 * Math.exp(-i / (HSR * 0.02));
+  }
+  // Mean share of chroma energy sitting on the ACTUAL chord tones, over every frame.
+  // Averaging over all frames (not one hand-picked one) is what makes this discriminate.
+  const inChordFrac = (frames) => {
+    let tot = 0;
+    for (const fr of frames) {
+      const c = Array.from(fr.chroma);
+      const sum = c.reduce((a, b) => a + b, 0) || 1;
+      tot += (c[0] + c[4] + c[7]) / sum;
+    }
+    return tot / (frames.length || 1);
+  };
+  const withHpss = eng.harmonicChromagram(noisy, HSR, { hopSec: 0.12 });
+  const plain = eng.beatSegments(noisy, HSR, Array.from({ length: 17 }, (_, i) => i * 0.25), { hpss: false });
+  expect(withHpss.length > 0 && withHpss[0].chroma.length === 12, "harmonicChromagram returns 12-bin chroma frames");
+  const fH = inChordFrac(withHpss), fP = inChordFrac(plain);
+  expect(fH > fP + 0.1, `HPSS should concentrate chroma on the real chord tones (got ${fH.toFixed(3)} vs unfiltered ${fP.toFixed(3)})`);
+  expect(eng.harmonicChromagram(new Float32Array(64), HSR, {}).length === 0, "too-short input yields no frames, not a crash");
 }
 
 /* ---- analyzeAudioChords: the panel entry point returns chords AND tempo ------ */
@@ -928,6 +1017,25 @@ expect(/N\.C\./.test(hcs), "the genuinely uncovered bar still exports as N.C.");
   // no beat grid (pure silence) must still produce a result via the sliding fallback
   const quiet = eng.analyzeAudioChords(new Float32Array(SR), SR);
   expect(Array.isArray(quiet.events), "falls back rather than throwing when there is no pulse");
+
+  /* Key prior. A chord whose notes all sit in the key is a better bet than one needing
+   * an accidental, scored as the fraction of the chord's pcs in the scale — no chord-
+   * function table, so it degrades gracefully instead of banning anything. Measured on
+   * the real Peg stem: root 38.7% -> 40.2%. Here: in C major, an ambiguous chroma that
+   * fits both C (diatonic) and Db (not) must resolve toward the diatonic one. */
+  const cMajScale = [true, false, true, false, true, true, false, true, false, true, false, true];
+  const segsOf = (chroma) => [0, 1, 2].map((i) => ({ t0: i, t1: i + 1, chroma, bass: new Float64Array(12), energy: 1 }));
+  const st = eng.chordStates({ maxRank: 14 });
+  // Db major slightly LOUDER than C major, so the non-diatonic reading wins on the
+  // audio alone — otherwise C wins regardless and the test proves nothing (it did).
+  const amb = new Float64Array(12);
+  [1, 5, 8].forEach((p) => { amb[p] = 1.0; });      // Db F Ab — outside C major
+  [0, 4, 7].forEach((p) => { amb[p] = 0.9; });      // C  E G  — inside
+  const rootOfState = (p) => (p[0] < st.length ? st[p[0]].root : null);
+  const noKey = rootOfState(eng.viterbiChords(segsOf(amb), st, { keyWeight: 0 }));
+  const inKey = rootOfState(eng.viterbiChords(segsOf(amb), st, { keyScale: cMajScale, keyWeight: 0.3 }));
+  expect(cMajScale[noKey] === false, `without a key the louder non-diatonic reading should win, got pc ${noKey}`);
+  expect(cMajScale[inKey] === true, `the key prior should tip it to the diatonic reading, got pc ${inKey}`);
 }
 
 /* ---- adaptive energy gate: quiet passages are music, not silence -------------
