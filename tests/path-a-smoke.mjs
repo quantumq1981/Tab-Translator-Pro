@@ -928,6 +928,25 @@ expect(/N\.C\./.test(hcs), "the genuinely uncovered bar still exports as N.C.");
   // no beat grid (pure silence) must still produce a result via the sliding fallback
   const quiet = eng.analyzeAudioChords(new Float32Array(SR), SR);
   expect(Array.isArray(quiet.events), "falls back rather than throwing when there is no pulse");
+
+  /* Key prior. A chord whose notes all sit in the key is a better bet than one needing
+   * an accidental, scored as the fraction of the chord's pcs in the scale — no chord-
+   * function table, so it degrades gracefully instead of banning anything. Measured on
+   * the real Peg stem: root 38.7% -> 40.2%. Here: in C major, an ambiguous chroma that
+   * fits both C (diatonic) and Db (not) must resolve toward the diatonic one. */
+  const cMajScale = [true, false, true, false, true, true, false, true, false, true, false, true];
+  const segsOf = (chroma) => [0, 1, 2].map((i) => ({ t0: i, t1: i + 1, chroma, bass: new Float64Array(12), energy: 1 }));
+  const st = eng.chordStates({ maxRank: 14 });
+  // Db major slightly LOUDER than C major, so the non-diatonic reading wins on the
+  // audio alone — otherwise C wins regardless and the test proves nothing (it did).
+  const amb = new Float64Array(12);
+  [1, 5, 8].forEach((p) => { amb[p] = 1.0; });      // Db F Ab — outside C major
+  [0, 4, 7].forEach((p) => { amb[p] = 0.9; });      // C  E G  — inside
+  const rootOfState = (p) => (p[0] < st.length ? st[p[0]].root : null);
+  const noKey = rootOfState(eng.viterbiChords(segsOf(amb), st, { keyWeight: 0 }));
+  const inKey = rootOfState(eng.viterbiChords(segsOf(amb), st, { keyScale: cMajScale, keyWeight: 0.3 }));
+  expect(cMajScale[noKey] === false, `without a key the louder non-diatonic reading should win, got pc ${noKey}`);
+  expect(cMajScale[inKey] === true, `the key prior should tip it to the diatonic reading, got pc ${inKey}`);
 }
 
 /* ---- adaptive energy gate: quiet passages are music, not silence -------------

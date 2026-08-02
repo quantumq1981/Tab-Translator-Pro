@@ -1366,6 +1366,7 @@ above the 0.35 adoption bar), then sampled every 0.1s MIREX-style:
 |---|---|---|---|---|
 | sliding window | 61% | 25.8 | 24.8 | 231 |
 | **beat-sync + Viterbi** | **100%** | **38.7** | **35.8** | 226 |
+| **+ key prior** | **100%** | **40.2** | **37.4** | 222 |
 
 +50% relative root accuracy, +44% majmin, and full coverage. Tuned defaults
 `changePenalty 0.08` / `bassWeight 0.15` come from sweeping both against that metric.
@@ -1379,6 +1380,16 @@ the first sweep looked best at `changePenalty 0.28`, which produced 32 events fo
 sliding-window fallback when no pulse is found, returning `{ events, bpm, beats, method }`
 — so **the ♩= control is filled in from the audio** instead of guessed. Runs off-thread
 (`analyzeChordsOffThread`, main-thread fallback). ~2s for a 4-minute stem in Node.
+
+**4. Key prior (second pass).** A tune mostly uses chords built from its scale. Decode
+once, read the key off THAT with the existing validated `analyzeKey`, then re-decode with
+a diatonic bonus scored as the FRACTION of the chord's pitch classes in the key's scale —
+no chord-function table, so it handles 7ths/extensions and *tips* rather than bans (a real
+secondary dominant still wins if the audio supports it). Skipped when the key reading is
+weak (`keyMinConfidence` 0.5), so a modulating tune isn't forced into one key. Peg reads
+**E minor, confidence 0.88**; measured gain root **38.7% → 40.2%**, majmin 35.8% → 37.4%
+at the tuned `keyWeight` 0.1. Modest but consistent and free — and `analyzeAudioChords`
+returns the detected `key` for the UI.
 
 **Honest limits.** This does not rescue a dense full mix — the Wagner prelude labels 96%
 of its duration but the vocabulary histogram still reads like mush being force-named.
