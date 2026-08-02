@@ -1391,6 +1391,39 @@ weak (`keyMinConfidence` 0.5), so a modulating tune isn't forced into one key. P
 at the tuned `keyWeight` 0.1. Modest but consistent and free — and `analyzeAudioChords`
 returns the detected `key` for the UI.
 
+#### Downbeat detection was tried and DOES NOT work with pure-DSP cues — don't re-derive it
+
+Beat tracking finds the pulse but not where **bar one** is, so barlines can sit a beat or
+two off even when the chords are right. Two principled cues were implemented and measured
+against real files; **both are near-chance, and the work was reverted rather than shipped.**
+
+1. **Harmonic cue** ("chords change on downbeats"). Measured phase distribution of chord
+   changes across the 4 beat positions on the Peg stem:
+   - our decoded chords: **26% / 16% / 31% / 27%** (25% = chance)
+   - the **time-aligned ground-truth** `.gp4` chords: **22% / 20% / 29% / 30%**
+
+   The premise is simply false for this music — Peg's harmonic rhythm puts changes on
+   beat 3 as often as beat 1. Note the ground truth is barely better than our decode, so
+   this is NOT a "our chords are too noisy" problem; the cue itself carries no phase.
+
+2. **Percussive cue** (downbeats are louder). Per-beat band energy by phase, same file:
+   - kick 40–120 Hz: 73/99/**100**/74 → peak at phase 2
+   - low 120–250 Hz: 87/**100**/97/91 → peak at phase 1
+   - snare/hat 2–6 kHz: 98/98/91/**100** → peak at phase 3
+
+   Three bands, three different answers. No coherent downbeat.
+
+Across all three real files the resulting confidence was Peg **0.081**, Wagner **0.027**,
+blues **0.286** — and the blues "success" is a false positive: its change distribution
+(22/19/30/29) is no better than the others, the score just cleared an arbitrary threshold
+on the energy term. A confident-but-wrong barline is **worse than none**, because it
+shifts every bar in the chart.
+
+**Conclusion:** modern downbeat trackers are learned models (RNN/CNN over spectral flux +
+chroma), not DSP heuristics, and that is why. If downbeats are wanted, that is the route —
+along the same seam as the `basic-pitch` note model. Do not bolt a phase-guesser onto the
+beat tracker.
+
 **Honest limits.** This does not rescue a dense full mix — the Wagner prelude labels 96%
 of its duration but the vocabulary histogram still reads like mush being force-named.
 Isolated stems remain the sweet spot. And 38.7% root accuracy is well under the 70–80%
