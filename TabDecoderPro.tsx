@@ -994,7 +994,11 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
     setAligning(true); setRefErr("");
     setTimeout(async () => {                                   // let "aligning…" paint
       try {
-        const res = await alignPcmToScoreOffThread(s.ds, s.dsr, tscore, { hopSec: 0.25 });
+        // hpss: drum-suppressed chroma for the alignment too. Measured on a real stem
+        // against its .gp4 — confidence 0.697 -> 0.753, and (what actually matters) the
+        // margin over a WRONG chart widens 0.103 -> 0.137, so the low-confidence
+        // fallback still catches a mismatched stem.
+        const res = await alignPcmToScoreOffThread(s.ds, s.dsr, tscore, { hopSec: 0.25, hpss: true });
         const segs = res && res.segments, conf = res ? res.confidence : 0;
         if (segs && segs.length && conf >= 0.35) setAlignSegs(segs);           // good enough → follow the recording
         else { setAlignSegs(null); setRefErr(segs && segs.length ? `Auto-align match was weak (${Math.round(conf * 100)}%) — nudge ♩= instead.` : "Couldn't auto-align — use ♩= instead."); }
