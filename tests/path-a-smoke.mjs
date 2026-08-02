@@ -820,6 +820,31 @@ const hcs = eng.scoreToCSMPN(hsc, { title: "H", tab: false, hybrid: false });
 expect((hcs.match(/%/g) || []).length === 3, `three held bars should export as three % similes, got ${(hcs.match(/%/g) || []).length}`);
 expect(/N\.C\./.test(hcs), "the genuinely uncovered bar still exports as N.C.");
 
+/* ---- adaptive energy gate: quiet passages are music, not silence -------------
+ * A gate fixed at a fraction of the GLOBAL peak assumes one level for the whole
+ * recording. On real wide-dynamic material (a Wagner prelude, peak ~28x the opening)
+ * it discarded 42% of the piece as "silence" — including 100% of the quiet opening
+ * where the harmony is. The reference is now a LOCAL peak, floored at a small
+ * fraction of the global peak so true silence still gates out. */
+{
+  const quietLoud = new Float32Array(SR * 8);
+  const put = (t0, t1, amp, freqs) => {
+    for (let i = t0 * SR; i < t1 * SR; i++) for (const f of freqs) quietLoud[i] += (amp * Math.sin((2 * Math.PI * f * i) / SR)) / freqs.length;
+  };
+  put(0, 3, 0.02, [261.63, 329.63, 392.0]);   // quiet C major — ~2% of the loud part
+  // 3–4s: silence
+  put(4, 8, 1.0, [392.0, 493.88, 587.33]);    // loud G major
+  // window must be shorter than the clip, or the local peak IS the global peak
+  const base = { hopSec: 0.12, smoothSec: 0.5, energyGateWindowSec: 2 };
+  const globalGate = eng.transcribeChords(quietLoud, SR, { ...base, energyGateWindowSec: 0 });
+  const adaptive = eng.transcribeChords(quietLoud, SR, base);
+  expect(!globalGate.some((e) => e.startSec < 3), "a global gate loses the quiet passage entirely (the bug)");
+  expect(adaptive.some((e) => e.symbol === "C" && e.startSec < 3), `adaptive gate recovers the quiet C, got [${adaptive.map((e) => e.symbol + "@" + e.startSec)}]`);
+  expect(adaptive.some((e) => e.symbol === "G"), "the loud passage still decodes under the adaptive gate");
+  // the floor must still hold: real silence never becomes a chord of its own
+  expect(!adaptive.some((e) => e.startSec >= 3.1 && e.startSec <= 3.8), `true silence stays gated, got [${adaptive.map((e) => e.symbol + "@" + e.startSec)}]`);
+}
+
 /* ---- recoverChordGaps: guarded second look at unlabelled spans ---------------
  * Opt-in. Must (a) leave every existing caller byte-identical when off, (b) refuse
  * silence, (c) refuse gaps too short to strand a bar, and (d) never emit a run
