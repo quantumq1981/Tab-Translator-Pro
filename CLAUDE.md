@@ -316,6 +316,26 @@ scope)**. Do not bolt an anchor-guesser onto this parser — it risks regressing
 validated Blue Sky output for no reliable gain. The honest fixes are **MusicXML
 import** (exact `<string>`/`<staff-tuning>`, no geometry) or in-app **Edit**.
 
+**THE FIX IS MANUAL (shipped 2026-08-02, Roadmap Wave 2 #7).** `buildChart(tokens,
+{ systemShifts })` takes a per-system correction keyed by GLOBAL system index; the value
+is added to the engine string index (0 = low E … 5 = high e), so **−1 moves that system's
+notes toward the bass**. Absent/0 is a strict no-op (Blue Sky is byte-identical with no
+opts, `{}`, and explicit zeros). `buildChart` also now returns `systems: [{ index, page,
+shift, measures, firstMeasure, lastMeasure }]` so the UI can label a control with the bars
+the player can actually find on the page (`StringShiftPanel` in TabDecoderPro.tsx —
+"⌥ Fix string alignment"; shifts persist in the session meta and re-apply on restore).
+
+**Validated against real ground truth, which is why this is trustworthy:** the Kid
+Charlemagne PDF reads bars 27–28 as `Fm7`; the `.gp3` says `C7`; shift −1 on that one
+system recovers `C7`/`C7` exactly, and bar 26 recovers its real `Ebdim/A G Fdim/B Bb`.
+
+**Per-system, not global, is load-bearing** — the measurement proves it: system 5
+(bars 26–28) is mis-anchored, but system 6 (bars 29–32) is ALREADY CORRECT at shift 0
+(`Am/C`, `Em/B`, `D7sus4/A` all match the `.gp3`) and shift −1 breaks it. A global shift
+would trade one broken system for another. (Note this also refines the old "bars 26–32"
+claim above: only 26–28 are actually mis-anchored.) Guarded by tests that fail if the
+shift is ignored OR made global.
+
 Related: the captured chords for a sparse rhythm-guitar part are inherently
 *partial* (e.g. a 3-string strum `5,5,5` on e/B/G reads as `Am/C`) — that is
 faithful to what's notated, not a bug. And measures where the part rests carry no

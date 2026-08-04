@@ -425,6 +425,11 @@ export default function TabDecoderPro() {
   const [pdfErr, setPdfErr] = useState("");
   const [pdfBusy, setPdfBusy] = useState(false);
   const [chart, setChart] = useState(null);
+  // Manual per-system string-shift overrides (Wave 2 #7). `topY` anchors to the
+  // highest digit row, which is wrong when a system never plays the high e — every
+  // note in it then shifts a string, silently. Not auto-fixable (see buildChart);
+  // this is the escape hatch. Keyed by global system index.
+  const [sysShifts, setSysShifts] = useState({});
   const [selFrets, setSelFrets] = useState(null);
   const [selMidis, setSelMidis] = useState(null);
   const [selKey, setSelKey] = useState("");
@@ -451,19 +456,34 @@ export default function TabDecoderPro() {
   const onFile = async (e) => {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
-    setPdfErr(""); setPdfBusy(true); setChart(null); clearSel();
+    setPdfErr(""); setPdfBusy(true); setChart(null); clearSel(); setSysShifts({});
     try {
       const buf = await f.arrayBuffer();
       const bytes = new Uint8Array(buf.slice(0)); // copy for the session cache (PDF.js may detach buf)
       const { tokens, pages } = await extractTokens(buf);
       const c = buildChart(tokens);
       if (!c.measures.length) setPdfErr("No tab measures detected. Is this a digital (text) tab PDF rather than a scan?");
-      setChart({ ...c, pages, fileName: f.name });
+      setChart({ ...c, tokens, pages, fileName: f.name });
       setRestored(false);
       saveSessionFile(bytes); // meta is written by the persist effect
     } catch (err) {
       setPdfErr("Parse failed: " + (err && err.message ? err.message : String(err)));
     } finally { setPdfBusy(false); }
+  };
+
+  /* Apply a manual string shift to ONE system and rebuild. Cheap — the PDF is already
+   * parsed, so this re-runs only buildChart over the retained tokens. Clamped to ±2;
+   * beyond that every note falls off the neck and the system empties. */
+  const bumpSystemShift = (index, delta) => {
+    if (!chart || !chart.tokens) return;
+    const next = { ...sysShifts, [index]: Math.max(-2, Math.min(2, ((sysShifts[index] | 0) || 0) + delta)) };
+    if (!next[index]) delete next[index];
+    setSysShifts(next);
+    try {
+      const c = buildChart(chart.tokens, { systemShifts: next });
+      setChart((prev) => ({ ...prev, ...c }));
+      clearSel();
+    } catch (_) { /* a bad shift must never wedge the panel */ }
   };
 
   // Re-run the right parser for a stored score (MusicXML text or gpif XML).
@@ -536,12 +556,12 @@ export default function TabDecoderPro() {
     saveSessionFile(new Uint8Array(d.bytes.slice(0))); // a decoded tab becomes a restorable session too
     (async () => {
       if (isPdf) {
-        setMode("pdf"); setPdfErr(""); setPdfBusy(true); setChart(null); clearSel();
+        setMode("pdf"); setPdfErr(""); setPdfBusy(true); setChart(null); clearSel(); setSysShifts({});
         try {
           const { tokens, pages } = await extractTokens(d.bytes.buffer);
           const c = buildChart(tokens);
           if (!c.measures.length) setPdfErr("No tab measures detected. Is this a digital (text) tab PDF rather than a scan?");
-          setChart({ ...c, pages, fileName: d.filename });
+          setChart({ ...c, tokens, pages, fileName: d.filename });
         } catch (err) { setPdfErr("Parse failed: " + (err && err.message ? err.message : String(err))); }
         finally { setPdfBusy(false); }
       } else {
@@ -575,7 +595,7 @@ export default function TabDecoderPro() {
     const active = (mode === "pdf" && chart) ? { kind: "pdf", filename: chart.fileName }
                  : (mode === "xml" && xmlScore) ? { kind: "xml", filename: xmlName } : null;
     if (!active) return;
-    saveSessionMeta({ v: 1, kind: active.kind, filename: active.filename, useSharp, overrides, partIndex: xmlScore ? (xmlScore.partIndex || 0) : 0 });
+    saveSessionMeta({ v: 1, kind: active.kind, filename: active.filename, useSharp, overrides, sysShifts, partIndex: xmlScore ? (xmlScore.partIndex || 0) : 0 });
   }, [mode, chart, xmlScore, xmlName, overrides, useSharp]);
 
   const restoreRef = useRef(null);
@@ -602,11 +622,14 @@ export default function TabDecoderPro() {
         const sharp = meta.useSharp !== false;
         setUseSharp(sharp);
         if (meta.kind === "pdf") {
-          setMode("pdf"); setPdfErr(""); setPdfBusy(true); setChart(null); clearSel();
+          setMode("pdf"); setPdfErr(""); setPdfBusy(true); setChart(null); clearSel(); setSysShifts({});
           try {
             const { tokens, pages } = await extractTokens(bytes.buffer);
-            const c = buildChart(tokens);
-            setChart({ ...c, pages, fileName: meta.filename || "restored.pdf" });
+            // re-apply saved per-system string shifts so a corrected chart restores corrected
+            const sh = meta.sysShifts && typeof meta.sysShifts === "object" ? meta.sysShifts : {};
+            setSysShifts(sh);
+            const c = buildChart(tokens, { systemShifts: sh });
+            setChart({ ...c, tokens, pages, fileName: meta.filename || "restored.pdf" });
           } finally { setPdfBusy(false); }
         } else {
           setMode("xml"); setXmlErr(""); setXmlScore(null); setXmlBusy(true); clearSel();
@@ -798,6 +821,9 @@ export default function TabDecoderPro() {
                   <ChartPanel score={scoreView} title={chart.fileName}
                     meta={`${scoreView.bars.length} bars · ${chart.systemsFound} systems · ${chart.pages} pp · 4/4 assumed`}
                     C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey={selKey} onPick={pickChord} />
+                )}
+                {scoreView && chart.systems && chart.systems.length > 0 && (
+                  <StringShiftPanel systems={chart.systems} shifts={sysShifts} onBump={bumpSystemShift} C={C} />
                 )}
               </>
             ) : (
@@ -1249,6 +1275,51 @@ function LeadSheetView({ score, C, overrides, setOverrides, editMode, editKey, s
   );
 }
 /* Grid view: the compact one-symbol-per-bar card grid. */
+/* StringShiftPanel — the manual escape hatch for a mis-anchored staff system.
+ *
+ * `topY` (the high-e line) anchors to the highest digit row in a system, which is only
+ * correct when that system actually plays the high e. When it doesn't, every note in
+ * that system reads a string too high and the chords come out confidently wrong — the
+ * worst failure class, because nothing looks broken. It is NOT reliably auto-fixable
+ * (a correctly-anchored system and a mis-anchored one can have near-identical geometry),
+ * so the honest fix is to let the player — who can see the page — nudge it.
+ *
+ * Presentational only: takes the systems, the current shifts, and a bump callback. */
+function StringShiftPanel({ systems, shifts, onBump, C }) {
+  const [open, setOpen] = React.useState(false);
+  const nudged = Object.keys(shifts || {}).filter((k) => shifts[k]).length;
+  return (
+    <div style={{ marginTop: 12, border: `1px solid ${C.border}`, borderRadius: 10, background: C.bg }}>
+      <button onClick={() => setOpen(!open)}
+        style={{ width: "100%", background: "none", border: "none", color: C.dim, textAlign: "left", padding: "10px 12px", fontSize: 11, cursor: "pointer", fontFamily: "'IBM Plex Mono', monospace" }}>
+        {open ? "▾" : "▸"} ⌥ Fix string alignment{nudged ? ` · ${nudged} system${nudged > 1 ? "s" : ""} adjusted` : ""}
+      </button>
+      {open && (
+        <div style={{ padding: "0 12px 12px" }}>
+          <div style={{ fontSize: 11, color: C.dim, lineHeight: 1.6, marginBottom: 10 }}>
+            If a run of bars reads as the wrong chords, its staff probably never plays the high E
+            string — so every note was read one string too high. Find the bars on the page and nudge
+            that system <b>−1</b> (toward the bass). Most systems need no change.
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 260, overflowY: "auto" }}>
+            {systems.filter((s) => s.firstMeasure != null).map((s) => {
+              const v = (shifts && shifts[s.index]) || 0;
+              return (
+                <div key={s.index} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+                  <span style={{ color: C.dim, minWidth: 92 }}>bars {s.firstMeasure}–{s.lastMeasure}</span>
+                  <button onClick={() => onBump(s.index, -1)} style={{ ...chip(C), padding: "2px 9px" }}>−</button>
+                  <span style={{ minWidth: 30, textAlign: "center", color: v ? C.green : C.dim }}>{v > 0 ? `+${v}` : v}</span>
+                  <button onClick={() => onBump(s.index, 1)} style={{ ...chip(C), padding: "2px 9px" }}>+</button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function GridView({ score, C, symOf, selKey, onPick }) {
   return (
     <>

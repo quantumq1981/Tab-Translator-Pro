@@ -476,6 +476,39 @@ const kc27 = [...new Set(kc3.bars[26].events.map((e) => e.symbol))].join(" ");
 const kc28 = [...new Set(kc3.bars[27].events.map((e) => e.symbol))].join(" ");
 expect(kc27 === "C7" && kc28 === "C7", `KC bars 27-28 expected C7/C7 (the PDF mis-read these as Fm7), got ${kc27}/${kc28}`);
 
+/* ---- manual per-system string shift (Wave 2 #7) ------------------------------
+ * The escape hatch for a mis-anchored staff. `topY` anchors to the highest digit row,
+ * which is only right when the system plays the high e; when it doesn't, every note in
+ * that system reads a string too high and the chords come out CONFIDENTLY WRONG. This
+ * is validated against real ground truth: the Kid Charlemagne PDF reads bars 27-28 as
+ * Fm7, the .gp3 says C7, and shift −1 on that one system fixes it.
+ *
+ * Per-SYSTEM (not global) is the whole point: the very next system in the same file is
+ * already correct, and shifting it breaks it. */
+{
+  const kcTokens = (await extractTokens(new Uint8Array(fs.readFileSync(path.join(repo, "Kid Charlemagne - Steeley Dan.pdf"))))).tokens;
+  const base = eng.buildChart(kcTokens);
+  expect(Array.isArray(base.systems) && base.systems.length > 0, "buildChart reports the systems it found");
+  const symAt = (chart, n) => {
+    const bar = eng.buildScore(chart, true).bars.find((b) => b.number === n);
+    return bar ? [...new Set(bar.events.map((e) => e.symbol))].join(" ") : "(none)";
+  };
+  expect(symAt(base, 27) === "Fm7", `baseline: the PDF mis-reads bar 27 as Fm7, got ${symAt(base, 27)}`);
+  const sys27 = base.systems.find((s) => s.measures.indexOf(27) >= 0);
+  expect(sys27 && sys27.firstMeasure === 26 && sys27.lastMeasure === 28,
+    `bar 27's system should cover bars 26-28, got ${sys27 && sys27.firstMeasure}-${sys27 && sys27.lastMeasure}`);
+  const fixed = eng.buildChart(kcTokens, { systemShifts: { [sys27.index]: -1 } });
+  expect(symAt(fixed, 27) === "C7" && symAt(fixed, 28) === "C7",
+    `shift −1 should recover the .gp3 truth C7/C7, got ${symAt(fixed, 27)}/${symAt(fixed, 28)}`);
+  // the NEXT system is already correct — shifting it must break it (why this is per-system)
+  const sys29 = base.systems.find((s) => s.measures.indexOf(29) >= 0);
+  expect(symAt(base, 29) === "Am/C", `bar 29 is already correct at shift 0, got ${symAt(base, 29)}`);
+  const overShifted = eng.buildChart(kcTokens, { systemShifts: { [sys29.index]: -1 } });
+  expect(symAt(overShifted, 29) !== "Am/C", "shifting an already-correct system changes it (per-system granularity is load-bearing)");
+  // and a shift on one system must not touch another
+  expect(symAt(fixed, 29) === symAt(base, 29), "a shift is scoped to its own system");
+}
+
 const peg4 = eng.parseGP345(new Uint8Array(fs.readFileSync(path.join(repo, "Steely Dan - Peg.gp4"))), true, 3);
 expect(peg4.parts[3].name === "Rhythm guitar", `Peg gp4 track 3 expected "Rhythm guitar", got "${peg4.parts[3].name}"`);
 const peg4Bars = peg4.bars.slice(0, 5).map((b) => [...new Set(b.events.map((e) => e.symbol))].join(" ")).join(" | ");
