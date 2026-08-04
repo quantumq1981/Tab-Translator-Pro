@@ -176,6 +176,27 @@ expect(JSON.stringify(e1[0].midis) === JSON.stringify([48, 52, 55]), `bar1 C mid
 // the pitch-less note (E3 via string4/fret2) resolved through the tuning fallback
 expect(e1[0].midis.includes(52), "fret-only note (string4/fret2) should resolve to E3=52 via tuning");
 
+/* ---- Path C: slash-notation chart — chords come from <harmony>, not the
+ *      placeholder slash noteheads. Regression for the "MusicXML → nonsense"
+ *      report (Larry Carlton "Room 335" fake-book export): every <note> is a
+ *      slash placeholder at pitch B4, so pitch-recognition alone yielded a single
+ *      "B" per bar. The chords live in <harmony> and must be read from there. --- */
+const rm = eng.parseMusicXML(
+  fs.readFileSync(path.join(here, "fixtures", "room-335-slash.musicxml"), "utf8"), true);
+const rmSyms = rm.bars.map((b) => (b.events[0] || {}).symbol || "—");
+expect(rm.bars.length === 339, `Room 335: expected 339 bars, got ${rm.bars.length}`);
+expect(rmSyms.slice(0, 3).join(" | ") === "Dmaj7 | C#m7 | Bm7",
+  `Room 335 first 3 bars expected "Dmaj7 | C#m7 | Bm7", got "${rmSyms.slice(0, 3).join(" | ")}"`);
+// NOT the placeholder-slash reading (would be a single "B" every bar)
+expect(new Set(rmSyms).size > 10, `Room 335 should recover many distinct chords, got ${new Set(rmSyms).size}`);
+expect(!rmSyms.every((s) => s === "B"), "Room 335 must not read the B4 slash placeholders as chords");
+// <bass> slash chords: a non-chord-tone bass stays a clean slash (D/E, not Dadd9/E)
+expect(rmSyms.includes("D/E"), `Room 335 should carry the D/E slash chord faithfully, got distinct: ${[...new Set(rmSyms)].join(", ")}`);
+// half-diminished from <kind>half-diminished</kind>
+expect(rmSyms.some((s) => /m7♭5$/.test(s)), "Room 335 should carry half-diminished (m7♭5) chords");
+// the source's <alter>1</alter> (this exporter's variant of <root-alter>) is read → C#, not C
+expect(rmSyms.includes("C#m7") && !rmSyms.includes("Cm7"), "Room 335: <alter> accidental must be read (C#m7, not Cm7)");
+
 /* ---- exporters: ChordPro + ABC, with an edit override applied ------------- */
 const overrides = { "2.0": "A7" }; // user re-spells bar 2's Am as A7
 const cp = eng.scoreToChordPro(mx, { overrides });

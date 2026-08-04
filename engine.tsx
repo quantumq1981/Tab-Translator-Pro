@@ -678,6 +678,58 @@ function _tuningName(arr) {
   for (const [n, t] of Object.entries(TUNINGS)) if (t.every((v, i) => v === arr[i])) return n;
   return "Custom";
 }
+
+// MusicXML <kind> value -> engine QUALITIES suffix (inverse of _XML_KIND, plus
+// common synonyms). Used to voice a <harmony> chord symbol into MIDI notes.
+const _MXKIND_SUFFIX = {
+  "major": "", "minor": "m", "dominant": "7", "dominant-seventh": "7",
+  "major-seventh": "maj7", "minor-seventh": "m7", "minor-sixth": "m6",
+  "major-sixth": "6", "diminished": "dim", "diminished-seventh": "dim7",
+  "half-diminished": "m7♭5", "augmented": "aug", "augmented-seventh": "7",
+  "suspended-second": "sus2", "suspended-fourth": "sus4",
+  "suspended-fourth-seventh": "7sus4", "power": "5",
+  "major-minor": "m(maj7)", "dominant-ninth": "9", "major-ninth": "maj9",
+  "minor-ninth": "m9", "major-sixth-ninth": "6/9", "add9": "add9",
+};
+const _SUFFIX_INTERVALS = QUALITIES.reduce((m, q) => { m[q.suffix] = q.intervals; return m; }, {});
+
+// Turn a <harmony> chord symbol into { symbol, midis }. The symbol is the
+// EXPLICIT chord the file already states, so we spell it directly (root + suffix
+// + optional /bass) using the engine's note table — more faithful than
+// re-inferring it (a non-chord-tone bass like D/E would fold into "Dadd9/E").
+// The voicing (root at C3=48; an explicit bass a register below so it stays the
+// lowest note) feeds playback / ABC / transpose. Returns null for no chord/N.C.
+//
+// Accidentals: standard MusicXML uses <root-alter>/<bass-alter>, but some
+// exporters (incl. this app family) write a plain <alter> inside <root>/<bass> —
+// both are read, scoped to their parent element so root and bass don't collide.
+function _harmonyChord(h, useSharp) {
+  const rootEl = _xFirst(h, "root");
+  if (!rootEl) return null;
+  const step = _xChildText(rootEl, "root-step") || _xChildText(rootEl, "step");
+  if (!step || !(step in STEP_SEMI)) return null;
+  const kind = _xChildText(h, "kind").toLowerCase().trim();
+  if (!kind || kind === "none") return null;
+  const alter = parseInt(_xChildText(rootEl, "root-alter") || _xChildText(rootEl, "alter") || "0", 10) || 0;
+  const rootPc = (STEP_SEMI[step] + alter + 1200) % 12;
+  const suffix = kind in _MXKIND_SUFFIX ? _MXKIND_SUFFIX[kind] : "";
+  const intervals = _SUFFIX_INTERVALS[suffix] || [0, 4, 7];
+  const names = useSharp ? NOTE_SHARP : NOTE_FLAT;
+  const rootMidi = 48 + rootPc;
+  const midis = intervals.map((iv) => rootMidi + iv);
+  let symbol = names[rootPc] + suffix;
+  const bassEl = _xFirst(h, "bass");
+  if (bassEl) {
+    const bstep = _xChildText(bassEl, "bass-step") || _xChildText(bassEl, "step");
+    if (bstep && bstep in STEP_SEMI) {
+      const balter = parseInt(_xChildText(bassEl, "bass-alter") || _xChildText(bassEl, "alter") || "0", 10) || 0;
+      const bassPc = (STEP_SEMI[bstep] + balter + 1200) % 12;
+      if (bassPc !== rootPc) { midis.unshift(36 + bassPc); symbol += "/" + names[bassPc]; }
+    }
+  }
+  return { symbol, midis };
+}
+
 function parseMusicXML(xml, useSharp = true, partIndex = 0) {
   const doc = new DOMParser().parseFromString(xml, "text/xml");
   if (_xEls(doc, "parsererror").length) throw new Error("Not valid XML.");
@@ -695,6 +747,7 @@ function parseMusicXML(xml, useSharp = true, partIndex = 0) {
   _xEls(part, "measure").forEach((measure, mi) => {
     let cursor = 0, lastOnset = 0;
     const onsets = new Map(); // onset(div) -> { midis:[], frets:{} }
+    const harmonies = []; // [{ onset, midis }] from <harmony> chord symbols
     for (let node = measure.firstChild; node; node = node.nextSibling) {
       if (node.nodeType !== 1) continue;
       const tag = node.nodeName;
@@ -711,6 +764,11 @@ function parseMusicXML(xml, useSharp = true, partIndex = 0) {
         const onset = isChord ? lastOnset : cursor;
         if (!isChord) { lastOnset = cursor; cursor += dur; }
         if (isRest) continue;
+        // Slash noteheads are rhythm placeholders (fake-book / lead-sheet slash
+        // charts), NOT real pitches — the chord lives in <harmony>. Skip them from
+        // pitch recognition (cursor already advanced) so onsets stays empty and the
+        // <harmony> path below takes over.
+        if (_xChildText(node, "notehead").toLowerCase() === "slash") continue;
         let midi = null, eng = null, fret = null;
         const p = _xFirst(node, "pitch"); if (p) midi = _pitchToMidi(p);
         const tech = _xFirst(node, "technical");
@@ -723,13 +781,23 @@ function parseMusicXML(xml, useSharp = true, partIndex = 0) {
         const tm = _xFirst(node, "time-modification"); let tup = 0; if (tm) { const an = parseInt(_xChildText(tm, "actual-notes") || "0", 10); if (an > 1) tup = an; }
         if (!onsets.has(onset)) onsets.set(onset, { midis: [], frets: {}, tuplet: tup });
         const o = onsets.get(onset); o.midis.push(midi); if (eng != null && o.frets[eng] === undefined) o.frets[eng] = fret;
+      } else if (tag === "harmony") {
+        const hc = _harmonyChord(node, useSharp);
+        if (hc) harmonies.push({ onset: cursor, symbol: hc.symbol, midis: hc.midis });
       } else if (tag === "backup") { cursor -= parseInt(_xChildText(node, "duration") || "0", 10) || 0; }
       else if (tag === "forward") { cursor += parseInt(_xChildText(node, "duration") || "0", 10) || 0; }
     }
     const divPerBeat = (divisions * 4) / beatType || divisions;
-    const raw = [...onsets.entries()].sort((a, b2) => a[0] - b2[0]).map(([onset, o]) => ({
-      symbol: symbolForMidis(o.midis, useSharp), midis: [...o.midis].sort((a, b2) => a - b2), frets: o.frets, tuplet: o.tuplet || 0, onset,
-    }));
+    // When a measure has explicit <harmony> chord symbols and no real pitched
+    // notes (a slash-notation chart), name the bars from the harmony symbols.
+    // Otherwise keep the validated note-recognition path unchanged.
+    const raw = (harmonies.length && onsets.size === 0)
+      ? harmonies.slice().sort((a, b2) => a.onset - b2.onset).map(({ onset, symbol, midis }) => ({
+          symbol, midis: [...midis].sort((a, b2) => a - b2), frets: {}, tuplet: 0, onset,
+        }))
+      : [...onsets.entries()].sort((a, b2) => a[0] - b2[0]).map(([onset, o]) => ({
+          symbol: symbolForMidis(o.midis, useSharp), midis: [...o.midis].sort((a, b2) => a - b2), frets: o.frets, tuplet: o.tuplet || 0, onset,
+        }));
     const events = [];
     raw.forEach((e) => { const last = events[events.length - 1]; if (!last || last.symbol !== e.symbol) events.push(e); });
     events.forEach((e) => { e.qbeat = e.onset / divPerBeat; e.beat = Math.max(0, Math.min(beats - 1, Math.round(e.qbeat))); });
