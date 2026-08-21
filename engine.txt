@@ -2112,6 +2112,108 @@ function transposeScore(score, n, useSharp) {
   return { ...score, bars, transposedBy: n };
 }
 
+/* ---- Brass / Horn / Sax section transposition ---------------------------
+ * Every transposing instrument reads a written pitch that is SEMITONES ABOVE the
+ * concert-pitch source. A Bb trumpet reads concert C as written D (+2). So
+ * `transposeSemitones = written − sounding`. `transposeScore` (above) already
+ * shifts every event's MIDI + re-labels the symbol, so a brass part is just the
+ * concert score run through it, with the part-name and (for bass-clef targets)
+ * clef swapped in the export.
+ *
+ * Standard catalog: the intervals every big-band chart uses. `midiProgram` is a
+ * General-MIDI voice for optional playback previews. */
+const BRASS_INSTRUMENTS = [
+  { id: "trumpet-bb", name: "B♭ Trumpet", family: "brass", transposeSemitones: 2, clef: "treble", midiProgram: 56 },
+  { id: "cornet-bb", name: "B♭ Cornet", family: "brass", transposeSemitones: 2, clef: "treble", midiProgram: 56 },
+  { id: "flugelhorn-bb", name: "B♭ Flugelhorn", family: "brass", transposeSemitones: 2, clef: "treble", midiProgram: 56 },
+  { id: "horn-f", name: "F Horn", family: "brass", transposeSemitones: 7, clef: "treble", midiProgram: 60 },
+  { id: "trombone", name: "Trombone", family: "brass", transposeSemitones: 0, clef: "bass", midiProgram: 57 },
+  { id: "bass-trombone", name: "Bass Trombone", family: "brass", transposeSemitones: 0, clef: "bass", midiProgram: 57 },
+  { id: "euphonium", name: "Euphonium (BC)", family: "brass", transposeSemitones: 0, clef: "bass", midiProgram: 58 },
+  { id: "euphonium-tc-bb", name: "B♭ Euphonium (TC)", family: "brass", transposeSemitones: 14, clef: "treble", midiProgram: 58 },
+  { id: "tuba", name: "Tuba", family: "brass", transposeSemitones: 0, clef: "bass", midiProgram: 58 },
+  { id: "soprano-sax-bb", name: "B♭ Soprano Sax", family: "sax", transposeSemitones: 2, clef: "treble", midiProgram: 64 },
+  { id: "alto-sax-eb", name: "E♭ Alto Sax", family: "sax", transposeSemitones: 9, clef: "treble", midiProgram: 65 },
+  { id: "tenor-sax-bb", name: "B♭ Tenor Sax", family: "sax", transposeSemitones: 14, clef: "treble", midiProgram: 66 },
+  { id: "baritone-sax-eb", name: "E♭ Baritone Sax", family: "sax", transposeSemitones: 21, clef: "treble", midiProgram: 67 },
+  { id: "clarinet-bb", name: "B♭ Clarinet", family: "woodwind", transposeSemitones: 2, clef: "treble", midiProgram: 71 },
+  { id: "bass-clarinet-bb", name: "B♭ Bass Clarinet", family: "woodwind", transposeSemitones: 14, clef: "treble", midiProgram: 71 },
+];
+
+function getBrassInstrument(id) {
+  for (let i = 0; i < BRASS_INSTRUMENTS.length; i++) if (BRASS_INSTRUMENTS[i].id === id) return BRASS_INSTRUMENTS[i];
+  return null;
+}
+
+/* Emit ONE instrument's part as MusicXML. Runs the concert score through
+ * `transposeScore` and swaps the <part-name> + (for bass-clef targets) the
+ * treble G/2 clef for bass F/4. Any G-clef input becomes a horn-section-ready
+ * part with correct written pitches. */
+function scoreToBrassMusicXML(score, instrumentId, opts = {}) {
+  const inst = getBrassInstrument(instrumentId);
+  if (!inst) throw new Error("Unknown brass instrument: " + instrumentId);
+  const tscore = transposeScore(score, inst.transposeSemitones, opts.useSharp !== false);
+  let xml = scoreToMusicXML(tscore, opts);
+  // Rename the part to this instrument.
+  xml = xml.replace(/<part-name>[^<]*<\/part-name>/, "<part-name>" + inst.name + "</part-name>");
+  // Bass-clef instruments: emit a <clef> in the first measure's attributes.
+  // Base exporter writes <attributes> only when meter changes or the first bar
+  // — inject a bass clef inside the first attributes block we see.
+  if (inst.clef === "bass") {
+    xml = xml.replace(/(<attributes>[\s\S]*?)(<\/attributes>)/,
+      "$1        <clef><sign>F</sign><line>4</line></clef>\n      $2");
+  }
+  return xml;
+}
+
+/* Same for ABC. Simplest transposition: shift the score, run scoreToABC, adjust
+ * the `V:1 clef=bass` line if this is a bass-clef instrument, and inject
+ * `%%MIDI program N` so playback previews the right voice. */
+function scoreToBrassABC(score, instrumentId, opts = {}) {
+  const inst = getBrassInstrument(instrumentId);
+  if (!inst) throw new Error("Unknown brass instrument: " + instrumentId);
+  const tscore = transposeScore(score, inst.transposeSemitones, opts.useSharp !== false);
+  // Transpose the K: too. If the caller supplied opts.key ({tonic, mode}) shift its
+  // tonic; else analyze the concert score, shift THAT — so the written K: matches
+  // the transposed pitches. `analyzeKey` returns { tonic, mode, confidence } and
+  // scoreToABC expects that shape.
+  let brassKey = opts.key || (typeof analyzeKey === "function" ? analyzeKey(score) : null);
+  if (brassKey && typeof brassKey.tonic === "number") {
+    brassKey = { ...brassKey, tonic: ((brassKey.tonic + inst.transposeSemitones) % 12 + 12) % 12 };
+  }
+  const abcOpts = { ...opts, key: brassKey };
+  let abc = scoreToABC(tscore, abcOpts);
+  if (inst.midiProgram != null) {
+    abc = abc.replace(/(K:[^\n]*\n)/, "$1%%MIDI program " + inst.midiProgram + "\n");
+  }
+  if (inst.clef === "bass") {
+    abc = abc.replace(/(K:[^\n]*\n)/, "$1V:1 clef=bass\n");
+  }
+  // Header line so the target instrument is visible in the exported file.
+  abc = abc.replace(/(T:[^\n]*\n)/, "$1T: " + inst.name + " part\n");
+  return abc;
+}
+
+/* Convenience: build a full brass section as { instrumentId → xml/abc } for the
+ * requested output format. Emits one part per instrument (individual charts);
+ * MusicXML full-score assembly is available on the finishing app (CSMP) — the
+ * one-part-per-instrument shape is what section players actually rehearse from.
+ * Returns [{ id, name, format, filename, content }]. */
+function buildBrassSection(score, instrumentIds, opts = {}) {
+  const fmt = opts.format === "abc" ? "abc" : "musicxml";
+  const title = (opts.title || "part").replace(/[^A-Za-z0-9._\- ]+/g, "").trim() || "part";
+  const parts = [];
+  for (let i = 0; i < instrumentIds.length; i++) {
+    const inst = getBrassInstrument(instrumentIds[i]);
+    if (!inst) continue;
+    const safeName = inst.name.replace(/[^A-Za-z0-9._\- ]+/g, "");
+    const filename = title + "-" + safeName + (fmt === "abc" ? ".abc" : ".xml");
+    const content = fmt === "abc" ? scoreToBrassABC(score, inst.id, opts) : scoreToBrassMusicXML(score, inst.id, opts);
+    parts.push({ id: inst.id, name: inst.name, format: fmt, filename, content });
+  }
+  return parts;
+}
+
 /* ---- MIDI export: score → Standard MIDI File (format 0) -------------------
  * Deterministic + testable like the other exporters (no deps, no browser API):
  * returns a Uint8Array of a single-track SMF. Same timing model as
@@ -3574,6 +3676,11 @@ export {
   _harmonyXML,
   scoreToMusicXML,
   transposeScore,
+  BRASS_INSTRUMENTS,
+  getBrassInstrument,
+  scoreToBrassMusicXML,
+  scoreToBrassABC,
+  buildBrassSection,
   ARRANGE_TEMPLATES,
   arrangeScore,
   _midiVarLen,

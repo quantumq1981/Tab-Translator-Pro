@@ -1487,6 +1487,67 @@ console.log(`ABC: ${abc.trim().split("\n").pop()}`);
 console.log(`4× exports (reported bugs): Wild Night ${wnChart.systemsFound} systems / ${wnChart.measures.length} bars (was 0/0) · ` +
   `Confirmation key ${cfKey} (was Em) ${cfBars.slice(0, 7).join(" | ")}`);
 
+/* ---- Brass / Horn / Sax section transposition (engine surface) -----------
+ * `mx` is the concert-pitch MusicXML fixture parsed above (`C G | Am | F` in C major).
+ * Every transposing instrument reads written pitches SEMITONES ABOVE concert. */
+expect(Array.isArray(eng.BRASS_INSTRUMENTS) && eng.BRASS_INSTRUMENTS.length >= 10, "BRASS_INSTRUMENTS catalog present");
+const trumpetBb = eng.getBrassInstrument("trumpet-bb");
+const altoSax = eng.getBrassInstrument("alto-sax-eb");
+const tenorSax = eng.getBrassInstrument("tenor-sax-bb");
+const trombone = eng.getBrassInstrument("trombone");
+const horn = eng.getBrassInstrument("horn-f");
+expect(trumpetBb && trumpetBb.transposeSemitones === 2, "Bb trumpet reads M2 above concert");
+expect(altoSax && altoSax.transposeSemitones === 9, "Eb alto sax reads M6 above concert");
+expect(tenorSax && tenorSax.transposeSemitones === 14, "Bb tenor sax reads M9 above concert");
+expect(trombone && trombone.transposeSemitones === 0 && trombone.clef === "bass", "trombone: concert pitch, bass clef");
+expect(horn && horn.transposeSemitones === 7, "F horn reads P5 above concert");
+
+// Concert C major → Bb trumpet reads it in D major (chord symbols shift up a M2).
+const tptXml = eng.scoreToBrassMusicXML(mx, "trumpet-bb", { useSharp: true });
+expect(/<part-name>[^<]*Trumpet[^<]*<\/part-name>/.test(tptXml), "trumpet part-name is set");
+expect(/<root-step>D<\/root-step>/.test(tptXml) && !/<root-step>C<\/root-step>/.test(tptXml),
+  "Bb trumpet: concert C → written D in the harmony");
+expect(/<root-step>A<\/root-step>/.test(tptXml), "Bb trumpet: concert G → written A");
+
+// Eb alto sax: concert C → written A (up a M6).
+const altoXml = eng.scoreToBrassMusicXML(mx, "alto-sax-eb", { useSharp: true });
+expect(/<part-name>[^<]*Alto Sax[^<]*<\/part-name>/.test(altoXml), "alto sax part-name is set");
+expect(/<root-step>A<\/root-step>/.test(altoXml) && /<root-step>E<\/root-step>/.test(altoXml),
+  "Eb alto sax: concert C → A, concert G → E");
+
+// Trombone: concert pitch preserved, but rendered in bass clef.
+const trbXml = eng.scoreToBrassMusicXML(mx, "trombone", { useSharp: true });
+expect(/<sign>F<\/sign>[\s\S]*?<line>4<\/line>/.test(trbXml), "trombone: F clef line 4 injected");
+expect(/<root-step>C<\/root-step>/.test(trbXml) && /<root-step>G<\/root-step>/.test(trbXml),
+  "trombone: concert-pitch chord symbols preserved");
+expect(/<part-name>Trombone<\/part-name>/.test(trbXml), "trombone part-name is set");
+
+// F horn: concert C → written G (up a P5).
+const hornXml = eng.scoreToBrassMusicXML(mx, "horn-f", { useSharp: true });
+expect(/<root-step>G<\/root-step>/.test(hornXml), "F horn: concert C → written G");
+
+// ABC brass export: %%MIDI program + T: header + transposed key.
+const tptAbc = eng.scoreToBrassABC(mx, "trumpet-bb", { useSharp: true });
+expect(/%%MIDI program 56/.test(tptAbc), "Bb trumpet ABC injects a trumpet MIDI program");
+expect(/T:[^\n]*Trumpet/.test(tptAbc), "ABC carries the instrument name in a T: header");
+expect(/K:D/.test(tptAbc), "Bb trumpet ABC key K:C → K:D");
+const trbAbc = eng.scoreToBrassABC(mx, "trombone", { useSharp: true });
+expect(/V:1 clef=bass/.test(trbAbc), "trombone ABC carries a V:1 clef=bass line");
+expect(/K:C/.test(trbAbc), "trombone ABC key stays K:C (concert pitch)");
+
+// Full section builder: one part per requested instrument, correct filenames.
+const section = eng.buildBrassSection(mx, ["trumpet-bb", "alto-sax-eb", "tenor-sax-bb", "trombone"], {
+  format: "musicxml", title: "Demo", useSharp: true,
+});
+expect(section.length === 4, "buildBrassSection returns one entry per requested instrument");
+expect(section.every((p) => p.filename.endsWith(".xml")), "brass MusicXML parts have .xml filenames");
+expect(section.some((p) => /Trombone/.test(p.filename)), "trombone part filename includes 'Trombone'");
+// Unknown instrument ids are silently skipped (matches the CSMP UI's tolerance).
+const skipped = eng.buildBrassSection(mx, ["not-a-real-id", "trumpet-bb"], { format: "musicxml" });
+expect(skipped.length === 1 && skipped[0].id === "trumpet-bb", "unknown instrument ids are skipped");
+
+console.log(`Brass: ${section.length} parts (trumpet C→D, alto C→A, tenor C→A, trombone concert bass-clef).`);
+
 if (fails.length) {
   console.error("\nFAIL:\n  " + fails.join("\n  "));
   console.error("\nRe-run with --log-tokens to dump the raw extractTokens() stream and diff against the reference.");
