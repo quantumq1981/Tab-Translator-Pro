@@ -1,0 +1,25 @@
+basic-pitch (vendored model files)
+==================================
+
+The two files in this directory —
+
+  model.json
+  group1-shard1of1.bin
+
+— are the TensorFlow.js graph model published by Spotify's basic-pitch project.
+They are redistributed here unchanged so this app can load them same-origin
+(no CORS, no third-party CDN dependency, cacheable by a Service Worker).
+
+Upstream: https://github.com/spotify/basic-pitch-ts (path: /model/)
+          https://github.com/spotify/basic-pitch  (Python + reference weights)
+
+License (code):     Apache License, Version 2.0
+License (weights):  Creative Commons Attribution 4.0 International (CC BY 4.0)
+
+  © Spotify AB, licensors of the basic-pitch model.
+
+Attribution: this app uses Spotify's basic-pitch model for per-voice note
+transcription. See docs/ML-NOTES.md for how it is wired in.
+
+Nothing in this app modifies the model; it is loaded verbatim by TensorFlow.js
+via the tf.io graph-model loader at runtime.

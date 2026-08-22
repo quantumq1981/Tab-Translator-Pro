@@ -44,25 +44,56 @@ winnable than a Demucs-class separator (166 MB). It's the right tool for this ta
 - **`transcribeWithNoteModel(pcm, sr, model, opts)`** — orchestrator: runs a pluggable
   `model` then decodes → `{ notes, score }`.
 
-## What remains (the device-only / hosted seam)
+## What's wired (2026-08-22)
 
-1. **Host the model.** Put the `basic-pitch` ONNX somewhere the app can fetch — the same
-   GitHub Pages origin is simplest (same-origin, no CORS), or allow the host in the
-   environment's network policy. (This sandbox's proxy blocks Hugging Face, so the model
-   could not be fetched/validated here.)
-2. **Wire the inference glue** — a browser-only function published as
-   **`window.TTP_NOTE_MODEL(pcm, sampleRate, opts)`** that returns
-   `{ onsets, frames, frameRate, minMidi }`:
-   - load `onnxruntime-web` (WASM single-thread on Pages — no COOP/COEP; or WebGPU where
-     available on iOS 18+),
-   - compute basic-pitch's **harmonic-CQT input features** from the PCM,
-   - run the ORT session → the onset/frame matrices.
-   The **UI already calls it**: the Audio panel's **🎼 Voices (ML)** button runs
-   `transcribeWithNoteModel(pcm, sr, window.TTP_NOTE_MODEL, …)` when the hook exists, else
-   shows a "not configured" message.
-3. **Device-test** — browser ONNX + iOS Safari is the seam only hardware can confirm (same
-   category as the PDF.js / Web Audio seams).
+The model + browser glue are now shipped. The route is **TensorFlow.js**, not ONNX —
+because Spotify already publishes a browser-ready wrapper (`@spotify/basic-pitch`) and its
+own TF.js graph model, so we get the exact Spotify-blessed input preprocessing +
+harmonic-CQT feature extraction for free, and skip re-porting ~200 lines of DSP. ONNX
+would have meant writing that ourselves against `onnxruntime-web` — the same runtime, more
+code we own, no functional win. Both paths hit the same iOS/Pages constraints (WASM
+single-thread, no COOP/COEP), so this is the pragmatic call.
 
-Everything downstream of the model (decode → notes → score → chart/export) is done and
-guarded by `npm test`, so finishing is: host the model + write the `window.TTP_NOTE_MODEL`
-inference function + smoke-test on device.
+1. **Model files vendored SAME-ORIGIN** at `models/basic-pitch/` — `model.json` (~175 KB
+   graph manifest) + `group1-shard1of1.bin` (~740 KB weights) = ~915 KB total, well under
+   any iOS budget. Redistributed verbatim from `spotify/basic-pitch-ts` under Apache 2.0
+   (code) + CC-BY 4.0 (weights); NOTICE file sits next to the weights. Same-origin means:
+   no CORS, no third-party CDN cache misses, and a Service Worker can cache it for offline
+   (Wave-1 #5).
+2. **Inference glue** — `note-model.js` (browser-only, plain ES module — no Babel
+   transpile step). Loads `@spotify/basic-pitch` + `@tensorflow/tfjs@3.21.0` from esm.sh
+   **lazily** on the FIRST `🎼 Voices (ML)` tap (deferred + cached; boot never pays for
+   it), then loads the vendored model and publishes `window.TTP_NOTE_MODEL(pcm, sr, opts)`
+   → `{ onsets, frames, frameRate: 86.13, minMidi: 21 }` — exactly the contract
+   `notesFromActivations` expects. Init errors clear the cache so a retry can actually
+   retry. Resamples the app's 16 kHz analysis buffer to basic-pitch's fixed 22050 with
+   linear interpolation (safe here: all fundamentals up to C8 = 4186 Hz sit well below
+   the 16 kHz Nyquist).
+3. **Deploy** — `pages.yml` copies `note-model.js` + `models/basic-pitch/` alongside the
+   existing three files. `npm test` guards the whole thing statically: model files exist,
+   `model.json` is a valid TF.js graph manifest referencing its weights shard,
+   `note-model.js` publishes `window.TTP_NOTE_MODEL` as a function that returns the right
+   shape, the shim is lazy + try/catch-wrapped + fail-silent, and the loader wires it in.
+
+## What still needs a real device
+
+Everything above passes `npm test`, but three things only real hardware can prove:
+
+- **First-tap load time on iOS Safari.** ~1.5 MB from esm.sh + ~915 KB same-origin — on
+  4G that's a few seconds; on WiFi ~1 s. Second tap should be instant (esm.sh + tf.io
+  cached, model in memory).
+- **Inference quality on real vocal harmony.** The decode + note-grouping is faithful to
+  basic-pitch's paper, but real 3-part backing vocals are what this was built for — score
+  a known song and eyeball the result. If the notes look right in pitch but sit at wrong
+  octaves, or lots of ghost onsets, the `notesFromActivations` thresholds
+  (`onsetThresh` 0.5, `frameThresh` 0.3, `minDurSec` 0.12) are the tuning knobs and are
+  already `opts`-overridable.
+- **iOS memory.** tfjs's WASM backend allocates a big arena; on iPhone SE-class devices
+  this can OOM on very long stems. The first fallback is to resample to a shorter chunk;
+  a real fix is chunked inference (basic-pitch's own loop, which we already benefit from
+  since we're using the library, not raw ORT).
+
+If quality is disappointing, the first thing to try is running the note model at the
+ORIGINAL sample rate from `onFile` (currently we take the 16 kHz analysis buffer). That's
+a one-line change in `TabDecoderPro.tsx voices()` — pass `s.audioBuf.getChannelData(0)` +
+`s.audioBuf.sampleRate` instead of `s.cur` + `s.sr`.

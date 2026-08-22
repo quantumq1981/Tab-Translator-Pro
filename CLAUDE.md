@@ -1209,19 +1209,42 @@ octave-snap over-corrects down). **Conclusion:** pure-JS recovers pitch *classes
 (hence chords work) but **not octaves or voice separation** — the pure-JS ceiling is the
 chord skeleton (Simple mode). Note-level per-voice transcription needs an ML model.
 
-**The ML path (Spotify `basic-pitch`) — the PURE half is built + tested, the model is a
-hosted/device-only seam.** `basic-pitch` is a ~few-MB note model (not a 166 MB separator), so
-the ONNX/iOS bet is winnable. `engine.tsx` ships the drop-in decode half (pure, headless-
-tested): **`notesFromActivations`** (onset/frame activation matrices → note events, faithful
-basic-pitch note-creation), **`polyNotesToScore`** (note stacks → the shared `source:"ml"`
-score, so chart/exporters/handoff work for free), and **`transcribeWithNoteModel(pcm, sr,
-model, opts)`** (orchestrator over a pluggable model). The UI's **🎼 Voices (ML)** button
-(Audio mode) calls it with `window.TTP_NOTE_MODEL` when present, else shows a clear "not
-configured" message. **Remaining (can't be done from this sandbox — HF is proxy-blocked, no
-device):** host the model, write the browser-only `window.TTP_NOTE_MODEL` inference glue
-(onnxruntime-web + the harmonic-CQT input features → matrices), smoke-test on device. `npm
-test` guards the decode: held C major → C4/E4/G4 notes, sub-minDur blips dropped, notes →
-`ml` score with the C voicing, orchestrator runs a fake model + throws with no model.
+**The ML path (Spotify `basic-pitch`) — WIRED + SHIPPED 2026-08-22.** `basic-pitch` is a
+small note model (not a 166 MB separator), so the iOS/Pages bet was winnable. `engine.tsx`
+ships the drop-in decode half (pure, headless-tested): **`notesFromActivations`** (onset/
+frame activation matrices → note events, faithful basic-pitch note-creation),
+**`polyNotesToScore`** (note stacks → the shared `source:"ml"` score, so chart/exporters/
+handoff work for free), and **`transcribeWithNoteModel(pcm, sr, model, opts)`**
+(orchestrator over a pluggable model). The UI's **🎼 Voices (ML)** button (Audio mode)
+calls it with `window.TTP_NOTE_MODEL` when present, else shows a clear "not configured"
+message. The device-only seam is now filled by:
+- **Vendored model files** at `models/basic-pitch/` (`model.json` ~175 KB + shard ~740 KB
+  = ~915 KB total), redistributed verbatim from `spotify/basic-pitch-ts` under Apache 2.0
+  + CC-BY 4.0 (NOTICE alongside). Same-origin → no CORS + Service-Worker-cacheable.
+- **`note-model.js`** — browser-only glue (plain ES module, no Babel step). Loads
+  `@spotify/basic-pitch` + `@tensorflow/tfjs@3.21.0` from esm.sh **lazily on first Voices
+  (ML) tap** (deferred + cached; boot never pays for it), loads the vendored model, and
+  publishes `window.TTP_NOTE_MODEL(pcm, sr, opts)` → `{ onsets, frames, frameRate:86.13,
+  minMidi:21 }` — the exact contract `notesFromActivations` expects. Init errors clear the
+  cache so a retry can actually retry. Linear-resamples the 16 kHz analysis buffer to
+  basic-pitch's fixed 22050 (safe: all fundamentals up to C8 = 4186 Hz sit well below the
+  16 kHz Nyquist). Wired in `index.html`; shipped by `pages.yml` alongside the app files.
+- **Why TF.js, not ONNX**: Spotify already ships the browser-ready wrapper
+  (`@spotify/basic-pitch`) with its own TF.js graph model + input harmonic-CQT features —
+  so we get the exact blessed preprocessing free, skip re-porting ~200 lines of DSP, and
+  hit the same iOS/Pages constraints ONNX would (WASM single-thread, no COOP/COEP). ONNX
+  would have been more code we own for no functional win.
+- **`npm test` guards** (in addition to the decode tests): the vendored files exist +
+  `model.json` is a valid TF.js graph manifest referencing its shard, `note-model.js`
+  publishes `window.TTP_NOTE_MODEL` as an async function returning the right shape, load
+  is lazy + fail-silent + cleared on rejection, `index.html` wires it, and `pages.yml`
+  ships it.
+- **Device-only** (as always for this class of seam): first-tap load time on iOS Safari
+  (~1.5 MB from esm.sh + ~915 KB same-origin), inference quality on real vocal-harmony
+  stems, and iOS memory on very long stems — smoke-test on hardware. If quality
+  disappoints, the first thing to try is feeding basic-pitch the ORIGINAL sample rate
+  from `onFile()` instead of the pre-16k-downsampled buffer (one-line change in
+  `voices()`). See `docs/ML-NOTES.md` for the full write-up.
 
 ### Center-channel (vocal) isolation — score sung harmony from a full mix (2026-07-07)
 

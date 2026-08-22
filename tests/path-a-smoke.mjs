@@ -1412,6 +1412,56 @@ expect(/__TTP_ENGINE_URL__/.test(uiSrc) && /new Worker\(/.test(uiSrc) && /type:\
 expect(/FICHIER GUITAR PRO/.test(uiSrc) && /ptab/.test(uiSrc), "worker routing must be gated to DOMParser-free formats (GP3/4/5 + Power Tab)");
 expect(/parseScoreOffThread/.test(uiSrc) && /return parseGuitarProOrXML\(/.test(uiSrc), "off-thread parse must fall back to the same main-thread engine call");
 
+/* ML note model (Wave 3 #10/11) wiring contract — browser-only glue (loads
+ * tfjs + basic-pitch from esm.sh at first use, runs inference), so statically
+ * guard the rails: the vendored model files exist and model.json is a valid
+ * TF.js graph manifest, note-model.js publishes window.TTP_NOTE_MODEL as an
+ * async function, load is lazy + failure is silent + init errors clear the
+ * cache so retries can actually retry, index.html wires the module, and the
+ * Pages deploy ships all three pieces alongside the rest of the app. */
+const modelJsonPath = path.join(repo, "models", "basic-pitch", "model.json");
+const modelBinPath = path.join(repo, "models", "basic-pitch", "group1-shard1of1.bin");
+expect(fs.existsSync(modelJsonPath), "vendored basic-pitch model.json must exist at models/basic-pitch/");
+expect(fs.existsSync(modelBinPath), "vendored basic-pitch weights shard must exist at models/basic-pitch/");
+{
+  const m = JSON.parse(fs.readFileSync(modelJsonPath, "utf8"));
+  expect(m.format === "graph-model", `model.json format must be 'graph-model', got ${m.format}`);
+  const manifest = (m.weightsManifest || [])[0] || {};
+  expect(Array.isArray(manifest.paths) && manifest.paths.includes("group1-shard1of1.bin"),
+    "model.json weightsManifest must reference group1-shard1of1.bin");
+  const sig = m.signature || {};
+  expect(sig.inputs && sig.outputs && Object.keys(sig.outputs).length >= 2,
+    "model.json signature must expose inputs and (at least) frames+onsets outputs");
+}
+const noteModelSrc = fs.readFileSync(path.join(repo, "note-model.js"), "utf8");
+expect(/window\.TTP_NOTE_MODEL\s*=/.test(noteModelSrc),
+  "note-model.js must publish window.TTP_NOTE_MODEL");
+expect(/async function TTP_NOTE_MODEL\s*\(/.test(noteModelSrc),
+  "TTP_NOTE_MODEL must be async (loading + inference)");
+expect(/models\/basic-pitch\/model\.json/.test(noteModelSrc),
+  "note-model.js must load the vendored SAME-ORIGIN model (no third-party CDN for weights)");
+expect(/@spotify\/basic-pitch/.test(noteModelSrc) && /@tensorflow\/tfjs/.test(noteModelSrc),
+  "note-model.js must wrap Spotify's basic-pitch (which uses tfjs) — not a hand-rolled ONNX path");
+expect(/_ready\s*=\s*null/.test(noteModelSrc) && /_ready\s*=\s*_initModel\(\)/.test(noteModelSrc) && /catch\s*\(/.test(noteModelSrc),
+  "note-model.js init must be lazy, cached on success, and cleared on rejection so retries can actually retry");
+expect(/typeof window !==\s*["']undefined["']/.test(noteModelSrc),
+  "note-model.js must feature-detect window so a non-browser context (tests) is a no-op");
+expect(/frameRate:\s*BP_FRAME_RATE|frameRate:\s*22050\s*\/\s*256/.test(noteModelSrc)
+  && /minMidi:\s*BP_MIN_MIDI|minMidi:\s*21/.test(noteModelSrc),
+  "TTP_NOTE_MODEL must return the basic-pitch contract (86.13 fps, minMidi 21) engine.tsx notesFromActivations expects");
+expect(/<script type="module" src="\.\/note-model\.js"/.test(htmlSrc),
+  "index.html must load note-model.js as a module so window.TTP_NOTE_MODEL is installed at boot");
+expect(/cp\s+note-model\.js\s+_site/.test(pagesYml),
+  "Pages deploy must ship note-model.js");
+expect(/models\/basic-pitch\/model\.json\s+_site\/models\/basic-pitch\//.test(pagesYml)
+  && /models\/basic-pitch\/group1-shard1of1\.bin\s+_site\/models\/basic-pitch\//.test(pagesYml),
+  "Pages deploy must ship the vendored basic-pitch model + weights");
+/* The UI's existing entry point (voices()) must keep calling
+ * transcribeWithNoteModel via window.TTP_NOTE_MODEL — so the moment the model
+ * is wired, the button works with no UI change. Regression-guard that seam. */
+expect(/window\.TTP_NOTE_MODEL/.test(uiSrc) && /transcribeWithNoteModel\s*\(/.test(uiSrc),
+  "UI Audio panel must invoke transcribeWithNoteModel via window.TTP_NOTE_MODEL (unchanged wiring seam)");
+
 /* ---- estimateSpacing: scale-invariant + noise-robust --------------------
  * Both the Wild Night ("no tab detected") and Confirmation ("wrong key/voicings")
  * bugs were ONE root cause: a 4× Guitar-Pro / alphaTab PDF export where the true
