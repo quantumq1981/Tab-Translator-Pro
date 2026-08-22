@@ -17,6 +17,13 @@
     the "zero build step" project ethos.
   -->
   <script src="https://unpkg.com/@babel/standalone@7.25.6/babel.min.js" crossorigin></script>
+  <!--
+    Optional per-voice ML note transcription (Spotify basic-pitch). Deferred +
+    lazy-init: this module only downloads the model + tfjs from esm.sh the first
+    time the user taps "🎼 Voices (ML)" in the Audio panel. Load failure is
+    silent — the UI's "not configured" message stays honest. See note-model.js.
+  -->
+  <script type="module" src="./note-model.js"></script>
   <script type="importmap">
   {
     "imports": {

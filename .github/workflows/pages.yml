@@ -53,6 +53,13 @@ jobs:
           cp index.html _site/
           cp engine.tsx _site/
           cp TabDecoderPro.tsx _site/
+          # Optional ML note-transcription (Spotify basic-pitch). Ships the
+          # browser-only inference glue + the vendored TF.js graph model.
+          cp note-model.js _site/
+          mkdir -p _site/models/basic-pitch
+          cp models/basic-pitch/model.json _site/models/basic-pitch/
+          cp models/basic-pitch/group1-shard1of1.bin _site/models/basic-pitch/
+          cp models/basic-pitch/NOTICE _site/models/basic-pitch/
 
       # enablement: true turns Pages on (source = GitHub Actions) using the
       # workflow's `pages: write` permission, so no manual Settings toggle is
