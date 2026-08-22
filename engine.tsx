@@ -3405,6 +3405,72 @@ async function transcribeWithNoteModel(pcm, sampleRate, model, opts = {}) {
   return { notes, score: polyNotesToScore(notes, opts) };
 }
 
+/* ---- SATB-style voice separation --------------------------------------------
+ * The ML note transcription is polyphonic BUT UNLABELED — every simultaneous note
+ * is dumped in one bucket. For a vocal-harmony stem the user usually wants each
+ * VOICE as its own line: soprano / alto / tenor / bass. This is the standard
+ * choral-analysis heuristic: at each time slice, sort active notes by pitch
+ * DESCENDING and assign top→bottom to voices 0..V-1 (voice 0 = highest / soprano).
+ * A sustained note that gets a different rank in a later slice is EMITTED AS
+ * TWO NOTES (the boundary is a voice-crossing) so each per-voice line stays
+ * monophonic. Notes below the requested voice count are dropped (documented —
+ * they're likely below-the-bass spurious activations).
+ *
+ * Pure → headless-tested. Composes with polyNotesToScore: caller filters the
+ * output by `voice` and feeds each subset in, getting one score per voice.
+ *
+ * Honest limits: (1) sort-by-pitch is register-based, so a genuine voice CROSSING
+ * (bass singer going above the tenor briefly) will swap slots. Sung harmony rarely
+ * crosses, so this is fine most of the time; when it isn't, edit fixes it. (2) A
+ * note above the current top rank enters as voice 0 at its onset, so a sustained
+ * "held" note stays in the slot it was ASSIGNED at first slice — no back-shuffle.
+ * That matches the perceptual "which line am I hearing" model. */
+function splitVoices(notes, opts = {}) {
+  const V = Math.max(1, Math.min(8, opts.voices | 0 || 3));
+  if (!notes || !notes.length) return [];
+  /* Timeline bounds — every note-on/note-off is a potential voice-reassignment
+   * boundary because the active set changes there. Between two adjacent bounds
+   * the active set is CONSTANT, so voice assignment is stable within that slice. */
+  const bounds = new Set();
+  for (const n of notes) { bounds.add(+n.startSec.toFixed(6)); bounds.add(+(n.startSec + n.durSec).toFixed(6)); }
+  const T = [...bounds].sort((a, b) => a - b);
+  const EPS = 1e-4;
+  /* Pre-index source notes for O(1) lookup in the per-slice loop (indexOf would
+   * be O(N²) — >4 min of vocal → thousands of notes → prohibitive). */
+  const srcIdx = new Map();
+  notes.forEach((n, i) => srcIdx.set(n, i));
+  const out = [];
+  /* per (source note, voice slot) run tracker — extends the last emitted note when
+   * the same source stays in the same voice across adjacent slices (no false split). */
+  const runs = new Map();
+  for (let i = 0; i < T.length - 1; i++) {
+    const t0 = T[i], t1 = T[i + 1];
+    if (t1 - t0 < EPS) continue;                                  // zero-width slice
+    const active = [];
+    for (const n of notes) {
+      if (n.startSec <= t0 + EPS && t1 - EPS <= n.startSec + n.durSec) active.push(n);
+    }
+    if (!active.length) continue;
+    active.sort((a, b) => b.midi - a.midi);                       // pitch DESC → v0 highest
+    const lim = Math.min(active.length, V);
+    for (let v = 0; v < lim; v++) {
+      const n = active[v];
+      const key = srcIdx.get(n) * 8 + v;                          // (srcIdx, voice) → key
+      const prev = runs.get(key);
+      if (prev && Math.abs(prev.startSec + prev.durSec - t0) < EPS) {
+        prev.durSec = t1 - prev.startSec;                          // extend the run
+      } else {
+        const emit = { midi: n.midi, startSec: t0, durSec: t1 - t0, voice: v };
+        if (n.amp != null) emit.amp = n.amp;
+        out.push(emit);
+        runs.set(key, emit);
+      }
+    }
+  }
+  out.sort((a, b) => a.startSec - b.startSec || a.voice - b.voice);
+  return out;
+}
+
 /* ---- audio ↔ score alignment (DTW auto-sync) ------------------------------
  * Line a real recording up to a score automatically (no manual ♩=): match the
  * audio's chroma sequence against the score's expected chroma via Dynamic Time
@@ -3718,6 +3784,7 @@ export {
   notesFromActivations,
   polyNotesToScore,
   transcribeWithNoteModel,
+  splitVoices,
   _cosDist,
   _dtw,
   scoreChromaSequence,
