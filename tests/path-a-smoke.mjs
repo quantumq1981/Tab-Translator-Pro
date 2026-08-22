@@ -1261,6 +1261,68 @@ expect(eng.recoverChordGaps([], mud, 0.1, 0.256, { ...noSmooth, recoverMinConfid
   expect(threw, "transcribeWithNoteModel throws a clear error when no model is configured");
 }
 
+/* ---- splitVoices — SATB-style voice separation from ML notes --------------
+ * The ML transcription is polyphonic but unlabeled; splitVoices assigns each note
+ * to a voice slot (0 = highest, N-1 = lowest) so a vocal-harmony stem can be
+ * displayed / exported as separate lines. */
+{
+  // Held C-major triad: 3 simultaneous notes → each takes its own slot, ordered high→low
+  const triad = [
+    { midi: 60, startSec: 0, durSec: 1 },
+    { midi: 64, startSec: 0, durSec: 1 },
+    { midi: 67, startSec: 0, durSec: 1 },
+  ];
+  const s3 = eng.splitVoices(triad, { voices: 3 });
+  expect(s3.length === 3, `held triad → 3 voice notes, got ${s3.length}`);
+  const byV = new Map(); for (const n of s3) byV.set(n.voice, n);
+  expect(byV.get(0).midi === 67 && byV.get(1).midi === 64 && byV.get(2).midi === 60,
+    `triad voice assignment (v0=high): got v0=${byV.get(0).midi} v1=${byV.get(1).midi} v2=${byV.get(2).midi}`);
+  expect(byV.get(0).startSec === 0 && Math.abs(byV.get(0).durSec - 1) < 1e-3,
+    "held triad preserves the full duration on each voice");
+
+  // voices:2 on the same triad → the LOWEST is dropped (below the bottom voice)
+  const s2 = eng.splitVoices(triad, { voices: 2 });
+  expect(s2.length === 2 && s2.every((n) => n.midi >= 64) && s2.some((n) => n.midi === 67) && s2.some((n) => n.midi === 64),
+    `voices:2 keeps top two (67, 64), got ${JSON.stringify(s2.map((n) => n.midi))}`);
+
+  // Sequential melody (only one note at a time) → all in voice 0
+  const seq = [
+    { midi: 60, startSec: 0, durSec: 0.5 },
+    { midi: 62, startSec: 0.5, durSec: 0.5 },
+    { midi: 64, startSec: 1.0, durSec: 0.5 },
+  ];
+  const ss = eng.splitVoices(seq, { voices: 3 });
+  expect(ss.length === 3 && ss.every((n) => n.voice === 0),
+    "sequential melody → all voice 0 (only one note active at a time)");
+
+  // Voice CROSSING — held bass note joined then overtaken by a new higher note.
+  //   held: MIDI 60 from t=0 to t=2 (initially voice 0 since alone)
+  //   new:  MIDI 72 from t=1 to t=2 (top rank in [1,2), so voice 0 in that slice)
+  // The held 60 becomes voice 1 in [1,2) → emitted as two runs.
+  const cross = [
+    { midi: 60, startSec: 0, durSec: 2 },
+    { midi: 72, startSec: 1, durSec: 1 },
+  ];
+  const sc = eng.splitVoices(cross, { voices: 2 });
+  const held0 = sc.filter((n) => n.midi === 60);
+  expect(held0.length === 2, `crossing splits held note into two runs, got ${held0.length}`);
+  expect(held0.some((n) => n.voice === 0 && Math.abs(n.startSec) < 1e-3 && Math.abs(n.durSec - 1) < 1e-3)
+      && held0.some((n) => n.voice === 1 && Math.abs(n.startSec - 1) < 1e-3 && Math.abs(n.durSec - 1) < 1e-3),
+    "crossing: 60 is v0 in [0,1) then v1 in [1,2) after the higher 72 joins");
+  const top = sc.find((n) => n.midi === 72);
+  expect(top && top.voice === 0, "crossing: 72 is v0 while it sounds");
+
+  // splitVoices → polyNotesToScore, one score per voice (composability)
+  const perVoice = [0, 1, 2].map((v) => eng.polyNotesToScore(s3.filter((n) => n.voice === v), { bpm: 120, beatsPerBar: 4 }));
+  expect(perVoice.every((sc) => sc.source === "ml"), "per-voice scores tag source=ml (round-trip through polyNotesToScore)");
+  expect(perVoice[0].bars[0].events[0].midis[0] === 67, "voice-0 score plays the soprano pitch (67)");
+
+  // Edge cases
+  expect(eng.splitVoices([]).length === 0, "empty notes → empty split");
+  expect(eng.splitVoices(null).length === 0, "null notes → empty split");
+  expect(eng.splitVoices(triad, { voices: 0 }).length > 0, "voices:0 defaults to a sensible split (not crash)");
+}
+
 /* ---- DTW audio↔score auto-sync -------------------------------------------- */
 // _dtw finds a monotonic path; identical sequences → diagonal, zero cost
 {

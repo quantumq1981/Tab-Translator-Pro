@@ -1246,6 +1246,45 @@ message. The device-only seam is now filled by:
   from `onFile()` instead of the pre-16k-downsampled buffer (one-line change in
   `voices()`). See `docs/ML-NOTES.md` for the full write-up.
 
+### Voice separation — SATB heuristic on the ML notes (2026-08-22)
+
+Basic-pitch's output is polyphonic but **unlabeled** — every simultaneous note lands in
+one bucket, so a 3-part vocal-harmony stem reads as chords rather than three lines. The
+zero-dep half-fix is the standard choral-analysis heuristic: at each time slice, sort
+active notes by pitch DESCENDING and assign top→bottom to voice slots 0..V-1 (voice 0 =
+highest / soprano). `engine.tsx` **`splitVoices(notes, { voices })`** does exactly that,
+purely, headless-tested, composing with `polyNotesToScore` — filter the output by `voice`
+and each subset builds its own score, so every existing exporter (MIDI/MusicXML/ABC/CSMPN/
+ChordSlashML/handoff) works per-voice with no new plumbing.
+
+**Voice CROSSINGS are handled** — a sustained note whose rank changes mid-way (a new
+higher note enters, pushing the held note into the lower slot) is EMITTED AS TWO RUNS
+(same MIDI, adjacent time spans, different `voice`) so each per-voice line stays
+monophonic. Notes below the requested voice count are dropped (documented as likely
+below-the-bass spurious detections). The algorithm is O(N·B) with N notes / B slice
+boundaries and uses a `Map<note→index>` (not `indexOf`) so a 4-minute vocal doesn't hit
+an accidental O(N²).
+
+**UI (`AudioImport` in `TabDecoderPro.tsx`, browser-only glue; engine stays pure)** —
+under the ML score, a "Split: 1 (all) / 2 / 3 / 4" chip row picks the SATB target, and a
+"Voice: 1 (high) / 2 / 3 / 4" picker chooses which line renders. Split is derived from
+the raw ML notes (kept in state) via `useMemo`, so switching the count or the displayed
+voice is **instant — no re-inference, no re-download**. Voice 1 (single) falls back to
+the original polyphonic score. Downloads apply to exactly the displayed voice's score.
+
+**HONEST LIMITS (deliberate):** (1) sort-by-pitch is register-based, so a genuine
+crossing (a bass singer briefly above a tenor line) will swap slots — sung harmony rarely
+crosses, so this is fine most of the time, and Edit fixes the rest. (2) The "one voice per
+slot per slice" model drops notes above/below the outermost voices as spurious. (3) This
+is the pure-DSP ceiling; **true voice-from-voice separation** (three clean audio streams
+from a single mono vocal stem) would need a Wave-4 ML separator, same iOS/Pages wall as
+the Demucs discussion above.
+
+**`npm test` guards:** held triad → 3 voice notes correctly ordered (v0=high); voices:2
+drops the lowest; sequential melody → all in v0; voice crossing splits a held note into
+two runs assigned to the right voice at the right time; per-voice `polyNotesToScore`
+round-trip preserves `source:"ml"` and voices the right pitch; empty/null/voices:0 safe.
+
 ### Center-channel (vocal) isolation — score sung harmony from a full mix (2026-07-07)
 
 For scoring **vocal harmony parts** without an external stem splitter: lead + backing

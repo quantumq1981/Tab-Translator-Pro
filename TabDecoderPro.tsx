@@ -202,6 +202,8 @@ import {
   extractCenter,
   harmonicClarity,
   transcribeWithNoteModel,
+  splitVoices,
+  polyNotesToScore,
   detectChord,
   transcribeChords,
   analyzeAudioChords,
@@ -1767,6 +1769,9 @@ function AudioImport({ C, useSharp }) {
   const [isolate, setIsolate] = useState(false);     // center-channel (vocal) isolation before analysis
   const [ab, setAb] = useState(null);                // { mix, iso } harmonic-clarity A/B, or "busy"
   const [mlScore, setMlScore] = useState(null);      // ML note-transcription result (basic-pitch), when a model is wired
+  const [mlNotes, setMlNotes] = useState(null);      // raw ML notes, kept so voice-count/voice-index can re-derive without re-inference
+  const [voiceCount, setVoiceCount] = useState(3);   // SATB split target (1 = no split, 2 = duet, 3 = SAT, 4 = SATB)
+  const [voiceIdx, setVoiceIdx] = useState(0);       // which voice slot is displayed (0 = highest / soprano)
   const [raw, setRaw] = useState([]);                // raw engine events (chords: {symbol,midis,…}; notes: {note,…})
   const [bpm, setBpm] = useState(120);
   const [beatInfo, setBeatInfo] = useState(null);   // detected tempo readout
@@ -1813,7 +1818,7 @@ function AudioImport({ C, useSharp }) {
 
   const onFile = async (e) => {
     const f = e.target.files && e.target.files[0]; if (!f) return;
-    setErr(""); setName(f.name); setBusy(true); setRaw([]); setOverrides({}); setAb(null); setMlScore(null); stopPlay();
+    setErr(""); setName(f.name); setBusy(true); setRaw([]); setOverrides({}); setAb(null); setMlScore(null); setMlNotes(null); setVoiceIdx(0); stopPlay();
     try {
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) { setErr("Web Audio isn't available in this browser."); setBusy(false); return; }
@@ -1863,11 +1868,32 @@ function AudioImport({ C, useSharp }) {
     const s = ref.current; if (!s.cur) { setErr("Upload audio first."); return; }
     const model = typeof window !== "undefined" ? window.TTP_NOTE_MODEL : null;
     if (typeof model !== "function") { setErr("Per-voice note transcription needs an ML note model (basic-pitch) — not configured on this build. See docs/ML-NOTES.md."); return; }
-    setBusy(true); setErr(""); setMlScore(null);
-    try { const { score } = await transcribeWithNoteModel(s.cur, s.sr, model, { bpm, beatsPerBar: bpb, useSharp }); setMlScore(score); }
+    setBusy(true); setErr(""); setMlScore(null); setMlNotes(null); setVoiceIdx(0);
+    try {
+      const { notes, score } = await transcribeWithNoteModel(s.cur, s.sr, model, { bpm, beatsPerBar: bpb, useSharp });
+      setMlNotes(notes); setMlScore(score);
+    }
     catch (e) { setErr("Note transcription failed: " + (e && e.message ? e.message : "unknown")); }
     setBusy(false);
   };
+  /* Voice split — SATB heuristic (engine.tsx splitVoices) runs on the RAW ML notes,
+   * so switching the voice count or the displayed voice is cheap: no re-inference,
+   * no re-download. voiceCount === 1 shows the full polyphonic score (no split).
+   * voiceCount > 1 filters notes by voice slot; polyNotesToScore builds ONE score
+   * per voice, so all existing exporters (MIDI/MusicXML/ABC/CSMPN/…) apply to
+   * exactly the displayed voice — download each voice separately if wanted. */
+  const mlVoiced = useMemo(() => {
+    if (!mlNotes || !mlNotes.length) return null;
+    if (voiceCount <= 1) return null;                              // no split — fall back to mlScore
+    return splitVoices(mlNotes, { voices: voiceCount });
+  }, [mlNotes, voiceCount]);
+  const mlDisplayScore = useMemo(() => {
+    if (!mlVoiced) return mlScore;                                 // 1-voice = original polyphonic score
+    const forVoice = mlVoiced.filter((n) => n.voice === voiceIdx);
+    if (!forVoice.length) return null;
+    return polyNotesToScore(forVoice, { bpm, beatsPerBar: bpb, useSharp });
+  }, [mlVoiced, voiceIdx, mlScore, bpm, bpb, useSharp]);
+  const VOICE_LABELS = ["1 (high)", "2", "3", "4"];                // 0-indexed → soprano-first labels; expand if voiceCount grows
   // A/B: does center-extraction actually clean up THIS file's harmony? Compare the
   // harmonic clarity of the raw downmix vs. the isolated center (the delta is the read).
   const runAB = async () => {
@@ -1948,11 +1974,43 @@ function AudioImport({ C, useSharp }) {
         );
       })()}
 
-      {/* VOICES (ML) → the per-voice note transcription, rendered through the shared chart */}
+      {/* VOICES (ML) → per-voice note transcription. Voice count controls the SATB
+          split; picker chooses which line is displayed + exported. Split is derived
+          from the same raw notes, so switching is instant (no re-inference). */}
       {mlScore && (
         <div style={{ marginBottom: 14 }}>
-          <div style={{ fontSize: 11, color: C.green, marginBottom: 6 }}>🎼 Per-voice note transcription (ML) — the actual sung notes, editable + exportable like any chart.</div>
-          <ChartPanel score={mlScore} title={(name || "Vocals") + " · voices"} meta={`${mlScore.bars.length} bars · from ML notes`} C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey="" onPick={() => {}} />
+          <div style={{ fontSize: 11, color: C.green, marginBottom: 6, lineHeight: 1.6 }}>
+            🎼 Per-voice note transcription (ML) — the actual sung notes, editable + exportable like any chart.
+            {mlNotes && mlNotes.length > 0 && <> <span style={{ color: C.dim }}>Voices split by pitch register (highest = voice 1). Rare voice crossings show as swaps — use ✎ Edit to fix.</span></>}
+          </div>
+          {mlNotes && mlNotes.length > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 8, fontSize: 11 }}>
+              <span style={{ color: C.dim }}>Split:</span>
+              {[1, 2, 3, 4].map((n) => (
+                <button key={n} onClick={() => { setVoiceCount(n); setVoiceIdx(0); setOverrides({}); }}
+                  style={{ ...chip(C), padding: "3px 9px", borderColor: voiceCount === n ? C.green : C.border, color: voiceCount === n ? C.green : C.dim }}>
+                  {n === 1 ? "1 (all)" : `${n} voices`}
+                </button>
+              ))}
+              {voiceCount > 1 && (
+                <>
+                  <span style={{ color: C.dim, marginLeft: 8 }}>Voice:</span>
+                  {Array.from({ length: voiceCount }, (_, v) => (
+                    <button key={v} onClick={() => { setVoiceIdx(v); setOverrides({}); }}
+                      style={{ ...chip(C), padding: "3px 9px", borderColor: voiceIdx === v ? C.amber : C.border, color: voiceIdx === v ? C.amber : C.dim }}>
+                      {VOICE_LABELS[v] || `${v + 1}`}
+                    </button>
+                  ))}
+                </>
+              )}
+            </div>
+          )}
+          {mlDisplayScore
+            ? <ChartPanel score={mlDisplayScore}
+                title={(name || "Vocals") + (voiceCount > 1 ? ` · voice ${voiceIdx + 1}/${voiceCount}` : " · voices")}
+                meta={`${mlDisplayScore.bars.length} bars · from ML notes${voiceCount > 1 ? ` · voice ${voiceIdx + 1} of ${voiceCount}` : ""}`}
+                C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey="" onPick={() => {}} />
+            : <div style={{ fontSize: 11, color: C.dim, padding: 8 }}>Voice {voiceIdx + 1} of {voiceCount} — no notes fell into this slot on this stem.</div>}
         </div>
       )}
 
