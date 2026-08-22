@@ -88,19 +88,24 @@ function _resample(pcm, srIn, srOut) {
   return out;
 }
 
-/* Basic-pitch's evaluateModel processes the buffer in ~2s windows and calls
- * onComplete with (frames, onsets, contours) 2-D arrays. Windows are already
- * stitched inside; we only keep frames + onsets (contours are for pitch-bend
- * / MIDI export, not needed for note events). */
+/* Basic-pitch's evaluateModel processes the audio in ~2 s WINDOWS and fires
+ * onComplete ONCE PER WINDOW (not once at the end). Each call hands us that
+ * window's frames/onsets — so a naive "framesOut = frames" only keeps the
+ * LAST ~2 s of the whole song. Accumulate instead: concat every batch in
+ * order so notesFromActivations sees the full timeline. Contours are for
+ * pitch-bend / MIDI export and aren't needed for note events, so ignore. */
 async function _evaluate(basicPitch, pcm22k) {
-  let framesOut = null, onsetsOut = null;
+  const framesAll = [], onsetsAll = [];
   await basicPitch.evaluateModel(
     pcm22k,
-    (frames, onsets /* , contours */) => { framesOut = frames; onsetsOut = onsets; },
+    (frames, onsets /* , contours */) => {
+      if (frames && frames.length) for (const row of frames) framesAll.push(row);
+      if (onsets && onsets.length) for (const row of onsets) onsetsAll.push(row);
+    },
     () => {},                                                     // progress: ignore for now
   );
-  if (!framesOut || !onsetsOut) throw new Error("basic-pitch produced no output");
-  return { frames: framesOut, onsets: onsetsOut };
+  if (!framesAll.length || !onsetsAll.length) throw new Error("basic-pitch produced no output");
+  return { frames: framesAll, onsets: onsetsAll };
 }
 
 /* The exported hook. Async by construction (loading + inference); it awaits
