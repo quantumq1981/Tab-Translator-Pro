@@ -1340,10 +1340,20 @@ depend on) is **untouched**; these are new functions.
   (`<tie>`+`<tied>` in XML, `-` in ABC). `_scoreToBeatNotes` lets a caller pass `{ score }`
   instead of `{ beatNotes }` (tests). Works in quarter-based ticks so it generalises across
   meters.
-- **Honest limits (documented, not bugs):** there's **no tempo detection on the vocal path** —
-  bpm/meter come from the Audio panel controls (default 120/4/4 per the work order), so if the
-  assumed tempo doesn't match the take the 16th-grid notation is faithful but *busy* (onsets
-  land off the metric grid). The voice split is register-based (rare genuine crossings show as
+- **Tempo/meter control in the Voices (ML) panel (2026-08-23).** BPM was only settable in the
+  CHORDS panel, so the vocal-score export was stuck at the default. The Voices (ML) panel now
+  has its own **♩=BPM (±1) + meter** control that feeds both the on-screen `mlDisplayScore` and
+  the vocal-score export (both already read `bpm`/`bpb`). BPM is a property of the PERFORMANCE,
+  not the clip — trimming a stem to a shorter excerpt keeps the same tempo — so the user sets
+  the song's real BPM regardless of clip length and the bars/note-values quantise to it.
+  Measured on the "25 or 6 to 4" stem: the same audio spans **15 bars at ♩=80 vs 26 at ♩=140**
+  with different note-value spellings, so the right BPM is what makes the notation meaningful.
+- **Honest limits (documented, not bugs):** there's **no tempo/downbeat detection on the vocal
+  path** (vocal stems have weak transients, so beat-tracking is unreliable on them) — bpm/meter
+  come from the Voices-panel control (default 120/4/4 per the work order). Even at the correct
+  BPM the notation stays somewhat *busy* because onsets aren't snapped to a beat PHASE (no
+  downbeat detection — CLAUDE.md documents that pure-DSP downbeat detection doesn't work) and
+  singers phrase with rubato; clip starting on a downbeat + ✎ Edit clean up the rest. The voice split is register-based (rare genuine crossings show as
   swaps — Edit fixes them). Cross-bar held notes re-articulate on the split pieces only where
   the greedy decomposition needs it (ties added). Beat/downbeat detection to snap onsets is a
   clean future refinement (the engine already has `detectBeats`/`analyzeAudioChords`).

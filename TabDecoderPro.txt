@@ -2074,6 +2074,23 @@ function AudioImport({ C, useSharp }) {
           )}
           {mlNotes && mlNotes.length > 0 && (
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 8, fontSize: 11 }}>
+              <span style={{ color: C.dim }}>Tempo:</span>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                <button onClick={() => setBpm((b) => Math.max(40, b - 1))} title="−1 BPM" style={{ ...chip(C), padding: "3px 8px" }}>−</button>
+                <span style={{ minWidth: 54, textAlign: "center", color: C.amber }}>♩={bpm}</span>
+                <button onClick={() => setBpm((b) => Math.min(240, b + 1))} title="+1 BPM" style={{ ...chip(C), padding: "3px 8px" }}>+</button>
+              </span>
+              <select value={bpb} onChange={(e) => setBpb(+e.target.value)} style={{ ...chip(C), padding: "3px 8px", background: C.raised, cursor: "pointer" }}>
+                <option value={4}>4/4</option><option value={3}>3/4</option><option value={6}>6/8</option>
+              </select>
+              {/* Tempo is a property of the PERFORMANCE, not the clip — a shorter
+                  excerpt has the same BPM, so set the song's real tempo here and the
+                  bars/note-values line up regardless of how much you trimmed. */}
+              <span style={{ color: C.dim }}>Set the song's real BPM — bars & note durations quantise to it. A shorter clip keeps the same tempo.</span>
+            </div>
+          )}
+          {mlNotes && mlNotes.length > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 8, fontSize: 11 }}>
               <span style={{ color: C.dim }}>Full score{voiceCount > 1 ? ` (${voiceCount} staves, lead on top)` : ""}:</span>
               <button onClick={() => exportVocalScore("musicxml")}
                 title="download ALL voices as ONE multi-staff standard-notation score (MusicXML) — opens in MuseScore / Sibelius / Finale"
