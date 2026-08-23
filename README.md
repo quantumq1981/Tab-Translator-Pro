@@ -25,7 +25,9 @@ vocal arrangement:
 2. Tap **🎼 Voices (ML)** to run the pluggable note model (Spotify `basic-pitch`)
    — this transcribes the actual sung notes, not just chord names.
 3. Choose a **Split** (2 / 3 / 4 voices). The engine's SATB heuristic assigns each
-   note to a voice by pitch register (voice 1 = highest = lead).
+   note to a voice by pitch register (voice 1 = highest = lead). Use the
+   **Sensitivity** control (Lead / Balanced / Full harmony) if quiet backing
+   voices are under-detected — it re-thresholds instantly, no re-analysis.
 4. Tap **⬇ Vocal score (MusicXML)** (or **⬇ ABC**) to download **all voices at
    once** as a single multi-staff score:
    - The **lead vocal is the top staff**, backing voices below in descending
@@ -39,8 +41,13 @@ A sample output is committed at
 [`docs/samples/vocal_score.musicxml`](docs/samples/vocal_score.musicxml)
 (lead + two backing harmony voices) with an ABC companion.
 
+Notes are quantised to a **16th-note grid** and emitted as real note-values with
+ties, so every measure sums exactly and the file validates. A sample generated
+end-to-end from a real 3-part isolated-vocal recording ("25 or 6 to 4") is at
+[`docs/samples/25or6to4-vocal.musicxml`](docs/samples/25or6to4-vocal.musicxml).
+
 **Honest limits.** Note detection quality depends on the model + stem isolation;
 the voice split is register-based (rare genuine voice crossings show as swaps — fix
-with ✎ Edit); and the notation grid is quantised to the integer beat grid (which
-keeps the MusicXML valid — finer sub-beat quantisation is future work). See
-`docs/ML-NOTES.md` and `CLAUDE.md`.
+with ✎ Edit); and there is no tempo detection on the vocal path — set ♩=BPM /
+meter with the Audio-panel controls (defaults 120 / 4/4). See `docs/ML-NOTES.md`
+and `CLAUDE.md`.

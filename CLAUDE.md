@@ -1317,12 +1317,55 @@ depend on) is **untouched**; these are new functions.
   split/voice pickers, a **⬇ Vocal score (MusicXML)** + **⬇ ABC** row exports **ALL** voices
   at once (not just the displayed one) via `splitVoicesToScores` → `scoreToMultipart*`; key
   is `analyzeKey(lead)`, tempo/meter from the panel controls.
-- **Honest limit (documented, not a bug):** the note grid comes from
-  `polyNotesToScore`→`audioEventsToScore`, i.e. the **integer beat grid** — that's what
-  guarantees each measure's durations sum exactly (valid MusicXML). Sub-beat quantisation
-  (16th/triplet) and true inter-note rests (a monophonic line currently sustains to the next
-  onset) are a clean future refinement of the score model, not this exporter. Voice split is
-  register-based (rare genuine crossings show as swaps — Edit fixes them).
+- **Sensitivity control (2026-08-23) — the load-bearing knob for backing harmony.** basic-pitch's
+  default onset/frame thresholds (0.5/0.3) are tuned for a prominent LEAD; a quiet backing stack
+  falls under them, so a 3-part stem comes back with the lower voices STARVED. Measured on the
+  real "25 or 6 to 4" iso-vocal: **44/14/1** notes per voice at 0.5/0.3 vs **82/49/16** at
+  0.4/0.25 vs **136/125/83** at 0.3/0.2. So `voices()` now runs the model ONCE, caches the raw
+  onset/frame matrices on `ref.current.mlRaw`, and a **Sensitivity** chip row (Lead 0.5/0.3 ·
+  **Balanced 0.4/0.25 = default** · Full 0.3/0.2) re-derives notes via `notesFromActivations`
+  **without re-inference** (`applySens`) — instant. `notesFromActivations` already exposed
+  `onsetThresh`/`frameThresh` opts; this just surfaces them. Too low (≈0.25/0.15 → 284 notes)
+  starts inventing, so Balanced is the honest default.
+- **Notation quantiser (16th grid)** — the on-screen chart's integer `beat`/`durBeats` grid
+  is quarter-resolution and can collapse a dense bar's onsets to **zero-length** events (fine
+  for the chart, invalid for notation — it produced `<duration>0`/ABC `/48` garbage). So the
+  notation exporters DON'T use that grid: `splitVoicesToScores` also carries each voice's raw
+  **`beatNotes`** (onsets/durations in beats), and `_voiceNotationMeasures(beatNotes, opts)`
+  quantises them onto a **16th grid** (`_NOTE_GRID=4` ticks/quarter), enforces monophony
+  (clips to the next onset, drops sub-tick micro-notes/re-articulations), splits notes+rests
+  at barlines, and decomposes each span into standard **tied** note-values
+  (`_noteValuesFromTicks`, greedy whole→16th incl. dotted) — so **every measure sums exactly**
+  (what keeps the MusicXML valid + MuseScore-clean) and a held note renders as tied values
+  (`<tie>`+`<tied>` in XML, `-` in ABC). `_scoreToBeatNotes` lets a caller pass `{ score }`
+  instead of `{ beatNotes }` (tests). Works in quarter-based ticks so it generalises across
+  meters.
+- **Tempo/meter control in the Voices (ML) panel (2026-08-23).** BPM was only settable in the
+  CHORDS panel, so the vocal-score export was stuck at the default. The Voices (ML) panel now
+  has its own **♩=BPM (±1) + meter** control that feeds both the on-screen `mlDisplayScore` and
+  the vocal-score export (both already read `bpm`/`bpb`). BPM is a property of the PERFORMANCE,
+  not the clip — trimming a stem to a shorter excerpt keeps the same tempo — so the user sets
+  the song's real BPM regardless of clip length and the bars/note-values quantise to it.
+  Measured on the "25 or 6 to 4" stem: the same audio spans **15 bars at ♩=80 vs 26 at ♩=140**
+  with different note-value spellings, so the right BPM is what makes the notation meaningful.
+- **Honest limits (documented, not bugs):** there's **no tempo/downbeat detection on the vocal
+  path** (vocal stems have weak transients, so beat-tracking is unreliable on them) — bpm/meter
+  come from the Voices-panel control (default 120/4/4 per the work order). Even at the correct
+  BPM the notation stays somewhat *busy* because onsets aren't snapped to a beat PHASE (no
+  downbeat detection — CLAUDE.md documents that pure-DSP downbeat detection doesn't work) and
+  singers phrase with rubato; clip starting on a downbeat + ✎ Edit clean up the rest. The voice split is register-based (rare genuine crossings show as
+  swaps — Edit fixes them). Cross-bar held notes re-articulate on the split pieces only where
+  the greedy decomposition needs it (ties added). Beat/downbeat detection to snap onsets is a
+  clean future refinement (the engine already has `detectBeats`/`analyzeAudioChords`).
+- **Validated on REAL audio (2026-08-23):** ran end-to-end in Node against the user's own
+  isolated vocal stems — decode (ffmpeg for `.m4a`/AAC, `mpg123-decoder` for `.mp3`) →
+  `basic-pitch` (vendored local model, TF.js cpu) → `notesFromActivations` →
+  `splitVoicesToScores(voices:3)` → `scoreToMultipartMusicXML`. On **"25 or 6 to 4" (3-part iso
+  vocals)** at Balanced sensitivity: 87 notes (MIDI 55–86), 3 aligned staves (82/49/16 across
+  Soprano/Lead · Alto · Tenor), detected key **A minor** (conf 0.87 — the song's actual key), 23
+  measures/part, **0 XML parse errors**, tied 16th-grid note-values, no degenerate durations
+  (~seconds for a 45 s clip). A separate 3-part backing-vocal chorus decoded the same way.
+  Sample committed at `docs/samples/25or6to4-vocal.musicxml` (+ `.abc`).
 - **Sample deliverable:** `docs/samples/vocal_score.musicxml` (+ `.abc`) — lead + two backing
   harmony voices, generated from the engine.
 - **`npm test` guards:** part labels + key-fifths math; a 3-part vocal → 3 aligned parts,
