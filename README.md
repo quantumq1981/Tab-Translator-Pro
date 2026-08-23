@@ -39,8 +39,13 @@ A sample output is committed at
 [`docs/samples/vocal_score.musicxml`](docs/samples/vocal_score.musicxml)
 (lead + two backing harmony voices) with an ABC companion.
 
+Notes are quantised to a **16th-note grid** and emitted as real note-values with
+ties, so every measure sums exactly and the file validates. A sample generated
+from a real 3-part backing-vocal MP3 is at
+[`docs/samples/real-vocal-test.musicxml`](docs/samples/real-vocal-test.musicxml).
+
 **Honest limits.** Note detection quality depends on the model + stem isolation;
 the voice split is register-based (rare genuine voice crossings show as swaps — fix
-with ✎ Edit); and the notation grid is quantised to the integer beat grid (which
-keeps the MusicXML valid — finer sub-beat quantisation is future work). See
-`docs/ML-NOTES.md` and `CLAUDE.md`.
+with ✎ Edit); and there is no tempo detection on the vocal path — set ♩=BPM /
+meter with the Audio-panel controls (defaults 120 / 4/4). See `docs/ML-NOTES.md`
+and `CLAUDE.md`.

@@ -1400,6 +1400,33 @@ expect(eng.recoverChordGaps([], mud, 0.1, 0.256, { ...noSmooth, recoverMinConfid
   // "no backing detected" → lead-only score
   const solo = eng.splitVoicesToScores([{ midi: 67, startSec: 0, durSec: 1 }], { voices: 3, bpm: 120, beatsPerBar: 4 });
   expect(solo.length === 1 && solo[0].name === "Soprano/Lead", `single-line stem → one lead part, got ${solo.length}`);
+
+  // --- 16th-grid notation quantiser: valid durations, ties, measures sum exact ---
+  // A note of 3.5 quarters (14 ticks) → dotted-half TIED to an eighth, then rests
+  // fill the bar. No zero/degenerate durations; measure divisions sum to 1920.
+  const nm = eng._voiceNotationMeasures([{ midi: 72, onsetBeat: 0, durBeat: 3.5 }], { beatsPerBar: 4, beatType: 4, div: 480 });
+  expect(nm.measures.length === 1, `one bar expected, got ${nm.measures.length}`);
+  const cells = nm.measures[0];
+  expect(cells.every((c) => c.divs > 0), "no zero-length cells in quantised notation");
+  expect(cells.reduce((s, c) => s + c.divs, 0) === 1920, `measure must sum to 1920 divisions, got ${cells.reduce((s, c) => s + c.divs, 0)}`);
+  const pitched = cells.filter((c) => !c.rest);
+  expect(pitched.length >= 2 && pitched[0].tieStart && pitched[pitched.length - 1].tieStop, "a >1-value note is emitted as tied chunks");
+  const shape = cells.map((c) => (c.rest ? "r:" : "n:") + c.type + (c.dot ? "." : "")).join(" ");
+  expect(shape === "n:half. n:eighth r:eighth", `expected dotted-half~eighth + eighth rest, got: ${shape}`);
+
+  // A DENSE bar (5 onsets in one 4/4 bar) — the case the coarse beat grid collapsed
+  // to zero-length events. Quantised: every duration positive, measure sums exact,
+  // and the emitted MusicXML has no <duration>0.
+  const dense = [0, 0.75, 1.5, 2.25, 3].map((b, i) => ({ midi: [60, 62, 64, 65, 67][i], onsetBeat: b, durBeat: 0.75 }));
+  const dnm = eng._voiceNotationMeasures(dense, { beatsPerBar: 4, beatType: 4, div: 480 });
+  expect(dnm.measures[0].reduce((s, c) => s + c.divs, 0) === 1920, "dense bar still sums to a full 4/4 measure");
+  const dxml = eng.scoreToMultipartMusicXML([{ name: "Lead Vocal", beatNotes: dense, clef: "treble" }], { key: { tonic: 0, mode: "major" } });
+  expect(!/<duration>0<\/duration>/.test(dxml), "quantiser never emits a zero-duration note (dense bar)");
+  expect(new DOMParser().parseFromString(dxml, "text/xml").getElementsByTagName("parsererror").length === 0, "dense-bar MusicXML is well-formed");
+
+  // greedy value decomposition
+  expect(eng._noteValuesFromTicks(5).map((v) => v.type + (v.dot ? "." : "")).join(" ") === "quarter 16th", "5 ticks → quarter + 16th");
+  expect(eng._noteValuesFromTicks(7).map((v) => v.type + (v.dot ? "." : "")).join(" ") === "quarter. 16th", "7 ticks → dotted-quarter + 16th");
 }
 
 /* ---- DTW audio↔score auto-sync -------------------------------------------- */

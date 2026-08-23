@@ -1317,12 +1317,32 @@ depend on) is **untouched**; these are new functions.
   split/voice pickers, a **⬇ Vocal score (MusicXML)** + **⬇ ABC** row exports **ALL** voices
   at once (not just the displayed one) via `splitVoicesToScores` → `scoreToMultipart*`; key
   is `analyzeKey(lead)`, tempo/meter from the panel controls.
-- **Honest limit (documented, not a bug):** the note grid comes from
-  `polyNotesToScore`→`audioEventsToScore`, i.e. the **integer beat grid** — that's what
-  guarantees each measure's durations sum exactly (valid MusicXML). Sub-beat quantisation
-  (16th/triplet) and true inter-note rests (a monophonic line currently sustains to the next
-  onset) are a clean future refinement of the score model, not this exporter. Voice split is
-  register-based (rare genuine crossings show as swaps — Edit fixes them).
+- **Notation quantiser (16th grid)** — the on-screen chart's integer `beat`/`durBeats` grid
+  is quarter-resolution and can collapse a dense bar's onsets to **zero-length** events (fine
+  for the chart, invalid for notation — it produced `<duration>0`/ABC `/48` garbage). So the
+  notation exporters DON'T use that grid: `splitVoicesToScores` also carries each voice's raw
+  **`beatNotes`** (onsets/durations in beats), and `_voiceNotationMeasures(beatNotes, opts)`
+  quantises them onto a **16th grid** (`_NOTE_GRID=4` ticks/quarter), enforces monophony
+  (clips to the next onset, drops sub-tick micro-notes/re-articulations), splits notes+rests
+  at barlines, and decomposes each span into standard **tied** note-values
+  (`_noteValuesFromTicks`, greedy whole→16th incl. dotted) — so **every measure sums exactly**
+  (what keeps the MusicXML valid + MuseScore-clean) and a held note renders as tied values
+  (`<tie>`+`<tied>` in XML, `-` in ABC). `_scoreToBeatNotes` lets a caller pass `{ score }`
+  instead of `{ beatNotes }` (tests). Works in quarter-based ticks so it generalises across
+  meters.
+- **Honest limits (documented, not bugs):** there's **no tempo detection on the vocal path** —
+  bpm/meter come from the Audio panel controls (default 120/4/4 per the work order), so if the
+  assumed tempo doesn't match the take the 16th-grid notation is faithful but *busy* (onsets
+  land off the metric grid). The voice split is register-based (rare genuine crossings show as
+  swaps — Edit fixes them). Cross-bar held notes re-articulate on the split pieces only where
+  the greedy decomposition needs it (ties added). Beat/downbeat detection to snap onsets is a
+  clean future refinement (the engine already has `detectBeats`/`analyzeAudioChords`).
+- **Validated on REAL audio (2026-08-23):** ran end-to-end in Node against the user's own
+  isolated **3-part backing-vocal chorus** MP3 — decode → `basic-pitch` (vendored local model,
+  TF.js cpu) → `notesFromActivations` → `splitVoicesToScores(voices:3)` →
+  `scoreToMultipartMusicXML`: 45 notes (MIDI 57–81), 3 aligned staves (Soprano/Lead · Alto ·
+  Tenor), detected key **A minor** (conf 0.81), 23 measures/part, **0 XML parse errors**, and
+  proper tied 16th-grid note-values (no degenerate durations). Also on a 45 s clip in ~seconds.
 - **Sample deliverable:** `docs/samples/vocal_score.musicxml` (+ `.abc`) — lead + two backing
   harmony voices, generated from the engine.
 - **`npm test` guards:** part labels + key-fifths math; a 3-part vocal → 3 aligned parts,
