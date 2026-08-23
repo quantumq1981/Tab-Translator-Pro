@@ -2096,6 +2096,236 @@ function scoreToMusicXML(score, opts = {}) {
   return L.join("\n");
 }
 
+/* ============================================================================
+ *  SATB → STANDARD-NOTATION MULTI-PART export (vocal-harmony score)
+ *  ---------------------------------------------------------------------------
+ *  The ML note transcription (basic-pitch) + `splitVoices` already yield one
+ *  MONOPHONIC line per voice (soprano/lead on top … bass at the bottom). This
+ *  turns those lines into a READABLE standard-notation score: one labelled
+ *  <part> / staff per voice — lead on the TOP staff, backing voices below in
+ *  descending register order — sharing key, meter and barlines, with real notes
+ *  and rests. The output is a valid `score-partwise` MusicXML that opens cleanly
+ *  in MuseScore / Sibelius / Finale, plus a multi-voice ABC. Pure → headless-
+ *  testable (no React, no DOM).
+ *
+ *  This is ADDITIVE and never touches the single-part `scoreToMusicXML` (which
+ *  the whole validated corpus + the MusicXML round-trip test depend on). Each
+ *  voice line is monophonic, so a bar is emitted as: an optional leading rest,
+ *  the notes on their beats (contiguous — the score model fills each duration to
+ *  the next onset), and a whole-measure rest for any bar this voice doesn't sing
+ *  (so barlines stay aligned across every staff).
+ *
+ *  Honest limit: the note grid comes from `polyNotesToScore` → `audioEventsToScore`,
+ *  which quantises to the integer beat grid (durations guaranteed to sum to the
+ *  measure — that's what keeps the MusicXML valid). Finer sub-beat quantisation
+ *  (16th/triplet) is a clean future refinement of the score model, not this
+ *  exporter.
+ * ------------------------------------------------------------------------- */
+
+function _xmlEsc(s) {
+  return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+/* Canonical SATB part labels; voice 0 = highest = lead, descending below it.
+ * A single voice is just the lead vocal; >4 voices fall back to "Voice N". */
+const _SATB_NAMES = ["Soprano/Lead", "Alto", "Tenor", "Bass"];
+function voicePartNames(voiceCount) {
+  const n = Math.max(1, voiceCount | 0);
+  if (n === 1) return ["Lead Vocal"];
+  const out = [];
+  for (let i = 0; i < n; i++) out.push(_SATB_NAMES[i] || ("Voice " + (i + 1)));
+  return out;
+}
+
+/* Circle-of-fifths accidental count for a key → MusicXML <fifths> (+sharps /
+ * −flats). Major C=0 … F♯=+6 / D♭=−5; a minor key uses its relative major. */
+const _FIFTHS_MAJOR = { 0: 0, 7: 1, 2: 2, 9: 3, 4: 4, 11: 5, 6: 6, 1: -5, 8: -4, 3: -3, 10: -2, 5: -1 };
+function _keyFifths(key) {
+  if (!key || typeof key.tonic !== "number") return 0;
+  const rel = key.mode === "minor" ? ((key.tonic + 3) % 12) : key.tonic;   // relative major
+  const f = _FIFTHS_MAJOR[((rel % 12) + 12) % 12];
+  return f == null ? 0 : f;
+}
+
+/* Pick a clef for a monophonic line from its median pitch: bass below G3 (55),
+ * treble otherwise — the same threshold `staffLayout` uses. */
+function _clefForScore(score) {
+  const ms = [];
+  for (const b of (score && score.bars) || []) for (const e of (b.events || [])) for (const m of (e.midis || [])) ms.push(m);
+  if (!ms.length) return "treble";
+  ms.sort((a, b) => a - b);
+  return ms[Math.floor(ms.length / 2)] < 55 ? "bass" : "treble";
+}
+
+/* splitVoices → one labelled, monophonic SCORE per voice. Composes the existing
+ * SATB splitter (`splitVoices`) with `polyNotesToScore`, so every downstream
+ * exporter/handoff applies per voice. Returns [{ voice, name, clef, score }] in
+ * soprano→bass order; a voice slot with no notes is dropped (the honest "no
+ * backing vocals detected → lead only" case). `voices <= 1` returns the single
+ * polyphonic lead score unchanged. opts: { voices, bpm, beatsPerBar, beatType,
+ * useSharp }. */
+function splitVoicesToScores(notes, opts = {}) {
+  const voiceCount = Math.max(1, Math.min(8, opts.voices | 0 || 3));
+  const names = voicePartNames(voiceCount);
+  const useSharp = opts.useSharp !== false;
+  const sopts = { bpm: opts.bpm, beatsPerBar: opts.beatsPerBar, beatType: opts.beatType, useSharp };
+  if (voiceCount <= 1) {
+    const score = polyNotesToScore(notes || [], sopts);
+    return [{ voice: 0, name: names[0], clef: _clefForScore(score), score }];
+  }
+  const split = splitVoices(notes || [], { voices: voiceCount });
+  const out = [];
+  for (let v = 0; v < voiceCount; v++) {
+    const forV = split.filter((n) => n.voice === v);
+    if (!forV.length) continue;
+    const score = polyNotesToScore(forV, sopts);
+    out.push({ voice: v, name: names[v], clef: _clefForScore(score), score });
+  }
+  return out.length ? out : [{ voice: 0, name: voicePartNames(1)[0], clef: "treble", score: polyNotesToScore(notes || [], sopts) }];
+}
+
+/* Emit ONE rest of `durDiv` divisions (with a <type> when it maps to a single
+ * note value; a notation reader splits an odd-length rest visually anyway). */
+function _emitRestXML(L, durDiv, div) {
+  if (durDiv <= 0) return;
+  const ty = _typeForQuarters(durDiv / div);
+  L.push("      <note><rest/><duration>" + durDiv + "</duration><voice>1</voice>" +
+    (ty ? "<type>" + ty.type + "</type>" + (ty.dot ? "<dot/>" : "") : "") + "</note>");
+}
+
+/* parts: [{ name, score, clef? }] → ONE valid `score-partwise` MusicXML with a
+ * <part>/staff per voice (parts[0] = top staff = lead). Shared key + tempo +
+ * meter; barlines align because every part spans the same measure count (short
+ * voices are padded with whole-measure rests). opts: { key, tempo, useSharp,
+ * divisions (>=480), title }. Enharmonic spelling follows the key when useSharp
+ * isn't given (sharp keys → sharps, flat keys → flats). */
+function scoreToMultipartMusicXML(parts, opts = {}) {
+  parts = (parts || []).filter((p) => p && p.score && p.score.bars);
+  if (!parts.length) throw new Error("scoreToMultipartMusicXML: no parts");
+  const div = Math.max(480, opts.divisions | 0 || 480);
+  const key = opts.key || null;
+  const fifths = _keyFifths(key);
+  const useSharp = opts.useSharp != null ? opts.useSharp : fifths >= 0;
+  const maxBars = Math.max(...parts.map((p) => p.score.bars.length));
+  const defaultSig = parts[0].score.timeSig || [4, 4];
+
+  const L = ['<?xml version="1.0" encoding="UTF-8"?>',
+    '<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 3.1 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">',
+    '<score-partwise version="3.1">'];
+  if (opts.title) L.push("  <work><work-title>" + _xmlEsc(opts.title) + "</work-title></work>");
+  L.push("  <part-list>");
+  parts.forEach((p, i) => {
+    L.push('    <score-part id="P' + (i + 1) + '"><part-name>' + _xmlEsc(p.name || ("Voice " + (i + 1))) + "</part-name></score-part>");
+  });
+  L.push("  </part-list>");
+
+  parts.forEach((p, pi) => {
+    const clef = p.clef || _clefForScore(p.score);
+    L.push('  <part id="P' + (pi + 1) + '">');
+    let prevSig = null;
+    for (let bi = 0; bi < maxBars; bi++) {
+      const bar = p.score.bars[bi];
+      const [bb, bt] = (bar && bar.timeSig) || defaultSig;
+      L.push('    <measure number="' + (bi + 1) + '">');
+      const sigChanged = !prevSig || prevSig[0] !== bb || prevSig[1] !== bt;
+      if (bi === 0 || sigChanged) {
+        L.push("      <attributes>");
+        if (bi === 0) {
+          L.push("        <divisions>" + div + "</divisions>");
+          L.push("        <key><fifths>" + fifths + "</fifths>" + (key ? "<mode>" + (key.mode || "major") + "</mode>" : "") + "</key>");
+        }
+        L.push("        <time><beats>" + bb + "</beats><beat-type>" + bt + "</beat-type></time>");
+        if (bi === 0) L.push(clef === "bass" ? "        <clef><sign>F</sign><line>4</line></clef>" : "        <clef><sign>G</sign><line>2</line></clef>");
+        L.push("      </attributes>");
+      }
+      prevSig = [bb, bt];
+      if (bi === 0 && pi === 0 && opts.tempo) {
+        const tp = Math.round(opts.tempo);
+        L.push('      <direction placement="above"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>' + tp +
+          "</per-minute></metronome></direction-type><sound tempo=\"" + tp + "\"/></direction>");
+      }
+      if (bi === 0) {
+        L.push('      <direction placement="above"><direction-type><words>' + _xmlEsc(p.name || ("Voice " + (pi + 1))) + "</words></direction-type></direction>");
+      }
+      const beatDiv = (div * 4) / bt;                     // divisions per notated beat
+      const measDiv = Math.round(bb * beatDiv);           // divisions in the whole measure
+      const events = (bar && bar.events) || [];
+      if (!events.length) {
+        L.push('      <note><rest measure="yes"/><duration>' + measDiv + "</duration><voice>1</voice></note>");
+      } else {
+        let cursor = 0;                                   // divisions consumed from bar start
+        events.forEach((e) => {
+          const startDiv = Math.round((e.beat || 0) * beatDiv);
+          if (startDiv > cursor) { _emitRestXML(L, startDiv - cursor, div); cursor = startDiv; }
+          const durDiv = Math.max(1, Math.round((e.durBeats || 1) * beatDiv));
+          const midis = (e.midis && e.midis.length) ? e.midis : [];
+          if (!midis.length) { _emitRestXML(L, durDiv, div); }
+          else {
+            const ty = _typeForQuarters(durDiv / div);
+            midis.forEach((m, ci) => {
+              const pit = _midiToPitchXML(m, useSharp);
+              L.push("      <note>");
+              if (ci > 0) L.push("        <chord/>");
+              L.push("        <pitch><step>" + pit.step + "</step>" + (pit.alter ? "<alter>" + pit.alter + "</alter>" : "") + "<octave>" + pit.oct + "</octave></pitch>");
+              L.push("        <duration>" + durDiv + "</duration><voice>1</voice>");
+              if (ty) { L.push("        <type>" + ty.type + "</type>"); if (ty.dot) L.push("        <dot/>"); }
+              L.push("      </note>");
+            });
+          }
+          cursor += durDiv;
+        });
+        if (cursor < measDiv) _emitRestXML(L, measDiv - cursor, div);
+      }
+      L.push("    </measure>");
+    }
+    L.push("  </part>");
+  });
+  L.push("</score-partwise>", "");
+  return L.join("\n");
+}
+
+/* Same voices → a multi-voice ABC document (V: fields, lead first). abcjs / most
+ * ABC readers render one staff per V:. Barlines align because every voice spans
+ * the same measure count (empty bars → a whole-measure rest `Z`). */
+function scoreToMultipartABC(parts, opts = {}) {
+  parts = (parts || []).filter((p) => p && p.score && p.score.bars);
+  if (!parts.length) throw new Error("scoreToMultipartABC: no parts");
+  const key = opts.key || null;
+  const useSharp = opts.useSharp != null ? opts.useSharp : _keyFifths(key) >= 0;
+  const [b0, bt0] = parts[0].score.timeSig || [4, 4];
+  const maxBars = Math.max(...parts.map((p) => p.score.bars.length));
+  const out = ["X:1", "T:" + (opts.title || "Vocal score"), "M:" + b0 + "/" + bt0, "L:1/4"];
+  if (opts.tempo) out.push("Q:1/4=" + Math.round(opts.tempo));
+  out.push("%%score " + parts.map((_, i) => i + 1).join(" "));
+  parts.forEach((p, i) => out.push("V:" + (i + 1) + " name=" + JSON.stringify(p.name || ("Voice " + (i + 1))) + " clef=" + (p.clef === "bass" ? "bass" : "treble")));
+  out.push("K:" + (keyName(key, useSharp) || "C"));
+  parts.forEach((p, i) => {
+    out.push("V:" + (i + 1));
+    let body = "";
+    let curSig = b0 + "/" + bt0;
+    for (let bi = 0; bi < maxBars; bi++) {
+      const bar = p.score.bars[bi];
+      const [bb, bt] = (bar && bar.timeSig) || [b0, bt0];
+      let cell = "";
+      const sig = bb + "/" + bt;
+      if (sig !== curSig) { cell += "[M:" + sig + "]"; curSig = sig; }
+      const events = (bar && bar.events) || [];
+      if (!events.length) { cell += "Z"; }
+      else {
+        if ((events[0].beat || 0) > 0) cell += "z" + abcDur(events[0].beat, bt);
+        events.forEach((e) => {
+          const dur = abcDur(e.durBeats != null ? e.durBeats : 1, bt);
+          cell += (e.midis && e.midis.length ? "[" + e.midis.map(midiToAbc).join("") + "]" + dur : "z" + dur) + " ";
+        });
+      }
+      body += cell.trim() + " |";
+      body += (bi + 1) % 4 === 0 ? "\n" : " ";
+    }
+    out.push(body.trim());
+  });
+  return out.join("\n") + "\n";
+}
+
 /* Transpose a whole score by n semitones. Shifts every event's MIDI and lets the
  * engine re-name the chord (so spelling follows the sharp/flat setting for free).
  * Frets are dropped — they're tuning/position-specific — so downstream readouts
@@ -3741,6 +3971,16 @@ export {
   _typeForQuarters,
   _harmonyXML,
   scoreToMusicXML,
+  _xmlEsc,
+  _SATB_NAMES,
+  voicePartNames,
+  _FIFTHS_MAJOR,
+  _keyFifths,
+  _clefForScore,
+  splitVoicesToScores,
+  _emitRestXML,
+  scoreToMultipartMusicXML,
+  scoreToMultipartABC,
   transposeScore,
   BRASS_INSTRUMENTS,
   getBrassInstrument,

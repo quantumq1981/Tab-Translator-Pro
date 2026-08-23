@@ -203,6 +203,9 @@ import {
   harmonicClarity,
   transcribeWithNoteModel,
   splitVoices,
+  splitVoicesToScores,
+  scoreToMultipartMusicXML,
+  scoreToMultipartABC,
   polyNotesToScore,
   detectChord,
   transcribeChords,
@@ -1894,6 +1897,30 @@ function AudioImport({ C, useSharp }) {
     return polyNotesToScore(forVoice, { bpm, beatsPerBar: bpb, useSharp });
   }, [mlVoiced, voiceIdx, mlScore, bpm, bpb, useSharp]);
   const VOICE_LABELS = ["1 (high)", "2", "3", "4"];                // 0-indexed → soprano-first labels; expand if voiceCount grows
+  /* Export ALL voices at once as ONE multi-staff standard-notation score — lead
+   * (voice 1) on the top staff, backing voices below in descending register,
+   * shared key/meter, barlines aligned. Combines every voice via the pure
+   * engine (splitVoicesToScores → scoreToMultipart{MusicXML,ABC}). This is the
+   * SATB deliverable: a real readable vocal arrangement, not per-voice one-offs. */
+  const exportVocalScore = (fmt) => {
+    try {
+      if (!mlNotes || !mlNotes.length) { setErr("Run 🎼 Voices (ML) first."); return; }
+      const parts = splitVoicesToScores(mlNotes, { voices: voiceCount, bpm, beatsPerBar: bpb, useSharp });
+      const key = parts.length ? analyzeKey(parts[0].score) : null;
+      const opts = { key, tempo: bpm, useSharp, title: (name || "Vocals").replace(/\.[^.]+$/, "") };
+      const isXml = fmt === "musicxml";
+      const text = isXml ? scoreToMultipartMusicXML(parts, opts) : scoreToMultipartABC(parts, opts);
+      const mime = isXml ? "application/vnd.recordare.musicxml+xml" : "text/vnd.abc";
+      const ext = isXml ? "musicxml" : "abc";
+      const base = (name || "vocal_score").replace(/\.[^.]+$/, "").replace(/[^\w.-]+/g, "_").replace(/^_+|_+$/g, "") || "vocal_score";
+      const blob = new Blob([text], { type: mime + ";charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `${base}.${ext}`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+    } catch (e) { setErr("Vocal score export failed: " + (e && e.message ? e.message : "unknown")); }
+  };
   // A/B: does center-extraction actually clean up THIS file's harmony? Compare the
   // harmonic clarity of the raw downmix vs. the isolated center (the delta is the read).
   const runAB = async () => {
@@ -2003,6 +2030,17 @@ function AudioImport({ C, useSharp }) {
                   ))}
                 </>
               )}
+            </div>
+          )}
+          {mlNotes && mlNotes.length > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 8, fontSize: 11 }}>
+              <span style={{ color: C.dim }}>Full score{voiceCount > 1 ? ` (${voiceCount} staves, lead on top)` : ""}:</span>
+              <button onClick={() => exportVocalScore("musicxml")}
+                title="download ALL voices as ONE multi-staff standard-notation score (MusicXML) — opens in MuseScore / Sibelius / Finale"
+                style={{ ...chip(C), padding: "3px 9px", borderColor: C.cyan, color: C.cyan }}>⬇ Vocal score (MusicXML)</button>
+              <button onClick={() => exportVocalScore("abc")}
+                title="download ALL voices as one multi-voice ABC file"
+                style={{ ...chip(C), padding: "3px 9px", borderColor: C.border, color: C.dim }}>⬇ ABC</button>
             </div>
           )}
           {mlDisplayScore

@@ -1323,6 +1323,85 @@ expect(eng.recoverChordGaps([], mud, 0.1, 0.256, { ...noSmooth, recoverMinConfid
   expect(eng.splitVoices(triad, { voices: 0 }).length > 0, "voices:0 defaults to a sensible split (not crash)");
 }
 
+/* ---- SATB → standard-notation multi-part score export --------------------
+ * splitVoicesToScores + scoreToMultipart{MusicXML,ABC}: one labelled staff per
+ * voice, lead on top, shared key/meter, aligned barlines. The MusicXML must be
+ * well-formed and open in notation software. */
+{
+  // canonical part labels: lead on top, SATB below
+  expect(eng.voicePartNames(1).join("|") === "Lead Vocal", `1-voice label should be Lead Vocal, got ${eng.voicePartNames(1)}`);
+  expect(eng.voicePartNames(3).join("|") === "Soprano/Lead|Alto|Tenor", `3-voice labels drifted: ${eng.voicePartNames(3)}`);
+  expect(eng.voicePartNames(4).join("|") === "Soprano/Lead|Alto|Tenor|Bass", `4-voice labels drifted: ${eng.voicePartNames(4)}`);
+  // circle-of-fifths key signature: C major=0, E major=+4, F major=−1, A minor=0, C minor=−3
+  expect(eng._keyFifths({ tonic: 0, mode: "major" }) === 0, "C major → 0 fifths");
+  expect(eng._keyFifths({ tonic: 4, mode: "major" }) === 4, "E major → +4 fifths");
+  expect(eng._keyFifths({ tonic: 5, mode: "major" }) === -1, "F major → −1 fifths");
+  expect(eng._keyFifths({ tonic: 9, mode: "minor" }) === 0, "A minor → 0 fifths (relative C)");
+  expect(eng._keyFifths({ tonic: 0, mode: "minor" }) === -3, "C minor → −3 fifths (relative Eb)");
+
+  // A 3-part vocal: C-major triad held bar 1, F-major triad held bar 2 (@120bpm, 2s/bar)
+  const vox = [
+    { midi: 67, startSec: 0, durSec: 1 }, { midi: 64, startSec: 0, durSec: 1 }, { midi: 60, startSec: 0, durSec: 1 },
+    { midi: 72, startSec: 2, durSec: 1 }, { midi: 69, startSec: 2, durSec: 1 }, { midi: 65, startSec: 2, durSec: 1 },
+  ];
+  const parts = eng.splitVoicesToScores(vox, { voices: 3, bpm: 120, beatsPerBar: 4, useSharp: true });
+  expect(parts.length === 3, `3 voices → 3 parts, got ${parts.length}`);
+  expect(parts.map((p) => p.name).join("|") === "Soprano/Lead|Alto|Tenor", `part names: ${parts.map((p) => p.name)}`);
+  // voice 0 = highest line (soprano) → G4/C5 ; voice 2 = lowest → C4/F4
+  expect(parts[0].score.bars[0].events[0].midis[0] === 67, `soprano bar1 should be 67 (G4), got ${parts[0].score.bars[0].events[0].midis[0]}`);
+  expect(parts[2].score.bars[0].events[0].midis[0] === 60, `tenor(low) bar1 should be 60 (C4), got ${parts[2].score.bars[0].events[0].midis[0]}`);
+
+  const xml = eng.scoreToMultipartMusicXML(parts, { key: { tonic: 0, mode: "major" }, tempo: 120, title: "Vocal Test", useSharp: true });
+  // well-formed + correct structure
+  const doc = new DOMParser().parseFromString(xml, "text/xml");
+  expect(doc.getElementsByTagName("parsererror").length === 0, "multipart MusicXML must be well-formed XML");
+  expect(/<score-partwise/.test(xml), "multipart output is score-partwise");
+  expect((xml.match(/<score-part /g) || []).length === 3, `part-list should hold 3 score-parts, got ${(xml.match(/<score-part /g) || []).length}`);
+  expect((xml.match(/<part id=/g) || []).length === 3, `should emit 3 <part> elements, got ${(xml.match(/<part id=/g) || []).length}`);
+  // lead part is first, labelled
+  expect(/<part-name>Soprano\/Lead<\/part-name>[\s\S]*<part-name>Alto/.test(xml), "Soprano/Lead part-name comes before Alto (lead on top)");
+  // key + time + clef present
+  expect(/<key><fifths>0<\/fifths><mode>major<\/mode><\/key>/.test(xml), "C-major key signature emitted");
+  expect(/<time><beats>4<\/beats><beat-type>4<\/beat-type><\/time>/.test(xml), "4/4 time signature emitted");
+  expect(/<clef><sign>G<\/sign><line>2<\/line><\/clef>/.test(xml), "treble clef emitted for the vocal lines");
+  expect(/<sound tempo="120"\/>/.test(xml), "tempo carried into the score");
+  // real notes (not just names), voice labels visible as text
+  expect(/<pitch><step>G<\/step><octave>4<\/octave><\/pitch>/.test(xml), "soprano G4 emitted as a real notated pitch");
+  expect(/<words>Soprano\/Lead<\/words>/.test(xml), "voice label emitted as a text expression");
+  // divisions ≥ 480 (task requirement)
+  expect(/<divisions>480<\/divisions>/.test(xml), "divisions ≥ 480 (per requirement)");
+  // barlines align: every part spans the same measure count
+  const measCounts = Array.from(doc.getElementsByTagName("part")).map((pt) => pt.getElementsByTagName("measure").length);
+  expect(measCounts.every((c) => c === measCounts[0] && c === 2), `all staves span the same 2 bars, got ${JSON.stringify(measCounts)}`);
+
+  // ALIGNMENT with a short voice: a voice that stops early is padded with a
+  // whole-measure rest so barlines still line up.
+  const uneven = [
+    { midi: 72, startSec: 0, durSec: 1 }, { midi: 60, startSec: 0, durSec: 1 },   // bar1: two voices
+    { midi: 74, startSec: 2, durSec: 1 },                                          // bar2: only the top voice
+  ];
+  const up = eng.splitVoicesToScores(uneven, { voices: 2, bpm: 120, beatsPerBar: 4, useSharp: true });
+  const uxml = eng.scoreToMultipartMusicXML(up, { key: { tonic: 0, mode: "major" }, tempo: 120 });
+  const udoc = new DOMParser().parseFromString(uxml, "text/xml");
+  const uCounts = Array.from(udoc.getElementsByTagName("part")).map((pt) => pt.getElementsByTagName("measure").length);
+  expect(uCounts.length === 2 && uCounts.every((c) => c === uCounts[0]), `uneven voices still align (${JSON.stringify(uCounts)})`);
+  expect(/rest measure="yes"/.test(uxml), "a silent bar in a shorter voice is a whole-measure rest (keeps barlines aligned)");
+
+  // enharmonic spelling follows the key when useSharp is not forced: F major → flats
+  const fParts = eng.splitVoicesToScores([{ midi: 70, startSec: 0, durSec: 1 }], { voices: 1, bpm: 120, beatsPerBar: 4 });
+  const fxml = eng.scoreToMultipartMusicXML(fParts, { key: { tonic: 5, mode: "major" } }); // Bb4 = midi 70
+  expect(/<step>B<\/step><alter>-1<\/alter>/.test(fxml), "F-major key spells midi 70 as Bb (flat), not A#");
+
+  // ABC multi-voice
+  const abc = eng.scoreToMultipartABC(parts, { key: { tonic: 0, mode: "major" }, tempo: 120, title: "Vocal Test" });
+  expect(/V:1 name="Soprano\/Lead"/.test(abc) && /V:2 name="Alto"/.test(abc) && /V:3 name="Tenor"/.test(abc), "ABC declares one V: per voice, lead first");
+  expect(/%%score 1 2 3/.test(abc), "ABC groups all three voices on one system");
+
+  // "no backing detected" → lead-only score
+  const solo = eng.splitVoicesToScores([{ midi: 67, startSec: 0, durSec: 1 }], { voices: 3, bpm: 120, beatsPerBar: 4 });
+  expect(solo.length === 1 && solo[0].name === "Soprano/Lead", `single-line stem → one lead part, got ${solo.length}`);
+}
+
 /* ---- DTW audio↔score auto-sync -------------------------------------------- */
 // _dtw finds a monotonic path; identical sequences → diagonal, zero cost
 {

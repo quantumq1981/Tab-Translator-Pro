@@ -1285,6 +1285,52 @@ drops the lowest; sequential melody → all in v0; voice crossing splits a held 
 two runs assigned to the right voice at the right time; per-voice `polyNotesToScore`
 round-trip preserves `source:"ml"` and voices the right pitch; empty/null/voices:0 safe.
 
+### SATB → standard-notation multi-part score export (2026-08-23)
+
+The SATB split above produced per-voice SCORES you could display/export **one at a time**,
+but not a single readable **multi-staff vocal arrangement**. This adds that — a combined
+`score-partwise` MusicXML (+ multi-voice ABC) with the **lead vocal on the top staff** and
+backing voices below, sharing key/meter/barlines. **Purely additive**: the single-part
+`scoreToMusicXML` (whose byte-output the whole validated corpus + the round-trip test
+depend on) is **untouched**; these are new functions.
+
+- **Engine (pure, headless-tested in `engine.tsx`):**
+  - **`voicePartNames(n)`** — canonical labels, lead first: 1 voice → `["Lead Vocal"]`;
+    otherwise `Soprano/Lead · Alto · Tenor · Bass` (>4 → `Voice N`).
+  - **`_keyFifths(key)`** — circle-of-fifths accidental count for the `<key><fifths>` element
+    (minor keys resolve via their relative major: Am→0, Cm→−3).
+  - **`_clefForScore(score)`** — bass clef below median G3 (midi 55), else treble.
+  - **`splitVoicesToScores(notes, opts)`** — composes the existing `splitVoices` +
+    `polyNotesToScore` into `[{ voice, name, clef, score }]` in soprano→bass order. A voice
+    slot with no notes is dropped (the honest "no backing detected → lead only"); `voices<=1`
+    returns the single polyphonic lead. opts: `{ voices, bpm, beatsPerBar, beatType, useSharp }`.
+  - **`scoreToMultipartMusicXML(parts, opts)`** — one `<part>`/staff per voice (parts[0] =
+    top = lead). Emits `<divisions>` (≥480 per the task), `<key>` (fifths+mode), per-bar
+    `<time>`, `<clef>`, a tempo `<direction>` + `<sound>`, and a `<words>` voice label above
+    each staff's first measure. Each voice is monophonic: a bar is an optional leading rest +
+    notes on their beats + a whole-measure rest for bars the voice doesn't sing — so **every
+    part spans the same measure count and barlines align**. Enharmonic spelling follows the
+    key when `useSharp` isn't forced (sharp keys→sharps, flat keys→flats).
+  - **`scoreToMultipartABC(parts, opts)`** — the same voices as a `%%score`-grouped
+    multi-voice ABC (`V:` per voice, lead first; empty bars → whole-measure rest `Z`).
+- **UI (`AudioImport` in `TabDecoderPro.tsx`, browser-only glue):** under the Voices (ML)
+  split/voice pickers, a **⬇ Vocal score (MusicXML)** + **⬇ ABC** row exports **ALL** voices
+  at once (not just the displayed one) via `splitVoicesToScores` → `scoreToMultipart*`; key
+  is `analyzeKey(lead)`, tempo/meter from the panel controls.
+- **Honest limit (documented, not a bug):** the note grid comes from
+  `polyNotesToScore`→`audioEventsToScore`, i.e. the **integer beat grid** — that's what
+  guarantees each measure's durations sum exactly (valid MusicXML). Sub-beat quantisation
+  (16th/triplet) and true inter-note rests (a monophonic line currently sustains to the next
+  onset) are a clean future refinement of the score model, not this exporter. Voice split is
+  register-based (rare genuine crossings show as swaps — Edit fixes them).
+- **Sample deliverable:** `docs/samples/vocal_score.musicxml` (+ `.abc`) — lead + two backing
+  harmony voices, generated from the engine.
+- **`npm test` guards:** part labels + key-fifths math; a 3-part vocal → 3 aligned parts,
+  well-formed XML (via `@xmldom/xmldom`), lead-first ordering, key/time/clef/tempo/label +
+  real notated pitches present, `divisions=480`; an uneven-length voice stays aligned via a
+  whole-measure rest; F-major spells midi 70 as B♭; ABC declares one `V:` per voice; a
+  single-line stem yields one `Lead Vocal`/`Soprano/Lead` part.
+
 ### Center-channel (vocal) isolation — score sung harmony from a full mix (2026-07-07)
 
 For scoring **vocal harmony parts** without an external stem splitter: lead + backing
