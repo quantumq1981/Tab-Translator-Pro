@@ -1317,6 +1317,16 @@ depend on) is **untouched**; these are new functions.
   split/voice pickers, a **⬇ Vocal score (MusicXML)** + **⬇ ABC** row exports **ALL** voices
   at once (not just the displayed one) via `splitVoicesToScores` → `scoreToMultipart*`; key
   is `analyzeKey(lead)`, tempo/meter from the panel controls.
+- **Sensitivity control (2026-08-23) — the load-bearing knob for backing harmony.** basic-pitch's
+  default onset/frame thresholds (0.5/0.3) are tuned for a prominent LEAD; a quiet backing stack
+  falls under them, so a 3-part stem comes back with the lower voices STARVED. Measured on the
+  real "25 or 6 to 4" iso-vocal: **44/14/1** notes per voice at 0.5/0.3 vs **82/49/16** at
+  0.4/0.25 vs **136/125/83** at 0.3/0.2. So `voices()` now runs the model ONCE, caches the raw
+  onset/frame matrices on `ref.current.mlRaw`, and a **Sensitivity** chip row (Lead 0.5/0.3 ·
+  **Balanced 0.4/0.25 = default** · Full 0.3/0.2) re-derives notes via `notesFromActivations`
+  **without re-inference** (`applySens`) — instant. `notesFromActivations` already exposed
+  `onsetThresh`/`frameThresh` opts; this just surfaces them. Too low (≈0.25/0.15 → 284 notes)
+  starts inventing, so Balanced is the honest default.
 - **Notation quantiser (16th grid)** — the on-screen chart's integer `beat`/`durBeats` grid
   is quarter-resolution and can collapse a dense bar's onsets to **zero-length** events (fine
   for the chart, invalid for notation — it produced `<duration>0`/ABC `/48` garbage). So the
@@ -1338,11 +1348,14 @@ depend on) is **untouched**; these are new functions.
   the greedy decomposition needs it (ties added). Beat/downbeat detection to snap onsets is a
   clean future refinement (the engine already has `detectBeats`/`analyzeAudioChords`).
 - **Validated on REAL audio (2026-08-23):** ran end-to-end in Node against the user's own
-  isolated **3-part backing-vocal chorus** MP3 — decode → `basic-pitch` (vendored local model,
-  TF.js cpu) → `notesFromActivations` → `splitVoicesToScores(voices:3)` →
-  `scoreToMultipartMusicXML`: 45 notes (MIDI 57–81), 3 aligned staves (Soprano/Lead · Alto ·
-  Tenor), detected key **A minor** (conf 0.81), 23 measures/part, **0 XML parse errors**, and
-  proper tied 16th-grid note-values (no degenerate durations). Also on a 45 s clip in ~seconds.
+  isolated vocal stems — decode (ffmpeg for `.m4a`/AAC, `mpg123-decoder` for `.mp3`) →
+  `basic-pitch` (vendored local model, TF.js cpu) → `notesFromActivations` →
+  `splitVoicesToScores(voices:3)` → `scoreToMultipartMusicXML`. On **"25 or 6 to 4" (3-part iso
+  vocals)** at Balanced sensitivity: 87 notes (MIDI 55–86), 3 aligned staves (82/49/16 across
+  Soprano/Lead · Alto · Tenor), detected key **A minor** (conf 0.87 — the song's actual key), 23
+  measures/part, **0 XML parse errors**, tied 16th-grid note-values, no degenerate durations
+  (~seconds for a 45 s clip). A separate 3-part backing-vocal chorus decoded the same way.
+  Sample committed at `docs/samples/25or6to4-vocal.musicxml` (+ `.abc`).
 - **Sample deliverable:** `docs/samples/vocal_score.musicxml` (+ `.abc`) — lead + two backing
   harmony voices, generated from the engine.
 - **`npm test` guards:** part labels + key-fifths math; a 3-part vocal → 3 aligned parts,

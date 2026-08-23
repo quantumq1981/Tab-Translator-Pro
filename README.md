@@ -25,7 +25,9 @@ vocal arrangement:
 2. Tap **🎼 Voices (ML)** to run the pluggable note model (Spotify `basic-pitch`)
    — this transcribes the actual sung notes, not just chord names.
 3. Choose a **Split** (2 / 3 / 4 voices). The engine's SATB heuristic assigns each
-   note to a voice by pitch register (voice 1 = highest = lead).
+   note to a voice by pitch register (voice 1 = highest = lead). Use the
+   **Sensitivity** control (Lead / Balanced / Full harmony) if quiet backing
+   voices are under-detected — it re-thresholds instantly, no re-analysis.
 4. Tap **⬇ Vocal score (MusicXML)** (or **⬇ ABC**) to download **all voices at
    once** as a single multi-staff score:
    - The **lead vocal is the top staff**, backing voices below in descending
@@ -41,8 +43,8 @@ A sample output is committed at
 
 Notes are quantised to a **16th-note grid** and emitted as real note-values with
 ties, so every measure sums exactly and the file validates. A sample generated
-from a real 3-part backing-vocal MP3 is at
-[`docs/samples/real-vocal-test.musicxml`](docs/samples/real-vocal-test.musicxml).
+end-to-end from a real 3-part isolated-vocal recording ("25 or 6 to 4") is at
+[`docs/samples/25or6to4-vocal.musicxml`](docs/samples/25or6to4-vocal.musicxml).
 
 **Honest limits.** Note detection quality depends on the model + stem isolation;
 the voice split is register-based (rare genuine voice crossings show as swaps — fix

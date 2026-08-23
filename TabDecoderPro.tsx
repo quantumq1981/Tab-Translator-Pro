@@ -202,6 +202,7 @@ import {
   extractCenter,
   harmonicClarity,
   transcribeWithNoteModel,
+  notesFromActivations,
   splitVoices,
   splitVoicesToScores,
   scoreToMultipartMusicXML,
@@ -1775,6 +1776,7 @@ function AudioImport({ C, useSharp }) {
   const [mlNotes, setMlNotes] = useState(null);      // raw ML notes, kept so voice-count/voice-index can re-derive without re-inference
   const [voiceCount, setVoiceCount] = useState(3);   // SATB split target (1 = no split, 2 = duet, 3 = SAT, 4 = SATB)
   const [voiceIdx, setVoiceIdx] = useState(0);       // which voice slot is displayed (0 = highest / soprano)
+  const [sens, setSens] = useState("balanced");      // ML note-detection sensitivity (see SENS): quiet backing vocals need a lower threshold
   const [raw, setRaw] = useState([]);                // raw engine events (chords: {symbol,midis,…}; notes: {note,…})
   const [bpm, setBpm] = useState(120);
   const [beatInfo, setBeatInfo] = useState(null);   // detected tempo readout
@@ -1821,7 +1823,7 @@ function AudioImport({ C, useSharp }) {
 
   const onFile = async (e) => {
     const f = e.target.files && e.target.files[0]; if (!f) return;
-    setErr(""); setName(f.name); setBusy(true); setRaw([]); setOverrides({}); setAb(null); setMlScore(null); setMlNotes(null); setVoiceIdx(0); stopPlay();
+    setErr(""); setName(f.name); setBusy(true); setRaw([]); setOverrides({}); setAb(null); setMlScore(null); setMlNotes(null); setVoiceIdx(0); ref.current.mlRaw = null; stopPlay();
     try {
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) { setErr("Web Audio isn't available in this browser."); setBusy(false); return; }
@@ -1867,14 +1869,40 @@ function AudioImport({ C, useSharp }) {
    * { onsets, frames, frameRate, minMidi } — then the pure engine decoder turns it into a
    * chart. No model wired yet → a clear message (the model + iOS inference is the device-
    * only, must-be-hosted seam; the decode/score half is done + tested). */
+  /* Note-detection sensitivity. basic-pitch's default thresholds are tuned for a
+   * prominent LEAD; quiet backing harmonies fall under them, so a 3-part stem can
+   * come back with the lower voices starved (measured on a real iso-vocal: 44/14/1
+   * notes at 0.5/0.3 → 136/125/83 at 0.3/0.2). "Balanced" is the default for the
+   * vocal-harmony use case; "Lead" is cleaner for a single line; "Full" digs
+   * deepest (more notes, more spurious). */
+  const SENS = {
+    lead: { onsetThresh: 0.5, frameThresh: 0.3, label: "Lead" },
+    balanced: { onsetThresh: 0.4, frameThresh: 0.25, label: "Balanced" },
+    full: { onsetThresh: 0.3, frameThresh: 0.2, label: "Full harmony" },
+  };
+  /* Re-derive notes from the CACHED model output (no re-inference) at a given
+   * sensitivity — cheap, so the sensitivity chips are instant after the first run. */
+  const applySens = (sensKey) => {
+    const s = ref.current; if (!s.mlRaw) return;
+    const th = SENS[sensKey] || SENS.balanced;
+    const notes = notesFromActivations(s.mlRaw.onsets, s.mlRaw.frames,
+      { frameRate: s.mlRaw.frameRate, minMidi: s.mlRaw.minMidi, onsetThresh: th.onsetThresh, frameThresh: th.frameThresh });
+    setMlNotes(notes);
+    setMlScore(polyNotesToScore(notes, { bpm, beatsPerBar: bpb, useSharp }));
+    setVoiceIdx(0); setOverrides({});
+  };
   const voices = async () => {
     const s = ref.current; if (!s.cur) { setErr("Upload audio first."); return; }
     const model = typeof window !== "undefined" ? window.TTP_NOTE_MODEL : null;
     if (typeof model !== "function") { setErr("Per-voice note transcription needs an ML note model (basic-pitch) — not configured on this build. See docs/ML-NOTES.md."); return; }
     setBusy(true); setErr(""); setMlScore(null); setMlNotes(null); setVoiceIdx(0);
     try {
-      const { notes, score } = await transcribeWithNoteModel(s.cur, s.sr, model, { bpm, beatsPerBar: bpb, useSharp });
-      setMlNotes(notes); setMlScore(score);
+      // Run the model ONCE and cache its raw onset/frame matrices, so changing
+      // sensitivity (a post-model threshold) re-derives notes without re-inference.
+      const out = await model(s.cur, s.sr, {});
+      if (!out || !out.frames || !out.onsets) throw new Error("model produced no output");
+      s.mlRaw = out;
+      applySens(sens);
     }
     catch (e) { setErr("Note transcription failed: " + (e && e.message ? e.message : "unknown")); }
     setBusy(false);
@@ -2010,6 +2038,18 @@ function AudioImport({ C, useSharp }) {
             🎼 Per-voice note transcription (ML) — the actual sung notes, editable + exportable like any chart.
             {mlNotes && mlNotes.length > 0 && <> <span style={{ color: C.dim }}>Voices split by pitch register (highest = voice 1). Rare voice crossings show as swaps — use ✎ Edit to fix.</span></>}
           </div>
+          {ref.current.mlRaw && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 8, fontSize: 11 }}>
+              <span style={{ color: C.dim }} title="basic-pitch's default threshold is tuned for a prominent lead; quiet backing harmonies need a lower threshold. Re-derived instantly (no re-inference).">Sensitivity:</span>
+              {["lead", "balanced", "full"].map((k) => (
+                <button key={k} onClick={() => { setSens(k); applySens(k); }}
+                  style={{ ...chip(C), padding: "3px 9px", borderColor: sens === k ? C.cyan : C.border, color: sens === k ? C.cyan : C.dim }}>
+                  {SENS[k].label}
+                </button>
+              ))}
+              <span style={{ color: C.dim, marginLeft: 4 }}>· {mlNotes ? mlNotes.length : 0} notes</span>
+            </div>
+          )}
           {mlNotes && mlNotes.length > 0 && (
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 8, fontSize: 11 }}>
               <span style={{ color: C.dim }}>Split:</span>

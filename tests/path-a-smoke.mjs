@@ -1624,11 +1624,11 @@ expect(/cp\s+note-model\.js\s+_site/.test(pagesYml),
 expect(/models\/basic-pitch\/model\.json\s+_site\/models\/basic-pitch\//.test(pagesYml)
   && /models\/basic-pitch\/group1-shard1of1\.bin\s+_site\/models\/basic-pitch\//.test(pagesYml),
   "Pages deploy must ship the vendored basic-pitch model + weights");
-/* The UI's existing entry point (voices()) must keep calling
- * transcribeWithNoteModel via window.TTP_NOTE_MODEL — so the moment the model
- * is wired, the button works with no UI change. Regression-guard that seam. */
-expect(/window\.TTP_NOTE_MODEL/.test(uiSrc) && /transcribeWithNoteModel\s*\(/.test(uiSrc),
-  "UI Audio panel must invoke transcribeWithNoteModel via window.TTP_NOTE_MODEL (unchanged wiring seam)");
+/* The UI's entry point (voices()) invokes the model via window.TTP_NOTE_MODEL and
+ * decodes with notesFromActivations — it caches the raw onset/frame matrices so a
+ * sensitivity change re-thresholds WITHOUT re-inference. Regression-guard that seam. */
+expect(/window\.TTP_NOTE_MODEL/.test(uiSrc) && /notesFromActivations\s*\(/.test(uiSrc),
+  "UI Audio panel must invoke the note model via window.TTP_NOTE_MODEL + notesFromActivations (wiring seam)");
 
 /* ---- estimateSpacing: scale-invariant + noise-robust --------------------
  * Both the Wild Night ("no tab detected") and Confirmation ("wrong key/voicings")
