@@ -15,3 +15,32 @@ The workflow enables Pages itself (`configure-pages` with `enablement: true`),
 so no manual Settings toggle is required. If your org/repo policy blocks that,
 set **Settings → Pages → Build and deployment → Source** to **GitHub Actions**
 once and re-run the workflow.
+
+## Vocal harmony → standard-notation score (SATB)
+
+The **Audio 🎵** mode can turn an isolated vocal stem into a readable, multi-staff
+vocal arrangement:
+
+1. Upload an isolated vocal stem (a single mixed vocal, or a pre-separated stem).
+2. Tap **🎼 Voices (ML)** to run the pluggable note model (Spotify `basic-pitch`)
+   — this transcribes the actual sung notes, not just chord names.
+3. Choose a **Split** (2 / 3 / 4 voices). The engine's SATB heuristic assigns each
+   note to a voice by pitch register (voice 1 = highest = lead).
+4. Tap **⬇ Vocal score (MusicXML)** (or **⬇ ABC**) to download **all voices at
+   once** as a single multi-staff score:
+   - The **lead vocal is the top staff**, backing voices below in descending
+     register (`Soprano/Lead`, `Alto`, `Tenor`, `Bass`).
+   - Real standard notation — notes, rests, barlines, time signature, key
+     signature, and a visible voice label above each staff.
+   - `divisions=480`, one `<part>`/staff per voice, aligned barlines.
+   - Opens cleanly in **MuseScore / Sibelius / Finale** (any MusicXML reader).
+
+A sample output is committed at
+[`docs/samples/vocal_score.musicxml`](docs/samples/vocal_score.musicxml)
+(lead + two backing harmony voices) with an ABC companion.
+
+**Honest limits.** Note detection quality depends on the model + stem isolation;
+the voice split is register-based (rare genuine voice crossings show as swaps — fix
+with ✎ Edit); and the notation grid is quantised to the integer beat grid (which
+keeps the MusicXML valid — finer sub-beat quantisation is future work). See
+`docs/ML-NOTES.md` and `CLAUDE.md`.
