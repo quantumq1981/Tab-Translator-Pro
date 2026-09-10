@@ -694,10 +694,11 @@ bloating the monolith. Lifting `semis`/transpose state out to the parent for per
     extension/MIME: `.abc`, `.musicxml` → `application/vnd.recordare.musicxml+xml`,
     `.mid` → `audio/midi`, `.chordpro`, `.csmpn`, `.csml`; filename from the chart
     title via a Blob + anchor).
-- **Key + roman numerals** (`analyzeKey`, `romanFor`, `keyName`): scores all 24
-  keys — each chord adds its duration when diatonic (×0.3 if only its root fits =
-  a borrowed quality), plus a small cadential bonus for the last/first chord being
-  the tonic — and picks the best. The `I·V·vi` toggle captions each chord with its
+- **Key + roman numerals** (`analyzeKey`, `analyzeKeyCandidates`, `romanFor`, `keyName`):
+  scores all 24 keys by **harmonic FUNCTION** — see "Key detection v2" below for the model
+  and the ♭VII defect it fixed — and picks the best; the **key is user-correctable**
+  (`KeyPicker` → `parseKeyName`), and the override flows through the same `opts.key`
+  every exporter reads. The `I·V·vi` toggle captions each chord with its
   function relative to that key (non-diatonic → absolute symbol); the detected key
   shows in the meta row and flows into export (`K:` line for ABC, `{key:}` for
   ChordPro). Chord class is parsed from the symbol suffix (`_classOf`); minor keys
@@ -1705,6 +1706,185 @@ Isolated stems remain the sweet spot. And 38.7% root accuracy is well under the 
 published systems reach on pop: the remaining gap is a key/harmony prior, downbeat
 detection, and the fact that the ground truth here is one partial rhythm-guitar part.
 
+### Key detection v2 — harmonic FUNCTION weights, not scale membership (2026-09-10)
+
+**The reported defect.** An audio-decoded chart of Marshall Tucker's *Can't You See*
+(the chord changes came out right — `D · C · G`) was labelled **E minor**. It is D major.
+Same class of bug: a `G · F · C` mixolydian vamp read **C**.
+
+**Root cause, and it was structural, not a threshold.** v1 `analyzeKey` scored each of the
+24 keys as *"how much duration is diatonic to it"* (full weight if the chord's root AND
+quality fit the scale, `×0.3` otherwise), plus a small cadence bonus. That model is
+**degenerate for relative keys** — they share a scale, so only the 0.08/0.04 bonus ever
+separated them — and it is **blind to which chord is home**. For `D · C · G`: all three are
+diatonic to **E minor** (VII · VI · III), whereas in **D major** the C is a *borrowed* ♭VII
+and got the 0.3 haircut. E minor therefore won **a key whose tonic chord never sounds**.
+
+**The fix — three musically-motivated terms** (`_keyChordWeight` + `analyzeKeyCandidates`):
+
+1. **Degree weights by function** — `I 1.00 · V 0.86 · IV 0.80 · ii/vi 0.62 · iii 0.48 ·
+   vii° 0.36` (minor: `i 1.00 · V(maj/dom) 0.78 · iv 0.80 · III/VI/VII 0.62 · v 0.72 ·
+   ii° 0.36`), so a key wins on the STRENGTH of the functions its chords fill rather than
+   on set membership. A dominant on the 5th degree gets +0.06 — it is the clearest key
+   signature there is.
+2. **A borrowed table** — `♭VII 0.52 · ♭III 0.34 · ♭VI 0.34` in major (mixolydian/aeolian
+   mixture is *ubiquitous* in rock; the ♭VII is the whole reason this bug existed), dorian
+   ♮6 `0.22` in minor, everything else chromatic `0.06`. A **diatonic root with the wrong
+   quality** keeps a fraction of its degree weight — `×0.50` for a dominant (a secondary
+   dominant still points at a diatonic target) and `×0.38` otherwise — instead of a flat 0.3.
+3. **Tonic presence** — a key whose tonic triad is never stated takes a **×0.80 haircut**,
+   and a tonic at a phrase boundary scores `+0.10·total` (last chord) / `+0.06·total`
+   (first). That is the "where does it come home" cue, and it is what separates D major
+   from **G major** on the very same three chords (D opens and closes every phrase).
+
+**Slash bass as a minority vote** (`_K_BASS = 0.20`). `_parseSym` now also resolves the
+inversion's bass pitch class, blended `0.8·w(root) + 0.2·w(bass)` (quality-agnostic — a bass
+note has no third), so normalisation is unchanged. The sounding bass is real functional
+evidence: `Eb6/9/F` in a B♭ tune is an F13sus by another name, i.e. the dominant. Gotcha the
+test pins: **`6/9` is a suffix, not an inversion** — only a trailing *note name* counts
+(`Eb6/9/F` → bass F; `C6/9` → none; `Csus4` → none).
+
+**Measured.** Every existing corpus expectation is byte-identical (`npm test` green: Blue Sky
+E, the fixture's `I V vi IV` in C, Confirmation F). Newly correct: **`D C G` → D** (E minor
+now loses by >20%, and its `tonicShare` is 0), **`G F C` → G**, Peg's chord track `Bm → Em`,
+Interstate Love Song's bass line `C#m → E`, Anthropology's *Chords* track `Gm → Bb` (the
+bass vote does that one — margin is thin, 0.642 vs 0.638, so it is NOT pinned as a test;
+the bass-vote unit tests are). Guards against over-correcting the other way are pinned too:
+a real E-minor tune and a minor blues both stay minor.
+
+**Confidence is now clamped to 0..1** and reads `score/totalDuration`. The audio decoder's
+key-prior gate (`keyMinConfidence 0.5`) still engages on real material — measured 0.669 on
+the Peg stem. An A/B of that prior (none / v2 / true key / the old v1 key) on the real Peg
+vocal stem against its time-aligned `.gp4` moved root accuracy by <1.5 points in every
+direction, i.e. **the key-model change is neutral for the chord decode** and its effect is
+on the *reported key*, which is what was broken. (Note: CLAUDE.md's 53%-root figure was
+measured on an isolated *instrument* stem that is not in the repo; the **vocals-only** Peg
+mp3 that IS in the repo scores ~10% against the rhythm-guitar chart, so don't use it as the
+accuracy benchmark — its DTW alignment confidence does reproduce exactly, 0.697.)
+
+**`analyzeKeyCandidates(score, {limit})`** is the new primitive — all 24 keys ranked with
+`{tonic, mode, confidence, score, tonicShare}`; `analyzeKey` is literally its head, so the
+two can never drift. The UI's picker lists the runners-up so a user correcting a call can
+see what the analysis weighed.
+
+### Manual key override — the key is now editable (2026-09-10)
+
+The analysis is good and still not infallible (modal vamps, a noisy audio decode), and the
+key drives the roman numerals AND every exporter's key field — so it needs the same escape
+hatch `✎ Edit` gives chords.
+
+- **Engine:** `parseKeyName(name)` (accepts `D` · `Dm` · `F#m` · `Bb minor` · `eb Major`,
+  case-insensitively; **rejects chords** — `Dsus4` is not a key) and `KEY_CHOICES` (the 24
+  keys, family-default spelling).
+- **UI (`KeyPicker` in `TabDecoderPro.tsx`)** — a `<select>` in `ChartPanel`'s toolbar:
+  *"Key: auto (D)"*, then an **Analysis ranked** optgroup (the runners-up with their
+  scores — the relative-major/minor mix-up is right there, one tap away), then all 24 keys.
+  `ChartPanel` takes it **controlled or uncontrolled**: the main app passes
+  `keyOverride`/`setKeyOverride` (persisted in the session meta, so a corrected chart
+  restores corrected); the Audio/ML panels use the internal state.
+- **The override names the key of the UNTRANSPOSED music**, so transposing moves it with the
+  chart (`key.tonic + semis`), and the picker un-shifts the ranked list to match.
+- It flows through the SAME `opts.key` every exporter already reads — ABC `K:`, ChordPro
+  `{key:}`, CSMPN/CSML `Key:`, and the Pro handoff — plus `describeScore` (which now takes
+  `opts.key`) so the summary pills can't contradict the header. The meta row shows
+  `key D (87%)` when detected and `key D (set)` in green when corrected.
+
+### Song STRUCTURE from audio — sections + an editor (2026-09-10)
+
+"Assign intro / verse / chorus / bridge automatically." Built from **the audio itself**
+(`detectSections` in `engine.tsx` — pure, zero-dep, worker-safe), with the standard MIR
+pipeline and an editor over the top, because structure is subjective and naming is a
+heuristic:
+
+```
+beats → beat-synchronous features → time-lag embedding → SSM → Foote novelty →
+boundaries → repetition clustering → pop-template naming
+```
+
+- **Beat-synchronous**, reusing `detectBeats`/`beatSegments` (HPSS chroma, drums suppressed)
+  — and the panel passes the beat grid the chord decode already found, so the beat is never
+  tracked twice.
+- **Chroma AND timbre.** A verse and its chorus very often share the chord loop (all of
+  *Can't You See* is D · C · G), so chroma alone cannot separate them; what changes is the
+  ARRANGEMENT. `_bandFeatures` adds 8 log-spaced spectral bands, **L2-normalised per beat**
+  so it describes brightness/density and not loudness (loudness rides separately as the beat
+  energy, and is what the naming step uses to find the hook). Blend `timbreWeight 0.35`.
+- **Time-lag embedding** (`embed` = 8 beats, **centred**): a section is a repeated
+  *progression*, not a repeated instant. A forward-only stack — the first thing tried —
+  shifts every boundary half a phrase early; centring fixed it.
+- **Foote checkerboard novelty** with a Gaussian taper. Two details that were each a bug:
+  (1) the kernel must be **no wider than the shortest section** accepted, or it straddles
+  two boundaries and smears both away; (2) at the edges the kernel is truncated, producing a
+  huge artificial spike — left in the mean/σ it **crushed every real boundary below the
+  threshold** (measured: real boundaries at z≈0.5 against an edge spike of z≈6.7). The
+  statistics are now computed over the interior only and the edges are zeroed.
+- **Peak-picking is two-stage**: a local-max test over a *short* window (a boundary is a
+  narrow spike), then **greedy strongest-first** selection enforcing the minimum section
+  length. Testing "is it the max over ±minSection" instead makes two real boundaries one
+  section apart annihilate each other — which is the entire grid of an 8-bars-per-part song.
+- **Repetition clustering** on the unembedded segment means, with an **adaptive** cosine cut
+  (`median + 0.5·(p95 − median)` of all pairwise similarities) rather than a magic constant:
+  how much more alike two instances of the same part are than a typical pair is
+  material-dependent.
+- **`nameSections`** (pure, separately tested) applies the pop template: a short
+  non-recurring opener → **Intro**; the most-repeated recurring part, tie-broken by
+  normalised energy → **Chorus**; the next → **Verse**; a one-off in the late half →
+  **Bridge**; a short closer → **Outro**; any other one-off → **Instrumental**. Repeats are
+  numbered (`Verse 1`, `Verse 2`).
+- **`SECTION_SENSITIVITY`** (`coarse`/`balanced`/`fine` → minSectionSec 20/14/8, novelty z
+  0.8/0.5/0.3) is shared by engine and UI so the chips and the defaults cannot disagree.
+  Measured on the real 4-minute Peg stem: fine → **18 parts** (unusable), balanced → **7**,
+  coarse → **5**. `balanced` is the default, and this is a **user** control on purpose.
+- **`applySectionsToScore(score, sections, {bpm, beatsPerBar})`** stamps the labels onto
+  `bar.section` — the SAME field the Guitar Pro / MusicXML importers fill — so CSMPN
+  (`- Chorus`), ChordSlashML (`[Chorus]`) and the Pro handoff carry the structure with
+  **zero new plumbing**. Time→bar uses the score's own grid (`b · beatsPerBar · 60/bpm`),
+  the grid `audioEventsToScore` already quantised onto, so it is exact, never mutates the
+  input, and never puts two labels on one bar (a collision is pushed to the next bar).
+- **`scoreToMusicXML` now WRITES `<rehearsal>`** for `bar.section` — `parseMusicXML` already
+  read it, so the structure now round-trips (import ↔ export), and MuseScore/Guitar Pro draw
+  the boxed "Chorus" above the staff.
+
+**UI — `SectionEditor` (in `TabDecoderPro.tsx`, pure presentational; the controller lives in
+`AudioImport`).** `🔎 Detect sections` + the Fewer/Balanced/More chips; one row per section
+with **▶ seek** (tapping a row starts the stem AT that second — verifying a boundary is one
+tap, not a scrub; `play(offset)` re-starts the BufferSource at the offset and rebases the
+clock), an editable name + a preset `▾` (Intro/Verse/Pre-Chorus/Chorus/Bridge/Instrumental/
+Solo/Breakdown/Outro), the **bar range** on the chart's own grid, `◀`/`▶|` to nudge the
+boundary a bar, `⤒` to merge into the section above, and the repetition letter. `＋ Add at
+m:ss` inserts a section at the playhead — which is also **how you enter a structure you
+looked up elsewhere**. Every edit runs through one normaliser that re-sorts, makes
+boundaries contiguous and clamps to the clip, so no edit can leave a gap or an overlap. The
+row containing the playhead highlights, so the list doubles as a map during playback. Runs
+**off-thread** (`detectSectionsOffThread`, main-thread fallback — correctness never depends
+on the worker).
+
+**HONEST LIMITS (documented, not bugs):**
+- Boundaries land on **beats, not downbeats** — pure-DSP downbeat detection does not work
+  (measured and written up above), so a boundary can sit a beat or two off. Nudge it.
+- The **names are a template**, not song knowledge. A tune that breaks the pop form gets
+  labelled oddly. That is what the editor is for.
+- On an **isolated stem you get the STEM's structure** — where that instrument plays. The
+  Peg vocals-only stem is silent through the sax solo, so its "sections" are the vocal's
+  sections, not the song's. Full mixes give song structure.
+- **Validated on:** synthesized audio with a known A-B-A-B-C-B form (every detected boundary
+  within 1.5 s of a real one — no invented sections — the once-only bridge in its own
+  repetition group, repeats clustered together) and the two real stems in the repo (Peg
+  4:00 → 7 parts in 3.6 s; a 45 s backing-vocal clip → 4). Section detection on a full
+  commercial mix with published structure is the device-side check that remains.
+
+**Why NOT an online structure database** (the alternative the request raised). It was
+considered and rejected on evidence, not taste: the app is **zero-server, client-side, on
+GitHub Pages**, so any lookup must be CORS-open and unauthenticated from the browser.
+MusicBrainz carries no section timings; AcousticBrainz is retired; SALAMI/Isophonics are
+research *datasets*, not lookup APIs; and the one commercial API that does return section
+boundaries (Spotify's `audio-analysis`) needs an OAuth client **secret** — which cannot be
+shipped in a client-side app without leaking it — and was restricted for new applications in
+late 2024. It would also add a network dependency and a song-identification step (the input
+here is often an untitled stem) to a feature that must work offline on an iPhone. The honest
+bridge is the editor: look the structure up wherever you like, then `＋ Add at m:ss` and
+type the names — under a minute for a whole song, and it round-trips into every export.
+
 ### `describeScore` — local chart summary (music-skill `describe` analog, 2026-07-24)
 
 The ListenHub **music** skill (Music/skill.md — the Mureka toolkit: generate / remix /
@@ -1862,6 +2042,21 @@ accordingly.
   and tempo survive; an `A7` override surfaces as a `<kind>dominant</kind>`
   harmony; and the **full Blue Sky score** round-trips to 165 bars with the verse
   intact.
+- **Key model v2 + manual override**: `npm test` asserts the reported defect is fixed
+  (`D · C · G` reads **D major**, and E minor — whose tonic never sounds — loses by >20%),
+  the same shape a step round the circle (`G · F · C` → G), that a genuine minor tune and a
+  minor blues **stay minor** (the over-correction guard), that Confirmation-shaped changes
+  survive their secondary dominants, the slash-bass vote (`Eb6/9/F` bass F, but `C6/9`/
+  `Csus4` have none), `parseKeyName`'s accept/reject set, and that a manually set key reaches
+  the ABC `K:` and CSMPN `Key:` headers.
+- **Song structure**: `npm test` renders a synthetic A-B-A-B-C-B song and asserts
+  `detectSections` finds most of the form with **no invented boundaries** (every detected
+  one within 1.5 s of a real one), clusters the repeats together, gives the once-only bridge
+  its own letter, and returns contiguous sections; `nameSections` is tested on its own
+  (short opener → Intro, loudest recurring → Chorus, quieter recurring → Verse, late one-off
+  → Bridge); and `applySectionsToScore` maps times to the right bars, never mutates its
+  input, pushes a colliding label to the next bar, and reaches CSMPN `- Chorus`, CSML
+  `[Chorus]` and a MusicXML `<rehearsal>` that `parseMusicXML` reads back.
 - **Multi-part picker**: `npm test` parses `tests/fixtures/sample-multipart.musicxml`
   and asserts two parts (`Guitar`, `Rhythm`), `partIndex 0 → C` and `1 → G`, and
   that the single-part fixture reports exactly one part.

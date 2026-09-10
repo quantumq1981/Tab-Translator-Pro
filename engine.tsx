@@ -1610,14 +1610,26 @@ function _classOf(suf) {
 }
 function _parseSym(symbol) {
   if (!symbol) return { pc: null };
-  const head = String(symbol).split("/")[0];
-  const mm = head.match(/^([A-G][#b♯♭]?)(.*)$/);
+  const parts = String(symbol).split("/");
+  const mm = parts[0].match(/^([A-G][#b♯♭]?)(.*)$/);
   if (!mm) return { pc: null };
   const root = mm[1].replace("♯", "#").replace("♭", "b");
   const pc = _PC_BY_NAME[root];
   if (pc === undefined) return { pc: null };
-  return { pc, suffix: mm[2], cls: _classOf(mm[2]) };
+  /* The SLASH BASS is a real functional cue — the sounding bass note is what tells a
+   * player (and the key analysis) where a chord points; `Eb6/9/F` in a B♭ tune is an
+   * F13sus by another name, i.e. the dominant. It is carried alongside (never instead
+   * of) the root: `bassPc` is null for a root-position chord, and "sus2"/"sus4" are
+   * suffixes, not slashes, so only a trailing NOTE name counts. */
+  let bassPc = null;
+  if (parts.length > 1) {
+    const bm = parts[parts.length - 1].match(/^([A-G][#b♯♭]?)$/);
+    if (bm) { const b = _PC_BY_NAME[bm[1].replace("♯", "#").replace("♭", "b")]; if (b !== undefined && b !== pc) bassPc = b; }
+  }
+  return { pc, bassPc, suffix: mm[2], cls: _classOf(mm[2]) };
 }
+/* Quality compatibility at a scale degree: does the chord's third/fifth match what the
+ * key builds on that degree? (power/sus chords have no third → they fit either.) */
 function qualCompatible(mode, rel, cls) {
   const exp = (mode === "major" ? _MAJ_Q : _MIN_Q)[rel];
   if (exp === undefined) return false;
@@ -1627,22 +1639,113 @@ function qualCompatible(mode, rel, cls) {
   if (exp === "dim") return cls === "dim";
   return false;
 }
-function analyzeKey(score) {
-  const parsed = [];
-  for (const b of score.bars) for (const e of b.events) { const p = _parseSym(e.symbol); if (p.pc != null) parsed.push({ ...p, dur: Math.max(0.5, e.durBeats || 1) }); }
-  if (!parsed.length) return null;
-  const total = parsed.reduce((s, p) => s + p.dur, 0);
-  const first = parsed[0].pc, last = parsed[parsed.length - 1].pc;
-  let best = null;
-  for (let tonic = 0; tonic < 12; tonic++) for (const mode of ["major", "minor"]) {
-    const idx = mode === "major" ? _MAJ : _MIN;
-    let sc = 0;
-    for (const p of parsed) { const rel = (p.pc - tonic + 12) % 12; if (rel in idx) sc += qualCompatible(mode, rel, p.cls) ? p.dur : p.dur * 0.3; }
-    if (last === tonic) sc += total * 0.08;
-    if (first === tonic) sc += total * 0.04;
-    if (!best || sc > best.sc) best = { tonic, mode, sc };
+/* ---- key model v2: harmonic FUNCTION weights, not scale membership --------
+ * v1 scored a key as "how much duration is diatonic to it". That is degenerate for
+ * relative keys (they share a scale, so only the small cadence bonus separated them)
+ * and blind to which chord is actually HOME. Two real defects fell out of it:
+ *   · "Can't You See" (D · C · G, ♭VII rock) read **E minor** — a key whose tonic
+ *     chord is never played — because C is diatonic to Em but only borrowed in D.
+ *   · A G-mixolydian vamp (G · F · C) read **C major** for the same reason.
+ * v2 replaces the flat 1.0-if-diatonic with three musically-motivated terms:
+ *   1. DEGREE WEIGHTS by function — I ≫ V/IV ≫ ii/vi ≫ iii ≫ vii° — so a key wins on
+ *      the STRENGTH of the functions its chords fill, not on set membership.
+ *   2. A BORROWED table — ♭VII/♭III/♭VI in major (mixolydian/aeolian borrowings that
+ *      are ubiquitous in rock) and the dorian ♮6 in minor score well above a random
+ *      chromatic chord; a diatonic root with the WRONG quality (a secondary dominant,
+ *      D7 in C) keeps a fraction of its degree weight instead of a flat 0.3.
+ *   3. TONIC PRESENCE — a key whose tonic triad is never stated takes a haircut, and a
+ *      tonic at a phrase boundary (first / last chord) scores a bonus. That is the
+ *      "where does it come home" cue, and it is what separates D major from G major
+ *      on the very same three chords.
+ * Weights are ≤ 1.0 and the result is normalised by total duration, so `confidence`
+ * stays a 0..1 read (the audio decoder's key-prior gate reads it at 0.5).
+ * ------------------------------------------------------------------------- */
+const _KW_MAJ = { 0: 1.00, 2: 0.62, 4: 0.48, 5: 0.80, 7: 0.86, 9: 0.62, 11: 0.36 };
+const _KW_MIN = { 0: 1.00, 2: 0.36, 3: 0.62, 5: 0.80, 7: 0.72, 8: 0.62, 10: 0.62, 11: 0.36 };
+const _KB_MAJ = { 10: 0.52, 3: 0.34, 8: 0.34 };   // ♭VII (mixolydian) · ♭III · ♭VI
+const _KB_MIN = { 9: 0.22 };                       // dorian ♮6
+const _K_CHROMATIC = 0.06;                         // anything else — a passing/chromatic chord
+const _K_NO_TONIC = 0.80;                          // haircut when the tonic triad never sounds
+const _K_BASS = 0.20;                               // an inversion's bass note, as a minority vote
+const _K_LAST = 0.10, _K_FIRST = 0.06;             // phrase-boundary tonic bonuses (× total)
+/* Weight one chord against one candidate key. Split out so it is testable and so
+ * `analyzeKeyCandidates` and `analyzeKey` can never drift apart. */
+function _keyChordWeight(mode, rel, cls) {
+  const dia = (mode === "major" ? _KW_MAJ : _KW_MIN)[rel];
+  if (dia !== undefined) {
+    if (qualCompatible(mode, rel, cls)) {
+      // a DOMINANT on the 5th degree is the single clearest key signature there is
+      return rel === 7 && cls === "dom" ? Math.min(1, dia + 0.06) : dia;
+    }
+    // diatonic root, wrong quality: a secondary dominant (V/x) keeps more than a
+    // modal-mixture swap, because it still points at a diatonic target.
+    return dia * (cls === "dom" ? 0.50 : 0.38);
   }
-  return { tonic: best.tonic, mode: best.mode, confidence: best.sc / (total || 1) };
+  const bor = (mode === "major" ? _KB_MAJ : _KB_MIN)[rel];
+  if (bor === undefined) return _K_CHROMATIC;
+  // the borrowing is the MAJOR chord on that degree (♭VII, ♭III, ♭VI); a minor or
+  // diminished chord there is a chromatic passing sonority, not the idiom.
+  return cls === "maj" || cls === "dom" || cls === "power" || cls === "sus" ? bor : bor * 0.5;
+}
+/* Every candidate key, scored + ranked. The UI's key picker shows the runners-up so a
+ * user correcting a call can see what the analysis actually weighed (and pick the
+ * relative major/minor in one tap). `analyzeKey` is just the top of this list. */
+function analyzeKeyCandidates(score, opts = {}) {
+  const parsed = [];
+  for (const b of (score && score.bars) || []) for (const e of b.events || []) {
+    const p = _parseSym(e.symbol);
+    if (p.pc != null) parsed.push({ ...p, dur: Math.max(0.5, e.durBeats || 1) });
+  }
+  if (!parsed.length) return [];
+  const total = parsed.reduce((s, p) => s + p.dur, 0) || 1;
+  const firstC = parsed[0], lastC = parsed[parsed.length - 1];
+  const out = [];
+  for (let tonic = 0; tonic < 12; tonic++) for (const mode of ["major", "minor"]) {
+    let sc = 0, tonicDur = 0;
+    for (const p of parsed) {
+      const rel = (p.pc - tonic + 12) % 12;
+      let w = _keyChordWeight(mode, rel, p.cls);
+      // an inversion's bass gets a minority vote at its own degree (quality-agnostic —
+      // a bass note has no third), blended so the total normalisation is unchanged.
+      if (p.bassPc != null) w = (1 - _K_BASS) * w + _K_BASS * _keyChordWeight(mode, (p.bassPc - tonic + 12) % 12, "power");
+      sc += p.dur * w;
+      if (rel === 0 && qualCompatible(mode, 0, p.cls)) tonicDur += p.dur;
+    }
+    if (!tonicDur) sc *= _K_NO_TONIC;                                   // never comes home → unlikely
+    if (lastC.pc === tonic && qualCompatible(mode, 0, lastC.cls)) sc += total * _K_LAST;
+    if (firstC.pc === tonic && qualCompatible(mode, 0, firstC.cls)) sc += total * _K_FIRST;
+    out.push({ tonic, mode, confidence: Math.max(0, Math.min(1, sc / total)), score: sc, tonicShare: tonicDur / total });
+  }
+  out.sort((a, b) => b.score - a.score || a.tonic - b.tonic);
+  const n = opts.limit != null ? opts.limit : out.length;
+  return out.slice(0, Math.max(1, n));
+}
+function analyzeKey(score) {
+  const c = analyzeKeyCandidates(score, { limit: 1 })[0];
+  return c ? { tonic: c.tonic, mode: c.mode, confidence: c.confidence } : null;
+}
+/* The 24 keys as pickable names (family-default spelling), and the parser the manual
+ * key override uses. Accepts "D", "Dm", "F#m", "Bbm", "Eb major", "c minor" — so a
+ * pasted/typed key from anywhere resolves to the same { tonic, mode } the analysis
+ * produces, and every exporter (ABC `K:`, ChordPro `{key:}`, CSMPN/CSML `Key:`) gets
+ * the corrected key for free. */
+const KEY_CHOICES = (() => {
+  const out = [];
+  for (const mode of ["major", "minor"]) for (let t = 0; t < 12; t++) out.push({ tonic: t, mode, name: NOTE_SHARP[t] + (mode === "minor" ? "m" : "") });
+  return out;
+})();
+function parseKeyName(name) {
+  if (!name) return null;
+  if (typeof name === "object") return name.tonic != null ? { tonic: ((name.tonic % 12) + 12) % 12, mode: name.mode === "minor" ? "minor" : "major" } : null;
+  const s = String(name).trim();
+  const m = s.match(/^([A-Ga-g])([#b♯♭]?)\s*(.*)$/);
+  if (!m) return null;
+  const pc = _PC_BY_NAME[m[1].toUpperCase() + m[2].replace("♯", "#").replace("♭", "b")];
+  if (pc === undefined) return null;
+  const rest = m[3].toLowerCase().replace(/[\s.]/g, "");
+  const minor = rest === "m" || rest === "min" || rest === "minor" || rest === "-";
+  if (rest && !minor && rest !== "maj" && rest !== "major") return null;   // "Dsus4" is a chord, not a key
+  return { tonic: pc, mode: minor ? "minor" : "major" };
 }
 const _romanExt = (suf) => ({ "7": "7", m7: "7", dim7: "7", maj7: "maj7", "6": "6", m6: "6", sus2: "sus2", sus4: "sus4", "7sus4": "7sus4" }[suf] || "");
 function romanFor(symbol, key) {
@@ -1693,7 +1796,9 @@ function describeScore(score, opts = {}) {
   const chords = [...counts.entries()].map(([symbol, count]) => ({ symbol, count }))
     .sort((a, b) => b.count - a.count || String(a.symbol).localeCompare(String(b.symbol)));
   const uniqueChords = chords.length;
-  const key = analyzeKey(score);
+  // `opts.key` lets a MANUALLY corrected key (the UI's key picker) drive the
+  // description + its tags, instead of the summary contradicting the chart header.
+  const key = opts.key || analyzeKey(score);
   const timeSig = score && score.timeSig ? `${score.timeSig[0]}/${score.timeSig[1]}` : null;
   const melodic = isMelodicScore(score);
   const extRatio = events ? ext / events : 0;
@@ -2073,6 +2178,11 @@ function scoreToMusicXML(score, opts = {}) {
     }
     prevSig = [bb, bt];
     if (bi === 0 && opts.tempo) L.push(`      <sound tempo="${opts.tempo}"/>`);
+    /* Section label → a rehearsal mark, so structure survives the round trip:
+     * `parseMusicXML` already READS <rehearsal> into bar.section, and this is the
+     * matching write. MuseScore/Guitar Pro draw it as the boxed "Chorus" above the
+     * staff — the same marker CSMPN's `- Chorus` and CSML's `[Chorus]` carry. */
+    if (bar.section) L.push(`      <direction placement="above"><direction-type><rehearsal>${_xmlEsc(String(bar.section))}</rehearsal></direction-type></direction>`);
     bar.events.forEach((e) => {
       const sym = ov[`${bar.number}.${e.beat}`] != null ? ov[`${bar.number}.${e.beat}`] : e.symbol;
       const durDiv = Math.max(1, Math.round((e.durBeats * div * 4) / bt));
@@ -3399,6 +3509,351 @@ function analyzeAudioChords(samples, sampleRate, opts = {}) {
   return { events: transcribeChords(samples, sampleRate, opts), bpm: 0, beats: [], key: null, method: "sliding" };
 }
 
+/* ============================================================================
+ *  SONG STRUCTURE — sections (intro / verse / chorus / bridge …) from the audio
+ *  ---------------------------------------------------------------------------
+ *  The decoder produced a flat run of bars with no idea where the song's PARTS
+ *  are, so a 5-minute chart is a wall of bars a player has to count through. This
+ *  recovers the structure from the recording itself, with the standard MIR
+ *  pipeline (Foote 2000 self-similarity + novelty; Paulus/Müller structure
+ *  features), pure + zero-dep so it runs in the worker on an iPhone:
+ *
+ *    beats → beat-synchronous features → time-lag embedding → SSM → novelty →
+ *    boundaries → segment clustering (which parts are the SAME part) → naming.
+ *
+ *  WHY beat-synchronous and WHY embedded: a section is a repeated PROGRESSION, not
+ *  a repeated instant. Averaging between beats denoises exactly as it does for the
+ *  chord decoder, and stacking `embed` consecutive beats means the similarity matrix
+ *  compares phrases, so "C · G · Am · F" matches its later repeat instead of every
+ *  isolated C matching every other C.
+ *
+ *  WHY chroma AND timbre: a verse and its chorus very often share the chord loop
+ *  (the whole of "Can't You See" is D · C · G), so chroma alone cannot separate
+ *  them. What does change is the ARRANGEMENT — density, brightness, how many
+ *  instruments — which is a spectral-shape (timbre) cue. Both go into the feature.
+ *
+ *  HONEST LIMITS (documented, not bugs): boundaries land on beats, not on a
+ *  downbeat grid (pure-DSP downbeat detection does not work — see CLAUDE.md), so a
+ *  boundary can sit a beat or two off; the section NAMES are heuristics over the
+ *  repetition pattern (most-repeated + loudest = chorus, etc.), not song knowledge,
+ *  so a tune that breaks the pop template will be labelled oddly. Both are why the
+ *  UI ships a section editor — this is a first draft the user corrects in seconds,
+ *  and every label round-trips into CSMPN/CSML/MusicXML through `bar.section`.
+ * ------------------------------------------------------------------------- */
+
+/* Per-beat spectral SHAPE: |X| folded into `bands` log-spaced bands, L2-normalised
+ * so it describes brightness/density and NOT loudness (loudness is carried
+ * separately by the beat energy). This is the timbre half of the feature. */
+function _bandFeatures(samples, sampleRate, beats, opts = {}) {
+  const B = opts.bands || 8;
+  let win = opts.structWindow || 2048;
+  while (win > samples.length && win > 256) win >>= 1;
+  const hop = Math.max(1, Math.floor(sampleRate * (opts.hopSec || 0.12)));
+  const lo = 55, hi = Math.min(sampleRate / 2 - 1, opts.bandMaxFreq || 8000);
+  const w = _hann(win);
+  const re = new Float64Array(win), im = new Float64Array(win);
+  const frames = [];
+  const logSpan = Math.log(hi / lo);
+  for (let s = 0; s + win <= samples.length; s += hop) {
+    for (let i = 0; i < win; i++) { re[i] = (samples[s + i] || 0) * w[i]; im[i] = 0; }
+    _fft(re, im);
+    const v = new Float64Array(B);
+    for (let k = 1; k < win / 2; k++) {
+      const f = (k * sampleRate) / win;
+      if (f < lo || f > hi) continue;
+      let b = Math.floor((B * Math.log(f / lo)) / logSpan);
+      if (b < 0) b = 0; else if (b >= B) b = B - 1;
+      v[b] += Math.hypot(re[k], im[k]);
+    }
+    frames.push({ t: s / sampleRate, v });
+  }
+  const out = [];
+  let fi = 0;
+  for (let b = 0; b + 1 < beats.length; b++) {
+    const t0 = beats[b], t1 = beats[b + 1];
+    while (fi < frames.length && frames[fi].t < t0) fi++;
+    const acc = new Float64Array(B);
+    let n = 0;
+    for (let j = fi; j < frames.length && frames[j].t < t1; j++) { for (let p = 0; p < B; p++) acc[p] += frames[j].v[p]; n++; }
+    if (!n && frames.length) { const j = Math.min(frames.length - 1, fi); for (let p = 0; p < B; p++) acc[p] = frames[j].v[p]; n = 1; }
+    let norm = 0; for (let p = 0; p < B; p++) { acc[p] /= n || 1; norm += acc[p] * acc[p]; }
+    norm = Math.sqrt(norm) || 1;
+    for (let p = 0; p < B; p++) acc[p] /= norm;
+    out.push(acc);
+  }
+  return out;
+}
+const _l2 = (v) => { let s = 0; for (let i = 0; i < v.length; i++) s += v[i] * v[i]; return Math.sqrt(s); };
+function _cosSim(a, b) {
+  let d = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { d += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  return na > 0 && nb > 0 ? d / Math.sqrt(na * nb) : 0;
+}
+/* Foote checkerboard novelty over a self-similarity matrix. The kernel is the
+ * classic ±/∓ quadrant pattern with a Gaussian taper: it reads high where the
+ * past `L` beats are self-similar, the next `L` beats are self-similar, and the
+ * two are UNLIKE each other — i.e. exactly at a section boundary. */
+function _footeNovelty(S, L) {
+  const T = S.length, nov = new Float64Array(T);
+  const K = [];
+  const sigma = L / 2 || 1;
+  for (let a = -L; a < L; a++) {
+    const row = [];
+    for (let b = -L; b < L; b++) {
+      const sign = (a < 0) === (b < 0) ? 1 : -1;
+      row.push(sign * Math.exp(-(a * a + b * b) / (2 * sigma * sigma)));
+    }
+    K.push(row);
+  }
+  for (let i = 0; i < T; i++) {
+    let s = 0;
+    for (let a = -L; a < L; a++) {
+      const ia = i + a; if (ia < 0 || ia >= T) continue;
+      const row = K[a + L], Srow = S[ia];
+      for (let b = -L; b < L; b++) {
+        const ib = i + b; if (ib < 0 || ib >= T) continue;
+        s += row[b + L] * Srow[ib];
+      }
+    }
+    nov[i] = s;
+  }
+  return nov;
+}
+/* Name a clustered structure with the pop/rock template. Pure + separately testable:
+ * takes segments that already carry a repetition `letter`, returns them labelled.
+ *   · the most-repeated, highest-energy recurring part → CHORUS (it is the hook, it
+ *     comes back, and it is nearly always the loudest/densest thing in the song);
+ *   · the other recurring part that keeps preceding it → VERSE;
+ *   · a short opening part → INTRO; a short closing one → OUTRO;
+ *   · a one-off part in the last half, after both verse and chorus exist → BRIDGE;
+ *   · any other one-off → INSTRUMENTAL (a solo / a break).
+ * Repeats are numbered (Verse 1, Verse 2 …) so a player can call them out. */
+function nameSections(segments, opts = {}) {
+  const segs = (segments || []).map((s) => ({ ...s }));
+  if (!segs.length) return segs;
+  const total = segs[segs.length - 1].endSec - segs[0].startSec || 1;
+  const byLetter = new Map();
+  segs.forEach((s, i) => { if (!byLetter.has(s.letter)) byLetter.set(s.letter, []); byLetter.get(s.letter).push(i); });
+  const dur = (i) => segs[i].endSec - segs[i].startSec;
+  const meanDur = segs.reduce((a, s) => a + (s.endSec - s.startSec), 0) / segs.length;
+  const role = new Map();                                        // letter -> role
+  // INTRO: the first part, when it is short and does not come back as a main part
+  const firstL = segs[0].letter;
+  const shortFirst = dur(0) < meanDur * 0.85 || dur(0) < (opts.introMaxSec || 20);
+  if (byLetter.get(firstL).length === 1 && shortFirst) role.set(firstL, "Intro");
+  // CHORUS: most repeated recurring part, tie-broken by energy (the hook is loud)
+  const recurring = [...byLetter.entries()].filter(([l, ix]) => ix.length >= 2 && role.get(l) !== "Intro");
+  // energy normalised across the song, so "loudest" is a real comparison rather than
+  // an absolute level that depends on how hot the file was mastered.
+  const maxE = Math.max(1e-9, ...segs.map((s) => s.energy || 0));
+  const scoreOf = ([l, ix]) => ix.length * (0.6 + 0.4 * (ix.reduce((a, i) => a + (segs[i].energy || 0), 0) / ix.length) / maxE);
+  recurring.sort((a, b) => scoreOf(b) - scoreOf(a));
+  let chorusL = null, verseL = null;
+  if (recurring.length) {
+    const top = recurring.slice(0, 2);
+    if (top.length === 2 && top[0][1].length === top[1][1].length) {
+      // same repeat count → the LOUDER one is the chorus, and the other is the verse
+      const e = ([l, ix]) => ix.reduce((a, i) => a + (segs[i].energy || 0), 0) / ix.length;
+      const [x, y] = top;
+      chorusL = e(x) >= e(y) ? x[0] : y[0];
+      verseL = chorusL === x[0] ? y[0] : x[0];
+    } else { chorusL = top[0][0]; verseL = top[1] ? top[1][0] : null; }
+    role.set(chorusL, "Chorus");
+    if (verseL) role.set(verseL, "Verse");
+  }
+  for (const [l, ix] of byLetter) {
+    if (role.has(l)) continue;
+    if (ix.length >= 2) { role.set(l, "Section"); continue; }
+    const i = ix[0];
+    const mid = (segs[i].startSec + segs[i].endSec) / 2 - segs[0].startSec;
+    if (i === segs.length - 1 && (dur(i) < meanDur * 0.85 || mid / total > 0.9)) role.set(l, "Outro");
+    else if (i === 0) role.set(l, "Intro");
+    else if (chorusL && verseL && mid / total > 0.45) role.set(l, "Bridge");
+    else role.set(l, "Instrumental");
+  }
+  const seen = new Map();
+  const counts = new Map();
+  for (const s of segs) counts.set(role.get(s.letter), (counts.get(role.get(s.letter)) || 0) + 1);
+  for (const s of segs) {
+    const r = role.get(s.letter) || "Section";
+    const n = (seen.get(r) || 0) + 1;
+    seen.set(r, n);
+    s.role = r;
+    s.label = counts.get(r) > 1 ? `${r} ${n}` : r;
+  }
+  return segs;
+}
+/* How finely to cut the song. Structure is genuinely subjective — is a pre-chorus its
+ * own part? is the solo a section or part of the verse? — so this is a USER control,
+ * not a constant to be tuned once. Measured on a real 4-minute stem: `fine` produced
+ * 18 parts (unusable), `balanced` 7, `coarse` 5. Shared with the UI so the chips and
+ * the engine can never disagree. */
+const SECTION_SENSITIVITY = {
+  coarse:   { minSectionSec: 20, noveltyThreshold: 0.8, label: "Fewer" },
+  balanced: { minSectionSec: 14, noveltyThreshold: 0.5, label: "Balanced" },
+  fine:     { minSectionSec: 8,  noveltyThreshold: 0.3, label: "More" },
+};
+/* The one entry point: PCM → { sections, boundaries, beats, bpm }. Reuses the beat
+ * grid the chord decoder already found when the caller passes `beats`/`bpm`, so the
+ * panel never tracks beats twice. Every returned time is in seconds. */
+function detectSections(samples, sampleRate, opts = {}) {
+  const bt = opts.beats && opts.beats.length > 4 ? { beats: opts.beats, bpm: opts.bpm || 0 } : detectBeats(samples, sampleRate, opts);
+  const beats = bt.beats || [];
+  const empty = { bpm: bt.bpm || 0, beats, boundaries: [], sections: [], novelty: [] };
+  if (beats.length < 16) return empty;
+  const segs = beatSegments(samples, sampleRate, beats, opts);   // per-beat chroma (HPSS by default) + energy
+  if (segs.length < 16) return empty;
+  const bands = _bandFeatures(samples, sampleRate, beats, opts);
+  const tw = opts.timbreWeight != null ? opts.timbreWeight : 0.35;
+  const T = Math.min(segs.length, bands.length);
+  // per-beat feature: unit chroma (harmony) ++ unit band shape (arrangement)
+  const feat = [];
+  for (let i = 0; i < T; i++) {
+    const c = segs[i].chroma, n = _l2(c) || 1;
+    const v = new Float64Array(12 + bands[i].length);
+    for (let p = 0; p < 12; p++) v[p] = ((c[p] / n) * (1 - tw));
+    for (let p = 0; p < bands[i].length; p++) v[12 + p] = bands[i][p] * tw;
+    feat.push(v);
+  }
+  // TIME-LAG EMBEDDING — compare phrases, not instants
+  const m = Math.max(1, Math.min(opts.embed || 8, Math.floor(T / 4)));
+  const emb = [];
+  const half = Math.floor(m / 2);                                  // CENTRED: a forward-only
+  for (let i = 0; i < T; i++) {                                    // stack shifts every boundary
+    const v = new Float64Array(feat[0].length * m);                // half a phrase early.
+    for (let k = 0; k < m; k++) { const src = feat[Math.max(0, Math.min(T - 1, i - half + k))]; v.set(src, k * feat[0].length); }
+    emb.push(v);
+  }
+  // SSM (cosine) + Foote novelty
+  const S = [];
+  for (let i = 0; i < T; i++) { const row = new Float64Array(T); S.push(row); }
+  const norms = emb.map((v) => _l2(v) || 1);
+  for (let i = 0; i < T; i++) for (let j = i; j < T; j++) {
+    let d = 0; const a = emb[i], b = emb[j];
+    for (let k = 0; k < a.length; k++) d += a[k] * b[k];
+    const s = d / (norms[i] * norms[j]);
+    S[i][j] = s; S[j][i] = s;
+  }
+  const secPerBeat = beats.length > 1 ? (beats[beats.length - 1] - beats[0]) / (beats.length - 1) : 0.5;
+  const minSec = opts.minSectionSec || SECTION_SENSITIVITY.balanced.minSectionSec;
+  const minGap = Math.max(2, Math.round(minSec / secPerBeat));
+  /* The checkerboard kernel must not be WIDER than the shortest section we accept, or
+   * it straddles two boundaries at once and smears both away. */
+  const L = Math.max(3, Math.min(Math.round((opts.kernelSec || 4) / secPerBeat), Math.floor(minGap / 2), Math.floor(T / 4)));
+  const nov = _footeNovelty(S, L);
+  /* Normalise the novelty curve — over the INTERIOR only. At the edges the kernel is
+   * truncated (half of it hangs off the matrix), which produces a huge artificial
+   * spike; left in, it dominates the mean/σ and crushes every real boundary below the
+   * threshold. So the edges are excluded from the statistics AND zeroed outright. */
+  const lo = Math.min(L, T - 1), hi = Math.max(lo, T - L);
+  let mean = 0, cnt = 0;
+  for (let i = lo; i < hi; i++) { mean += nov[i]; cnt++; }
+  mean /= cnt || 1;
+  let sd = 0; for (let i = lo; i < hi; i++) sd += (nov[i] - mean) * (nov[i] - mean);
+  sd = Math.sqrt(sd / (cnt || 1)) || 1;
+  const z = Array.from(nov, (v, i) => (i < lo || i >= hi ? 0 : (v - mean) / sd));
+  const thr = opts.noveltyThreshold != null ? opts.noveltyThreshold : SECTION_SENSITIVITY.balanced.noveltyThreshold;
+  /* Peak-pick in two stages, which is what makes adjacent sections survive: a LOCAL
+   * maximum test over a short window (a boundary is a narrow spike), then a GREEDY
+   * strongest-first selection that enforces the minimum section length. Testing
+   * "is it the max over ±minSection" instead would make two real boundaries one
+   * section apart annihilate each other — the whole grid of an 8-bar-per-part song. */
+  const peakWin = Math.max(2, Math.round(1.5 / secPerBeat));
+  const cands = [];
+  for (let i = L; i < T - L; i++) {
+    if (z[i] < thr) continue;
+    let isMax = true;
+    for (let k = Math.max(0, i - peakWin); k <= Math.min(T - 1, i + peakWin); k++) if (z[k] > z[i]) { isMax = false; break; }
+    if (isMax) cands.push(i);
+  }
+  cands.sort((a, b) => z[b] - z[a]);
+  const peaks = [];
+  for (const i of cands) {
+    // a first/last section may legitimately be shorter than the floor (a lead-in, a
+    // fade-out), so the edge rule is half the floor — but never a 1-bar sliver.
+    if (i < minGap / 2 || T - i < minGap / 2) continue;
+    if (peaks.some((p) => Math.abs(p - i) < minGap)) continue;
+    peaks.push(i);
+  }
+  peaks.sort((a, b) => a - b);
+  const bounds = [0, ...peaks, T];
+  // segment features (unembedded means) → repetition clustering
+  const raw = [];
+  for (let s = 0; s + 1 < bounds.length; s++) {
+    const i0 = bounds[s], i1 = bounds[s + 1];
+    const v = new Float64Array(feat[0].length);
+    let energy = 0;
+    for (let i = i0; i < i1; i++) { for (let k = 0; k < v.length; k++) v[k] += feat[i][k]; energy += segs[i].energy || 0; }
+    const n = i1 - i0 || 1;
+    for (let k = 0; k < v.length; k++) v[k] /= n;
+    raw.push({ i0, i1, v, energy: energy / n, startSec: beats[i0], endSec: beats[Math.min(beats.length - 1, i1)] });
+  }
+  // adaptive similarity threshold: sections of the same part are far more alike than
+  // the song's typical pair, and how much more is material-dependent — so the cut sits
+  // between the median pair and the most-alike pair rather than at a magic constant.
+  const sims = [];
+  for (let i = 0; i < raw.length; i++) for (let j = i + 1; j < raw.length; j++) sims.push(_cosSim(raw[i].v, raw[j].v));
+  sims.sort((a, b) => a - b);
+  const q = (p) => (sims.length ? sims[Math.min(sims.length - 1, Math.floor(p * sims.length))] : 1);
+  const cut = opts.clusterThreshold != null ? opts.clusterThreshold
+    : Math.min(0.995, q(0.5) + (opts.clusterSplit != null ? opts.clusterSplit : 0.5) * (q(0.95) - q(0.5)));
+  const clusters = [];
+  for (const r of raw) {
+    let bestI = -1, bestS = -1;
+    clusters.forEach((c, ci) => { const s = _cosSim(r.v, c.centroid); if (s > bestS) { bestS = s; bestI = ci; } });
+    if (bestI >= 0 && bestS >= cut) {
+      const c = clusters[bestI];
+      for (let k = 0; k < c.centroid.length; k++) c.centroid[k] = (c.centroid[k] * c.n + r.v[k]) / (c.n + 1);
+      c.n++; r.cluster = bestI;
+    } else { clusters.push({ centroid: Float64Array.from(r.v), n: 1 }); r.cluster = clusters.length - 1; }
+  }
+  const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const segOut = raw.map((r, i) => ({
+    index: i,
+    letter: LETTERS[r.cluster % 26],
+    startSec: +r.startSec.toFixed(3),
+    endSec: +r.endSec.toFixed(3),
+    energy: r.energy,
+    confidence: i === 0 ? 1 : Math.max(0, Math.min(1, z[bounds[i]] / 3)),
+  }));
+  return {
+    bpm: bt.bpm || (secPerBeat ? 60 / secPerBeat : 0),
+    beats,
+    boundaries: segOut.slice(1).map((s) => s.startSec),
+    sections: nameSections(segOut, opts),
+    novelty: Array.from(z),
+  };
+}
+/* Stamp detected sections onto a score's bars, so the label rides in the SAME
+ * `bar.section` field the Guitar Pro / MusicXML importers fill — which means the
+ * CSMPN (`- Chorus`), ChordSlashML (`[Chorus]`) and handoff exporters carry the
+ * structure with ZERO new plumbing. Time → bar uses the score's own grid
+ * (bar b starts at b · beatsPerBar · 60/bpm), the same grid `audioEventsToScore`
+ * quantised onto, so the mapping is exact rather than a second guess. Returns a NEW
+ * score (never mutates), and never puts two labels on one bar. */
+function applySectionsToScore(score, sections, opts = {}) {
+  if (!score || !score.bars) return score;
+  const bars = score.bars.map((b) => { const { section, ...rest } = b; return rest; });
+  const list = (sections || []).filter((s) => s && s.label && isFinite(s.startSec));
+  if (list.length) {
+    const bpm = Math.max(20, Math.min(400, opts.bpm || score.tempo || 120));
+    const bpb = opts.beatsPerBar || (score.timeSig ? score.timeSig[0] : 4) || 4;
+    const secPerBar = (60 / bpm) * bpb;
+    const offset = opts.offsetSec || 0;
+    const used = new Set();
+    for (const s of [...list].sort((a, b) => a.startSec - b.startSec)) {
+      let bi = Math.round((s.startSec - offset) / secPerBar);
+      if (!isFinite(bi)) continue;
+      bi = Math.max(0, Math.min(bars.length - 1, bi));
+      while (used.has(bi) && bi + 1 < bars.length) bi++;             // one label per bar
+      if (used.has(bi)) continue;
+      used.add(bi);
+      bars[bi] = { ...bars[bi], section: s.label };
+    }
+  }
+  return { ...score, bars };
+}
+
 /* One frame of PCM → recognised chord. (Thin wrapper: chroma → chord.) */
 function detectChord(samples, sampleRate, opts = {}) {
   const d = chordFromChroma(pcmToChroma(samples, sampleRate, opts), opts);
@@ -4038,6 +4493,10 @@ export {
   _classOf,
   _parseSym,
   qualCompatible,
+  _keyChordWeight,
+  analyzeKeyCandidates,
+  KEY_CHOICES,
+  parseKeyName,
   analyzeKey,
   _romanExt,
   romanFor,
@@ -4119,6 +4578,13 @@ export {
   viterbiChords,
   transcribeChordsBeatSync,
   analyzeAudioChords,
+  _bandFeatures,
+  _cosSim,
+  _footeNovelty,
+  nameSections,
+  SECTION_SENSITIVITY,
+  detectSections,
+  applySectionsToScore,
   chordFromChroma,
   detectChord,
   recoverChordGaps,
