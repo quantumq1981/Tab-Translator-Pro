@@ -149,6 +149,13 @@ import {
   _parseSym,
   qualCompatible,
   analyzeKey,
+  analyzeKeyCandidates,
+  KEY_CHOICES,
+  parseKeyName,
+  detectSections,
+  applySectionsToScore,
+  nameSections,
+  SECTION_SENSITIVITY,
   _romanExt,
   romanFor,
   keyName,
@@ -386,6 +393,12 @@ async function parseScoreOffThread(bytes, filename, sharp) {
   }
   return parseGuitarProOrXML(bytes, filename, sharp);
 }
+/* PCM → song sections (intro/verse/chorus…), off-thread when possible. Pure DSP and
+ * DOMParser-free, so the worker can run it; main-thread fallback as always. */
+async function detectSectionsOffThread(samples, sr, opts = {}) {
+  try { return await _engineRPC("detectSections", [samples, sr, opts]); }
+  catch (_) { return detectSections(samples, sr, opts); }
+}
 /* PCM → chord/note events, off-thread when possible (the analysis is a heavy pure-JS
  * FFT/YIN loop that would jank the main thread on a long stem); ALWAYS falls back to
  * the identical main-thread engine call so correctness never depends on the worker. */
@@ -587,6 +600,11 @@ export default function TabDecoderPro() {
     clearSel();
   };
 
+  /* Manual key correction (see ChartPanel's KeyPicker): a key NAME ("" = auto). It
+   * rides in the session meta next to the chord `overrides` — a corrected chart must
+   * restore corrected, or the correction is worthless on the next visit. */
+  const [keyOverride, setKeyOverride] = useState("");
+
   /* ---- Session persistence (Wave 1 #2) -----------------------------------
    * SAVE: the upload handlers cache the raw bytes once (saveSessionFile); this
    * effect keeps the small UI-state meta in sync as the chart, spelling, part,
@@ -601,8 +619,8 @@ export default function TabDecoderPro() {
     const active = (mode === "pdf" && chart) ? { kind: "pdf", filename: chart.fileName }
                  : (mode === "xml" && xmlScore) ? { kind: "xml", filename: xmlName } : null;
     if (!active) return;
-    saveSessionMeta({ v: 1, kind: active.kind, filename: active.filename, useSharp, overrides, sysShifts, partIndex: xmlScore ? (xmlScore.partIndex || 0) : 0 });
-  }, [mode, chart, xmlScore, xmlName, overrides, useSharp]);
+    saveSessionMeta({ v: 1, kind: active.kind, filename: active.filename, useSharp, overrides, sysShifts, keyOverride, partIndex: xmlScore ? (xmlScore.partIndex || 0) : 0 });
+  }, [mode, chart, xmlScore, xmlName, overrides, useSharp, keyOverride]);
 
   const restoreRef = useRef(null);
   const [restoreReq, setRestoreReq] = useState(0);
@@ -646,6 +664,7 @@ export default function TabDecoderPro() {
           } finally { setXmlBusy(false); }
         }
         if (meta.overrides && Object.keys(meta.overrides).length) setOverrides(meta.overrides);
+        if (meta.keyOverride) setKeyOverride(meta.keyOverride);
         setRestored(true);
         saveSessionMeta(meta); // re-affirm the restored state in one clean write
       } catch (err) { console.warn("session restore failed:", err); }
@@ -655,7 +674,7 @@ export default function TabDecoderPro() {
 
   const startFresh = async () => {
     try { await clearSession(); } catch (_) {}
-    setChart(null); setXmlScore(null); setXmlName(""); setMode("manual"); clearSel(); setRestored(false);
+    setChart(null); setXmlScore(null); setXmlName(""); setMode("manual"); clearSel(); setRestored(false); setKeyOverride("");
   };
 
   const pickChord = (key, e) => { setSelKey(key); setSelFrets(e.frets || null); setSelMidis(e.midis || null); };
@@ -826,7 +845,8 @@ export default function TabDecoderPro() {
                 {scoreView && (
                   <ChartPanel score={scoreView} title={chart.fileName}
                     meta={`${scoreView.bars.length} bars · ${chart.systemsFound} systems · ${chart.pages} pp · 4/4 assumed`}
-                    C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey={selKey} onPick={pickChord} />
+                    C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey={selKey} onPick={pickChord}
+                    keyOverride={keyOverride} setKeyOverride={setKeyOverride} />
                 )}
                 {scoreView && chart.systems && chart.systems.length > 0 && (
                   <StringShiftPanel systems={chart.systems} shifts={sysShifts} onBump={bumpSystemShift} C={C} />
@@ -860,7 +880,8 @@ export default function TabDecoderPro() {
                 {xmlScore && (
                   <ChartPanel score={xmlScore} title={xmlName}
                     meta={`${xmlScore.bars.length} bars · ${xmlScore.tuning} tuning · ${xmlScore.timeSig.join("/")}`}
-                    C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey={selKey} onPick={pickChord} />
+                    C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey={selKey} onPick={pickChord}
+                    keyOverride={keyOverride} setKeyOverride={setKeyOverride} />
                 )}
               </>
             )}
@@ -945,7 +966,7 @@ export default function TabDecoderPro() {
  * the same shape, so the renderer, editor and exporters are identical. Edits are
  * lifted to the parent as an `overrides` map ("<bar>.<beat>" -> symbol) so they
  * survive view/transpose changes and feed straight into export. */
-function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, selKey, onPick }) {
+function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, selKey, onPick, keyOverride, setKeyOverride }) {
   const [view, setView] = useState("chart");
   const [editMode, setEditMode] = useState(false);
   const [editKey, setEditKey] = useState("");
@@ -979,11 +1000,27 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   const simp = useMemo(() => (simplify ? simplifyScore(score, useSharp) : score), [simplify, score, useSharp]);
   const base = useMemo(() => (arrange === "off" ? simp : arrangeScore(simp, arrange)), [simp, arrange]);
   const tscore = useMemo(() => transposeScore(base, semis, useSharp), [base, semis, useSharp]);
-  const key = useMemo(() => analyzeKey(tscore), [tscore]);
+  /* KEY — detected, but CORRECTABLE. The analysis is very good and still not
+   * infallible (a ♭VII rock tune, a modal vamp, an audio decode with a noisy
+   * chord list), and the key drives the roman numerals AND every export's key
+   * field — so it needs an escape hatch, exactly like ✎ Edit does for chords.
+   * Controlled when the parent passes `keyOverride`/`setKeyOverride` (so it can
+   * be persisted in the session), uncontrolled otherwise. The override names the
+   * key of the UNTRANSPOSED music, so transposing moves it with the chart. */
+  const [localKeyOv, setLocalKeyOv] = useState("");
+  const keyOv = keyOverride !== undefined ? keyOverride : localKeyOv;
+  const setKeyOv = setKeyOverride || setLocalKeyOv;
+  const keyCands = useMemo(() => analyzeKeyCandidates(tscore, { limit: 5 }), [tscore]);
+  const key = useMemo(() => {
+    const manual = parseKeyName(keyOv);
+    if (manual) return { tonic: (((manual.tonic + semis) % 12) + 12) % 12, mode: manual.mode, confidence: 1, manual: true };
+    const c = keyCands[0];
+    return c ? { tonic: c.tonic, mode: c.mode, confidence: c.confidence } : null;
+  }, [keyOv, keyCands, semis]);
   // A local, zero-dep analog of the ListenHub music skill's `describe` — a one-glance
   // summary (complexity + human tags) of whatever the chart currently is (post
   // simplify/arrange/transpose). Pure metadata; never touches recognition.
-  const describe = useMemo(() => describeScore(tscore, { useSharp, title }), [tscore, useSharp, title]);
+  const describe = useMemo(() => describeScore(tscore, { useSharp, title, key }), [tscore, useSharp, title, key]);
 
   useEffect(() => { setBpm(score.tempo || 100); }, [score.tempo]);
   // Re-apply the melodic auto-default whenever a new score loads (upload / part switch /
@@ -1130,7 +1167,9 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
     <>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, fontSize: 11, color: C.dim, margin: "14px 0 6px" }}>
         <span style={{ color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 220 }}>{title}</span>
-        <span>{meta}{semis ? ` · ${semis > 0 ? "+" : ""}${semis} st` : ""}{key ? ` · key ${keyName(key, useSharp)}` : ""}</span>
+        <span>{meta}{semis ? ` · ${semis > 0 ? "+" : ""}${semis} st` : ""}
+          {key ? <> · key <b style={{ color: key.manual ? C.green : C.dim }}>{keyName(key, useSharp)}</b>
+            {key.manual ? " (set)" : ` (${Math.round(key.confidence * 100)}%)`}</> : null}</span>
       </div>
       {describe && describe.tags.length > 0 && (
         <div className="no-print" title="a local read of this chart (the music skill's `describe`, on-device)"
@@ -1149,6 +1188,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
           style={{ ...chip(C), padding: "3px 9px", opacity: view !== "chart" ? 0.4 : 1, borderColor: editMode ? C.green : C.border, color: editMode ? C.green : C.dim }}>{editMode ? "✓ Editing" : "✎ Edit"}</button>
         <button onClick={() => setShowRoman((r) => !r)} title={key ? `key of ${keyName(key, useSharp)}` : "key analysis"}
           style={{ ...chip(C), padding: "3px 9px", borderColor: showRoman ? C.cyan : C.border, color: showRoman ? C.cyan : C.dim }}>{showRoman ? "I·V·vi ✓" : "I·V·vi"}</button>
+        <KeyPicker C={C} value={keyOv} onChange={setKeyOv} cands={keyCands} useSharp={useSharp} semis={semis} />
         <button onClick={() => setSimplify((s) => !s)} title="aggregate each bar's notes into one chord (for dense transcriptions)"
           style={{ ...chip(C), padding: "3px 9px", borderColor: simplify ? C.green : C.border, color: simplify ? C.green : C.dim }}>{simplify ? "1 chord/bar ✓" : "Simplify"}</button>
         <select value={arrange} onChange={(e) => setArrange(e.target.value)} title="stamp a strum/comping rhythm across each bar (exports as CSMPN/CSML slash-rhythm)"
@@ -1222,6 +1262,32 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
  * bloating as new views (Audio/Practice, Wave 3) land — each is just another
  * sibling here, switched on `view`, with no shared-state entanglement. Pure
  * props in, JSX out — no engine internals, no own persistent state. */
+/* Key picker — "Key: auto (D)" plus the 24 keys. The runners-up the analysis actually
+ * weighed are listed first (with their scores) so correcting a call is one tap and the
+ * user can see WHY it chose what it chose — the relative major/minor mix-up that made
+ * "Can't You See" read E minor is right there at the top of the list. Pure + controlled:
+ * the value is a key NAME string ("" = auto), which is what gets persisted. */
+function KeyPicker({ C, value, onChange, cands, useSharp, semis }) {
+  const auto = cands && cands[0] ? keyName(cands[0], useSharp) : null;
+  const alts = (cands || []).slice(0, 4).map((c) => ({ name: keyName(c, useSharp), pct: Math.round(c.confidence * 100) }));
+  // the stored override names the UNTRANSPOSED key, so the list must be un-transposed
+  // by the current transpose to stay consistent with what the chart shows.
+  const shift = (n) => { const k = parseKeyName(n); return k ? keyName({ tonic: (((k.tonic - semis) % 12) + 12) % 12, mode: k.mode }, useSharp) : n; };
+  return (
+    <select value={value || ""} onChange={(e) => onChange(e.target.value)}
+      title="the detected key drives the roman numerals and every export's key field — correct it here if the analysis called it wrong"
+      style={{ ...chip(C), padding: "3px 9px", borderColor: value ? C.green : C.border, color: value ? C.green : C.dim, background: C.raised, cursor: "pointer", maxWidth: 150 }}>
+      <option value="">{auto ? `Key: auto (${auto})` : "Key: auto"}</option>
+      {alts.length > 1 && (
+        <optgroup label="Analysis ranked">
+          {alts.map((a, i) => <option key={"a" + i} value={shift(a.name)}>{a.name} · {a.pct}%</option>)}
+        </optgroup>
+      )}
+      <optgroup label="Major">{KEY_CHOICES.filter((k) => k.mode === "major").map((k) => <option key={"M" + k.name} value={k.name}>{k.name} major</option>)}</optgroup>
+      <optgroup label="Minor">{KEY_CHOICES.filter((k) => k.mode === "minor").map((k) => <option key={"m" + k.name} value={k.name}>{k.name} minor</option>)}</optgroup>
+    </select>
+  );
+}
 function MelodicNudge({ C, onSimplify }) {
   return (
     <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8, fontSize: 11, color: C.amber, background: "rgba(233,162,75,0.08)", border: `1px solid ${C.amber}`, borderRadius: 8, padding: "7px 10px", marginBottom: 10 }}>
@@ -1780,6 +1846,9 @@ function AudioImport({ C, useSharp }) {
   const [raw, setRaw] = useState([]);                // raw engine events (chords: {symbol,midis,…}; notes: {note,…})
   const [bpm, setBpm] = useState(120);
   const [beatInfo, setBeatInfo] = useState(null);   // detected tempo readout
+  const [sections, setSections] = useState([]);      // song structure (intro/verse/chorus…), editable
+  const [secBusy, setSecBusy] = useState(false);
+  const [secSens, setSecSens] = useState("balanced");// how finely to cut the song
   const [bpb, setBpb] = useState(4);                 // beats per bar
   const [simple, setSimple] = useState(false);       // triad/7th bias (no 9th/extension over-labels) — good for vocal harmony
   const [overrides, setOverrides] = useState({});
@@ -1815,6 +1884,9 @@ function AudioImport({ C, useSharp }) {
           setRaw(r.events || []);
           if (r.bpm) setBpm(Math.round(r.bpm));
           setBeatInfo(r.bpm ? { bpm: r.bpm, method: r.method } : null);
+          // cache the beat grid: the structure pass reuses it instead of tracking twice
+          ref.current.beats = r.beats && r.beats.length ? r.beats : null;
+          ref.current.beatBpm = r.bpm || 0;
         }
       } catch (_) { setErr("Analysis failed on this file."); }
       setBusy(false);
@@ -1823,7 +1895,7 @@ function AudioImport({ C, useSharp }) {
 
   const onFile = async (e) => {
     const f = e.target.files && e.target.files[0]; if (!f) return;
-    setErr(""); setName(f.name); setBusy(true); setRaw([]); setOverrides({}); setAb(null); setMlScore(null); setMlNotes(null); setVoiceIdx(0); ref.current.mlRaw = null; stopPlay();
+    setErr(""); setName(f.name); setBusy(true); setRaw([]); setOverrides({}); setAb(null); setMlScore(null); setMlNotes(null); setVoiceIdx(0); setSections([]); ref.current.mlRaw = null; stopPlay();
     try {
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) { setErr("Web Audio isn't available in this browser."); setBusy(false); return; }
@@ -1919,11 +1991,11 @@ function AudioImport({ C, useSharp }) {
     return splitVoices(mlNotes, { voices: voiceCount });
   }, [mlNotes, voiceCount]);
   const mlDisplayScore = useMemo(() => {
-    if (!mlVoiced) return mlScore;                                 // 1-voice = original polyphonic score
-    const forVoice = mlVoiced.filter((n) => n.voice === voiceIdx);
-    if (!forVoice.length) return null;
-    return polyNotesToScore(forVoice, { bpm, beatsPerBar: bpb, useSharp });
-  }, [mlVoiced, voiceIdx, mlScore, bpm, bpb, useSharp]);
+    const base = !mlVoiced ? mlScore                               // 1-voice = original polyphonic score
+      : (() => { const forVoice = mlVoiced.filter((n) => n.voice === voiceIdx); return forVoice.length ? polyNotesToScore(forVoice, { bpm, beatsPerBar: bpb, useSharp }) : null; })();
+    // same audio, same timeline → the detected structure applies to the ML score too
+    return base && sections.length ? applySectionsToScore(base, sections, { bpm, beatsPerBar: bpb }) : base;
+  }, [mlVoiced, voiceIdx, mlScore, bpm, bpb, useSharp, sections]);
   const VOICE_LABELS = ["1 (high)", "2", "3", "4"];                // 0-indexed → soprano-first labels; expand if voiceCount grows
   /* Export ALL voices at once as ONE multi-staff standard-notation score — lead
    * (voice 1) on the top staff, backing voices below in descending register,
@@ -1961,22 +2033,77 @@ function AudioImport({ C, useSharp }) {
     } catch (_) { setAb(null); }
   };
 
-  const play = () => {
+  /* `offset` is what makes the section list a NAVIGATOR: tapping a section starts the
+   * stem at that second, so checking "is this really where the chorus starts" is one
+   * tap instead of scrubbing. A BufferSource can't seek, so a seek is a fresh source
+   * started at the offset, with the clock rebased by it. */
+  const play = (offset) => {
     const s = ref.current; if (!s.audioBuf) return;
-    if (playing) { stopPlay(); return; }
+    const seeking = typeof offset === "number";
+    if (playing && !seeking) { stopPlay(); return; }
+    if (playing) stopPlay();
+    const at = Math.max(0, Math.min(s.audioBuf.duration - 0.05, seeking ? offset : 0));
     try {
       const AC = window.AudioContext || window.webkitAudioContext;
       const ctx = new AC();
       const src = ctx.createBufferSource(); src.buffer = s.audioBuf; src.connect(ctx.destination);
       src.onended = () => { if (ref.current.src === src) stopPlay(); };
-      src.start(); s.ctx = ctx; s.src = src; s.startedAt = ctx.currentTime; setPlaying(true);
+      src.start(0, at); s.ctx = ctx; s.src = src; s.startedAt = ctx.currentTime - at; setPlaying(true); setPos(at);
       const loop = () => { const t = ctx.currentTime - s.startedAt; setPos(t); if (t <= s.audioBuf.duration) s.raf = requestAnimationFrame(loop); };
       s.raf = requestAnimationFrame(loop);
     } catch (_) { setErr("Playback failed."); stopPlay(); }
   };
 
+  /* ---- SONG STRUCTURE (sections) ------------------------------------------
+   * Detected from the audio (engine `detectSections`: beat-sync chroma + timbre →
+   * self-similarity → Foote novelty → repetition clustering → pop-template naming),
+   * then EDITABLE here. Structure is subjective and the naming is a heuristic, so the
+   * detection is a first draft: every row can be renamed, split, merged or deleted,
+   * and rows can be added from scratch (which is also how you enter a structure you
+   * looked up somewhere else). The list feeds `applySectionsToScore`, so the labels
+   * ride into CSMPN (`- Chorus`), ChordSlashML (`[Chorus]`), MusicXML rehearsal marks
+   * and the Chord Sheet Maker Pro handoff with no extra plumbing. */
+  const secPerBar = (60 / Math.max(20, bpm)) * bpb;
+  const barOf = (sec) => Math.max(1, Math.round(sec / secPerBar) + 1);
+  const detectStructure = async () => {
+    const s = ref.current; if (!s.cur) { setErr("Upload audio first."); return; }
+    setSecBusy(true); setErr("");
+    try {
+      const preset = SECTION_SENSITIVITY[secSens] || SECTION_SENSITIVITY.balanced;
+      const opts = { ...preset, ...(s.beats ? { beats: s.beats, bpm: s.beatBpm } : {}) };
+      const r = await detectSectionsOffThread(s.cur, s.sr, opts);
+      const list = (r && r.sections) || [];
+      if (!list.length) setErr("Couldn't find section boundaries in this audio — add them by hand at the playhead.");
+      setSections(list.map((x) => ({ label: x.label, letter: x.letter, startSec: x.startSec, endSec: x.endSec, confidence: x.confidence })));
+    } catch (_) { setErr("Section detection failed on this file."); }
+    setSecBusy(false);
+  };
+  /* All edits go through one normaliser: sort by time, make the boundaries contiguous
+   * (a section ends where the next begins) and clamp to the clip. That way no edit can
+   * leave a gap or an overlap, and the bar mapping stays sane. */
+  const setSecs = (list) => {
+    const end = dur || (list.length ? list[list.length - 1].endSec : 0);
+    const sorted = list.filter(Boolean).map((s) => ({ ...s, startSec: Math.max(0, Math.min(end, s.startSec)) })).sort((a, b) => a.startSec - b.startSec);
+    sorted.forEach((s, i) => { s.endSec = i + 1 < sorted.length ? sorted[i + 1].startSec : end; });
+    setSections(sorted.filter((s) => s.endSec - s.startSec > 0.05));
+  };
+  const renameSection = (i, label) => setSections((ls) => ls.map((s, j) => (j === i ? { ...s, label } : s)));
+  const removeSection = (i) => setSecs(sections.filter((_, j) => j !== i));      // merges into the one above
+  const nudgeSection = (i, bars) => { if (i === 0) return; setSecs(sections.map((s, j) => (j === i ? { ...s, startSec: s.startSec + bars * secPerBar } : s))); };
+  const addSectionAt = (t) => {
+    const at = Math.max(0, Math.min(dur - 0.1, t));
+    if (sections.some((s) => Math.abs(s.startSec - at) < 0.25)) return;
+    const base = sections.length ? sections : [{ label: "Intro", letter: "A", startSec: 0, endSec: dur }];
+    setSecs([...base, { label: "Section", letter: "?", startSec: at, endSec: dur, manual: true }]);
+  };
+  const SECTION_NAMES = ["Intro", "Verse", "Pre-Chorus", "Chorus", "Bridge", "Instrumental", "Solo", "Breakdown", "Outro"];
+
   // chords → a real score (re-quantised live as bpm / time-sig change); notes → a timeline
-  const audioScore = useMemo(() => (kind === "chords" && raw.length ? audioEventsToScore(raw, { bpm, beatsPerBar: bpb, useSharp }) : null), [kind, raw, bpm, bpb, useSharp]);
+  const audioScore = useMemo(() => {
+    if (!(kind === "chords" && raw.length)) return null;
+    const sc = audioEventsToScore(raw, { bpm, beatsPerBar: bpb, useSharp });
+    return sections.length ? applySectionsToScore(sc, sections, { bpm, beatsPerBar: bpb }) : sc;
+  }, [kind, raw, bpm, bpb, useSharp, sections]);
   const noteEvents = kind === "notes" ? raw.map((e) => ({ label: e.note, midi: e.midi, startSec: e.startSec, durSec: e.durSec })) : [];
   const fmt = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
   const activeIdx = noteEvents.findIndex((e) => pos >= e.startSec && pos < e.startSec + e.durSec);
@@ -2109,11 +2236,19 @@ function AudioImport({ C, useSharp }) {
         </div>
       )}
 
+      {/* SONG STRUCTURE → detected + editable, applied to the chart below */}
+      {!!raw.length && !!ref.current.cur && (
+        <SectionEditor C={C} sections={sections} names={SECTION_NAMES} barOf={barOf} pos={pos} dur={dur}
+          busy={secBusy} sens={secSens} onSens={(k) => setSecSens(k)} onDetect={detectStructure}
+          onRename={renameSection} onRemove={removeSection} onNudge={nudgeSection} onAddAt={addSectionAt}
+          onSeek={(t) => play(t)} fmt={fmt} />
+      )}
+
       {/* CHORDS → editable chart + export/handoff, with a tempo/meter grid control */}
       {kind === "chords" && audioScore && (
         <>
           <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10, marginBottom: 8, fontSize: 11, color: C.dim }}>
-            <button onClick={play} style={{ ...chip(C), padding: "4px 12px", borderColor: playing ? C.green : C.border, color: playing ? C.green : C.amber }}>{playing ? "■ Stop stem" : "▶ Play stem"}</button>
+            <button onClick={() => play()} style={{ ...chip(C), padding: "4px 12px", borderColor: playing ? C.green : C.border, color: playing ? C.green : C.amber }}>{playing ? "■ Stop stem" : "▶ Play stem"}</button>
             <span>{fmt(pos)} / {fmt(dur)}</span>
             <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
               <button onClick={() => setBpm((b) => Math.max(40, b - 5))} style={{ ...chip(C), padding: "3px 8px" }}>−</button>
@@ -2138,7 +2273,7 @@ function AudioImport({ C, useSharp }) {
       {kind === "notes" && !!noteEvents.length && (
         <>
           <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-            <button onClick={play} style={{ ...chip(C), padding: "5px 14px", borderColor: playing ? C.green : C.border, color: playing ? C.green : C.amber }}>{playing ? "■ Stop" : "▶ Play"}</button>
+            <button onClick={() => play()} style={{ ...chip(C), padding: "5px 14px", borderColor: playing ? C.green : C.border, color: playing ? C.green : C.amber }}>{playing ? "■ Stop" : "▶ Play"}</button>
             <span style={{ fontSize: 11, color: C.dim }}>{fmt(pos)} / {fmt(dur)} · {noteEvents.length} notes</span>
           </div>
           <StaffView events={noteEvents} activeIdx={activeIdx} C={C} useSharp={useSharp} />
@@ -2154,6 +2289,66 @@ function AudioImport({ C, useSharp }) {
         </>
       )}
     </section>
+  );
+}
+
+/* ---- SECTION EDITOR — the song's structure, correctable in seconds ---------
+ * Pure presentational: rows in, callbacks out. Each row is a section — tap the ▶ to
+ * hear where it starts (the whole point: verify a boundary without scrubbing), type
+ * over the name, nudge the boundary a bar either way, or merge it into the one above.
+ * The bar numbers come from the panel's ♩=/meter, i.e. the same grid the chart uses,
+ * so "Chorus @ bar 33" means bar 33 of the chart you're looking at.
+ * The playhead row is highlighted, so during playback the list doubles as a map. */
+function SectionEditor({ C, sections, names, barOf, pos, dur, busy, sens, onSens, onDetect, onRename, onRemove, onNudge, onAddAt, onSeek, fmt }) {
+  const active = sections.findIndex((s) => pos >= s.startSec && pos < s.endSec);
+  return (
+    <div style={{ marginBottom: 14, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 12px", background: C.raised }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: sections.length ? 8 : 0 }}>
+        <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim }}>SECTIONS</span>
+        <button onClick={onDetect} disabled={busy} title="find the song's structure in the audio (self-similarity + novelty), then correct it here"
+          style={{ ...chip(C), padding: "4px 12px", borderColor: sections.length ? C.green : C.amber, color: busy ? C.dim : sections.length ? C.green : C.amber }}>
+          {busy ? "listening…" : sections.length ? "⟳ Re-detect" : "🔎 Detect sections"}</button>
+        <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+          {["coarse", "balanced", "fine"].map((k) => (
+            <button key={k} onClick={() => onSens(k)} disabled={busy} title="how finely to cut the song — structure is subjective, so this is yours to set"
+              style={{ ...chip(C), padding: "3px 8px", borderColor: sens === k ? C.cyan : C.border, color: sens === k ? C.cyan : C.dim }}>{SECTION_SENSITIVITY[k].label}</button>
+          ))}
+        </span>
+        <button onClick={() => onAddAt(pos)} title="start a new section at the playhead (also how you enter a structure you looked up elsewhere)"
+          style={{ ...chip(C), padding: "4px 10px" }}>＋ Add at {fmt(pos)}</button>
+      </div>
+      {sections.length > 0 && (
+        <div className="tdp-scroll" style={{ maxHeight: 260, overflow: "auto" }}>
+          {sections.map((s, i) => (
+            <div key={i} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, padding: "4px 0", borderTop: i ? `1px solid ${C.border}` : "none",
+              background: i === active ? `${C.amber}14` : "transparent" }}>
+              <button onClick={() => onSeek(s.startSec)} title="play the stem from here"
+                style={{ ...chip(C), padding: "2px 8px", color: i === active ? C.amber : C.cyan, borderColor: i === active ? C.amber : C.border }}>▶</button>
+              <span style={{ fontFamily: "'Space Mono', monospace", fontSize: 11, color: C.dim, minWidth: 42 }}>{fmt(s.startSec)}</span>
+              <input value={s.label} onChange={(e) => onRename(i, e.target.value)} aria-label={`section ${i + 1} name`}
+                style={{ width: 108, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, color: C.text, padding: "3px 6px", fontSize: 12, fontFamily: "inherit" }} />
+              <select value="" onChange={(e) => { if (e.target.value) onRename(i, e.target.value); }} aria-label="preset name"
+                style={{ ...chip(C), padding: "3px 4px", background: C.raised, cursor: "pointer", width: 34 }}>
+                <option value="">▾</option>
+                {names.map((n) => <option key={n} value={n}>{n}</option>)}
+              </select>
+              <span style={{ fontSize: 10, color: C.dim, minWidth: 76 }}>bar {barOf(s.startSec)}–{Math.max(barOf(s.startSec), barOf(s.endSec) - 1)}</span>
+              <span style={{ fontSize: 10, color: C.dim, minWidth: 30 }}>{Math.round(s.endSec - s.startSec)}s</span>
+              {i > 0 && <>
+                <button onClick={() => onNudge(i, -1)} title="move this boundary one bar earlier" style={{ ...chip(C), padding: "2px 7px" }}>◀</button>
+                <button onClick={() => onNudge(i, 1)} title="move this boundary one bar later" style={{ ...chip(C), padding: "2px 7px" }}>▶|</button>
+                <button onClick={() => onRemove(i)} title="merge into the section above" style={{ ...chip(C), padding: "2px 7px", color: C.red }}>⤒</button>
+              </>}
+              {s.letter && s.letter !== "?" && <span title="repetition group — sections sharing a letter were detected as the same part"
+                style={{ fontSize: 9, color: C.dim, border: `1px solid ${C.border}`, borderRadius: 999, padding: "0 6px" }}>{s.letter}</span>}
+            </div>
+          ))}
+        </div>
+      )}
+      <div style={{ fontSize: 10, color: C.dim, marginTop: 8, lineHeight: 1.6 }}>
+        Boundaries come from the recording (repetition + novelty); the NAMES are the pop template (most-repeated + loudest = chorus), so treat them as a first draft. Labels ride into <b>CSMPN</b>/<b>ChordSlashML</b>/<b>MusicXML</b> and the Pro handoff. On an isolated stem you get the STEM's structure — where that instrument plays.
+      </div>
+    </div>
   );
 }
 

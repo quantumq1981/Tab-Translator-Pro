@@ -1766,6 +1766,191 @@ expect(skipped.length === 1 && skipped[0].id === "trumpet-bb", "unknown instrume
 
 console.log(`Brass: ${section.length} parts (trumpet C→D, alto C→A, tenor C→A, trombone concert bass-clef).`);
 
+/* ============================================================================
+ *  KEY MODEL v2 — harmonic-function weights (the "Can't You See" defect)
+ *  ---------------------------------------------------------------------------
+ *  The reported bug: an audio-decoded chart of Marshall Tucker's "Can't You See"
+ *  (D · C · G, a ♭VII rock loop) was labelled E MINOR — a key whose tonic chord
+ *  never sounds — because the old model scored a key purely by how much duration
+ *  was diatonic to it, and C IS diatonic to E minor while it is only borrowed in
+ *  D major. These pin the three terms that fix it (function weights, the borrowed
+ *  table, tonic presence) and, just as importantly, that a genuinely minor tune
+ *  does NOT now get swung to its relative major.
+ * ==========================================================================*/
+const mkScore = (bars) => ({
+  timeSig: [4, 4],
+  bars: bars.map((b, i) => ({
+    number: i + 1, timeSig: [4, 4],
+    events: b.map((s, j) => ({ symbol: s, beat: j * (4 / b.length), durBeats: 4 / b.length, qbeat: j * (4 / b.length), qdur: 4 / b.length })),
+  })),
+});
+const keyOf = (bars) => eng.keyName(eng.analyzeKey(mkScore(bars)), true);
+
+// THE reported defect. D is the tonic (it opens and closes every phrase); C is ♭VII.
+const cysKey = keyOf([["D"], ["C"], ["G"], ["D"], ["D"], ["C"], ["G"], ["D"]]);
+expect(cysKey === "D", `"Can't You See" (D C G D) should read D major, got ${cysKey} (was Em)`);
+// …and E minor must not merely tie: it never states its tonic, so it should lose clearly.
+const cysCands = eng.analyzeKeyCandidates(mkScore([["D"], ["C"], ["G"], ["D"]]));
+const cysD = cysCands.find((c) => c.tonic === 2 && c.mode === "major");
+const cysEm = cysCands.find((c) => c.tonic === 4 && c.mode === "minor");
+expect(cysD.score > cysEm.score * 1.2, `D major should beat E minor comfortably (${cysD.score.toFixed(2)} vs ${cysEm.score.toFixed(2)})`);
+expect(cysEm.tonicShare === 0, "E minor's tonic chord never sounds in D C G — tonicShare must be 0");
+// the same shape one step round the circle: a G-mixolydian vamp is G, not C.
+expect(keyOf([["G"], ["F"], ["C"], ["G"], ["G"], ["F"], ["C"], ["G"]]) === "G", "G F C vamp reads G major (♭VII), not C");
+// GUARD (the failure mode of over-correcting): a real minor tune stays minor.
+expect(keyOf([["Em"], ["D"], ["C"], ["Em"], ["Em"], ["D"], ["C"], ["B7"]]) === "Em", "a genuine E-minor tune stays E minor");
+expect(keyOf([["Am"], ["Am"], ["Dm"], ["Am"], ["E7"], ["Dm"], ["Am"], ["E7"]]) === "Am", "a minor blues stays A minor");
+// jazz: secondary dominants must not drag the key off its tonic
+expect(keyOf([["Fmaj7"], ["Em7♭5", "Am7"], ["Dm7", "G7"], ["Cm7", "F7"], ["Bb7"], ["Am7", "D7"], ["Gm7", "C7"], ["Fmaj7"]]) === "F",
+  "Confirmation-shaped changes read F major through their secondary dominants");
+
+// candidate list: ranked, capped, and its head IS analyzeKey's answer
+const cands = eng.analyzeKeyCandidates(mx, { limit: 3 });
+expect(cands.length === 3 && cands[0].confidence >= cands[1].confidence && cands[1].confidence >= cands[2].confidence,
+  "analyzeKeyCandidates returns a ranked, limited list");
+expect(cands[0].tonic === mxKey.tonic && cands[0].mode === mxKey.mode, "analyzeKey is the head of analyzeKeyCandidates");
+expect(eng.analyzeKeyCandidates({ bars: [] }).length === 0, "an empty score yields no key candidates");
+
+// the SLASH BASS is a functional cue — but "6/9" is a suffix, not an inversion
+expect(eng._parseSym("Eb6/9/F").bassPc === 5, "Eb6/9/F: bass F is read as the inversion");
+expect(eng._parseSym("C6/9").bassPc == null, "C6/9: the 6/9 slash is a suffix, not a bass note");
+expect(eng._parseSym("Am7/C").bassPc === 0 && eng._parseSym("Am7").bassPc == null, "Am7/C bass C; root-position Am7 has no bass");
+expect(eng._parseSym("Csus4").bassPc == null, "sus4 is a suffix, not a slash bass");
+
+// manual key override parsing (what the UI's key picker stores)
+expect(eng.parseKeyName("D").tonic === 2 && eng.parseKeyName("D").mode === "major", "parseKeyName('D') → D major");
+expect(eng.parseKeyName("F#m").tonic === 6 && eng.parseKeyName("F#m").mode === "minor", "parseKeyName('F#m') → F# minor");
+expect(eng.parseKeyName("Bb minor").tonic === 10 && eng.parseKeyName("Bb minor").mode === "minor", "parseKeyName('Bb minor')");
+expect(eng.parseKeyName("eb Major").tonic === 3 && eng.parseKeyName("eb Major").mode === "major", "parseKeyName is case-insensitive");
+expect(eng.parseKeyName("Dsus4") === null && eng.parseKeyName("H") === null && eng.parseKeyName("") === null,
+  "parseKeyName rejects chords and nonsense");
+expect(eng.KEY_CHOICES.length === 24 && eng.KEY_CHOICES.filter((k) => k.mode === "minor").length === 12,
+  "KEY_CHOICES lists all 24 keys");
+// a picked key round-trips through the exporters exactly like a detected one
+const forcedD = eng.parseKeyName("D");
+expect(/^K:D$/m.test(eng.scoreToABC(mx, { key: forcedD, useSharp: true })), "a manually set key reaches the ABC K: header");
+expect(/Key: D\b/.test(eng.scoreToCSMPN(mx, { key: forcedD, useSharp: true })), "a manually set key reaches the CSMPN header");
+console.log(`Key v2: Can't You See D C G → ${cysKey} (was Em) · G F C → G · Em tune stays Em · overrides parse`);
+
+/* ============================================================================
+ *  SONG STRUCTURE — sections from audio (detectSections) + the editable list
+ * ==========================================================================*/
+/* nameSections is the pure naming half: repetition letters + energies in, the pop
+ * template out. Tested on its own so a naming tweak can't hide behind the DSP. */
+const namedAB = eng.nameSections([
+  { letter: "A", startSec: 0,  endSec: 8,  energy: 0.3 },   // short opener, never returns → Intro
+  { letter: "B", startSec: 8,  endSec: 40, energy: 0.5 },   // returns, quieter        → Verse
+  { letter: "C", startSec: 40, endSec: 64, energy: 0.9 },   // returns, loudest        → Chorus
+  { letter: "B", startSec: 64, endSec: 96, energy: 0.5 },
+  { letter: "C", startSec: 96, endSec: 120, energy: 0.9 },
+  { letter: "D", startSec: 120, endSec: 140, energy: 0.6 }, // one-off, late           → Bridge
+  { letter: "C", startSec: 140, endSec: 164, energy: 0.9 },
+]).map((s) => s.label);
+expect(namedAB[0] === "Intro", `first short non-repeating part is the Intro, got ${namedAB[0]}`);
+expect(namedAB[1] === "Verse 1" && namedAB[3] === "Verse 2", `the quieter recurring part is the Verse, got ${namedAB[1]}/${namedAB[3]}`);
+expect(namedAB[2] === "Chorus 1" && namedAB[6] === "Chorus 3", `the loudest recurring part is the Chorus, got ${namedAB[2]}/${namedAB[6]}`);
+expect(namedAB[5] === "Bridge", `a late one-off part is the Bridge, got ${namedAB[5]}`);
+expect(eng.nameSections([]).length === 0 && eng.nameSections(null).length === 0, "nameSections is safe on empty input");
+expect(eng.SECTION_SENSITIVITY.coarse.minSectionSec > eng.SECTION_SENSITIVITY.fine.minSectionSec,
+  "SECTION_SENSITIVITY: coarse cuts the song into fewer, longer parts than fine");
+
+/* End-to-end on SYNTHESIZED audio with a known form. Sections differ in harmony AND
+ * arrangement (the chorus adds an octave doubling), because a real verse/chorus pair
+ * very often shares its chords — which is exactly why the feature is chroma + timbre. */
+const SSR = 16000;
+function renderSong(plan, bpm) {
+  const spb = 60 / bpm;
+  const total = plan.reduce((a, s) => a + s.bars, 0) * 4 * spb;
+  const buf = new Float32Array(Math.ceil(total * SSR));
+  let seed = 7, rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff) * 2 - 1;
+  let t = 0;
+  for (const sec of plan) for (let bar = 0; bar < sec.bars; bar++) for (let beat = 0; beat < 4; beat++) {
+    const chord = sec.chords[(bar * 4 + beat) % sec.chords.length];
+    const start = Math.floor(t * SSR), len = Math.floor(spb * SSR);
+    for (let i = 0; i < len; i++) {
+      const tt = i / SSR, env = Math.exp(-tt * 6);
+      let v = 0;
+      for (const m of chord) v += Math.sin(2 * Math.PI * 440 * Math.pow(2, (m - 69) / 12) * tt) / chord.length;
+      if (sec.bright) for (const m of chord) v += 0.5 * Math.sin(2 * Math.PI * 440 * Math.pow(2, (m + 12 - 69) / 12) * tt) / chord.length;
+      const click = i < 200 ? rnd() * 0.5 * Math.exp(-i / 60) : 0;   // a transient so the beat tracker locks
+      if (start + i < buf.length) buf[start + i] += (v * env * sec.gain + click) * 0.6;
+    }
+    t += spb;
+  }
+  return buf;
+}
+const _C = [48, 52, 55], _G = [43, 47, 50], _Am = [45, 48, 52], _F = [41, 45, 48], _Em = [40, 43, 47], _Bb = [46, 50, 53];
+const songPlan = [
+  { bars: 2, chords: [_C, _C, _C, _C], gain: 0.5, bright: false },                    // 0–4s   intro
+  { bars: 4, chords: [_C, _C, _G, _G, _Am, _Am, _F, _F], gain: 0.7, bright: false },  // 4–12s  verse
+  { bars: 4, chords: [_F, _F, _C, _C, _G, _G, _C, _C], gain: 1.0, bright: true },     // 12–20s chorus
+  { bars: 4, chords: [_C, _C, _G, _G, _Am, _Am, _F, _F], gain: 0.7, bright: false },  // 20–28s verse
+  { bars: 4, chords: [_F, _F, _C, _C, _G, _G, _C, _C], gain: 1.0, bright: true },     // 28–36s chorus
+  { bars: 4, chords: [_Em, _Em, _Bb, _Bb, _Em, _Em, _Bb, _Bb], gain: 0.8, bright: false }, // 36–44s bridge
+  { bars: 4, chords: [_F, _F, _C, _C, _G, _G, _C, _C], gain: 1.0, bright: true },     // 44–52s chorus
+];
+const songPcm = renderSong(songPlan, 120);
+const struct = eng.detectSections(songPcm, SSR, { minSectionSec: 6, noveltyThreshold: 0.35 });
+expect(Math.abs(struct.bpm - 120) < 3, `structure pass reads the synthetic tempo (got ${struct.bpm && struct.bpm.toFixed(1)})`);
+expect(struct.sections.length >= 4 && struct.sections.length <= 8,
+  `A-B-A-B-C-B form should cut into a handful of parts, got ${struct.sections.length}`);
+// every detected boundary must land on a REAL one (±1.5 s) — no invented sections
+const truthBounds = [4, 12, 20, 28, 36, 44];
+const nearTruth = struct.boundaries.every((b) => truthBounds.some((t) => Math.abs(b - t) <= 1.5));
+expect(nearTruth, `detected boundaries ${struct.boundaries.map((b) => b.toFixed(1))} should all sit on a real one (${truthBounds})`);
+expect(struct.boundaries.length >= 3, `should find most of the form's boundaries, got ${struct.boundaries.length}`);
+// the bridge (36–44 s) is harmonically unlike everything else → its own repetition group
+const bridgeSeg = struct.sections.find((s) => s.startSec > 33 && s.startSec < 38);
+expect(bridgeSeg && struct.sections.filter((s) => s.letter === bridgeSeg.letter).length === 1,
+  "the once-only bridge gets a repetition letter of its own");
+// the two choruses that follow it are the SAME part
+const lastTwo = struct.sections.slice(-1)[0];
+expect(struct.sections.some((s) => s.letter === lastTwo.letter && s !== lastTwo),
+  "a repeated part is clustered with its earlier occurrence");
+expect(struct.sections.every((s) => s.endSec > s.startSec) &&
+  struct.sections.every((s, i) => i === 0 || s.startSec === struct.sections[i - 1].endSec),
+  "sections are contiguous and non-empty");
+expect(eng.detectSections(new Float32Array(1000), SSR).sections.length === 0, "too-short audio yields no sections, not a crash");
+
+/* applySectionsToScore — time → bar on the SAME grid audioEventsToScore quantised
+ * onto, and the labels then ride out through every exporter for free. */
+const audEvents = [
+  { symbol: "C", midis: [48, 52, 55], startSec: 0, durSec: 4 },
+  { symbol: "G", midis: [43, 47, 50], startSec: 4, durSec: 4 },
+  { symbol: "Am", midis: [45, 48, 52], startSec: 8, durSec: 4 },
+  { symbol: "F", midis: [41, 45, 48], startSec: 12, durSec: 4 },
+];
+const audScore = eng.audioEventsToScore(audEvents, { bpm: 120, beatsPerBar: 4 });   // 2 s per bar
+const audSecs = [{ label: "Intro", startSec: 0 }, { label: "Verse 1", startSec: 4 }, { label: "Chorus", startSec: 12 }];
+const audWith = eng.applySectionsToScore(audScore, audSecs, { bpm: 120, beatsPerBar: 4 });
+expect(audWith.bars[0].section === "Intro" && audWith.bars[2].section === "Verse 1" && audWith.bars[6].section === "Chorus",
+  `sections map onto bars 1/3/7 at 120bpm 4/4, got ${audWith.bars.map((b, i) => (b.section ? i + ":" + b.section : "")).filter(Boolean).join(" ")}`);
+expect(!audScore.bars.some((b) => b.section), "applySectionsToScore never mutates the score it was given");
+expect(audWith.bars.filter((b) => b.section).length === 3, "one label per bar — two sections can't land on the same bar");
+const twoAtOnce = eng.applySectionsToScore(audScore, [{ label: "A", startSec: 0 }, { label: "B", startSec: 0.2 }], { bpm: 120, beatsPerBar: 4 });
+expect(twoAtOnce.bars[0].section === "A" && twoAtOnce.bars[1].section === "B", "a colliding label is pushed to the next bar, never dropped");
+const secCsmpn = eng.scoreToCSMPN(audWith, { title: "Demo", tempo: 120 });
+expect(/^- Intro$/m.test(secCsmpn) && /^- Verse 1$/m.test(secCsmpn) && /^- Chorus$/m.test(secCsmpn),
+  "detected sections become CSMPN section markers");
+const secCsml = eng.scoreToCSML(audWith, { title: "Demo" });
+expect(/^\[Intro\]$/m.test(secCsml) && /^\[Chorus\]$/m.test(secCsml), "detected sections become ChordSlashML [labels]");
+const secXml = eng.scoreToMusicXML(audWith, { title: "Demo", tempo: 120 });
+expect(/<rehearsal>Chorus<\/rehearsal>/.test(secXml), "MusicXML export writes a rehearsal mark for each section");
+const secBack = eng.parseMusicXML(secXml, true);
+expect(secBack.bars[0].section === "Intro" && secBack.bars[6].section === "Chorus",
+  "…and parseMusicXML reads them back — the structure round-trips");
+console.log(`Structure: synthetic A-B-A-B-C-B → ${struct.sections.length} parts, boundaries ${struct.boundaries.map((b) => b.toFixed(1)).join("/")}s (truth 4/12/20/28/36/44) · labels round-trip CSMPN/CSML/MusicXML`);
+
+/* ---- UI contract guards for the two features (static, like the module split) -- */
+expect(/function KeyPicker\(/.test(uiSrc) && /<KeyPicker\b/.test(uiSrc), "the UI ships a key picker");
+expect(/keyOverride/.test(uiSrc) && /saveSessionMeta\(\{[^}]*keyOverride/.test(uiSrc),
+  "a manual key correction is persisted in the session meta (a corrected chart must restore corrected)");
+expect(/function SectionEditor\(/.test(uiSrc) && /<SectionEditor\b/.test(uiSrc), "the UI ships an editable section list");
+expect(/detectSectionsOffThread/.test(uiSrc) && /catch \(_\) \{ return detectSections\(samples, sr, opts\); \}/.test(uiSrc),
+  "section detection runs off-thread with a main-thread fallback (correctness never depends on the worker)");
+expect(/applySectionsToScore\(sc, sections/.test(uiSrc), "the edited section list is stamped onto the chart, so exports carry it");
+expect(/src\.start\(0, at\)/.test(uiSrc), "the stem player can seek, so a section row can jump to its start");
+
 if (fails.length) {
   console.error("\nFAIL:\n  " + fails.join("\n  "));
   console.error("\nRe-run with --log-tokens to dump the raw extractTokens() stream and diff against the reference.");
