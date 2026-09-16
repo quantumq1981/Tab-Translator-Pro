@@ -1908,6 +1908,14 @@ function isChordToken(tok) {
   const t = String(tok).trim();
   return t !== "" && _CHORD_RE.test(t);
 }
+// The content of a whole-line bracket is "just chords" (drop it) when every part is
+// a chord — including a compound/sequence beat written `G_C` (CSMPN `_`-join) or a
+// space-separated run `[C Em Bb F]`. This is what stops a lone `[G_C]` beat being
+// mistaken for a section label, while `[Verse A]` (a real word) still isn't chords.
+function isChordBracket(inner) {
+  const parts = String(inner == null ? "" : inner).trim().split(/[_\s]+/).filter(Boolean);
+  return parts.length > 0 && parts.every(isChordToken);
+}
 // A whole line is a CHORD LINE (drop it) only when it is non-blank and every token
 // is a chord or an allowed marker, with at least one real chord present.
 function isChordLine(line) {
@@ -1977,8 +1985,16 @@ function parseLyrics(text, opts = {}) {
       if (name === "sot" || name === "start_of_tab") inTab = true;
       else if (name === "eot" || name === "end_of_tab") inTab = false;
       else if (name === "title" || name === "t") { if (!meta.title) meta.title = val; }
-      else if (name === "subtitle" || name === "st" || name === "artist") { if (!meta.subtitle) meta.subtitle = val; }
-      else if (name === "comment" || name === "c" || name === "ci" || name === "comment_italic" || name === "comment_box" || name === "cb") { if (val) newSection(val); }
+      else if (name === "subtitle" || name === "st" || name === "artist" || name === "composer") { if (!meta.subtitle) meta.subtitle = val; }
+      else if (name === "comment" || name === "c" || name === "ci" || name === "comment_italic" || name === "comment_box" || name === "cb") {
+        // {comment}/{c:} is ambiguous in ChordPro: a SHORT section keyword ("Verse 1",
+        // "Chorus") is a header, but everything else is CONTENT — and a chord-free song
+        // (or an exporter that keeps chords on their own lines) stores its LYRICS here.
+        // So: keyword-shaped → section label; otherwise → a lyric line. This is what
+        // makes a "lyrics live in {comment}" file (chords on [bracket] lines, words in
+        // comments) read as words, not as a pile of empty section headers.
+        if (val) { if (_isBareSectionLabel(val)) newSection(val); else stanza.push(_trimEdges(val)); }
+      }
       else if (name === "sov" || name === "start_of_verse") newSection(val || "Verse");
       else if (name === "soc" || name === "start_of_chorus") newSection(val || "Chorus");
       else if (name === "sob" || name === "start_of_bridge") newSection(val || "Bridge");
@@ -1993,7 +2009,7 @@ function parseLyrics(text, opts = {}) {
     const brk = trimmed.match(/^\[([^\]]+)\]$/);
     if (brk) {
       const inner = brk[1].trim();
-      if (!isChordToken(inner)) newSection(inner);
+      if (!isChordBracket(inner)) newSection(inner);      // a lone [chord]/[G_C] beat is dropped; [Verse A] is a label
       continue;
     }
     // ChordPro lyric line with inline [chord] tags → strip them, keep the words
@@ -4766,6 +4782,7 @@ export {
   _CHORD_RE,
   _CHORD_LINE_MARK,
   isChordToken,
+  isChordBracket,
   isChordLine,
   stripInlineChords,
   _SECTION_KEYWORDS,

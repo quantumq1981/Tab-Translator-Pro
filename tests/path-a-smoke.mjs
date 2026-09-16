@@ -1286,6 +1286,22 @@ expect(eng.recoverChordGaps([], mud, 0.1, 0.256, { ...noSmooth, recoverMinConfid
   expect(eng.parseLyrics("[A]\nlyric").sections[0].label === null, "a lone [A] is a chord, not a section (dropped)");
   expect(eng.parseLyrics("[Verse A]\nlyric").sections[0].label === "Verse A", "[Verse A] is kept as a section label");
 
+  // regression: a ChordPro file that stores LYRICS INSIDE {comment} (chords on their
+  // own [bracket] lines) must read the comments as words, not as empty section headers.
+  // A short keyword comment ({c: Chorus}) is still a header; a prose comment is a lyric.
+  const inComments = "{title: RnR}\n{composer: Billy Joel}\n{start_of_verse: Verse 1}\n[C] [Em] [Bb] [F]\n{comment: What's the matter with the clothes I'm wearing?}\n{comment: Can't you tell that your tie's too wide?}\n{start_of_chorus: Chorus}\n[C] [Em] [Bb] [F_Am]\n[G_C]\n{comment: Everybody's talkin' 'bout the new sound}";
+  const ic = eng.parseLyrics(inComments);
+  expect(ic.title === "RnR" && ic.subtitle === "Billy Joel", `title + {composer}→subtitle captured, got ${ic.title} / ${ic.subtitle}`);
+  expect(ic.sections.length === 2 && ic.sections.map((s) => s.label).join("|") === "Verse 1|Chorus",
+    `lyrics-in-{comment} → 2 named sections (no G_C/empty-header noise), got ${JSON.stringify(ic.sections.map((s) => s.label))}`);
+  expect(ic.sections[0].blocks[0].length === 2 && ic.sections[0].blocks[0][0] === "What's the matter with the clothes I'm wearing?",
+    "{comment} prose lines are kept as the section's lyric lines");
+
+  // compound/sequence chord brackets are chords, not labels
+  expect(eng.isChordBracket("G_C") && eng.isChordBracket("C Em Bb F") && eng.isChordBracket("A") && !eng.isChordBracket("Verse A"),
+    "isChordBracket: [G_C]/[C Em Bb F]/[A] are chords; [Verse A] is a label");
+  expect(eng.parseLyrics("[G_C]\nsing").sections[0].label === null, "a lone compound [G_C] beat is a chord, not a section");
+
   // robustness: empty / null / all-chords input never throws and yields no sections
   expect(eng.parseLyrics("").sections.length === 0 && eng.parseLyrics(null).sections.length === 0, "empty/null input → no sections, no throw");
   expect(eng.parseLyrics("C G Am F\nEm  D  C").sections.length === 0, "an all-chords paste yields no lyric sections");
