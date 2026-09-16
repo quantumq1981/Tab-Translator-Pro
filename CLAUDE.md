@@ -1166,8 +1166,16 @@ not audio, so it is fully deterministic and on-device.
   `lyricsToText(parsed)` renders `plain` (UPPERCASE headers, blank line between stanzas &
   sections). Two dialects auto-detected **line by line** (a file may mix them):
   **ChordPro** — inline `[C]` tags stripped (`stripInlineChords`, closes the gap);
-  `{title}`/`{artist}`, `{c:}`/`{comment}`, `{sov}`/`{soc}`/`{sob}` (+ optional label) →
+  `{title}`/`{artist}`/`{composer}` → header, `{sov}`/`{soc}`/`{sob}` (+ optional label) →
   sections; `{sot}…{eot}` tab blocks **skipped** (ASCII tab is not lyrics).
+  **`{comment}`/`{c:}` is ambiguous and resolved by CONTENT (2026-09-16 fix):** a short
+  section keyword (`{c: Chorus}`) is a header, but any other comment is a **lyric line** —
+  because a real-world ChordPro export (Billy Joel "…rock 'n' roll to me") stores the whole
+  song as chord-only `[bracket]` lines with the **words inside `{comment: …}`**. Treating
+  every comment as a header (the original bug) made every lyric an empty section → "0
+  sections, 0 lines". A whole-line bracket is dropped when it's chords via **`isChordBracket`**
+  (splits on `_`/space, all parts chords) so a compound beat `[G_C]` or a run `[C Em Bb F]`
+  is a chord, not a mislabelled section; `[Verse A]` (a real word) is still a label.
   **Chords-over-lyrics** — a monospace chord LINE above each lyric line is **dropped**;
   `[Verse]`-style and bare **Verse/Chorus/Bridge/Intro/Outro…** headers become sections.
 - **THE load-bearing decision — chord-vs-word disambiguation.** `_parseSym` is too loose

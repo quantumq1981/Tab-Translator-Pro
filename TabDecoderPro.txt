@@ -1930,7 +1930,7 @@ function LyricsImport({ C }) {
 
       {err && <div style={{ marginTop: 12, color: C.red, fontSize: 12 }}>{err}</div>}
       <div style={{ marginTop: 16, fontSize: 11, color: C.dim, lineHeight: 1.6 }}>
-        Recognised structure: ChordPro <code>{"{title}"}</code>/<code>{"{c: …}"}</code>/<code>{"{soc}"}</code>/<code>{"{sov}"}</code> and <code>[Verse]</code>/<code>[Chorus]</code>-style headers, plus bare <b>Verse / Chorus / Bridge / Intro / Outro …</b> labels. A lone bracketed single letter (e.g. <code>[A]</code>) reads as a chord and is removed — write sub-sections as <code>[Verse A]</code> if you want them kept, or add headers in your text.
+        Recognised structure: ChordPro <code>{"{title}"}</code>, <code>{"{soc}"}</code>/<code>{"{sov}"}</code>/<code>{"{sob}: Label}"}</code> and <code>[Verse]</code>/<code>[Chorus]</code>-style headers, plus bare <b>Verse / Chorus / Bridge / Intro / Outro …</b> labels. A <code>{"{comment}"}</code> is treated as a <b>lyric line</b> unless it's a short section name (so files that store the words in comments still work). A lone bracketed chord — even a compound beat like <code>[A]</code> or <code>[G_C]</code> — reads as a chord and is removed; write sub-sections as <code>[Verse A]</code> if you want them kept.
       </div>
     </section>
   );
