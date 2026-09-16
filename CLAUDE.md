@@ -1150,6 +1150,54 @@ behind a live-looking UI. Three rails now (all in `LyricsCapture`, browser-only)
 Device-only (live mic + browser ASR) — smoke-test on hardware; `npm test` covers the
 transpile + module-split contracts.
 
+### Lyrics IMPORT — chords-over-lyrics / ChordPro → clean lyrics-only sheet (2026-09-16)
+
+The Lyrics mode is now **two sub-tools** (`LyricsPanel` switches them; default = Import):
+the existing **Live capture** (mic ASR), and a new **Import** tool that takes a
+**chords-over-lyrics** tab (the ultimate-guitar.com layout) **or** a **ChordPro** file,
+**strips every chord**, and re-arranges the WORDS into a printable **lyrics-only** sheet
+— centered/underlined section headers, left-aligned stanzas (the hymnal-page look in the
+work-order photos). It is the **inverse of an authoring tool**: recognition here is text,
+not audio, so it is fully deterministic and on-device.
+
+- **Pure engine core (`parseLyrics` in `engine.tsx`, React/DOM-free, headless-tested).**
+  `parseLyrics(text)` → `{ title, subtitle, sections:[{ label, blocks:[[line…]] }], plain }`
+  (`blocks` = stanzas split on blank lines; `plain` = the formatted sheet text).
+  `lyricsToText(parsed)` renders `plain` (UPPERCASE headers, blank line between stanzas &
+  sections). Two dialects auto-detected **line by line** (a file may mix them):
+  **ChordPro** — inline `[C]` tags stripped (`stripInlineChords`, closes the gap);
+  `{title}`/`{artist}`, `{c:}`/`{comment}`, `{sov}`/`{soc}`/`{sob}` (+ optional label) →
+  sections; `{sot}…{eot}` tab blocks **skipped** (ASCII tab is not lyrics).
+  **Chords-over-lyrics** — a monospace chord LINE above each lyric line is **dropped**;
+  `[Verse]`-style and bare **Verse/Chorus/Bridge/Intro/Outro…** headers become sections.
+- **THE load-bearing decision — chord-vs-word disambiguation.** `_parseSym` is too loose
+  (its suffix is `.*`, so it reads the word "Cab" as C+"ab"), so this uses a **strict**
+  matcher `_CHORD_RE` (root + a **tight suffix alphabet**: `maj/min/sus/add/aug/dim/m/M/Δ/
+  ø/°/+/-/digits/#b/()` + optional `/bass`). That alphabet is what makes lyric words that
+  START with a note letter (Add · Cab · Bad · Fed · Gem · Bee · Ace) fail to parse.
+  Classification is then done **at LINE level** (`isChordLine`: EVERY token must be a chord
+  or a repeat/barline marker `_CHORD_LINE_MARK` — `x2`/`(x2)`/`|`/`N.C.`/…), so **a single
+  ordinary word protects the whole lyric line** ("Am I the only one" stays). This two-stage
+  design is the invariant — do NOT relax it to a per-token or fractional test.
+- **Documented ambiguity:** a lone `[A]`/`[B]` is BOTH a valid chord and a possible
+  sub-section marker (photo 2's A/B). It is resolved toward **chord** (dropped); `[Verse A]`
+  (inner is not a chord) is kept as a label. Single-letter sub-sections are the honest limit
+  — write them as `[Verse A]` or edit after import. (The UI's panel note says so.)
+- **UI (`LyricsImport` in `TabDecoderPro.tsx`, browser-only glue; engine stays pure):** a
+  paste `<textarea>` + a file `<input>` with **NO `accept` attribute** (the same iOS UTI
+  lesson as the GP/audio uploads — `accept` greys out `.cho`/`.crd`/`.pro`/`.chordpro`;
+  `readFileText` reads anything as text). Live `useMemo(parseLyrics)` render of the sheet,
+  a "Load example" button, and Copy / Download `.txt` (filename from the detected title).
+- **`npm test` guards** (all pure, headless): `isChordToken` accepts real chords (slash /
+  extensions / alterations) and rejects the note-letter lyric words; `isChordLine` catches
+  chord lines (spacing, slash, repeat markers) and spares lyric/blank lines; a full
+  chords-over-lyrics parse yields the right sections with chords gone; the ChordPro dialect
+  captures `{title}`/`{artist}`, `{c:}`/`{soc}` sections, inline-chord stripping, and skips
+  `{sot}…{eot}`; blank-line stanza splitting; the `[A]`-vs-`[Verse A]` ambiguity; and
+  empty/null/all-chords input → no sections, no throw. Plus UI contract guards (imports
+  `parseLyrics`, ships `LyricsImport`/`LyricsPanel`, the Lyrics mode renders `LyricsPanel`,
+  the file input has no `accept`). React render itself is device-only (smoke-test on hardware).
+
 ## Audio → CHORDS from an isolated stem (2026-06-20)
 
 "Upload an isolated instrument stem → get a chord/note sketch." The owner's pro workflow
@@ -2060,6 +2108,15 @@ accordingly.
 - **Multi-part picker**: `npm test` parses `tests/fixtures/sample-multipart.musicxml`
   and asserts two parts (`Guitar`, `Rhythm`), `partIndex 0 → C` and `1 → G`, and
   that the single-part fixture reports exactly one part.
+- **Lyrics import (`parseLyrics`)**: `npm test` asserts the strict chord matcher accepts
+  real chords and rejects note-letter lyric words (Add/Cab/Bad/Fed/Gem/Bee/Ace), the
+  line-level `isChordLine` catches chord lines but spares lyric/blank lines, a full
+  chords-over-lyrics parse strips chords and keeps the `[Verse 1]`/bare-`Chorus` sections,
+  the ChordPro dialect captures `{title}`/`{artist}`/`{c:}`/`{soc}` + inline-chord stripping
+  and skips `{sot}…{eot}`, blank lines split stanzas, `[A]` reads as a chord while `[Verse A]`
+  is a label, and empty/null/all-chords input yields no sections without throwing. Plus UI
+  contract guards (imports `parseLyrics`, ships `LyricsImport`/`LyricsPanel`, Lyrics mode
+  renders `LyricsPanel`, file input has no `accept`).
 
 ## Session conventions
 

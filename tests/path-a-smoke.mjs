@@ -1234,6 +1234,63 @@ expect(eng.recoverChordGaps([], mud, 0.1, 0.256, { ...noSmooth, recoverMinConfid
   expect(eng.scoreToMusicPrompt(score, { maxChords: 6 }).prompt.includes("…"), "long progression is capped with an ellipsis");
 }
 
+/* ---- parseLyrics: chords-over-lyrics / ChordPro → clean lyrics-only sheet ---
+ * A pure text transform (the inverse of an authoring tool): strip the chords, keep
+ * the words + the song structure. Two dialects, auto-detected line by line. The
+ * load-bearing part is chord-vs-word disambiguation — a strict chord matcher plus
+ * line-level classification (ALL tokens must be chords/markers) so an ordinary word
+ * saves the whole lyric line. */
+{
+  // token-level: real chords match, and ordinary words that START with a note letter DON'T
+  expect(["C", "G", "Am", "F#m7", "D/F#", "Bb", "Cmaj7", "C7(b9)", "G7sus4"].every(eng.isChordToken),
+    "isChordToken accepts real chord symbols (incl. slash, extensions, alterations)");
+  expect(!["Add", "Cab", "Bad", "Fed", "Gem", "Bee", "Ace", "the", "you", "I", "Stop"].some(eng.isChordToken),
+    "isChordToken rejects lyric words that begin with a note letter (Add/Cab/Bad/Fed/Gem/Bee/Ace/…)");
+
+  // line-level: a pure chord line (incl. repeat markers) is a chord line; a lyric line isn't
+  expect(eng.isChordLine("   C        G") && eng.isChordLine("C  G  Am  F") && eng.isChordLine("D/F#  G/B  C")
+    && eng.isChordLine("C G (x2) |"), "isChordLine detects chord lines (spacing, slash chords, repeat/barline markers)");
+  expect(!eng.isChordLine("Am I the only one") && !eng.isChordLine("A little brown mav'rick") && !eng.isChordLine("Stop, You gotta stop") && !eng.isChordLine(""),
+    "isChordLine leaves lyric lines (one real word disqualifies the line) and blank lines alone");
+
+  // inline chordpro tags are stripped and the gap closed
+  expect(eng.stripInlineChords("There's a [C]bright golden [G]haze").replace(/ +/g, " ") === "There's a bright golden haze",
+    `stripInlineChords removes [chord] tags, got: "${eng.stripInlineChords("There's a [C]bright golden [G]haze")}"`);
+
+  // full chords-over-lyrics parse (the ultimate-guitar layout in the photos)
+  const cov = "[Verse 1]\n       C            G\nThere's a bright golden haze on the meadow\n        F         C\nThe corn is as high as an elephant's eye\n\nChorus\n   C            G\nOh, what a beautiful mornin'";
+  const pc = eng.parseLyrics(cov);
+  expect(pc.sections.length === 2 && pc.sections[0].label === "Verse 1" && pc.sections[1].label === "Chorus",
+    `parseLyrics finds the [Verse 1] + bare Chorus sections, got ${JSON.stringify(pc.sections.map((s) => s.label))}`);
+  expect(pc.sections[0].blocks[0].length === 2 && pc.sections[0].blocks[0][0] === "There's a bright golden haze on the meadow",
+    "parseLyrics drops the chord lines and keeps the lyric lines under Verse 1");
+  expect(!/[ ]{2,}|\bC\b\s+\bG\b/.test(pc.plain) && !pc.plain.includes("F         C"),
+    "parseLyrics plain output carries no chord lines");
+  expect(pc.plain.includes("VERSE 1") && pc.plain.includes("CHORUS"), "plain sheet uppercases the section headers (photo style)");
+
+  // ChordPro dialect: {title}/{artist}, inline [chords], {soc}, and a {sot}..{eot} tab block skipped
+  const cp = "{title: Beautiful Mornin'}\n{artist: R&H}\n{c: Verse 1}\nThere's a [C]bright golden [G]haze\n{soc}\n[C]Oh what a [G]beautiful mornin'\n{sot}\ne|--0--2--|\nB|--1--3--|\n{eot}";
+  const pp = eng.parseLyrics(cp);
+  expect(pp.title === "Beautiful Mornin'" && pp.subtitle === "R&H", `ChordPro {title}/{artist} captured, got ${pp.title} / ${pp.subtitle}`);
+  expect(pp.sections.length === 2 && pp.sections[0].label === "Verse 1" && pp.sections[1].label === "Chorus",
+    `ChordPro sections from {c:}/{soc}, got ${JSON.stringify(pp.sections.map((s) => s.label))}`);
+  expect(pp.sections[0].blocks[0][0] === "There's a bright golden haze", "ChordPro inline chords stripped from the lyric");
+  expect(!pp.plain.includes("--0--") && !pp.plain.includes("|--"), "ChordPro {sot}..{eot} tab block is not treated as lyrics");
+
+  // stanzas: a blank line splits a section into blocks; the leading no-label block is kept
+  const st = eng.parseLyrics("line one\nline two\n\nline three");
+  expect(st.sections.length === 1 && st.sections[0].label === null && st.sections[0].blocks.length === 2,
+    "a blank line splits stanzas within an unlabelled block");
+
+  // ambiguity: a lone [A] reads as a chord (dropped); [Verse A] is a section label kept
+  expect(eng.parseLyrics("[A]\nlyric").sections[0].label === null, "a lone [A] is a chord, not a section (dropped)");
+  expect(eng.parseLyrics("[Verse A]\nlyric").sections[0].label === "Verse A", "[Verse A] is kept as a section label");
+
+  // robustness: empty / null / all-chords input never throws and yields no sections
+  expect(eng.parseLyrics("").sections.length === 0 && eng.parseLyrics(null).sections.length === 0, "empty/null input → no sections, no throw");
+  expect(eng.parseLyrics("C G Am F\nEm  D  C").sections.length === 0, "an all-chords paste yields no lyric sections");
+}
+
 /* ---- ML note-transcription decoder (basic-pitch-style, pure half) ----------
  * Pure-JS multi-F0 can't reliably transcribe dense vocal harmony, so the real path is a
  * hosted ML model. The model is a device-only seam, but the decode (activation matrices →
@@ -1950,6 +2007,21 @@ expect(/detectSectionsOffThread/.test(uiSrc) && /catch \(_\) \{ return detectSec
   "section detection runs off-thread with a main-thread fallback (correctness never depends on the worker)");
 expect(/applySectionsToScore\(sc, sections/.test(uiSrc), "the edited section list is stamped onto the chart, so exports carry it");
 expect(/src\.start\(0, at\)/.test(uiSrc), "the stem player can seek, so a section row can jump to its start");
+
+/* Lyrics IMPORT (chords-over-lyrics / ChordPro → clean lyrics-only sheet) — the
+ * transform is the pure engine parseLyrics (tested above); the UI is glue only.
+ * Statically guard: it imports the pure function, ships the two components, the
+ * Lyrics mode renders the panel, and the file input keeps NO `accept` filter
+ * (the iOS UTI lesson — .cho/.crd/.pro would be greyed out otherwise). */
+expect(/\bparseLyrics\b/.test(uiSrc), "UI must import + use the pure parseLyrics (no lyric-stripping logic duplicated in the UI)");
+expect(/function LyricsImport\(/.test(uiSrc) && /function LyricsPanel\(/.test(uiSrc), "the UI ships LyricsImport + LyricsPanel");
+expect(/mode === "lyrics" \? <LyricsPanel\b/.test(uiSrc), "the Lyrics mode renders LyricsPanel (live capture + import sub-tools)");
+{
+  const liBody = uiSrc.slice(uiSrc.indexOf("function LyricsImport("));
+  const fileInput = liBody.slice(0, liBody.indexOf("</section>"));
+  expect(/<input type="file"[^>]*onChange=\{onFile\}/.test(fileInput) && !/<input type="file"[^>]*accept=/.test(fileInput),
+    "the lyrics-import file input has NO accept attribute (iOS greys out .cho/.crd/.pro UTIs otherwise)");
+}
 
 if (fails.length) {
   console.error("\nFAIL:\n  " + fails.join("\n  "));
