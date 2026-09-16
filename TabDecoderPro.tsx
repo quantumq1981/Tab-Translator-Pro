@@ -1832,6 +1832,7 @@ function LyricsImport({ C }) {
   const [raw, setRaw] = useState("");
   const [fileName, setFileName] = useState("");
   const [copied, setCopied] = useState(false);
+  const [sentPerf, setSentPerf] = useState(false);
   const [err, setErr] = useState("");
 
   const parsed = useMemo(() => {
@@ -1869,6 +1870,41 @@ function LyricsImport({ C }) {
       document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 0);
     } catch (_) {}
+  };
+  /* ---- Handoff → Chord Sheet Maker Pro · Perform Lyrics ----------------------
+   * The two apps share the same GitHub Pages origin (quantumq1981.github.io) →
+   * shared localStorage. Once the chords are stripped and the lyrics extracted,
+   * hand the clean sheet straight to Pro's auto-scrolling PERFORM LYRICS stage
+   * view. Its own contract (mirror of csm:handoff:v1): the lyric body rides in
+   * localStorage["csm:lyrics:v1"] and we navigate to Pro with ?import=lyrics; Pro
+   * reads the key once, clears it, and opens the Perform Lyrics modal pre-seeded.
+   *
+   * The lyric BODY carries the section headers + stanzas but NOT the title line —
+   * the title/artist ride as their own envelope fields so Pro seeds its Song
+   * title / Artist inputs with them (a title dropped into the body would re-parse
+   * as a stray lyric line). Same-tab nav is mobile-popup-safe; try/catch so a
+   * failure can never wedge the UI. */
+  const sendToPerform = () => {
+    if (!parsed || !parsed.sections.length) return;
+    try {
+      const bodyLines = [];
+      parsed.sections.forEach((sec, si) => {
+        if (sec.label) bodyLines.push(sec.label.toUpperCase());
+        sec.blocks.forEach((blk, bi) => { if (bi > 0) bodyLines.push(""); blk.forEach((l) => bodyLines.push(l)); });
+        if (si < parsed.sections.length - 1) bodyLines.push("");
+      });
+      const env = {
+        v: 1,
+        source: "tab-translator-pro",
+        createdAt: new Date().toISOString(),
+        title: parsed.title || fileName.replace(/\.[^.]+$/, "") || "",
+        artist: parsed.subtitle || "",
+        lyrics: bodyLines.join("\n"),
+      };
+      localStorage.setItem("csm:lyrics:v1", JSON.stringify(env));
+      setSentPerf(true);
+      window.location.assign(`${window.location.origin}/chord-sheet-maker-pro/?import=lyrics`);
+    } catch (e) { setSentPerf(false); console.warn("Perform Lyrics handoff failed:", e); }
   };
 
   return (
@@ -1915,6 +1951,8 @@ function LyricsImport({ C }) {
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
             <button onClick={copy} style={{ ...chip(C), padding: "6px 14px", color: copied ? C.green : C.text, borderColor: copied ? C.green : C.border }}>{copied ? "✓ Copied" : "Copy lyrics"}</button>
             <button onClick={download} style={{ ...chip(C), padding: "6px 14px" }}>Download .txt</button>
+            <button onClick={sendToPerform} title="Open these lyrics in Chord Sheet Maker Pro's auto-scrolling Perform Lyrics stage view"
+              style={{ ...chip(C), padding: "6px 14px", color: sentPerf ? C.green : C.amber, borderColor: sentPerf ? C.green : C.amber, fontWeight: 600 }}>{sentPerf ? "opening Pro ✓" : "🎤 Perform on Chord Sheet Maker Pro"}</button>
             <button onClick={clear} style={{ ...chip(C), padding: "6px 14px", color: C.dim }}>Clear</button>
           </div>
         </>

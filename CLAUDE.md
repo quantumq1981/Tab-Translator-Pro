@@ -1206,6 +1206,33 @@ not audio, so it is fully deterministic and on-device.
   `parseLyrics`, ships `LyricsImport`/`LyricsPanel`, the Lyrics mode renders `LyricsPanel`,
   the file input has no `accept`). React render itself is device-only (smoke-test on hardware).
 
+### Lyrics IMPORT → Chord Sheet Maker Pro · Perform Lyrics handoff (2026-09-16)
+
+Once `LyricsImport` has stripped the chords and extracted the words, a **🎤 Perform on
+Chord Sheet Maker Pro** button (in the Copy/Download/Clear action row) sends the clean
+lyric sheet straight to CSMP's auto-scrolling **Perform Lyrics** stage view — the two
+apps used in tandem (recognize/strip here → perform there). Same GitHub Pages origin →
+shared `localStorage`, so this is a **new same-origin handoff channel** alongside the
+forward `csm:handoff:v1` (chart) and reverse `ttp:decode:v1` (raw file).
+
+- **Contract `csm:lyrics:v1` + `?import=lyrics`** (mirror of the chart handoff):
+  envelope `{ v:1, source:"tab-translator-pro", createdAt, title, artist, lyrics }`.
+  `lyrics` is the **section headers + stanzas ONLY** (no title line — the title/artist
+  ride as their own fields so CSMP seeds its Song title / Artist inputs, instead of a
+  stray leading lyric line). Built in `sendToPerform` (`LyricsImport`, browser-only glue)
+  by re-flattening `parsed.sections` (UPPERCASE labels, blank line between stanzas/
+  sections — the same shape `lyricsToText` emits minus the title). `title` ←
+  `parsed.title || fileName`, `artist` ← `parsed.subtitle`.
+- `localStorage.setItem("csm:lyrics:v1", …)` then **same-tab** nav to
+  `${origin}/chord-sheet-maker-pro/?import=lyrics` (mobile-popup-safe); try/catch so a
+  failure can't wedge the UI. CSMP reads the key once, clears it, strips the param, and
+  opens its Perform Lyrics modal pre-seeded (`consumeLyricsHandoff` in CSMP index.html →
+  `PerformanceLyrics.openPerformanceLyrics(lyrics, title, artist)`). Because the body is
+  plain UPPERCASE-header text, CSMP's `parseLyrics` re-detects the sections cleanly.
+- Engine stays pure — this is sender glue only (no test change; the transpile guard
+  covers the JSX). Device smoke-test: strip a chords-over-lyrics sheet → 🎤 → CSMP opens
+  the stage view with the words + title.
+
 ## Audio → CHORDS from an isolated stem (2026-06-20)
 
 "Upload an isolated instrument stem → get a chord/note sketch." The owner's pro workflow
