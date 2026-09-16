@@ -181,6 +181,7 @@ import {
   scoreToCSML,
   describeScore,
   scoreToMusicPrompt,
+  parseLyrics,
   _STEP_ALTER_SHARP,
   _STEP_ALTER_FLAT,
   _pcStepAlter,
@@ -778,7 +779,7 @@ export default function TabDecoderPro() {
           </div>
         )}
 
-        {mode === "tuner" ? <LiveTuner C={C} useSharp={useSharp} /> : mode === "lyrics" ? <LyricsCapture C={C} /> : mode === "audio" ? <AudioImport C={C} useSharp={useSharp} /> : (
+        {mode === "tuner" ? <LiveTuner C={C} useSharp={useSharp} /> : mode === "lyrics" ? <LyricsPanel C={C} /> : mode === "audio" ? <AudioImport C={C} useSharp={useSharp} /> : (
         <div className={"tdp-cols" + (mode === "manual" ? " manual" : "")} style={{ position: "relative" }}>
           <section className="panel-rise" style={{ animationDelay: ".05s", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
             {mode === "manual" ? (
@@ -1757,6 +1758,179 @@ function LyricsCapture({ C }) {
       {err && <div style={{ marginTop: 12, color: C.red, fontSize: 12 }}>{err}</div>}
       <div style={{ marginTop: 16, fontSize: 11, color: C.dim, lineHeight: 1.6 }}>
         Note: in Chrome the audio is sent to Google's speech servers for recognition (the recognizer is the browser's, not this app) — so unlike the rest of Tab Translator, lyrics capture isn't fully on-device. Needs mic permission.
+      </div>
+    </section>
+  );
+}
+
+/* ---- Lyrics panel wrapper: live speech-to-text OR import chords/ChordPro ----
+ * The mode-level "Lyrics" tab now offers two sub-tools, switched here so the top
+ * mode row stays uncluttered:
+ *   • Live capture — the existing Web Speech mic transcription (LyricsCapture).
+ *   • Import — paste/upload a chords-over-lyrics tab or a ChordPro file and get a
+ *     clean, lyrics-ONLY sheet back (LyricsImport). */
+function LyricsPanel({ C }) {
+  const [sub, setSub] = useState("import"); // default to the new, deterministic tool
+  return (
+    <div style={{ maxWidth: 620, margin: "0 auto" }}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+        <button onClick={() => setSub("import")} style={{ ...toggle(C), ...(sub === "import" ? activeToggle(C) : {}) }}>📄 Import chords / ChordPro</button>
+        <button onClick={() => setSub("live")} style={{ ...toggle(C), ...(sub === "live" ? activeToggle(C) : {}) }}>🎙️ Live capture</button>
+      </div>
+      {sub === "live" ? <LyricsCapture C={C} /> : <LyricsImport C={C} />}
+    </div>
+  );
+}
+
+/* ---- Lyrics IMPORT — chords-over-lyrics / ChordPro → clean lyrics-only sheet -
+ * Paste (or upload) a tab in either dialect — the classic ultimate-guitar.com
+ * "chords over lyrics" layout, or a ChordPro file with inline [C] chords and
+ * {directives}. The pure engine `parseLyrics` strips every chord, keeps the words
+ * and the section structure, and this renders it as a printable lyric sheet:
+ * centered/underlined section headers, left-aligned stanzas — a hymnal page.
+ *
+ * The file <input> deliberately has NO `accept` attribute (the same iOS lesson as
+ * the Guitar Pro / audio uploads: `accept` maps to UTIs and greys out .cho/.crd/
+ * .pro/.chordpro on iOS). Anything that reads as text is accepted; the engine
+ * auto-detects the dialect line by line. Engine stays pure — this is glue only. */
+const _LYRICS_EXAMPLE = [
+  "[Verse 1]",
+  "       C                       G",
+  "There's a bright golden haze on the meadow",
+  "       C                       G",
+  "There's a bright golden haze on the meadow",
+  "         F                   C",
+  "The corn is as high as an elephant's eye",
+  "          G                        C",
+  "An' it looks like it's climbing clear up in the sky",
+  "",
+  "[Chorus]",
+  "   C            G",
+  "Oh, what a beautiful mornin',",
+  "   C            G",
+  "Oh, what a beautiful day.",
+  "   F              C",
+  "I got a beautiful feelin'",
+  "      G                 C",
+  "Ev'rything's goin' my way.",
+].join("\n");
+
+function readFileText(file) {
+  // Blob.text() where available (modern Safari incl. iOS 14+), FileReader fallback.
+  if (file && typeof file.text === "function") return file.text();
+  return new Promise((resolve, reject) => {
+    try {
+      const fr = new FileReader();
+      fr.onload = () => resolve(String(fr.result || ""));
+      fr.onerror = () => reject(fr.error || new Error("read failed"));
+      fr.readAsText(file);
+    } catch (e) { reject(e); }
+  });
+}
+
+function LyricsImport({ C }) {
+  const [raw, setRaw] = useState("");
+  const [fileName, setFileName] = useState("");
+  const [copied, setCopied] = useState(false);
+  const [err, setErr] = useState("");
+
+  const parsed = useMemo(() => {
+    if (!raw.trim()) return null;
+    try { return parseLyrics(raw); } catch (_) { return null; }
+  }, [raw]);
+
+  const stats = useMemo(() => {
+    if (!parsed) return null;
+    let lines = 0; parsed.sections.forEach((s) => s.blocks.forEach((b) => (lines += b.length)));
+    return { sections: parsed.sections.length, lines };
+  }, [parsed]);
+
+  const onFile = (e) => {
+    setErr("");
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    setFileName(f.name || "");
+    readFileText(f).then((txt) => setRaw(txt || "")).catch(() => setErr("Couldn't read that file as text."));
+    e.target.value = ""; // allow re-selecting the same file
+  };
+  const loadExample = () => { setFileName(""); setErr(""); setRaw(_LYRICS_EXAMPLE); };
+  const clear = () => { setRaw(""); setFileName(""); setErr(""); };
+  const copy = () => {
+    const txt = parsed && parsed.plain.trim(); if (!txt) return;
+    try { navigator.clipboard.writeText(txt); setCopied(true); setTimeout(() => setCopied(false), 1200); } catch (_) {}
+  };
+  const download = () => {
+    const txt = parsed && parsed.plain.trim(); if (!txt) return;
+    try {
+      const base = (parsed.title || fileName.replace(/\.[^.]+$/, "") || "lyrics").replace(/[^\w .'-]+/g, "").trim() || "lyrics";
+      const blob = new Blob([parsed.plain], { type: "text/plain" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a"); a.href = url; a.download = base + ".txt";
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    } catch (_) {}
+  };
+
+  return (
+    <section className="panel-rise" style={{ position: "relative", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 20 }}>
+      <SectionLabel C={C}>IMPORT · CHORDS-OVER-LYRICS or CHORDPRO → LYRICS-ONLY SHEET</SectionLabel>
+      <div style={{ fontSize: 12, color: C.dim, lineHeight: 1.6, marginBottom: 12 }}>
+        Paste a song from <b>ultimate-guitar.com</b> (chords-over-lyrics) or drop in a <b>ChordPro</b> file — the chords are stripped and the words are re-arranged into a clean, printable <b>lyrics-only</b> sheet with section headers. Everything stays on your device.
+      </div>
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 10 }}>
+        <label style={{ ...chip(C), padding: "6px 14px", cursor: "pointer", color: C.amber, borderColor: C.amber }}>
+          ⬆ Upload text / ChordPro
+          <input type="file" onChange={onFile} style={{ display: "none" }} />
+        </label>
+        <button onClick={loadExample} style={{ ...chip(C), padding: "6px 14px" }}>Load example</button>
+        {fileName && <span style={{ fontSize: 11, color: C.dim }}>{fileName}</span>}
+        {stats && <span style={{ fontSize: 11, color: C.dim, marginLeft: "auto" }}>{stats.sections} section{stats.sections === 1 ? "" : "s"} · {stats.lines} line{stats.lines === 1 ? "" : "s"}</span>}
+      </div>
+
+      <textarea
+        value={raw}
+        onChange={(e) => setRaw(e.target.value)}
+        placeholder={"Paste chords-over-lyrics or ChordPro here…\n\n       C            G\nThere's a bright golden haze on the meadow"}
+        spellCheck={false}
+        style={{ width: "100%", boxSizing: "border-box", minHeight: 120, resize: "vertical", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: 12, fontSize: 12.5, lineHeight: 1.5, color: C.text, fontFamily: "'IBM Plex Mono', monospace", marginBottom: 14 }}
+      />
+
+      {parsed && parsed.sections.length > 0 ? (
+        <>
+          <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: "22px 20px", marginBottom: 12, maxHeight: 460, overflowY: "auto" }}>
+            {parsed.title && <div style={{ textAlign: "center", fontWeight: 700, fontSize: 17, color: C.text, marginBottom: 4, textDecoration: "underline" }}>{parsed.title}</div>}
+            {parsed.subtitle && <div style={{ textAlign: "center", fontSize: 12, color: C.dim, marginBottom: 10 }}>{parsed.subtitle}</div>}
+            {parsed.sections.map((sec, si) => (
+              <div key={si} style={{ marginTop: si === 0 ? (parsed.title ? 14 : 0) : 22 }}>
+                {sec.label && <div style={{ textAlign: "center", fontWeight: 700, fontSize: 13.5, letterSpacing: 0.5, color: C.text, textDecoration: "underline", textUnderlineOffset: 3, marginBottom: 8 }}>{sec.label.toUpperCase()}</div>}
+                {sec.blocks.map((blk, bi) => (
+                  <div key={bi} style={{ marginTop: bi === 0 ? 0 : 12 }}>
+                    {blk.map((l, li) => <div key={li} style={{ fontSize: 14, lineHeight: 1.55, color: C.text }}>{l}</div>)}
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            <button onClick={copy} style={{ ...chip(C), padding: "6px 14px", color: copied ? C.green : C.text, borderColor: copied ? C.green : C.border }}>{copied ? "✓ Copied" : "Copy lyrics"}</button>
+            <button onClick={download} style={{ ...chip(C), padding: "6px 14px" }}>Download .txt</button>
+            <button onClick={clear} style={{ ...chip(C), padding: "6px 14px", color: C.dim }}>Clear</button>
+          </div>
+        </>
+      ) : raw.trim() ? (
+        <div style={{ fontSize: 12, color: C.dim, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: 16 }}>
+          No lyric lines found — this looks like it's all chords, tab or directives. Paste a section that has words under the chords.
+        </div>
+      ) : (
+        <div style={{ fontSize: 12, color: C.dim, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: 16 }}>
+          The formatted, chords-removed lyric sheet will appear here.
+        </div>
+      )}
+
+      {err && <div style={{ marginTop: 12, color: C.red, fontSize: 12 }}>{err}</div>}
+      <div style={{ marginTop: 16, fontSize: 11, color: C.dim, lineHeight: 1.6 }}>
+        Recognised structure: ChordPro <code>{"{title}"}</code>/<code>{"{c: …}"}</code>/<code>{"{soc}"}</code>/<code>{"{sov}"}</code> and <code>[Verse]</code>/<code>[Chorus]</code>-style headers, plus bare <b>Verse / Chorus / Bridge / Intro / Outro …</b> labels. A lone bracketed single letter (e.g. <code>[A]</code>) reads as a chord and is removed — write sub-sections as <code>[Verse A]</code> if you want them kept, or add headers in your text.
       </div>
     </section>
   );

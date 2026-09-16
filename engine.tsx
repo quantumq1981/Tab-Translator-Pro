@@ -1869,6 +1869,167 @@ function scoreToMusicPrompt(score, opts = {}) {
   return { prompt, style, title, instrumental, command, describe: d };
 }
 
+/* ---- Lyrics / ChordPro → clean lyrics-only sheet ---------------------------
+ * A pure text transform (NO score, NO DOM): take a "chords-over-lyrics" tab or a
+ * ChordPro file — the two things ultimate-guitar.com et al. hand out — and return
+ * the LYRICS ONLY, arranged into titled sections and stanzas: a printable lyric
+ * sheet like a hymnal page. It is the inverse of an authoring tool — strip the
+ * chords, keep the words and the song's structure.
+ *
+ * Two input dialects, auto-detected LINE BY LINE (a file may even mix them):
+ *   - ChordPro           — chords inline in [brackets]; {directives} for title /
+ *                          sections; {sot}…{eot} tab blocks (skipped, not lyrics).
+ *   - Chords-over-lyrics — a monospace chord LINE sitting above each lyric line;
+ *                          `[Verse]`-style section headers.
+ *
+ * The load-bearing decision is chord-vs-word disambiguation. `_parseSym` is too
+ * loose for this (its suffix is `.*`, so it treats the word "Cab" as C+"ab"), so
+ * we use a STRICT chord matcher (`_CHORD_RE`, a tight suffix alphabet) and then
+ * classify at LINE level: a line is a chord line only when EVERY token is a chord
+ * or a repeat/barline marker — so a single ordinary word protects the whole lyric
+ * line. Ambiguity note: a lone `[A]`/`[B]` is both a valid chord and a possible
+ * sub-section label; we resolve it toward CHORD (drop it). The standard section
+ * vocabulary (`[Verse]`, `{soc}`, "Chorus:") is recognised robustly instead.
+ *
+ * Everything here is pure + headless-testable; the LyricsCapture UI renders the
+ * returned structure (centered/underlined section headers, stanza spacing). */
+
+// Strict chord-symbol matcher — root + a suffix built ONLY from real chord-quality
+// tokens, optional /bass. The tight suffix alphabet is what stops lyric words
+// (Add, Cab, Bad, Fed, Gem, Bee…) reading as chords; line-level classification
+// (below) then needs ALL tokens to be chords, so one plain word saves the line.
+const _CHORD_RE = /^[A-G][#b♯♭]?(?:maj|min|sus|add|aug|dim|m|M|Δ|ø|°|\+|-|\d|[#b♯♭]|\(|\))*(?:\/[A-G][#b♯♭]?)?$/;
+// Tokens allowed to ride ON a chord line without disqualifying it (repeat counts,
+// barlines, no-chord) — so "C G Am (x2) |" is still recognised as a chord line.
+const _CHORD_LINE_MARK = /^(?:x\d+|\d+x|\(x?\d+x?\)|N\.?C\.?|\||\|\||:\||\|:|:|-|–|—|%|\*|>|\.)$/i;
+
+function isChordToken(tok) {
+  if (tok == null) return false;
+  const t = String(tok).trim();
+  return t !== "" && _CHORD_RE.test(t);
+}
+// A whole line is a CHORD LINE (drop it) only when it is non-blank and every token
+// is a chord or an allowed marker, with at least one real chord present.
+function isChordLine(line) {
+  if (line == null) return false;
+  const s = String(line).trim();
+  if (!s) return false;
+  const toks = s.split(/\s+/);
+  let chords = 0;
+  for (const tk of toks) {
+    if (isChordToken(tk)) { chords++; continue; }
+    if (_CHORD_LINE_MARK.test(tk)) continue;
+    return false;                               // a real word → this is a lyric line
+  }
+  return chords >= 1;
+}
+// Remove inline [chord] tags from a ChordPro lyric line and close the gap the tag
+// left behind (so "There's a [C]bright  [G]haze" → "There's a bright haze").
+function stripInlineChords(line) {
+  return String(line == null ? "" : line)
+    .replace(/\[[^\]]*\]/g, "")
+    .replace(/[ \t]{2,}/g, " ");
+}
+
+const _SECTION_KEYWORDS = /^(?:intro|verse|pre[\s-]*chorus|chorus|refrain|hook|bridge|interlude|instrumental|solo|outro|ending|coda|tag|vamp|breakdown)\b/i;
+const _trimEdges = (s) => String(s == null ? "" : s).replace(/^[ \t]+/, "").replace(/[ \t]+$/, "");
+// Normalise a section label: drop wrapping brackets/colons, collapse spaces, and
+// expand the most common shorthand (v2 → Verse 2, Ch → Chorus, Br → Bridge).
+function _cleanLabel(raw) {
+  let s = String(raw == null ? "" : raw).replace(/^[\[({<]+/, "").replace(/[\])}>:：]+\s*$/, "").replace(/\s+/g, " ").trim();
+  let m;
+  if ((m = s.match(/^(?:v|vs)\s*\.?\s*(\d+)?$/i))) return "Verse" + (m[1] ? " " + m[1] : "");
+  if ((m = s.match(/^(?:ch|cho)\s*\.?\s*(\d+)?$/i))) return "Chorus" + (m[1] ? " " + m[1] : "");
+  if ((m = s.match(/^br\s*\.?\s*(\d+)?$/i))) return "Bridge" + (m[1] ? " " + m[1] : "");
+  return s;
+}
+// A short bare line that names a known section ("Chorus", "Verse 2", "Bridge:") —
+// keyword-gated so shouted all-caps LYRICS (e.g. "STOP!") never become headers.
+function _isBareSectionLabel(trimmed) {
+  const t = String(trimmed == null ? "" : trimmed).replace(/[:：]\s*$/, "").trim();
+  if (!t || t.split(/\s+/).length > 4) return false;
+  if (isChordLine(t)) return false;                          // don't swallow a chord line
+  return _SECTION_KEYWORDS.test(t);
+}
+
+// The parser. Returns { title, subtitle, sections:[{label, blocks:[[line…]]}], plain }.
+function parseLyrics(text, opts = {}) {
+  const meta = { title: null, subtitle: null };
+  const sections = [];
+  let cur = null, stanza = [], inTab = false;
+  const mk = (label) => { const s = { label: label || null, blocks: [] }; sections.push(s); return s; };
+  const flushStanza = () => { if (stanza.length) { if (!cur) cur = mk(null); cur.blocks.push(stanza); stanza = []; } };
+  const newSection = (label) => {
+    flushStanza();
+    if (cur && cur.label == null && cur.blocks.length === 0) cur.label = _cleanLabel(label);
+    else cur = mk(_cleanLabel(label));
+  };
+
+  const rawLines = String(text == null ? "" : text).replace(/\r\n?/g, "\n").split("\n");
+  for (const raw of rawLines) {
+    const line = raw.replace(/\t/g, "    ");
+    const trimmed = line.trim();
+
+    // ChordPro directive line: {name} or {name: value}
+    const dir = trimmed.match(/^\{\s*([a-zA-Z_][\w-]*)\s*(?::\s*([\s\S]*?))?\s*\}$/);
+    if (dir) {
+      const name = dir[1].toLowerCase(), val = (dir[2] || "").trim();
+      if (name === "sot" || name === "start_of_tab") inTab = true;
+      else if (name === "eot" || name === "end_of_tab") inTab = false;
+      else if (name === "title" || name === "t") { if (!meta.title) meta.title = val; }
+      else if (name === "subtitle" || name === "st" || name === "artist") { if (!meta.subtitle) meta.subtitle = val; }
+      else if (name === "comment" || name === "c" || name === "ci" || name === "comment_italic" || name === "comment_box" || name === "cb") { if (val) newSection(val); }
+      else if (name === "sov" || name === "start_of_verse") newSection(val || "Verse");
+      else if (name === "soc" || name === "start_of_chorus") newSection(val || "Chorus");
+      else if (name === "sob" || name === "start_of_bridge") newSection(val || "Bridge");
+      // start_of_part/eov/eoc/eob/define/key/tempo/… → not lyrics, ignored
+      continue;
+    }
+    if (inTab) continue;                          // ASCII-tab block content is not lyrics
+
+    if (!trimmed) { flushStanza(); continue; }    // blank line → stanza break
+
+    // whole-line bracket: a section header [Verse 1] — but a lone [chord] is dropped
+    const brk = trimmed.match(/^\[([^\]]+)\]$/);
+    if (brk) {
+      const inner = brk[1].trim();
+      if (!isChordToken(inner)) newSection(inner);
+      continue;
+    }
+    // ChordPro lyric line with inline [chord] tags → strip them, keep the words
+    if (/\[[^\]]*\]/.test(line)) {
+      const lyric = _trimEdges(stripInlineChords(line));
+      if (lyric) stanza.push(lyric);
+      continue;
+    }
+    if (isChordLine(line)) continue;              // chords-over-lyrics chord line → drop
+    if (_isBareSectionLabel(trimmed)) { newSection(trimmed); continue; }
+    stanza.push(_trimEdges(line));                // a lyric line
+  }
+  flushStanza();
+
+  const kept = sections.filter((s) => s.blocks.some((b) => b.length));
+  const parsed = { title: meta.title || null, subtitle: meta.subtitle || null, sections: kept };
+  parsed.plain = lyricsToText(parsed);
+  return parsed;
+}
+
+// Render a parsed lyric structure to a clean plain-text sheet: optional title,
+// UPPERCASE section headers, a blank line between stanzas and between sections.
+function lyricsToText(parsed) {
+  const out = [];
+  if (parsed.title) { out.push(parsed.title); out.push(""); }
+  (parsed.sections || []).forEach((sec, si) => {
+    if (sec.label) out.push(sec.label.toUpperCase());
+    (sec.blocks || []).forEach((blk, bi) => {
+      if (bi > 0) out.push("");
+      blk.forEach((l) => out.push(l));
+    });
+    if (si < parsed.sections.length - 1) out.push("");
+  });
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").replace(/\s+$/, "") + "\n";
+}
+
 /* ---- exporters: a score → ChordPro grid / ABC (chords + playable notes) ----
  * Both accept an `overrides` map ({ "<bar>.<beat>": "Symbol" }) so user edits
  * flow straight into the exported text. ABC emits the actual chord tones as
@@ -4602,4 +4763,15 @@ export {
   alignPcmToScore,
   describeScore,
   scoreToMusicPrompt,
+  _CHORD_RE,
+  _CHORD_LINE_MARK,
+  isChordToken,
+  isChordLine,
+  stripInlineChords,
+  _SECTION_KEYWORDS,
+  _trimEdges,
+  _cleanLabel,
+  _isBareSectionLabel,
+  parseLyrics,
+  lyricsToText,
 };
