@@ -2338,8 +2338,30 @@ function _harmonyXML(sym, useSharp) {
   if (slash) { const bp = _PC_BY_NAME[slash.replace("♯", "#").replace("♭", "b")]; if (bp !== undefined) { const [bs, ba] = _pcStepAlter(bp, useSharp); s += `        <bass><bass-step>${bs}</bass-step>${ba ? `<bass-alter>${ba}</bass-alter>` : ""}</bass>\n`; } }
   return s + "      </harmony>";
 }
+/* MusicXML divisions are per QUARTER note. Keep ordinary charts at four, but
+ * increase the resolution when true onsets/durations include tuplets or other
+ * fractions; the displayed integer beat grid must never determine playback. */
+function _xmlDivisions(score) {
+  let div = 4;
+  const gcd = (a, b) => b ? gcd(b, a % b) : a;
+  for (const bar of score.bars || []) {
+    const bt = (bar.timeSig || score.timeSig || [4, 4])[1];
+    for (const e of bar.events || []) {
+      for (const beat of [e.qbeat != null ? e.qbeat : e.beat, e.qdur != null ? e.qdur : e.durBeats]) {
+        const q = beat * 4 / bt;
+        if (!Number.isFinite(q)) continue;
+        let den = 1;
+        while (den <= 96 && Math.abs(q * den - Math.round(q * den)) > 1e-7) den++;
+        if (den > 96) { div = Math.max(div, 480); continue; } // PDF-derived free timing
+        const next = div / gcd(div, den) * den;
+        div = next <= 10080 ? next : 10080;
+      }
+    }
+  }
+  return div;
+}
 function scoreToMusicXML(score, opts = {}) {
-  const ov = opts.overrides || {}, useSharp = opts.useSharp !== false, div = 4;
+  const ov = opts.overrides || {}, useSharp = opts.useSharp !== false, div = _xmlDivisions(score);
   const L = ['<?xml version="1.0" encoding="UTF-8"?>', '<score-partwise version="3.1">',
     "  <part-list><score-part id=\"P1\"><part-name>Chords</part-name></score-part></part-list>", '  <part id="P1">'];
   let prevSig = null, wroteDiv = false;
@@ -2360,13 +2382,22 @@ function scoreToMusicXML(score, opts = {}) {
      * matching write. MuseScore/Guitar Pro draw it as the boxed "Chorus" above the
      * staff — the same marker CSMPN's `- Chorus` and CSML's `[Chorus]` carry. */
     if (bar.section) L.push(`      <direction placement="above"><direction-type><rehearsal>${_xmlEsc(String(bar.section))}</rehearsal></direction-type></direction>`);
+    let cursor = 0;
+    const barDiv = Math.round(bb * div * 4 / bt);
+    const pushRest = (duration) => { if (duration > 0) L.push(`      <note><rest/><duration>${duration}</duration></note>`); };
     bar.events.forEach((e) => {
+      const onset = Math.max(cursor, Math.round((e.qbeat != null ? e.qbeat : e.beat) * div * 4 / bt));
+      if (onset >= barDiv) return;
+      pushRest(onset - cursor);
       const sym = ov[`${bar.number}.${e.beat}`] != null ? ov[`${bar.number}.${e.beat}`] : e.symbol;
-      const durDiv = Math.max(1, Math.round((e.durBeats * div * 4) / bt));
+      const durDiv = Math.min(barDiv - onset, Math.max(1, Math.round((e.qdur != null ? e.qdur : e.durBeats) * div * 4 / bt)));
+      cursor = onset + durDiv;
       const h = _harmonyXML(sym, useSharp); if (h) L.push(h);
       const midis = e.midis && e.midis.length ? e.midis : [];
       if (!midis.length) { L.push(`      <note><rest/><duration>${durDiv}</duration></note>`); return; }
-      const ty = _typeForQuarters(durDiv / div);
+      const tuplet = e.tuplet > 1 ? e.tuplet : 0;
+      const normal = tuplet ? _csmpnTupNormal(tuplet) : 0;
+      const ty = _typeForQuarters(durDiv / div * (tuplet ? tuplet / normal : 1));
       midis.forEach((m, ci) => {
         const p = _midiToPitchXML(m, useSharp);
         L.push("      <note>");
@@ -2374,9 +2405,11 @@ function scoreToMusicXML(score, opts = {}) {
         L.push(`        <pitch><step>${p.step}</step>${p.alter ? `<alter>${p.alter}</alter>` : ""}<octave>${p.oct}</octave></pitch>`);
         L.push(`        <duration>${durDiv}</duration>`);
         if (ty) { L.push(`        <type>${ty.type}</type>`); if (ty.dot) L.push("        <dot/>"); }
+        if (tuplet) L.push(`        <time-modification><actual-notes>${tuplet}</actual-notes><normal-notes>${normal}</normal-notes></time-modification>`);
         L.push("      </note>");
       });
     });
+    pushRest(barDiv - cursor);
     L.push("    </measure>");
   });
   L.push("  </part>", "</score-partwise>", "");

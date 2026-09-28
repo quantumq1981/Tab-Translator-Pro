@@ -395,6 +395,30 @@ expect(bsRt.bars.length === 165, `Blue Sky MusicXML round-trip expected 165 bars
 const bsVerse = bsRt.bars.slice(0, 8).map((b) => b.events.map((e) => e.symbol).join(" ")).join(" ");
 expect(bsVerse === "E A A E E A A E", `Blue Sky round-trip verse drifted: "${bsVerse}"`);
 
+// The displayed beat grid rounds multiple changes to the same beat. MusicXML
+// must use qbeat/qdur so triplets and sixteenths keep their true onsets.
+const tripXml = eng.scoreToMusicXML(tupScore);
+const tripDoc = new DOMParser().parseFromString(tripXml, "text/xml");
+const tripDiv = Number(tripDoc.getElementsByTagName("divisions")[0].textContent);
+const tripNotes = Array.from(tripDoc.getElementsByTagName("note")).filter((n) => !n.getElementsByTagName("chord").length);
+const tripDurs = tripNotes.map((n) => Number(n.getElementsByTagName("duration")[0].textContent));
+expect(tripDurs.reduce((sum, n) => sum + n, 0) === 4 * tripDiv,
+  `4/4 triplet measure must total four beats, got ${tripDurs.join("+")}/${tripDiv}`);
+expect(tripDurs.slice(0, 3).every((n) => n === tripDiv / 3),
+  `triplet events must last a third of a quarter, got ${tripDurs.join(",")}`);
+expect(tripNotes.slice(0, 3).every((n) => n.getElementsByTagName("time-modification")[0]?.getElementsByTagName("actual-notes")[0]?.textContent === "3"),
+  "triplet notes need MusicXML time-modification for notation apps");
+const tripBack = eng.parseMusicXML(tripXml, true);
+expect(tripBack.bars[0].events.length === 4 && Math.abs(tripBack.bars[0].events[1].qbeat - 1 / 3) < 1e-6,
+  "MusicXML triplets should retain their distinct onsets when re-imported");
+const sixteenthXml = eng.scoreToMusicXML(arr16);
+const sixteenthDoc = new DOMParser().parseFromString(sixteenthXml, "text/xml");
+const sixteenthNotes = Array.from(sixteenthDoc.getElementsByTagName("measure")[0].getElementsByTagName("note"))
+  .filter((n) => !n.getElementsByTagName("chord").length);
+expect(sixteenthNotes.length === 16 && sixteenthNotes.every((n) =>
+  Number(n.getElementsByTagName("duration")[0].textContent) === 1),
+  "sixteenth-note arrangement should export sixteen distinct, quarter-beat notes");
+
 /* ---- MIDI export (deterministic SMF; same timing model as ABC/playback) --- */
 function _parseMidi(bytes) {
   // minimal SMF format-0 walker: returns header facts + noteOn pitches + noteOff count
