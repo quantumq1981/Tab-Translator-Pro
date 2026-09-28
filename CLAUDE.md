@@ -678,7 +678,10 @@ bloating the monolith. Lifting `semis`/transpose state out to the parent for per
   Pro show it above the staff) AND the voiced `<note>` pitches, so it re-imports
   as real music *and* **round-trips through `parseMusicXML`** (the notes
   reconstruct the same symbols — that round-trip is a test, incl. the full 165-bar
-  Blue Sky score). All exporters honour `overrides` and the current transpose;
+  Blue Sky score). MusicXML durations and onsets follow `qdur`/`qbeat`, with
+  divisions raised for tuplets and `<time-modification>` on tuplet notes; the
+  displayed integer `durBeats`/`beat` grid is not accurate enough for this export.
+  All exporters honour `overrides` and the current transpose;
   ChordPro/ABC/MusicXML all carry the detected key.
   - **MIDI export** (`scoreToMidi`, Roadmap Wave 2 #9): a 6th exporter — a pure,
     deterministic **Standard MIDI File** (format 0, PPQ 480) returning a
