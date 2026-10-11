@@ -1335,6 +1335,10 @@ message. The device-only seam is now filled by:
 
 ### Voice separation — SATB heuristic on the ML notes (2026-08-22)
 
+> **Superseded as the DEFAULT on 2026-10-11** by the voice-leading split — see
+> "Vocal score v2" below. The register heuristic described here is still available as
+> `splitVoices(notes, { method: "register" })`.
+
 Basic-pitch's output is polyphonic but **unlabeled** — every simultaneous note lands in
 one bucket, so a 3-part vocal-harmony stem reads as chords rather than three lines. The
 zero-dep half-fix is the standard choral-analysis heuristic: at each time slice, sort
@@ -1359,7 +1363,7 @@ the raw ML notes (kept in state) via `useMemo`, so switching the count or the di
 voice is **instant — no re-inference, no re-download**. Voice 1 (single) falls back to
 the original polyphonic score. Downloads apply to exactly the displayed voice's score.
 
-**HONEST LIMITS (deliberate):** (1) sort-by-pitch is register-based, so a genuine
+**HONEST LIMITS (deliberate, of the legacy method):** (1) sort-by-pitch is register-based, so a genuine
 crossing (a bass singer briefly above a tenor line) will swap slots — sung harmony rarely
 crosses, so this is fine most of the time, and Edit fixes the rest. (2) The "one voice per
 slot per slice" model drops notes above/below the outermost voices as spurious. (3) This
@@ -1373,6 +1377,11 @@ two runs assigned to the right voice at the right time; per-voice `polyNotesToSc
 round-trip preserves `source:"ml"` and voices the right pitch; empty/null/voices:0 safe.
 
 ### SATB → standard-notation multi-part score export (2026-08-23)
+
+> **Upgraded 2026-10-11** ("Vocal score v2" below): range-based names + clefs, bracket,
+> key-aware spelling, metric note values, rehearsal marks, learning-track MIDI. The
+> `<words>` staff label described here is now opt-in (`labelStaves`), and ABC uses
+> `%%score [1 2 3]`.
 
 The SATB split above produced per-voice SCORES you could display/export **one at a time**,
 but not a single readable **multi-staff vocal arrangement**. This adds that — a combined
@@ -1460,6 +1469,110 @@ depend on) is **untouched**; these are new functions.
   real notated pitches present, `divisions=480`; an uneven-length voice stays aligned via a
   whole-measure rest; F-major spells midi 70 as B♭; ABC declares one `V:` per voice; a
   single-line stem yields one `Lead Vocal`/`Soprano/Lead` part.
+
+### Vocal score v2 — rehearsal-ready choral score from separated vocals (2026-10-11)
+
+**The ask:** once a vocal stem is split, export a vocal MusicXML score that ACCURATELY shows
+each separated part on its own staff, easy to decipher at rehearsal, so every musician has
+correct materials before the gig. Audit of the v1 path found four accuracy defects and a set
+of engraving gaps; all fixed, every claim below measured on the real stems in the repo
+(basic-pitch run headlessly via `@spotify/basic-pitch` + TF.js-cpu on the vendored model,
+app-faithful 16 kHz → 22050 Hz path) and rendered with Verovio / validated with music21.
+
+**1. Voice separation was the real accuracy bug — now voice-leading (`splitVoices` default).**
+The register heuristic assigns rank r → voice r per slice, so whenever fewer parts sing than
+the split count, every note slides into the TOP voice. On "25 or 6 to 4" (3-part iso vocals)
+voice 1 spanned MIDI 55–84 with a mean step of 7.6 semitones and 37 leaps > a fifth — not one
+singer. The new method (contig/voice-leading separation, after Chew & Wu 2004 / Kilian & Hoos
+2002), pure + headless-tested:
+- `_voiceSlices` (constant-active-set slices, sweep not O(N·B) scan) → `_voiceCenters` learns
+  each voice's register from the FULL-texture slices (exactly V notes sounding).
+- **Phase A, polyphonic slices:** an order-preserving DP (O(k·V)) — voices never cross inside a
+  chord, a HELD note keeps its slot (cost 0), otherwise distance to the slot's reference pitch
+  (last note, decaying to the learned register over `memorySec` 2 s); switching a held note
+  costs `switchCost` 6; when k > V the DP drops the worst misfit (an octave ghost above the
+  soprano), not the real bass.
+- **Phase B, monophonic runs, assigned WHOLE** (contig linking): a run (one note at a time,
+  broken by a chord, a silence > `runGapSec` 1 s or a leap > `runLeap` 9) goes to the ONE slot
+  it links to best at the neighbouring chords + register fit. Without this a verse sung solo
+  before a 3-part chorus was shredded 14/15/9 across staves; with it the lead keeps the verse.
+- **Measured (3 voices):** 25 or 6 to 4 — mean step 7.6/7.3/4.7 → **3.9/3.4/3.8**, leaps >5th
+  37/17/2 → **2/4/2**, emitted fragments 139 → 104 (86 source notes). Heart of Rock & Roll —
+  voice-1 leaps 46 → 10. 6000 dense notes split + export in ~0.3 s.
+- `suggestVoiceCount(notes)` = the largest k sounding together for ≥ 0.5 s AND ≥ 5 % of sung
+  time; the UI pre-selects it (25 or 6 → 3, Heart of Rock & Roll → 2).
+- **Do not** auto-remove octave "ghosts": measured on both stems, the upper note of an exact
+  octave pair is as often the LOUDER one, so amplitude can't tell a model harmonic from a real
+  octave doubling. The k > V drop handles the clear cases only.
+
+**2. Parts named + clefed by RANGE** (`VOICE_TYPES`, `classifyVoiceTypes`, `_lineStats`):
+S C4–A5 · A F3–D5 · T C3–A4 · Bar A2–F4 · B E2–E4. An order-preserving DP over the lines
+(high→low; type never rises; repeats allowed → "Soprano 1/Soprano 2/Alto"). Clef follows the
+type: S/A treble, **T treble-8vb** (`<clef-octave-change>-1`, ABC `clef=treble-8`), Bar/B bass.
+`splitVoicesToScores(…, { naming })`: `"range"` (default) · `"harmony"` (Lead Vocal moved to the
+TOP staff + Harmony / High/Low Harmony — how bands name parts; `leadVoice` picks the line) ·
+`"numbered"` · `"satb"` (legacy positional). A stem with one detected line is "Lead Vocal".
+`vocalRangeReport(parts, {key})` → span, tessitura (p10–p90), notes below/above the type's range.
+
+**3. Key + spelling were wrong in real use.** The UI passed `useSharp:true`, forcing sharps,
+so an F-major chart printed A♯ for B♭. Now:
+- `keyFromNotes` — Krumhansl–Kessler on duration-weighted pitch classes (the right model for
+  sung LINES; `analyzeKey` reasons about chord function). Compared KK / Albrecht–Shanahan /
+  Temperley on the real stems: all three agree (25 or 6 → C major — same signature as A minor,
+  the excerpt's pitch content really is C/E/G; Heart → E♭). The UI key picker overrides.
+- `_keySpeller(key)` spells by SCALE DEGREE: major ♯1 ♭3 ♯4 ♭6 ♭7 (♯1 not ♭2 — V/ii is far
+  commoner than the Neapolitan, so E♭ major's E is E♮ not F♭), minor ♭2 ♮3 ♯4 ♮6 ♮7. Double
+  accidentals fall out (G♯ minor → F𝄪), octave computed from the letter (B♯3, C♭4).
+- MusicXML now carries explicit `<accidental>` with per-bar carry (tied-over notes not
+  re-inflected). **ABC was emitting WRONG PITCHES**: `midiToAbc` ignores `K:` and bar state, so
+  under `K:F` a written `B` (meant B♮) is read as B♭. The multipart ABC now writes accidentals
+  relative to the key with per-bar carry. ⚠ **The single-part `scoreToABC` still uses
+  `midiToAbc` and has the same latent bug for non-diatonic notes in non-C keys** — left alone
+  here to keep the validated ABC corpus byte-identical; fix it next (reuse `_accidentalTracker`).
+
+**4. Metric note values** (`_meterLevels`, `_metricOK`, `_metricValues`): the greedy largest-
+value fill hid beats (a dotted quarter on beat 2 crossing beat 3). Values are now chosen
+greedily-longest-LEGAL against the meter's beat hierarchy (4/4 `[16,8,4,2,1]`, 6/8
+`[12,6,2,1]` …): a value may cross a boundary only if it starts on one at least as strong,
+except one-level syncopation (8-q-8, q-h-q); rests get no syncopation and no dots in simple
+time. Plus `grid` (2 = 8ths, the UI default "readable"; 4 = 16ths) and `legatoBeats` (UI 0.5 —
+basic-pitch releases sung notes early, so without it every syllable is "note + 16th rest";
+measured −10…−25 % rests). A note between ½ and 1 grid step is kept at one step.
+
+**5. Choral engraving + rehearsal materials** (`scoreToMultipartMusicXML`): part-group
+**bracket with `<group-barline>no`** (vocal convention — room for lyrics), `<part-abbreviation>`,
+per-part `<midi-instrument>` (Choir Aahs = GM 53, own channel, spread pan) so notation-app
+playback is a rehearsal track, `<identification>` (composer/arranger/software), metronome in
+the meter's beat unit (6/8 → eighth; `<sound tempo>` stays quarters), detected sections →
+**boxed `<rehearsal>` marks** (top staff only) + a double barline before each, final
+`light-heavy` barline, `barsPerSystem` → `<print new-system>` (UI: 4). ABC mirrors it
+(`%%score [1 2 3]`, `snm=`, `"^Chorus"`, `||`, `|]`). **`scoreToVocalMidi`** — format-1 SMF,
+conductor track (tempo/meter/key-sig/title) + one named Choir-Aahs track per part, timed from
+the SAME quantised cells as the notation (ties re-joined); `emphasize` makes a **learning
+track** (that part 112 vel / vol 127 / centred, others 64 / 72).
+
+**UI (`AudioImport`, browser-only glue):** a "📄 Vocal score" panel under Voices (ML): Parts
+naming chips (+ lead-line picker), Key (auto = KK, + all 24), Rhythm 1/8 · 1/16, Legato, the
+per-part range check, and ⬇ Vocal score (MusicXML) · ABC · Rehearsal MIDI · Learning track
+(displayed part). Voice-picker chips show the part names. Exports pass the detected
+`sections` and `bpm`/meter (6/8 → `beatType 8`).
+
+**Verified:** `npm test` (new block "Vocal score v2" — separation incl. the solo-verse case,
+ghost drop, register learning, voice count, voice types/naming/clefs, KK key, spelling table,
+metric values for 4/4 + 6/8, grid/legato, bracket/abbr/MIDI-instrument/treble-8vb/rehearsal/
+double-bar/final-bar/system breaks/accidental carry/6-8 metronome, ABC key-relative pitches,
+range report, SMF format-1 walk). **Real browser:** the actual app booted in headless Chromium
+(CDNs routed to local React 18.3.1/Babel — the sandbox blocks unpkg/esm.sh), the real stem
+decoded, real cached basic-pitch activations injected as `TTP_NOTE_MODEL`, panel rendered at
+430 px, and the three downloads validated with music21 (0 malformed measures). Regenerated
+samples: `docs/samples/25or6to4-vocal.{musicxml,abc}` + **`25or6to4-vocal-rehearsal.mid`**
+(real stem, ♩=86 from the beat tracker) and `vocal_score.{musicxml,abc}` (synthetic lead + two
+harmonies, verse-solo → chorus, rehearsal marks, G major with a ♯4).
+
+**Honest limits (unchanged by design):** no lyrics (syllable alignment is a separate problem);
+no downbeat detection on vocals (set ♩= and run 🔎 Detect sections); voices can't cross inside a
+chord; a part singing alone far outside its learned register can still land on a neighbour —
+✎ Edit fixes it; output quality is bounded by basic-pitch on the stem.
 
 ### Center-channel (vocal) isolation — score sung harmony from a full mix (2026-07-07)
 
@@ -2146,6 +2259,12 @@ accordingly.
 - **Multi-part picker**: `npm test` parses `tests/fixtures/sample-multipart.musicxml`
   and asserts two parts (`Guitar`, `Rhythm`), `partIndex 0 → C` and `1 → G`, and
   that the single-part fixture reports exactly one part.
+- **Vocal score v2**: `npm test` asserts the voice-leading split keeps a lone low line in the
+  bass slot and a solo verse whole on the lead staff (the register method fails both), drops an
+  octave ghost not the bass, learns registers from full chords, suggests the right voice count;
+  range naming/clefs (S/A/T-8vb/B, SSA repeats, harmony + numbered modes); KK key; scale-degree
+  spelling (C♯ in Dm, B♭ in F, E♮ in E♭, F𝄪 in G♯m, B♯3); metric values (4/4, 6/8, no dotted
+  rests); choral MusicXML structure; ABC key-relative pitches; range report; format-1 MIDI.
 - **Lyrics import (`parseLyrics`)**: `npm test` asserts the strict chord matcher accepts
   real chords and rejects note-letter lyric words (Add/Cab/Bad/Fed/Gem/Bee/Ace), the
   line-level `isChordLine` catches chord lines but spares lyric/blank lines, a full

@@ -1,16 +1,19 @@
 X:1
-T:Sample Vocal Harmony (Lead + 2 Backing)
+T:Vocal score sample — lead + two harmonies
 M:4/4
 L:1/4
-Q:1/4=120
-%%score 1 2 3
-V:1 name="Soprano/Lead" clef=treble
-V:2 name="Alto" clef=treble
-V:3 name="Tenor" clef=treble
-K:C
+Q:1/4=96
+%%score [1 2 3]
+V:1 name="Lead Vocal" snm="Ld." clef=treble
+V:2 name="Harmony 1" snm="H1" clef=treble
+V:3 name="Harmony 2" snm="H2" clef=treble
+K:G
 V:1
-c3- c/2 z/2 | A3- A/2 z/2 | F3- F/2 z/2 | G3- G/2 z/2 |
+"^Verse"G A B2 | c3/2 B/2 A2 | G F G2 | d3 c ||
+"^Chorus"B2 c2 | d ^c d2 | e2 d c | B4 |]
 V:2
-G3- G/2 z/2 | E3- E/2 z/2 | C3- C/2 z/2 | D3- D/2 z/2 |
+Z | Z | Z | Z ||
+G2 A2 | B A F2 | c2 B A | G4 |]
 V:3
-E3- E/2 z/2 | C3- C/2 z/2 | A,3- A,/2 z/2 | B,3- B,/2 z/2 |
+Z | Z | Z | Z ||
+D2 E2 | G E D2 | G2 G F | D4 |]

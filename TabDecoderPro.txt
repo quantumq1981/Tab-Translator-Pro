@@ -215,6 +215,10 @@ import {
   splitVoicesToScores,
   scoreToMultipartMusicXML,
   scoreToMultipartABC,
+  suggestVoiceCount,
+  keyFromNotes,
+  vocalRangeReport,
+  scoreToVocalMidi,
   polyNotesToScore,
   detectChord,
   transcribeChords,
@@ -1285,7 +1289,7 @@ function KeyPicker({ C, value, onChange, cands, useSharp, semis }) {
         </optgroup>
       )}
       <optgroup label="Major">{KEY_CHOICES.filter((k) => k.mode === "major").map((k) => <option key={"M" + k.name} value={k.name}>{k.name} major</option>)}</optgroup>
-      <optgroup label="Minor">{KEY_CHOICES.filter((k) => k.mode === "minor").map((k) => <option key={"m" + k.name} value={k.name}>{k.name} minor</option>)}</optgroup>
+      <optgroup label="Minor">{KEY_CHOICES.filter((k) => k.mode === "minor").map((k) => <option key={"m" + k.name} value={k.name}>{k.name.replace(/m$/, "")} minor</option>)}</optgroup>
     </select>
   );
 }
@@ -2055,6 +2059,11 @@ function AudioImport({ C, useSharp }) {
   const [voiceCount, setVoiceCount] = useState(3);   // SATB split target (1 = no split, 2 = duet, 3 = SAT, 4 = SATB)
   const [voiceIdx, setVoiceIdx] = useState(0);       // which voice slot is displayed (0 = highest / soprano)
   const [sens, setSens] = useState("balanced");      // ML note-detection sensitivity (see SENS): quiet backing vocals need a lower threshold
+  const [partNaming, setPartNaming] = useState("range"); // vocal-score staff labels: range (S/A/T/B) | harmony (lead + harmonies) | numbered
+  const [leadVoice, setLeadVoice] = useState(0);         // harmony naming: which line (high→low) carries the melody → top staff
+  const [vsKey, setVsKey] = useState("");                // vocal-score key override ("" = auto, from the sung notes)
+  const [vsGrid, setVsGrid] = useState(2);               // notation grid: 2 = 8ths (default — easiest to sight-read), 4 = 16ths (detailed)
+  const [vsLegato, setVsLegato] = useState(true);        // hold each sung note across gaps < ½ beat (the model releases early)
   const [raw, setRaw] = useState([]);                // raw engine events (chords: {symbol,midis,…}; notes: {note,…})
   const [bpm, setBpm] = useState(120);
   const [beatInfo, setBeatInfo] = useState(null);   // detected tempo readout
@@ -2174,6 +2183,7 @@ function AudioImport({ C, useSharp }) {
     setMlNotes(notes);
     setMlScore(polyNotesToScore(notes, { bpm, beatsPerBar: bpb, useSharp }));
     setVoiceIdx(0); setOverrides({});
+    return notes;
   };
   const voices = async () => {
     const s = ref.current; if (!s.cur) { setErr("Upload audio first."); return; }
@@ -2186,7 +2196,10 @@ function AudioImport({ C, useSharp }) {
       const out = await model(s.cur, s.sr, {});
       if (!out || !out.frames || !out.onsets) throw new Error("model produced no output");
       s.mlRaw = out;
-      applySens(sens);
+      const notes = applySens(sens);
+      // Start the Split on the number of parts the stem actually has (≥ k notes
+      // together for a meaningful share of the sung time) — the user can override.
+      if (notes && notes.length) { const sug = suggestVoiceCount(notes); setVoiceCount(Math.max(1, Math.min(4, sug.count))); setLeadVoice(0); }
     }
     catch (e) { setErr("Note transcription failed: " + (e && e.message ? e.message : "unknown")); }
     setBusy(false);
@@ -2208,27 +2221,45 @@ function AudioImport({ C, useSharp }) {
     // same audio, same timeline → the detected structure applies to the ML score too
     return base && sections.length ? applySectionsToScore(base, sections, { bpm, beatsPerBar: bpb }) : base;
   }, [mlVoiced, voiceIdx, mlScore, bpm, bpb, useSharp, sections]);
-  const VOICE_LABELS = ["1 (high)", "2", "3", "4"];                // 0-indexed → soprano-first labels; expand if voiceCount grows
-  /* Export ALL voices at once as ONE multi-staff standard-notation score — lead
-   * (voice 1) on the top staff, backing voices below in descending register,
-   * shared key/meter, barlines aligned. Combines every voice via the pure
-   * engine (splitVoicesToScores → scoreToMultipart{MusicXML,ABC}). This is the
-   * SATB deliverable: a real readable vocal arrangement, not per-voice one-offs. */
+  /* The vocal SCORE — every separated line as a labelled part (range-named S/A/T/B,
+   * or lead + harmonies), with its voice type, clef and range. Derived from the raw
+   * ML notes, so naming/key/rhythm changes are instant (no re-inference). Shared by
+   * the voice picker labels, the range check and every vocal-score export. */
+  const vocalParts = useMemo(() => {
+    if (!mlNotes || !mlNotes.length) return [];
+    try { return splitVoicesToScores(mlNotes, { voices: voiceCount, naming: partNaming, leadVoice, bpm, beatsPerBar: bpb, beatType: bpb === 6 ? 8 : 4, useSharp }); }
+    catch (e) { return []; }
+  }, [mlNotes, voiceCount, partNaming, leadVoice, bpm, bpb, useSharp]);
+  const voiceSuggest = useMemo(() => (mlNotes && mlNotes.length ? suggestVoiceCount(mlNotes) : null), [mlNotes]);
+  const autoVocalKey = useMemo(() => (mlNotes && mlNotes.length ? keyFromNotes(mlNotes) : null), [mlNotes]);
+  const vocalKey = vsKey ? parseKeyName(vsKey) : autoVocalKey;
+  const rangeReport = useMemo(() => vocalRangeReport(vocalParts, { key: vocalKey }), [vocalParts, vocalKey]);
+  const voiceLabel = (v) => { const p = vocalParts.find((x) => x.voice === v); return p ? p.name : (v === 0 ? "1 (high)" : String(v + 1)); };
+  /* Export ALL voices at once as ONE rehearsal score: a bracketed choral system
+   * (lead/top part first), key-aware spelling, beat-aware note values, the detected
+   * sections as rehearsal marks, 4 bars per system — plus learning-track MIDI (every
+   * part, or the displayed part emphasised). All pure engine (scoreToMultipart* /
+   * scoreToVocalMidi); this is only the download glue. */
   const exportVocalScore = (fmt) => {
     try {
-      if (!mlNotes || !mlNotes.length) { setErr("Run 🎼 Voices (ML) first."); return; }
-      const parts = splitVoicesToScores(mlNotes, { voices: voiceCount, bpm, beatsPerBar: bpb, useSharp });
-      const key = parts.length ? analyzeKey(parts[0].score) : null;
-      const opts = { key, tempo: bpm, useSharp, title: (name || "Vocals").replace(/\.[^.]+$/, "") };
-      const isXml = fmt === "musicxml";
-      const text = isXml ? scoreToMultipartMusicXML(parts, opts) : scoreToMultipartABC(parts, opts);
-      const mime = isXml ? "application/vnd.recordare.musicxml+xml" : "text/vnd.abc";
-      const ext = isXml ? "musicxml" : "abc";
+      if (!vocalParts.length) { setErr("Run 🎼 Voices (ML) first."); return; }
+      const title = (name || "Vocals").replace(/\.[^.]+$/, "");
+      const opts = { key: vocalKey, tempo: bpm, title, beatsPerBar: bpb, beatType: bpb === 6 ? 8 : 4,
+        grid: vsGrid, legatoBeats: vsLegato ? 0.5 : 0, barsPerSystem: 4, sections };
+      let data, mime, ext, suffix = "";
+      if (fmt === "musicxml") { data = scoreToMultipartMusicXML(vocalParts, opts); mime = "application/vnd.recordare.musicxml+xml;charset=utf-8"; ext = "musicxml"; }
+      else if (fmt === "abc") { data = scoreToMultipartABC(vocalParts, opts); mime = "text/vnd.abc;charset=utf-8"; ext = "abc"; }
+      else {
+        const emphIdx = fmt === "midi-part" ? vocalParts.findIndex((p) => p.voice === voiceIdx) : -1;
+        data = scoreToVocalMidi(vocalParts, { ...opts, emphasize: emphIdx >= 0 ? emphIdx : null });
+        mime = "audio/midi"; ext = "mid";
+        suffix = emphIdx >= 0 ? "_" + vocalParts[emphIdx].name.replace(/[^\w]+/g, "_") + "_learning" : "_rehearsal";
+      }
       const base = (name || "vocal_score").replace(/\.[^.]+$/, "").replace(/[^\w.-]+/g, "_").replace(/^_+|_+$/g, "") || "vocal_score";
-      const blob = new Blob([text], { type: mime + ";charset=utf-8" });
+      const blob = new Blob([data], { type: mime });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
-      a.href = url; a.download = `${base}.${ext}`;
+      a.href = url; a.download = `${base}${suffix}.${ext}`;
       document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 2000);
     } catch (e) { setErr("Vocal score export failed: " + (e && e.message ? e.message : "unknown")); }
@@ -2404,7 +2435,7 @@ function AudioImport({ C, useSharp }) {
                   {Array.from({ length: voiceCount }, (_, v) => (
                     <button key={v} onClick={() => { setVoiceIdx(v); setOverrides({}); }}
                       style={{ ...chip(C), padding: "3px 9px", borderColor: voiceIdx === v ? C.amber : C.border, color: voiceIdx === v ? C.amber : C.dim }}>
-                      {VOICE_LABELS[v] || `${v + 1}`}
+                      {voiceLabel(v)}
                     </button>
                   ))}
                 </>
@@ -2428,15 +2459,67 @@ function AudioImport({ C, useSharp }) {
               <span style={{ color: C.dim }}>Set the song's real BPM — bars & note durations quantise to it. A shorter clip keeps the same tempo.</span>
             </div>
           )}
-          {mlNotes && mlNotes.length > 0 && (
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 8, fontSize: 11 }}>
-              <span style={{ color: C.dim }}>Full score{voiceCount > 1 ? ` (${voiceCount} staves, lead on top)` : ""}:</span>
-              <button onClick={() => exportVocalScore("musicxml")}
-                title="download ALL voices as ONE multi-staff standard-notation score (MusicXML) — opens in MuseScore / Sibelius / Finale"
-                style={{ ...chip(C), padding: "3px 9px", borderColor: C.cyan, color: C.cyan }}>⬇ Vocal score (MusicXML)</button>
-              <button onClick={() => exportVocalScore("abc")}
-                title="download ALL voices as one multi-voice ABC file"
-                style={{ ...chip(C), padding: "3px 9px", borderColor: C.border, color: C.dim }}>⬇ ABC</button>
+          {vocalParts.length > 0 && (
+            <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, padding: 10, marginBottom: 10, fontSize: 11 }}>
+              <div style={{ color: C.cyan, marginBottom: 6 }}>
+                📄 Vocal score — {vocalParts.length} {vocalParts.length === 1 ? "staff" : "staves"}, every part on its own line for rehearsal
+                {voiceSuggest && voiceSuggest.count !== voiceCount && <span style={{ color: C.amber }}> · this stem sings up to {voiceSuggest.count} parts together</span>}
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 6 }}>
+                <span style={{ color: C.dim }} title="Range: S/A/T/B from each line's tessitura (choir). Lead + harmonies: how bands name parts — the lead goes on the top staff.">Parts:</span>
+                {[["range", "Range (S·A·T·B)"], ["harmony", "Lead + harmonies"], ["numbered", "Voice 1–N"]].map(([k, lbl]) => (
+                  <button key={k} onClick={() => setPartNaming(k)}
+                    style={{ ...chip(C), padding: "3px 9px", borderColor: partNaming === k ? C.cyan : C.border, color: partNaming === k ? C.cyan : C.dim }}>{lbl}</button>
+                ))}
+                {partNaming === "harmony" && voiceCount > 1 && (
+                  <select value={leadVoice} onChange={(e) => setLeadVoice(+e.target.value)} title="which line carries the melody — it moves to the top staff"
+                    style={{ ...chip(C), padding: "3px 8px", background: C.raised, cursor: "pointer" }}>
+                    {Array.from({ length: voiceCount }, (_, v) => <option key={v} value={v}>Lead = line {v + 1}{v === 0 ? " (highest)" : v === voiceCount - 1 ? " (lowest)" : ""}</option>)}
+                  </select>
+                )}
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 6 }}>
+                <span style={{ color: C.dim }}>Key:</span>
+                <select value={vsKey} onChange={(e) => setVsKey(e.target.value)} title="key signature + note spelling; auto = Krumhansl–Kessler on the sung notes"
+                  style={{ ...chip(C), padding: "3px 8px", background: C.raised, cursor: "pointer" }}>
+                  <option value="">auto{autoVocalKey ? ` (${keyName({ tonic: autoVocalKey.tonic, mode: "major" }, true)} ${autoVocalKey.mode})` : ""}</option>
+                  <optgroup label="Major">{KEY_CHOICES.filter((k) => k.mode === "major").map((k) => <option key={"M" + k.name} value={k.name}>{k.name} major</option>)}</optgroup>
+                  <optgroup label="Minor">{KEY_CHOICES.filter((k) => k.mode === "minor").map((k) => <option key={"m" + k.name} value={k.name}>{k.name.replace(/m$/, "")} minor</option>)}</optgroup>
+                </select>
+                <span style={{ color: C.dim, marginLeft: 6 }}>Rhythm:</span>
+                {[[2, "1/8 (readable)"], [4, "1/16 (detailed)"]].map(([g, lbl]) => (
+                  <button key={g} onClick={() => setVsGrid(g)}
+                    style={{ ...chip(C), padding: "3px 9px", borderColor: vsGrid === g ? C.green : C.border, color: vsGrid === g ? C.green : C.dim }}>{lbl}</button>
+                ))}
+                <button onClick={() => setVsLegato((x) => !x)} title="hold each sung note through gaps shorter than half a beat (the model releases notes early)"
+                  style={{ ...chip(C), padding: "3px 9px", borderColor: vsLegato ? C.green : C.border, color: vsLegato ? C.green : C.dim }}>{vsLegato ? "✓ " : ""}Legato</button>
+              </div>
+              <div style={{ margin: "6px 0", lineHeight: 1.7 }}>
+                {rangeReport.filter((r) => !r.empty).map((r, i) => (
+                  <div key={i}>
+                    <span style={{ color: C.text }}>{r.name}</span>
+                    <span style={{ color: C.dim }}> · {r.typeName} range · sings {r.lowName}–{r.highName} (mostly {r.tessitura[0]}–{r.tessitura[1]})</span>
+                    {r.ok ? <span style={{ color: C.green }}> ✓ within {r.rangeName}</span>
+                      : <span style={{ color: C.amber }}> ⚠ {r.above ? `${r.above} above` : ""}{r.above && r.below ? ", " : ""}{r.below ? `${r.below} below` : ""} {r.rangeName}</span>}
+                  </div>
+                ))}
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+                <button onClick={() => exportVocalScore("musicxml")}
+                  title="ALL parts as ONE bracketed choral score (MusicXML) — opens in MuseScore / Sibelius / Finale / Dorico; sections become rehearsal marks"
+                  style={{ ...chip(C), padding: "3px 9px", borderColor: C.cyan, color: C.cyan }}>⬇ Vocal score (MusicXML)</button>
+                <button onClick={() => exportVocalScore("abc")} title="all parts as one multi-voice ABC file"
+                  style={{ ...chip(C), padding: "3px 9px", borderColor: C.border, color: C.dim }}>⬇ ABC</button>
+                <button onClick={() => exportVocalScore("midi")} title="rehearsal MIDI: one named track per part (Choir Aahs), balanced"
+                  style={{ ...chip(C), padding: "3px 9px", borderColor: C.border, color: C.dim }}>⬇ Rehearsal MIDI</button>
+                {vocalParts.length > 1 && (
+                  <button onClick={() => exportVocalScore("midi-part")} title="learning track: every part audible, the displayed part loud + centred"
+                    style={{ ...chip(C), padding: "3px 9px", borderColor: C.amber, color: C.amber }}>⬇ Learning track: {voiceLabel(voiceIdx)}</button>
+                )}
+              </div>
+              <div style={{ color: C.dim, marginTop: 6 }}>
+                Set the song's real ♩= above and run 🔎 Detect sections first — bars and rehearsal marks follow them. Parts open as a bracketed choir system; extract individual parts in your notation app.
+              </div>
             </div>
           )}
           {mlDisplayScore

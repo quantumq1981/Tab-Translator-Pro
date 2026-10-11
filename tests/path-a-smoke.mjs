@@ -1392,7 +1392,8 @@ expect(eng.recoverChordGaps([], mud, 0.1, 0.256, { ...noSmooth, recoverMinConfid
   expect(ss.length === 3 && ss.every((n) => n.voice === 0),
     "sequential melody → all voice 0 (only one note active at a time)");
 
-  // Voice CROSSING — held bass note joined then overtaken by a new higher note.
+  // Voice CROSSING (legacy "register" method) — held bass note joined then overtaken
+  // by a new higher note.
   //   held: MIDI 60 from t=0 to t=2 (initially voice 0 since alone)
   //   new:  MIDI 72 from t=1 to t=2 (top rank in [1,2), so voice 0 in that slice)
   // The held 60 becomes voice 1 in [1,2) → emitted as two runs.
@@ -1400,7 +1401,7 @@ expect(eng.recoverChordGaps([], mud, 0.1, 0.256, { ...noSmooth, recoverMinConfid
     { midi: 60, startSec: 0, durSec: 2 },
     { midi: 72, startSec: 1, durSec: 1 },
   ];
-  const sc = eng.splitVoices(cross, { voices: 2 });
+  const sc = eng.splitVoices(cross, { voices: 2, method: "register" });
   const held0 = sc.filter((n) => n.midi === 60);
   expect(held0.length === 2, `crossing splits held note into two runs, got ${held0.length}`);
   expect(held0.some((n) => n.voice === 0 && Math.abs(n.startSec) < 1e-3 && Math.abs(n.durSec - 1) < 1e-3)
@@ -1408,6 +1409,13 @@ expect(eng.recoverChordGaps([], mud, 0.1, 0.256, { ...noSmooth, recoverMinConfid
     "crossing: 60 is v0 in [0,1) then v1 in [1,2) after the higher 72 joins");
   const top = sc.find((n) => n.midi === 72);
   expect(top && top.voice === 0, "crossing: 72 is v0 while it sounds");
+  // Same input, DEFAULT voice-leading method: the held 60 is ONE singer — it stays in
+  // the lower slot for its whole length (one run) and the entering 72 takes the top.
+  const vl = eng.splitVoices(cross, { voices: 2 });
+  const vl60 = vl.filter((n) => n.midi === 60);
+  expect(vl60.length === 1 && vl60[0].voice === 1 && Math.abs(vl60[0].durSec - 2) < 1e-3,
+    `voice-leading: held 60 stays one run in v1, got ${JSON.stringify(vl60)}`);
+  expect(vl.find((n) => n.midi === 72).voice === 0, "voice-leading: entering 72 takes the top slot");
 
   // splitVoices → polyNotesToScore, one score per voice (composability)
   const perVoice = [0, 1, 2].map((v) => eng.polyNotesToScore(s3.filter((n) => n.voice === v), { bpm: 120, beatsPerBar: 4 }));
@@ -1441,7 +1449,7 @@ expect(eng.recoverChordGaps([], mud, 0.1, 0.256, { ...noSmooth, recoverMinConfid
     { midi: 67, startSec: 0, durSec: 1 }, { midi: 64, startSec: 0, durSec: 1 }, { midi: 60, startSec: 0, durSec: 1 },
     { midi: 72, startSec: 2, durSec: 1 }, { midi: 69, startSec: 2, durSec: 1 }, { midi: 65, startSec: 2, durSec: 1 },
   ];
-  const parts = eng.splitVoicesToScores(vox, { voices: 3, bpm: 120, beatsPerBar: 4, useSharp: true });
+  const parts = eng.splitVoicesToScores(vox, { voices: 3, bpm: 120, beatsPerBar: 4, useSharp: true, naming: "satb" });
   expect(parts.length === 3, `3 voices → 3 parts, got ${parts.length}`);
   expect(parts.map((p) => p.name).join("|") === "Soprano/Lead|Alto|Tenor", `part names: ${parts.map((p) => p.name)}`);
   // voice 0 = highest line (soprano) → G4/C5 ; voice 2 = lowest → C4/F4
@@ -1464,7 +1472,8 @@ expect(eng.recoverChordGaps([], mud, 0.1, 0.256, { ...noSmooth, recoverMinConfid
   expect(/<sound tempo="120"\/>/.test(xml), "tempo carried into the score");
   // real notes (not just names), voice labels visible as text
   expect(/<pitch><step>G<\/step><octave>4<\/octave><\/pitch>/.test(xml), "soprano G4 emitted as a real notated pitch");
-  expect(/<words>Soprano\/Lead<\/words>/.test(xml), "voice label emitted as a text expression");
+  expect(!/<words>/.test(xml), "no duplicate staff-label text by default (the part name sits left of the staff)");
+  expect(/<words>Soprano\/Lead<\/words>/.test(eng.scoreToMultipartMusicXML(parts, { labelStaves: true })), "labelStaves:true prints the name above bar 1");
   // divisions ≥ 480 (task requirement)
   expect(/<divisions>480<\/divisions>/.test(xml), "divisions ≥ 480 (per requirement)");
   // barlines align: every part spans the same measure count
@@ -1492,11 +1501,11 @@ expect(eng.recoverChordGaps([], mud, 0.1, 0.256, { ...noSmooth, recoverMinConfid
   // ABC multi-voice
   const abc = eng.scoreToMultipartABC(parts, { key: { tonic: 0, mode: "major" }, tempo: 120, title: "Vocal Test" });
   expect(/V:1 name="Soprano\/Lead"/.test(abc) && /V:2 name="Alto"/.test(abc) && /V:3 name="Tenor"/.test(abc), "ABC declares one V: per voice, lead first");
-  expect(/%%score 1 2 3/.test(abc), "ABC groups all three voices on one system");
+  expect(/%%score \[1 2 3\]/.test(abc), "ABC brackets all three voices on one system (barlines unjoined)");
 
   // "no backing detected" → lead-only score
   const solo = eng.splitVoicesToScores([{ midi: 67, startSec: 0, durSec: 1 }], { voices: 3, bpm: 120, beatsPerBar: 4 });
-  expect(solo.length === 1 && solo[0].name === "Soprano/Lead", `single-line stem → one lead part, got ${solo.length}`);
+  expect(solo.length === 1 && solo[0].name === "Lead Vocal", `single-line stem → one lead part, got ${solo.length} ${solo[0] && solo[0].name}`);
 
   // --- 16th-grid notation quantiser: valid durations, ties, measures sum exact ---
   // A note of 3.5 quarters (14 ticks) → dotted-half TIED to an eighth, then rests
@@ -1524,6 +1533,183 @@ expect(eng.recoverChordGaps([], mud, 0.1, 0.256, { ...noSmooth, recoverMinConfid
   // greedy value decomposition
   expect(eng._noteValuesFromTicks(5).map((v) => v.type + (v.dot ? "." : "")).join(" ") === "quarter 16th", "5 ticks → quarter + 16th");
   expect(eng._noteValuesFromTicks(7).map((v) => v.type + (v.dot ? "." : "")).join(" ") === "quarter. 16th", "7 ticks → dotted-quarter + 16th");
+}
+
+/* ---- Vocal score v2 (2026-10-11): voice-leading split, choral engraving, key-aware
+ * spelling, metric notation, rehearsal marks, learning-track MIDI. ------------- */
+{
+  // -- voice-leading separation -------------------------------------------------
+  // A 3-part texture (full chords at t=0 and t=4) with a stretch in between where
+  // ONLY the low voice sings a stepwise line. The legacy split dumps that line into
+  // the TOP voice (rank 0); voice-leading keeps it with the singer it belongs to.
+  const tex = [
+    { midi: 72, startSec: 0, durSec: 1 }, { midi: 67, startSec: 0, durSec: 1 }, { midi: 60, startSec: 0, durSec: 1 },
+    { midi: 59, startSec: 1, durSec: 1 }, { midi: 57, startSec: 2, durSec: 1 }, { midi: 59, startSec: 3, durSec: 1 },
+    { midi: 72, startSec: 4, durSec: 1 }, { midi: 67, startSec: 4, durSec: 1 }, { midi: 60, startSec: 4, durSec: 1 },
+  ];
+  const vRef = eng.splitVoices(tex, { voices: 3, method: "register" });
+  const vVL = eng.splitVoices(tex, { voices: 3 });
+  const lowLine = (sp) => sp.filter((n) => n.startSec >= 1 - 1e-6 && n.startSec < 4 - 1e-6).map((n) => n.voice);
+  expect(lowLine(vRef).every((v) => v === 0), "legacy register split puts a lone low line in the top voice (the defect)");
+  expect(lowLine(vVL).every((v) => v === 2), `voice-leading keeps the lone low line in the bass slot, got ${lowLine(vVL)}`);
+  // A melody sung ALONE (verse) before the harmonies join (chorus) stays on ONE staff —
+  // the lead's — even though it sits in Harmony 1's chorus register (run linking).
+  {
+    const N = [];
+    [[0, 1, 67], [1, 1, 69], [2, 2, 71], [4, 1.5, 72], [5.5, 0.5, 71], [6, 2, 69], [8, 1, 67], [9, 1, 66], [10, 2, 67], [12, 3, 74], [15, 1, 72]]
+      .forEach(([b, d, m]) => N.push({ midi: m, startSec: b * 0.5, durSec: d * 0.5 }));
+    [[16, 2, [71, 67, 62]], [18, 2, [72, 69, 64]], [20, 2, [74, 71, 67]], [22, 2, [74, 66, 62]]]
+      .forEach(([b, d, ms]) => ms.forEach((m) => N.push({ midi: m, startSec: b * 0.5, durSec: d * 0.5 })));
+    const sv = eng.splitVoices(N, { voices: 3 });
+    const verse = sv.filter((n) => n.startSec < 8 - 1e-6);
+    expect(verse.length === 11 && verse.every((n) => n.voice === 0), `solo verse stays whole on the lead (v0): ${verse.map((n) => n.voice).join("")}`);
+    expect(sv.filter((n) => n.startSec >= 8 - 1e-6 && n.voice === 0).map((n) => n.midi).join(",") === "71,72,74,74", "chorus top line = lead");
+  }
+  // learned registers come from the full-texture slices
+  const cen = eng._voiceCenters(eng._voiceSlices(tex), 3);
+  expect(cen[0] === 72 && cen[1] === 67 && cen[2] === 60, `register centres from full chords, got ${cen}`);
+  // more notes than voices: the misfit (an octave ghost above the soprano) is dropped, NOT the real bass
+  const ghost = [
+    { midi: 72, startSec: 0, durSec: 1 }, { midi: 67, startSec: 0, durSec: 1 }, { midi: 60, startSec: 0, durSec: 1 },
+    { midi: 84, startSec: 1, durSec: 1, amp: 0.3 }, { midi: 72, startSec: 1, durSec: 1 }, { midi: 67, startSec: 1, durSec: 1 }, { midi: 60, startSec: 1, durSec: 1 },
+  ];
+  const gs = eng.splitVoices(ghost, { voices: 3 });
+  expect(!gs.some((n) => n.midi === 84) && gs.filter((n) => n.midi === 60).every((n) => n.voice === 2),
+    `k>V drops the ghost above, keeps the bass: ${JSON.stringify(gs.map((n) => n.midi + "v" + n.voice))}`);
+  // every voice line stays monophonic
+  for (let v = 0; v < 3; v++) {
+    const line = vVL.filter((n) => n.voice === v).sort((a, b) => a.startSec - b.startSec);
+    expect(line.every((n, i) => !i || n.startSec >= line[i - 1].startSec + line[i - 1].durSec - 1e-6), `voice ${v} line is monophonic`);
+  }
+  // suggested voice count: up to 3 parts for meaningful time, a 50ms 4-note blip doesn't count
+  const sug = eng.suggestVoiceCount([...tex, { midi: 76, startSec: 0, durSec: 0.05 }]);
+  expect(sug.count === 3, `suggestVoiceCount → 3, got ${JSON.stringify(sug)}`);
+  expect(eng.suggestVoiceCount([]).count === 1, "suggestVoiceCount on nothing → 1");
+
+  // -- voice types / naming / clefs ---------------------------------------------
+  const st = (m) => ({ median: m, p10: m - 3, p90: m + 3, low: m - 5, high: m + 5 });
+  expect(eng.classifyVoiceTypes([st(72), st(64), st(57), st(50)]).join(",") === "soprano,alto,tenor,bass", "SATB medians classify S,A,T,B");
+  expect(eng.classifyVoiceTypes([st(74), st(70), st(63)]).join(",") === "soprano,soprano,alto", "SSA trio classifies soprano,soprano,alto (repeats allowed)");
+  expect(eng.classifyVoiceTypes([st(50), st(70)]).join(",") !== "bass,soprano", "type order never rises as the lines descend");
+  const satb = [
+    { midi: 72, startSec: 0, durSec: 2 }, { midi: 64, startSec: 0, durSec: 2 }, { midi: 57, startSec: 0, durSec: 2 }, { midi: 48, startSec: 0, durSec: 2 },
+    { midi: 74, startSec: 2, durSec: 2 }, { midi: 65, startSec: 2, durSec: 2 }, { midi: 59, startSec: 2, durSec: 2 }, { midi: 43, startSec: 2, durSec: 2 },
+  ];
+  const sp = eng.splitVoicesToScores(satb, { voices: 4, bpm: 120, beatsPerBar: 4 });
+  expect(sp.map((p) => p.name).join("|") === "Soprano|Alto|Tenor|Bass", `range naming: ${sp.map((p) => p.name)}`);
+  expect(sp.map((p) => p.clef).join("|") === "treble|treble|treble8vb|bass", `clefs by voice type: ${sp.map((p) => p.clef)}`);
+  expect(sp.map((p) => p.abbr).join("|") === "S.|A.|T.|B.", "standard part abbreviations");
+  const hp = eng.splitVoicesToScores(satb, { voices: 4, bpm: 120, naming: "harmony", leadVoice: 1 });
+  expect(hp[0].name === "Lead Vocal" && hp[0].voice === 1, "harmony naming: lead part (voice 2) moves to the TOP staff");
+  expect(hp.slice(1).map((p) => p.name).join("|") === "High Harmony|Low Harmony 1|Low Harmony 2", `harmony labels: ${hp.map((p) => p.name)}`);
+  expect(eng.splitVoicesToScores(satb, { voices: 4, naming: "numbered" }).map((p) => p.name).join("|") === "Voice 1|Voice 2|Voice 3|Voice 4", "numbered naming");
+
+  // -- key from notes (Krumhansl–Kessler) ---------------------------------------
+  const scaleNotes = (pcs, base) => pcs.map((pc, i) => ({ midi: base + pc, durSec: i === 0 ? 3 : 1 }));
+  const kG = eng.keyFromNotes(scaleNotes([7, 9, 11, 0, 2, 4, 6, 7, 2, 11], 48));
+  expect(kG && kG.tonic === 7 && kG.mode === "major", `G-major line → G major, got ${JSON.stringify(kG)}`);
+  const kAm = eng.keyFromNotes(scaleNotes([9, 0, 4, 9, 11, 0, 2, 4, 8, 9, 4, 9], 48));
+  expect(kAm && kAm.tonic === 9 && kAm.mode === "minor", `A-minor line (with G#) → A minor, got ${JSON.stringify(kAm)}`);
+  expect(eng.keyFromNotes([]) === null, "keyFromNotes on nothing → null");
+
+  // -- key-aware spelling ---------------------------------------------------------
+  const nm = (key, m) => { const p = eng._keySpeller(key)(m); return p.step + ({ "-2": "bb", "-1": "b", 0: "", 1: "#", 2: "x" })[p.alter] + p.oct; };
+  expect(nm({ tonic: 2, mode: "minor" }, 61) === "C#4", "D minor leading tone is C#, not Db");
+  expect(nm({ tonic: 5, mode: "major" }, 70) === "Bb4", "F major 4th is Bb");
+  expect(nm({ tonic: 3, mode: "major" }, 64) === "E4", "Eb major chromatic E is E-natural (#1), not Fb");
+  expect(nm({ tonic: 8, mode: "minor" }, 67) === "Fx4", "G# minor leading tone is F double-sharp");
+  expect(nm({ tonic: 1, mode: "minor" }, 60) === "B#3", "C# minor leading tone is B#3 (octave from the letter)");
+  expect(nm({ tonic: 6, mode: "major" }, 65) === "E#4", "F# major 7th is E#");
+  expect(nm({ tonic: 0, mode: "major" }, 70) === "Bb4" && nm({ tonic: 0, mode: "major" }, 66) === "F#4", "C major: b7 flat, #4 sharp");
+
+  // -- metric note values --------------------------------------------------------
+  const meter44 = eng._meterLevels(4, 4), meter68 = eng._meterLevels(6, 8);
+  expect(meter44.levels.join(",") === "16,8,4,2,1" && meter68.levels.join(",") === "12,6,2,1" && eng._meterLevels(3, 4).levels.join(",") === "12,4,2,1",
+    `meter hierarchies 4/4 ${meter44.levels} 6/8 ${meter68.levels}`);
+  const vals = (a, b, m, rest) => eng._metricValues(a, b, m, rest).map((v) => v.type + (v.dot ? "." : "")).join(" ");
+  expect(vals(4, 10, meter44, false) === "quarter eighth", `dotted-qtr on beat 2 shows beat 3 (q~e), got ${vals(4, 10, meter44, false)}`);
+  expect(vals(2, 6, meter44, false) === "quarter", "8th-QTR-8th syncopation kept as one quarter");
+  expect(vals(4, 12, meter44, false) === "half", "qtr-HALF-qtr syncopation kept as one half");
+  expect(vals(0, 12, meter44, true) === "half quarter", `rests never dotted in simple time, got ${vals(0, 12, meter44, true)}`);
+  expect(vals(2, 8, meter68, false) === "quarter eighth", `6/8: note across the dotted-qtr beat splits there, got ${vals(2, 8, meter68, false)}`);
+  expect(vals(0, 6, meter68, true) === "quarter.", "6/8: a dotted-quarter rest on the beat is fine");
+
+  // -- notation options: grid + legato -----------------------------------------
+  const ragged = [{ midi: 67, onsetBeat: 0, durBeat: 0.3 }, { midi: 69, onsetBeat: 0.5, durBeat: 0.3 }, { midi: 71, onsetBeat: 1, durBeat: 0.9 }];
+  const cellsOf = (o) => eng._voiceNotationMeasures(ragged, { beatsPerBar: 4, beatType: 4, div: 480, ...o }).measures[0];
+  const shape = (cs) => cs.map((c) => (c.rest ? "r" : "n") + ":" + c.type + (c.dot ? "." : "")).join(" ");
+  expect(cellsOf({}).filter((c) => c.rest).length > cellsOf({ legatoBeats: 0.5 }).filter((c) => c.rest).length, "legato closes the tiny gaps between sung syllables");
+  expect(cellsOf({ grid: 2 }).every((c) => c.type !== "16th"), `8th grid emits no 16ths, got ${shape(cellsOf({ grid: 2 }))}`);
+  expect(cellsOf({ grid: 2, legatoBeats: 0.5 }).reduce((s, c) => s + c.divs, 0) === 1920, "grid/legato measures still sum to a full bar");
+
+  // -- the choral MusicXML -----------------------------------------------------
+  const kC = { tonic: 0, mode: "major" };
+  const cx = eng.scoreToMultipartMusicXML(sp, { key: kC, tempo: 96, title: "Rehearsal", composer: "Test", barsPerSystem: 1,
+    sections: [{ label: "Chorus", startSec: 2.5 }] });
+  const cdoc = new DOMParser().parseFromString(cx, "text/xml");
+  expect(cdoc.getElementsByTagName("parsererror").length === 0, "choral MusicXML is well-formed");
+  expect(/<part-group type="start" number="1"><group-symbol>bracket<\/group-symbol><group-barline>no<\/group-barline><\/part-group>/.test(cx)
+    && /<part-group type="stop" number="1"\/>/.test(cx), "vocal staves bracketed with barlines broken between staves");
+  expect((cx.match(/<part-abbreviation>/g) || []).length === 4, "every part carries an abbreviation for later systems");
+  expect((cx.match(/<midi-program>53<\/midi-program>/g) || []).length === 4 && /<midi-channel>4<\/midi-channel>/.test(cx), "each part = Choir Aahs on its own MIDI channel");
+  expect(/<clef><sign>G<\/sign><line>2<\/line><clef-octave-change>-1<\/clef-octave-change><\/clef>/.test(cx), "tenor part uses treble-8vb");
+  expect(/<clef><sign>F<\/sign><line>4<\/line><\/clef>/.test(cx), "bass part uses bass clef");
+  expect(/<creator type="composer">Test<\/creator>/.test(cx) && /<software>Tab Translator Pro<\/software>/.test(cx), "identification block");
+  expect(/<rehearsal enclosure="rectangle">Chorus<\/rehearsal>/.test(cx), "section → boxed rehearsal mark");
+  expect((cx.match(/<rehearsal /g) || []).length === 1, "rehearsal mark printed once (top staff), not on every part");
+  expect((cx.match(/light-light/g) || []).length === 4 && (cx.match(/light-heavy/g) || []).length === 4, "double bar before the section + final barline on every part");
+  expect((cx.match(/<print new-system="yes"\/>/g) || []).length === 4, "barsPerSystem:1 → a system break at bar 2 in each part");
+  expect(/<metronome><beat-unit>quarter<\/beat-unit><per-minute>96<\/per-minute><\/metronome>/.test(cx), "metronome mark");
+  // accidentals: printed when needed, carried through the bar, cancelled by a natural
+  const accLine = [{ midi: 66, onsetBeat: 0, durBeat: 1 }, { midi: 66, onsetBeat: 1, durBeat: 1 }, { midi: 65, onsetBeat: 2, durBeat: 1 }, { midi: 66, onsetBeat: 4, durBeat: 1 }];
+  const ax = eng.scoreToMultipartMusicXML([{ name: "Alto", beatNotes: accLine, clef: "treble" }], { key: kC });
+  const accs = (ax.match(/<accidental>[a-z-]+<\/accidental>/g) || []).map((x) => x.replace(/<\/?accidental>/g, ""));
+  expect(accs.join(",") === "sharp,natural,sharp", `accidental carry: F# F# F♮ | F# → sharp,natural,sharp, got ${accs}`);
+  // 6/8 metronome on the eighth, sound tempo in quarters
+  const x68 = eng.scoreToMultipartMusicXML([{ name: "S", beatNotes: [{ midi: 72, onsetBeat: 0, durBeat: 3 }] }], { key: kC, tempo: 180, beatsPerBar: 6, beatType: 8 });
+  expect(/<beat-unit>eighth<\/beat-unit><per-minute>180/.test(x68) && /<sound tempo="90"\/>/.test(x68), "6/8: metronome in eighths, <sound tempo> in quarters");
+
+  // -- ABC: pitches relative to K:, per-bar accidentals --------------------------
+  const fLine = [{ midi: 71, onsetBeat: 0, durBeat: 1 }, { midi: 71, onsetBeat: 1, durBeat: 1 }, { midi: 70, onsetBeat: 2, durBeat: 1 }, { midi: 71, onsetBeat: 4, durBeat: 1 }];
+  const fabc = eng.scoreToMultipartABC([{ name: "Lead", beatNotes: fLine }], { key: { tonic: 5, mode: "major" } });
+  const body = fabc.split("\n").slice(fabc.split("\n").indexOf("V:1", fabc.indexOf("K:")) + 1).join(" ");
+  expect(/K:F/.test(fabc) && /=B B _B/.test(body) && /\| =B/.test(body), `ABC under K:F writes B-natural as =B (carried) and Bb as _B after it: ${body}`);
+  const sabc = eng.scoreToMultipartABC(sp, { key: kC, sections: [{ label: "Chorus", startSec: 2.5 }] });
+  expect(/clef=treble-8/.test(sabc) && /snm="T\."/.test(sabc), "ABC tenor uses treble-8 + short name");
+  expect(/"\^Chorus"/.test(sabc) && /\|\|/.test(sabc) && /\|\]/.test(sabc), "ABC rehearsal annotation, section double bar, final bar");
+
+  // -- range report -------------------------------------------------------------
+  const hi = eng.splitVoicesToScores([{ midi: 84, startSec: 0, durSec: 1 }, { midi: 72, startSec: 1, durSec: 1 }], { voices: 1 });
+  hi[0].voiceType = "soprano";
+  const rr = eng.vocalRangeReport(hi, { key: kC });
+  expect(rr[0].above === 1 && rr[0].below === 0 && !rr[0].ok && rr[0].highName === "C6" && rr[0].rangeName === "C4–A5", `range report flags the C6: ${JSON.stringify(rr[0])}`);
+  expect(eng.vocalRangeReport(sp, { key: kC }).every((r) => r.ok), "a clean SATB stays inside every range");
+
+  // -- learning-track MIDI (format 1, one track per part) ------------------------
+  const mid = eng.scoreToVocalMidi(sp, { key: kC, tempo: 120, title: "Rehearsal", emphasize: 1 });
+  const dv = new DataView(mid.buffer);
+  expect(String.fromCharCode(...mid.slice(0, 4)) === "MThd" && dv.getUint16(8) === 1 && dv.getUint16(10) === 5 && dv.getUint16(12) === 480,
+    "SMF format 1, conductor + 4 part tracks, PPQ 480");
+  // walk tracks: count note-ons + velocities per track
+  let off = 14; const tracks = [];
+  while (off < mid.length) {
+    const len = dv.getUint32(off + 4); const data = mid.slice(off + 8, off + 8 + len); off += 8 + len;
+    const t = { ons: [], name: "", program: null }; let i = 0, run = 0;
+    const vlq = () => { let v = 0, b; do { b = data[i++]; v = (v << 7) | (b & 0x7f); } while (b & 0x80); return v; };
+    while (i < data.length) {
+      vlq(); let st = data[i];
+      if (st === 0xFF) { const ty = data[i + 1]; i += 2; const l = vlq(); if (ty === 0x03) t.name = String.fromCharCode(...data.slice(i, i + l)); i += l; continue; }
+      if (st & 0x80) { run = st; i++; } else st = run;
+      const hi4 = st & 0xf0;
+      if (hi4 === 0xC0) { t.program = data[i]; i += 1; }
+      else { const a = data[i], b = data[i + 1]; i += 2; if (hi4 === 0x90 && b > 0) t.ons.push([a, b]); }
+    }
+    tracks.push(t);
+  }
+  expect(tracks.slice(1).map((t) => t.name).join("|") === "Soprano|Alto|Tenor|Bass" && tracks.slice(1).every((t) => t.program === 52), "named part tracks on Choir Aahs");
+  expect(tracks[2].ons.length === 2 && tracks[2].ons.every(([, v]) => v === 112) && tracks[1].ons.every(([, v]) => v === 64), "emphasized part louder, others ducked");
+  expect(tracks[4].ons.map(([m]) => m).join(",") === "48,43", `bass track plays its own line, got ${tracks[4].ons.map(([m]) => m)}`);
+  console.log(`Vocal score v2: voice-leading split · ${sp.map((p) => p.name + "(" + p.clef + ")").join(" ")} · key-aware spelling · metric values · rehearsal MIDI ${mid.length} B`);
 }
 
 /* ---- DTW audio↔score auto-sync -------------------------------------------- */
