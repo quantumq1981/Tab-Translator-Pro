@@ -41,7 +41,10 @@ one staff per sung part — plus rehearsal MIDI:
      sections as boxed rehearsal marks with double bars, 4 bars per system, final
      barline, a Choir-Aahs playback instrument per part. Opens in **MuseScore /
      Sibelius / Finale / Dorico**; extract individual parts there.
-   - **⬇ ABC** — the same score as multi-voice ABC.
+   - **⬇ ABC** / **⧉ Copy ABC** — the same score as multi-voice ABC notation 2.1 (UTF-8,
+     `%abc-2.1` header, pitches written against the key signature). iPhone/iPad/Mac treat
+     a `.abc` file as the unrelated *Alembic* 3D format, so on Apple devices it saves as
+     `.abc.txt` (the ABC standard's own `.txt` fallback); a toggle switches to `.abc`.
    - **⬇ Rehearsal MIDI** — one named track per part; **⬇ Learning track** — every part
      audible with the selected part loud and centred.
 
