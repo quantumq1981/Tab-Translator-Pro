@@ -16,38 +16,43 @@ so no manual Settings toggle is required. If your org/repo policy blocks that,
 set **Settings → Pages → Build and deployment → Source** to **GitHub Actions**
 once and re-run the workflow.
 
-## Vocal harmony → standard-notation score (SATB)
+## Vocal harmony → rehearsal-ready vocal score
 
-The **Audio 🎵** mode can turn an isolated vocal stem into a readable, multi-staff
-vocal arrangement:
+The **Audio 🎵** mode turns an isolated vocal stem into a readable choral score —
+one staff per sung part — plus rehearsal MIDI:
 
 1. Upload an isolated vocal stem (a single mixed vocal, or a pre-separated stem).
-2. Tap **🎼 Voices (ML)** to run the pluggable note model (Spotify `basic-pitch`)
-   — this transcribes the actual sung notes, not just chord names.
-3. Choose a **Split** (2 / 3 / 4 voices). The engine's SATB heuristic assigns each
-   note to a voice by pitch register (voice 1 = highest = lead). Use the
-   **Sensitivity** control (Lead / Balanced / Full harmony) if quiet backing
-   voices are under-detected — it re-thresholds instantly, no re-analysis.
-4. Tap **⬇ Vocal score (MusicXML)** (or **⬇ ABC**) to download **all voices at
-   once** as a single multi-staff score:
-   - The **lead vocal is the top staff**, backing voices below in descending
-     register (`Soprano/Lead`, `Alto`, `Tenor`, `Bass`).
-   - Real standard notation — notes, rests, barlines, time signature, key
-     signature, and a visible voice label above each staff.
-   - `divisions=480`, one `<part>`/staff per voice, aligned barlines.
-   - Opens cleanly in **MuseScore / Sibelius / Finale** (any MusicXML reader).
+   Set the song's real **♩=** and, optionally, run **🔎 Detect sections**.
+2. Tap **🎼 Voices (ML)** to run the note model (Spotify `basic-pitch`) — the actual
+   sung notes, not chord names. **Sensitivity** (Lead / Balanced / Full harmony)
+   re-thresholds instantly if quiet backing voices are under-detected.
+3. **Split** is pre-set to the number of parts the stem actually sings. Notes are
+   assigned to parts by **voice leading** (each singer's line stays continuous;
+   a melody sung alone stays on one staff), not just by register.
+4. In the **📄 Vocal score** panel choose how parts are named — **Range**
+   (Soprano / Alto / Tenor / Baritone / Bass from each line's tessitura), **Lead +
+   harmonies** (lead on the top staff), or **Voice 1–N** — the **Key** (auto-detected
+   from the notes, overridable) and **Rhythm** (1/8 readable · 1/16 detailed, Legato).
+   A range check flags notes outside each part's comfortable range.
+5. Download:
+   - **⬇ Vocal score (MusicXML)** — a bracketed choir system (barlines broken between
+     staves), part names + abbreviations, tenor in treble-8vb / low parts in bass clef,
+     key-aware spelling with proper accidentals, beat-aware note values and ties,
+     sections as boxed rehearsal marks with double bars, 4 bars per system, final
+     barline, a Choir-Aahs playback instrument per part. Opens in **MuseScore /
+     Sibelius / Finale / Dorico**; extract individual parts there.
+   - **⬇ ABC** — the same score as multi-voice ABC.
+   - **⬇ Rehearsal MIDI** — one named track per part; **⬇ Learning track** — every part
+     audible with the selected part loud and centred.
 
-A sample output is committed at
-[`docs/samples/vocal_score.musicxml`](docs/samples/vocal_score.musicxml)
-(lead + two backing harmony voices) with an ABC companion.
-
-Notes are quantised to a **16th-note grid** and emitted as real note-values with
-ties, so every measure sums exactly and the file validates. A sample generated
-end-to-end from a real 3-part isolated-vocal recording ("25 or 6 to 4") is at
-[`docs/samples/25or6to4-vocal.musicxml`](docs/samples/25or6to4-vocal.musicxml).
+Samples: [`docs/samples/vocal_score.musicxml`](docs/samples/vocal_score.musicxml)
+(lead + two harmonies, verse → chorus) and, generated end-to-end from a real 3-part
+isolated-vocal recording ("25 or 6 to 4"),
+[`docs/samples/25or6to4-vocal.musicxml`](docs/samples/25or6to4-vocal.musicxml)
+(+ `.abc`, `-rehearsal.mid`).
 
 **Honest limits.** Note detection quality depends on the model + stem isolation;
-the voice split is register-based (rare genuine voice crossings show as swaps — fix
-with ✎ Edit); and there is no tempo detection on the vocal path — set ♩=BPM /
-meter with the Audio-panel controls (defaults 120 / 4/4). See `docs/ML-NOTES.md`
+voices can't cross inside a chord and a part singing alone far outside its usual
+register can land on a neighbouring staff (fix with ✎ Edit); no lyrics; no downbeat
+detection on vocals — set ♩= / meter and sections. See `docs/ML-NOTES.md`
 and `CLAUDE.md`.

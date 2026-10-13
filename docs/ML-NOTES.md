@@ -97,3 +97,20 @@ If quality is disappointing, the first thing to try is running the note model at
 ORIGINAL sample rate from `onFile` (currently we take the 16 kHz analysis buffer). That's
 a one-line change in `TabDecoderPro.tsx voices()` — pass `s.audioBuf.getChannelData(0)` +
 `s.audioBuf.sampleRate` instead of `s.cur` + `s.sr`.
+
+## Voice separation + vocal score v2 (2026-10-11)
+
+basic-pitch's output is unlabeled polyphony; turning it into per-singer lines is now done by
+**voice-leading separation** (`splitVoices`, default) rather than per-slice pitch rank — see
+CLAUDE.md "Vocal score v2" for the algorithm and the measurements on the real stems
+(25 or 6 to 4: per-voice mean step 7.6 → ~3.5 semitones, leaps > a fifth 37 → ≤ 4). Two
+findings worth keeping here:
+
+- **Octave "ghosts" are not separable by amplitude.** On both real stems the upper note of an
+  exact-octave pair was as often the louder one, so a ghost filter would delete real octave
+  doublings. Only the k > V case (more notes than parts) drops the worst misfit.
+- **Headless reproduction of the model works** (`@spotify/basic-pitch@1.0.1` +
+  `@tensorflow/tfjs@3.21.0` in Node, loading the vendored `models/basic-pitch/` through a custom
+  `tf.io` handler, ~60 s CPU for a 45 s stem). Cache the onset/frame matrices to JSON once and
+  iterate on everything downstream (`notesFromActivations` → `splitVoices` → exporters) in
+  milliseconds.

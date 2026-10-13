@@ -2417,37 +2417,50 @@ function scoreToMusicXML(score, opts = {}) {
 }
 
 /* ============================================================================
- *  SATB → STANDARD-NOTATION MULTI-PART export (vocal-harmony score)
+ *  VOCAL SCORE — separated vocal parts → a rehearsal-ready choral score
  *  ---------------------------------------------------------------------------
- *  The ML note transcription (basic-pitch) + `splitVoices` already yield one
- *  MONOPHONIC line per voice (soprano/lead on top … bass at the bottom). This
- *  turns those lines into a READABLE standard-notation score: one labelled
- *  <part> / staff per voice — lead on the TOP staff, backing voices below in
- *  descending register order — sharing key, meter and barlines, with real notes
- *  and rests. The output is a valid `score-partwise` MusicXML that opens cleanly
- *  in MuseScore / Sibelius / Finale, plus a multi-voice ABC. Pure → headless-
- *  testable (no React, no DOM).
+ *  The ML note transcription (basic-pitch) + `splitVoices` yield one MONOPHONIC
+ *  line per voice. This turns those lines into a score every singer can read at
+ *  rehearsal and every musician can rely on at the gig. One <part>/staff per
+ *  voice, sharing key, meter and barlines. It follows standard choral-engraving
+ *  practice (Gould, *Behind Bars*, "Vocal music"):
+ *
+ *   - PART NAMES FROM RANGE, not from slot number. Each line's tessitura is
+ *     classified as Soprano / Alto / Tenor / Baritone / Bass (an order-preserving
+ *     fit, so an SSA trio reads "Soprano 1 · Soprano 2 · Alto"). Alternative
+ *     namings: "harmony" (Lead Vocal on top + High/Low Harmony, how bands talk),
+ *     "numbered" (Voice 1–N) and legacy "satb".
+ *   - CLEF FROM VOICE TYPE: S/A treble, TENOR treble-8vb (the modern choral
+ *     convention; plain treble would sit an octave of ledger lines too low),
+ *     Baritone/Bass bass clef.
+ *   - Part-group BRACKET with barlines BROKEN between staves (vocal convention:
+ *     leaves room for lyrics), part abbreviations on later systems, a per-part
+ *     MIDI instrument (Choir Aahs, own channel, spread pan) so notation-app
+ *     playback doubles as a rehearsal track.
+ *   - KEY-AWARE SPELLING: diatonic notes from the key's scale; chromatic notes by
+ *     scale degree (♭3/♭6/♭7/♭2 and ♯4 in major; raised 6th/7th and Picardy 3rd in
+ *     minor). Fixes A♯ in F major and D♭ for the leading tone in D minor.
+ *     MusicXML carries explicit <accidental>s with per-bar carry; ABC writes
+ *     accidentals RELATIVE TO K: and per-bar state (the old writer emitted "B"
+ *     for B♮ under K:F, which ABC reads as B♭ — a wrong PITCH).
+ *   - METRIC NOTATION: note values are split at the beat hierarchy (show the
+ *     beat / half-bar; one-level syncopation like e-q-e or q-h-q allowed; no
+ *     dotted rests in simple time) instead of a greedy largest-value fill.
+ *   - REHEARSAL STRUCTURE: detected/edited sections become boxed rehearsal marks
+ *     with a double barline before them, the last bar gets a final barline, and
+ *     optional system breaks every N bars make "from bar 9" findable.
  *
  *  This is ADDITIVE and never touches the single-part `scoreToMusicXML` (which
- *  the whole validated corpus + the MusicXML round-trip test depend on). Each
- *  voice line is monophonic, so a bar is emitted as: an optional leading rest,
- *  the notes on their beats (contiguous — the score model fills each duration to
- *  the next onset), and a whole-measure rest for any bar this voice doesn't sing
- *  (so barlines stay aligned across every staff).
- *
- *  Honest limit: the note grid comes from `polyNotesToScore` → `audioEventsToScore`,
- *  which quantises to the integer beat grid (durations guaranteed to sum to the
- *  measure — that's what keeps the MusicXML valid). Finer sub-beat quantisation
- *  (16th/triplet) is a clean future refinement of the score model, not this
- *  exporter.
+ *  the whole validated corpus + the MusicXML round-trip test depend on). Pure →
+ *  headless-tested (no React, no DOM).
  * ------------------------------------------------------------------------- */
 
 function _xmlEsc(s) {
   return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-/* Canonical SATB part labels; voice 0 = highest = lead, descending below it.
- * A single voice is just the lead vocal; >4 voices fall back to "Voice N". */
+/* Legacy SATB slot labels (naming:"satb"); voice 0 = highest. Kept for callers
+ * that want positional names. A single voice is just the lead vocal. */
 const _SATB_NAMES = ["Soprano/Lead", "Alto", "Tenor", "Bass"];
 function voicePartNames(voiceCount) {
   const n = Math.max(1, voiceCount | 0);
@@ -2468,7 +2481,8 @@ function _keyFifths(key) {
 }
 
 /* Pick a clef for a monophonic line from its median pitch: bass below G3 (55),
- * treble otherwise — the same threshold `staffLayout` uses. */
+ * treble otherwise — the same threshold `staffLayout` uses. (Legacy helper; the
+ * vocal score now clefs by VOICE TYPE, see VOICE_TYPES.) */
 function _clefForScore(score) {
   const ms = [];
   for (const b of (score && score.bars) || []) for (const e of (b.events || [])) for (const m of (e.midis || [])) ms.push(m);
@@ -2477,62 +2491,333 @@ function _clefForScore(score) {
   return ms[Math.floor(ms.length / 2)] < 55 ? "bass" : "treble";
 }
 
-/* splitVoices → one labelled, monophonic SCORE per voice. Composes the existing
- * SATB splitter (`splitVoices`) with `polyNotesToScore`, so every downstream
- * exporter/handoff applies per voice. Returns [{ voice, name, clef, score,
- * beatNotes }] in soprano→bass order; a voice slot with no notes is dropped (the
- * honest "no backing vocals detected → lead only" case). `voices <= 1` returns
- * the single polyphonic lead. `score` (integer-beat grid) feeds the on-screen
- * chart + the other exporters; `beatNotes` are the voice's raw onsets/durations
- * in BEATS, which the notation exporters quantise finely. opts: { voices, bpm,
- * beatsPerBar, beatType, useSharp }. */
+/* ---- voice types (choral ranges) -----------------------------------------
+ * Standard choral ranges (sounding pitch, MIDI): the span a part can be asked to
+ * sing in a typical amateur/semi-pro choir. Used to NAME and CLEF a separated line
+ * by its tessitura, and to flag notes outside the comfortable range in the range
+ * report (so an arranger sees "3 notes above A5" before handing the part out). */
+const VOICE_TYPES = [
+  { id: "soprano", name: "Soprano", abbr: "S.", low: 60, high: 81, clef: "treble" },     // C4–A5
+  { id: "alto", name: "Alto", abbr: "A.", low: 53, high: 74, clef: "treble" },           // F3–D5
+  { id: "tenor", name: "Tenor", abbr: "T.", low: 48, high: 69, clef: "treble8vb" },      // C3–A4 (written 8va)
+  { id: "baritone", name: "Baritone", abbr: "Bar.", low: 45, high: 65, clef: "bass" },   // A2–F4
+  { id: "bass", name: "Bass", abbr: "B.", low: 40, high: 64, clef: "bass" },             // E2–E4
+];
+const _VT_BY_ID = Object.fromEntries(VOICE_TYPES.map((t) => [t.id, t]));
+/* Duration-weighted pitch statistics of a line: { low, high, median, p10, p90, n }.
+ * Accepts notes with `midi` (or `midis`) and `durSec`/`durBeat` weights. */
+function _lineStats(notes) {
+  const pairs = [];
+  for (const n of notes || []) {
+    const ms = n.midis && n.midis.length ? n.midis : (n.midi != null ? [n.midi] : []);
+    const w = Math.max(1e-3, n.durBeat != null ? n.durBeat : (n.durSec != null ? n.durSec : 1));
+    for (const m of ms) pairs.push([m, w]);
+  }
+  if (!pairs.length) return null;
+  pairs.sort((a, b) => a[0] - b[0]);
+  const tot = pairs.reduce((a, p) => a + p[1], 0);
+  const q = (f) => { let acc = 0; for (const p of pairs) { acc += p[1]; if (acc >= f * tot) return p[0]; } return pairs[pairs.length - 1][0]; };
+  return { low: pairs[0][0], high: pairs[pairs.length - 1][0], median: q(0.5), p10: q(0.1), p90: q(0.9), n: pairs.length };
+}
+/* Classify lines (ordered HIGH → LOW) into voice types. An order-preserving DP:
+ * the type index never goes back up as the lines descend (a lower line is never
+ * labelled higher than the line above it), repeats are allowed (SSA, TTBB). Cost
+ * per (line, type) = share of the line's duration outside the type's range ×4 +
+ * the tessitura's distance from the range centre in octaves. Returns type ids. */
+function classifyVoiceTypes(statsList) {
+  const P = statsList.length, T = VOICE_TYPES.length;
+  if (!P) return [];
+  const cost = (st, t) => {
+    if (!st) return 0;
+    const vt = VOICE_TYPES[t], centre = (vt.low + vt.high) / 2;
+    const out = (st.p10 < vt.low ? 0.1 : 0) + (st.p90 > vt.high ? 0.1 : 0) + (st.median < vt.low || st.median > vt.high ? 0.5 : 0);
+    return out * 4 + Math.abs(st.median - centre) / 12;
+  };
+  const D = Array.from({ length: P }, () => new Array(T).fill(Infinity));
+  const B = Array.from({ length: P }, () => new Array(T).fill(-1));
+  for (let t = 0; t < T; t++) D[0][t] = cost(statsList[0], t);
+  for (let i = 1; i < P; i++) for (let t = 0; t < T; t++) {
+    for (let u = 0; u <= t; u++) { const c = D[i - 1][u] + cost(statsList[i], t); if (c < D[i][t]) { D[i][t] = c; B[i][t] = u; } }
+  }
+  let t = 0;
+  for (let u = 1; u < T; u++) if (D[P - 1][u] < D[P - 1][t]) t = u;
+  const ids = new Array(P);
+  for (let i = P - 1; i >= 0; i--) { ids[i] = VOICE_TYPES[t].id; t = B[i][t]; }
+  return ids;
+}
+
+/* ---- key from the NOTES (Krumhansl–Kessler) -------------------------------
+ * `analyzeKey` reasons about chord FUNCTION, which is the right model for a chord
+ * chart but not for a set of sung lines (each "event" is one note). Key finding
+ * from note data is the classic Krumhansl–Schmuckler method: correlate the
+ * duration-weighted pitch-class histogram with the Krumhansl–Kessler major/minor
+ * probe-tone profiles in all 24 rotations. Returns { tonic, mode, confidence
+ * (Pearson r, clamped 0..1), candidates:[top 5] } or null for no notes. */
+const _KK_MAJOR = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
+const _KK_MINOR = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
+function _pearson(a, b) {
+  const n = a.length, ma = a.reduce((s, x) => s + x, 0) / n, mb = b.reduce((s, x) => s + x, 0) / n;
+  let num = 0, da = 0, db = 0;
+  for (let i = 0; i < n; i++) { const x = a[i] - ma, y = b[i] - mb; num += x * y; da += x * x; db += y * y; }
+  return da && db ? num / Math.sqrt(da * db) : 0;
+}
+function keyFromNotes(notes) {
+  const h = new Array(12).fill(0);
+  for (const n of notes || []) {
+    const ms = n.midis && n.midis.length ? n.midis : (n.midi != null ? [n.midi] : []);
+    const w = Math.max(0, n.durSec != null ? n.durSec : (n.durBeat != null ? n.durBeat : 1));
+    for (const m of ms) h[((Math.round(m) % 12) + 12) % 12] += w;
+  }
+  if (!h.some((x) => x > 0)) return null;
+  const cands = [];
+  for (let t = 0; t < 12; t++) for (const [mode, prof] of [["major", _KK_MAJOR], ["minor", _KK_MINOR]]) {
+    const rot = h.map((_, i) => h[(i + t) % 12]);
+    cands.push({ tonic: t, mode, r: _pearson(rot, prof) });
+  }
+  cands.sort((a, b) => b.r - a.r);
+  const best = cands[0];
+  return { tonic: best.tonic, mode: best.mode, confidence: +Math.max(0, Math.min(1, best.r)).toFixed(3),
+    candidates: cands.slice(0, 5).map((c) => ({ tonic: c.tonic, mode: c.mode, confidence: +Math.max(0, c.r).toFixed(3) })) };
+}
+
+/* ---- key-aware pitch spelling ---------------------------------------------
+ * _keySpeller(key) → midi → { step, alter, oct }. Diatonic pitch classes take the
+ * key's scale letter; the 5 chromatic ones are spelled by SCALE DEGREE:
+ *   major: ♯1 ♭3 ♯4 ♭6 ♭7       minor: ♭2 ♮3(Picardy) ♯4 ♮6 ♮7 (raised 6th/7th)
+ * (♯1 not ♭2 in major: V/ii is far commoner than the Neapolitan — E♭ major's
+ * chromatic E reads E♮, not F♭) so D minor's leading tone is C♯ (not D♭) and
+ * F major's 4th is B♭ (not A♯).
+ * Double accidentals fall out naturally where a key needs them (G♯ minor's
+ * leading tone is F𝄪). Octave is computed from the LETTER, so B♯3 / C♭4 sit in
+ * the right octave. No key → the legacy sharps/flats table. */
+const _LETTERS = "CDEFGAB";
+const _LETTER_PC = [0, 2, 4, 5, 7, 9, 11];
+const _REL_MAJOR_LETTER = { 0: 0, 1: 4, 2: 1, 3: 5, 4: 2, 5: 6, 6: 3, "-1": 3, "-2": 6, "-3": 2, "-4": 5, "-5": 1, "-6": 4 };
+const _DIA_STEPS = { major: [0, 2, 4, 5, 7, 9, 11], minor: [0, 2, 3, 5, 7, 8, 10] };
+const _CHROM_DEG = { major: { 1: 0, 3: 2, 6: 3, 8: 5, 10: 6 }, minor: { 1: 1, 4: 2, 6: 3, 9: 5, 11: 6 } };
+function _keySpeller(key, fallbackSharp = true) {
+  if (!key || typeof key.tonic !== "number") {
+    return (m) => { const p = _midiToPitchXML(m, fallbackSharp); return { step: p.step, alter: p.alter, oct: p.oct }; };
+  }
+  const mode = key.mode === "minor" ? "minor" : "major";
+  const relLetter = _REL_MAJOR_LETTER[_keyFifths(key)] || 0;
+  const tonicLetter = mode === "minor" ? (relLetter + 5) % 7 : relLetter;
+  const tonic = ((key.tonic % 12) + 12) % 12;
+  const table = [];
+  for (let rel = 0; rel < 12; rel++) {
+    const di = _DIA_STEPS[mode].indexOf(rel);
+    const deg = di >= 0 ? di : _CHROM_DEG[mode][rel];
+    const letter = (tonicLetter + deg) % 7;
+    const pc = (tonic + rel) % 12;
+    const alter = ((pc - _LETTER_PC[letter] + 18) % 12) - 6;
+    table[pc] = [letter, alter];
+  }
+  return (m) => {
+    const [letter, alter] = table[((Math.round(m) % 12) + 12) % 12];
+    return { step: _LETTERS[letter], alter, oct: Math.round((m - alter - _LETTER_PC[letter]) / 12) - 1 };
+  };
+}
+/* The key signature as letter → alter (for accidental bookkeeping). */
+function _keySigAlters(key) {
+  const f = _keyFifths(key), sig = { C: 0, D: 0, E: 0, F: 0, G: 0, A: 0, B: 0 };
+  const sharps = "FCGDAEB", flats = "BEADGCF";
+  for (let i = 0; i < Math.abs(f); i++) sig[(f > 0 ? sharps : flats)[i]] = f > 0 ? 1 : -1;
+  return sig;
+}
+/* Spelled pitch → display name ("F#4", "Bb3", "Fx4"). */
+const _ACC_TXT = { "-2": "bb", "-1": "b", 0: "", 1: "#", 2: "x" };
+function _spelledName(p) { return p.step + (_ACC_TXT[p.alter] || "") + p.oct; }
+
+/* ---- splitVoices → labelled parts ------------------------------------------ */
 function _notesToBeatNotes(notes, bpm) {
   const spb = 60 / Math.max(20, Math.min(400, bpm || 120));
   return (notes || []).map((n) => ({ midi: n.midi, onsetBeat: (n.startSec || 0) / spb, durBeat: Math.max(1e-3, (n.durSec || spb) / spb) }));
 }
+/* Names for parts ordered HIGH→LOW. naming:
+ *   "range"    (default) voice type from tessitura, numbered when repeated
+ *   "harmony"  the lead line (opts.leadVoice = its index HIGH→LOW, default 0)
+ *              is "Lead Vocal"; the rest are "Harmony" (one side) or "High/Low
+ *              Harmony" (both sides), numbered top-down when repeated
+ *   "numbered" "Voice 1" … "Voice N"
+ *   "satb"     the legacy positional labels (Soprano/Lead, Alto, Tenor, Bass)
+ * Returns [{ name, abbr }]. */
+function _partLabels(typeIds, slots, opts = {}) {
+  const naming = opts.naming || "range";
+  const P = typeIds.length;
+  if (naming === "satb") {
+    const names = voicePartNames(opts.voices || P);
+    return slots.map((v) => ({ name: names[v] || ("Voice " + (v + 1)), abbr: (names[v] || "V").slice(0, 1) + "." }));
+  }
+  if (naming === "numbered") return typeIds.map((_, i) => ({ name: "Voice " + (i + 1), abbr: "V" + (i + 1) }));
+  if (naming === "harmony") {
+    const L = Math.max(0, Math.min(P - 1, opts.leadVoice | 0));
+    const above = L, below = P - 1 - L;
+    return typeIds.map((_, i) => {
+      if (i === L) return { name: "Lead Vocal", abbr: "Ld." };
+      if (P === 1) return { name: "Lead Vocal", abbr: "Ld." };
+      if (!above || !below) {
+        const n = above + below, k = i < L ? i + 1 : i - L;
+        return n === 1 ? { name: "Harmony", abbr: "Harm." } : { name: "Harmony " + k, abbr: "H" + k };
+      }
+      if (i < L) return above === 1 ? { name: "High Harmony", abbr: "Hi." } : { name: "High Harmony " + (i + 1), abbr: "Hi" + (i + 1) };
+      const k = i - L;
+      return below === 1 ? { name: "Low Harmony", abbr: "Lo." } : { name: "Low Harmony " + k, abbr: "Lo" + k };
+    });
+  }
+  const count = {}; typeIds.forEach((t) => { count[t] = (count[t] || 0) + 1; });
+  const seen = {};
+  return typeIds.map((t) => {
+    const vt = _VT_BY_ID[t];
+    if (count[t] === 1) return { name: vt.name, abbr: vt.abbr };
+    seen[t] = (seen[t] || 0) + 1;
+    return { name: vt.name + " " + seen[t], abbr: vt.abbr.replace(/\.$/, "") + seen[t] + "." };
+  });
+}
+/* splitVoices → one labelled, monophonic part per voice. Returns
+ *   [{ voice, name, abbr, voiceType, clef, stats, score, beatNotes }]
+ * HIGH→LOW, except naming:"harmony" puts the LEAD part first (top staff) and the
+ * harmonies below it in descending register. A voice slot with no notes is dropped
+ * (the honest "no backing detected → lead only" case); `voices <= 1` returns the
+ * single polyphonic line. `score` (integer-beat grid) feeds the on-screen chart +
+ * the other exporters; `beatNotes` are the raw onsets/durations in BEATS, which the
+ * notation exporters quantise finely. opts: { voices, method, naming, leadVoice,
+ * bpm, beatsPerBar, beatType, useSharp }. */
 function splitVoicesToScores(notes, opts = {}) {
   const voiceCount = Math.max(1, Math.min(8, opts.voices | 0 || 3));
-  const names = voicePartNames(voiceCount);
   const useSharp = opts.useSharp !== false;
   const bpm = opts.bpm || 120;
   const sopts = { bpm, beatsPerBar: opts.beatsPerBar, beatType: opts.beatType, useSharp };
-  if (voiceCount <= 1) {
-    const score = polyNotesToScore(notes || [], sopts);
-    return [{ voice: 0, name: names[0], clef: _clefForScore(score), score, beatNotes: _notesToBeatNotes(notes, bpm) }];
+  const groups = [];
+  if (voiceCount <= 1) groups.push({ voice: 0, notes: notes || [] });
+  else {
+    const split = splitVoices(notes || [], { voices: voiceCount, method: opts.method });
+    for (let v = 0; v < voiceCount; v++) {
+      const forV = split.filter((n) => n.voice === v);
+      if (forV.length) groups.push({ voice: v, notes: forV });
+    }
+    if (!groups.length) groups.push({ voice: 0, notes: notes || [] });
   }
-  const split = splitVoices(notes || [], { voices: voiceCount });
-  const out = [];
-  for (let v = 0; v < voiceCount; v++) {
-    const forV = split.filter((n) => n.voice === v);
-    if (!forV.length) continue;
-    const score = polyNotesToScore(forV, sopts);
-    out.push({ voice: v, name: names[v], clef: _clefForScore(score), score, beatNotes: _notesToBeatNotes(forV, bpm) });
+  const stats = groups.map((g) => _lineStats(g.notes));
+  const types = classifyVoiceTypes(stats);
+  /* one line in = one line out: whatever split was asked for, a stem with a single
+   * detected line is the lead vocal (unless a positional naming was requested). */
+  const naming = groups.length === 1 && !["numbered", "satb"].includes(opts.naming) ? "single" : (opts.naming || "range");
+  const labels = naming === "single"
+    ? [{ name: voicePartNames(1)[0], abbr: "Voc." }]
+    : _partLabels(types, groups.map((g) => g.voice), { naming, leadVoice: opts.leadVoice, voices: voiceCount });
+  let parts = groups.map((g, i) => {
+    const vt = _VT_BY_ID[types[i]] || VOICE_TYPES[0];
+    return { voice: g.voice, name: labels[i].name, abbr: labels[i].abbr, voiceType: vt.id, clef: vt.clef, stats: stats[i],
+      score: polyNotesToScore(g.notes, sopts), beatNotes: _notesToBeatNotes(g.notes, bpm) };
+  });
+  if (naming === "harmony" && parts.length > 1) {
+    const L = Math.max(0, Math.min(parts.length - 1, opts.leadVoice | 0));
+    parts = [parts[L], ...parts.filter((_, i) => i !== L)];
   }
-  return out.length ? out : [{ voice: 0, name: voicePartNames(1)[0], clef: "treble", score: polyNotesToScore(notes || [], sopts), beatNotes: _notesToBeatNotes(notes, bpm) }];
+  return parts;
+}
+/* Range check per part against its voice type → what an arranger needs before the
+ * parts go out: the actual span, the tessitura, and how many notes sit outside the
+ * type's comfortable range (with which way). opts.key spells the note names. */
+function vocalRangeReport(parts, opts = {}) {
+  const spell = _keySpeller(opts.key || null, opts.useSharp !== false);
+  return (parts || []).map((p) => {
+    const vt = _VT_BY_ID[p.voiceType] || null;
+    const notes = p.beatNotes || _scoreToBeatNotes(p.score);
+    const st = _lineStats(notes);
+    if (!st) return { name: p.name, voiceType: p.voiceType, empty: true };
+    let below = 0, above = 0, total = 0;
+    for (const n of notes) {
+      const ms = n.midis && n.midis.length ? n.midis : (n.midi != null ? [n.midi] : []);
+      for (const m of ms) { total++; if (vt && m < vt.low) below++; if (vt && m > vt.high) above++; }
+    }
+    const nm = (m) => _spelledName(spell(m));
+    return { name: p.name, voiceType: p.voiceType, typeName: vt ? vt.name : "", low: st.low, high: st.high,
+      lowName: nm(st.low), highName: nm(st.high), tessitura: [nm(st.p10), nm(st.p90)], median: st.median,
+      rangeName: vt ? nm(vt.low) + "–" + nm(vt.high) : "", below, above, total, ok: !below && !above };
+  });
 }
 
-/* ---- notation quantiser (16th grid) --------------------------------------
+/* ---- notation quantiser + METRIC note values ------------------------------
  * The score model's integer `beat`/`durBeats` grid is quarter-resolution and can
  * collapse a dense bar's onsets to ZERO-length events — fine for the on-screen
- * chart, invalid for notation. So the notation exporters below quantise a voice's
- * real onsets/durations onto a 16th-note grid instead, split notes/rests at
- * barlines, and decompose each span into standard tied note-values so every
- * measure's durations sum EXACTLY (what keeps the MusicXML valid + MuseScore-
- * clean). Everything is measured in "ticks" = sixteenth-of-a-quarter (grid 4),
- * so a quarter = 4 ticks regardless of the meter's beat unit. */
+ * chart, invalid for notation. So the notation exporters quantise a voice's real
+ * onsets/durations onto a 16th (or 8th) grid, split notes/rests at barlines, and
+ * spell each span as standard tied note-values so every measure sums EXACTLY.
+ * Everything is measured in "ticks" = a 16th note (_NOTE_GRID per quarter). */
 const _NOTE_GRID = 4;                                          // ticks per quarter (16th resolution)
-/* Greedy decomposition of a tick count into standard note-values (largest
- * first; the set includes a 16th so any positive integer terminates). Returns
- * [{ ticks, type, dot }]. Chunks of one sustained note are tied together. */
-const _NOTE_VALUES = [[16, "whole", false], [12, "half", true], [8, "half", false], [6, "quarter", true], [4, "quarter", false], [3, "eighth", true], [2, "eighth", false], [1, "16th", false]];
+const _NOTE_VALUES = [[24, "whole", true], [16, "whole", false], [12, "half", true], [8, "half", false], [6, "quarter", true], [4, "quarter", false], [3, "eighth", true], [2, "eighth", false], [1, "16th", false]];
+const _VALUE_BY_TICKS = Object.fromEntries(_NOTE_VALUES.map((v) => [v[0], { ticks: v[0], type: v[1], dot: v[2] }]));
+/* Greedy decomposition of a tick count into standard note-values (largest first),
+ * position-blind. Kept as the fallback; notation uses `_metricValues`. */
 function _noteValuesFromTicks(t) {
   const out = [];
   let r = Math.max(0, Math.round(t));
   while (r > 0) {
     let picked = _NOTE_VALUES[_NOTE_VALUES.length - 1];
-    for (const v of _NOTE_VALUES) { if (v[0] <= r) { picked = v; break; } }
+    for (const v of _NOTE_VALUES) { if (v[0] <= r && (v[0] !== 24)) { picked = v; break; } }
     out.push({ ticks: picked[0], type: picked[1], dot: picked[2] });
     r -= picked[0];
+  }
+  return out;
+}
+/* The meter's beat hierarchy as tick periods, strongest first:
+ *   4/4 → [16 bar, 8 half-bar, 4 beat, 2, 1]   3/4 → [12, 4, 2, 1]
+ *   6/8 → [12, 6 dotted-quarter beat, 2, 1]    12/8 → [24, 12, 6, 2, 1]
+ *   2/2 → [16, 8, 4, 2, 1]                     x/8 (odd) → eighth beats */
+function _meterLevels(bpb, bt) {
+  const g = _NOTE_GRID;
+  const tpm = Math.round(bpb * (4 / bt) * g);
+  const compound = bt === 8 && bpb % 3 === 0 && bpb > 3;
+  const beat = compound ? 3 * (g / 2) : (bt === 8 ? g / 2 : Math.round((4 / bt) * g));
+  const levels = [tpm];
+  const nBeats = Math.round(tpm / beat);
+  if (nBeats >= 4 && nBeats % 2 === 0) levels.push(tpm / 2);
+  levels.push(beat);
+  let sub = compound ? g / 2 : beat;
+  if (compound) levels.push(sub);
+  while (sub > 1) { sub /= 2; if (Number.isInteger(sub)) levels.push(sub); }
+  const out = [];
+  for (const L of levels) if (L >= 1 && Number.isInteger(L) && !out.includes(L) && (!out.length || L < out[out.length - 1])) out.push(L);
+  if (out[out.length - 1] !== 1) out.push(1);
+  return { levels: out, tpm, beat, compound };
+}
+/* Is [a, a+len) a legible single value at this position? A value may cross a
+ * metric boundary only if it STARTS on a boundary at least as strong; the one
+ * allowed exception is classic one-level syncopation (an undotted note twice the
+ * length of its starting level: 8th-qtr-8th, qtr-half-qtr). Rests get no
+ * syncopation and, in simple time, no dots (Gould). */
+function _metricOK(a, len, v, meter, isRest) {
+  const { levels, beat, compound } = meter;
+  const lvl = (pos) => { for (let i = 0; i < levels.length; i++) if (pos % levels[i] === 0) return i; return levels.length; };
+  const la = lvl(a);
+  if (isRest && v.dot && !(compound && len === beat && a % beat === 0)) return false;
+  for (let i = 0; i < levels.length; i++) {
+    const L = levels[i];
+    const m = (Math.floor(a / L) + 1) * L;
+    if (m >= a + len) continue;                                 // no boundary of this level inside
+    if (la <= i) continue;                                      // starts at least as strong
+    if (!isRest && !v.dot && i === la - 1 && len === 2 * levels[la]) continue;   // one-level syncopation
+    return false;
+  }
+  return true;
+}
+/* Spell [a, b) (ticks within ONE measure) as tied note values that respect the
+ * beat: greedy longest LEGAL value from the start, falling back to the next
+ * smaller one. Always terminates (a 16th is always legal). */
+function _metricValues(a, b, meter, isRest) {
+  const out = [];
+  let pos = a;
+  while (pos < b) {
+    let pick = null;
+    for (const v of _NOTE_VALUES) {
+      if (v[0] > b - pos) continue;
+      const val = _VALUE_BY_TICKS[v[0]];
+      if (_metricOK(pos, v[0], val, meter, isRest)) { pick = val; break; }
+    }
+    if (!pick) pick = _VALUE_BY_TICKS[1];
+    out.push(pick);
+    pos += pick.ticks;
   }
   return out;
 }
@@ -2540,32 +2825,52 @@ function _noteValuesFromTicks(t) {
  * onsetBeat, durBeat} in BEATS (1 beat = 1/beatType note). Output: an array of
  * measures, each a list of cells:
  *   { rest, midis, type, dot, divs, tieStart, tieStop, wholeMeasure }
- * with `divs` in MusicXML divisions (opts.div per quarter). Monophonic: notes
- * are clipped to the next onset; a note quantising to <1 tick is dropped (the
- * micro-note / re-articulation removal the task asks for). */
+ * with `divs` in MusicXML divisions (opts.div per quarter). opts:
+ *   grid        subdivisions per quarter to quantise to: 4 = 16ths (default), 2 = 8ths
+ *   legatoBeats close a gap shorter than this (in beats) by holding the previous
+ *               note to the next onset — basic-pitch releases sung notes early, so
+ *               without it every syllable reads as "16th + 16th rest" (default 0)
+ *   minBars     pad to at least this many measures
+ * Monophonic: notes are clipped to the next onset. A note shorter than half a grid
+ * step is dropped (model blip); one between half and one step is kept at one step. */
 function _voiceNotationMeasures(beatNotes, opts = {}) {
-  const grid = _NOTE_GRID;
   const bpb = opts.beatsPerBar || 4, bt = opts.beatType || 4;
   const div = opts.div || 480;
-  const dpt = div / grid;                                      // divisions per tick (16th)
+  const dpt = div / _NOTE_GRID;                                // divisions per tick (16th)
   const q = 4 / bt;                                            // quarters per beat
-  const tpm = Math.round(bpb * q * grid);                      // ticks per measure
-  // beats → quarter-ticks, quantised, sorted, monophonic
-  const raw = (beatNotes || []).filter((n) => n).map((n) => ({
-    start: Math.round(n.onsetBeat * q * grid),
-    end: Math.round((n.onsetBeat + Math.max(0, n.durBeat)) * q * grid),
+  const grid = opts.grid === 2 ? 2 : 4;
+  const step = _NOTE_GRID / grid;                              // ticks per grid step
+  const meter = _meterLevels(bpb, bt);
+  const tpm = meter.tpm;
+  const toTicks = (beats) => beats * q * _NOTE_GRID;
+  const snap = (ticks) => Math.round(ticks / step) * step;
+  const src = (beatNotes || []).filter((n) => n).map((n) => ({
+    on: n.onsetBeat, off: n.onsetBeat + Math.max(0, n.durBeat),
     midis: n.midis && n.midis.length ? n.midis : (n.midi != null ? [n.midi] : []),
-  })).filter((n) => n.midis.length).sort((a, b) => a.start - b.start || b.end - a.end);
+  })).filter((n) => n.midis.length && isFinite(n.on)).sort((a, b) => a.on - b.on || b.off - a.off);
+  const legato = Math.max(0, opts.legatoBeats || 0);
+  if (legato > 0) {
+    for (let i = 0; i + 1 < src.length; i++) {
+      const gap = src[i + 1].on - src[i].off;
+      if (gap > 0 && gap < legato) src[i].off = src[i + 1].on;
+    }
+  }
+  const raw = src.map((n) => {
+    const t0 = toTicks(n.on), t1 = toTicks(n.off);
+    const start = snap(t0);
+    let end = snap(t1);
+    if (end <= start && t1 - t0 >= step / 2) end = start + step;
+    return { start, end, midis: n.midis };
+  }).sort((a, b) => a.start - b.start || b.end - a.end);
   const notesQ = [];
   let cursor = 0;
   for (let i = 0; i < raw.length; i++) {
     let s = Math.max(raw[i].start, cursor), e = raw[i].end;
-    if (i + 1 < raw.length) e = Math.min(e, raw[i + 1].start);
+    if (i + 1 < raw.length) e = Math.min(e, Math.max(raw[i + 1].start, s));
     if (e <= s) continue;                                      // coincident / micro → drop
     notesQ.push({ start: s, end: e, midis: raw[i].midis });
     cursor = e;
   }
-  // interleave rests, then pad to a whole number of measures
   const items = [];
   let pos = 0;
   for (const n of notesQ) { if (n.start > pos) items.push({ rest: true, start: pos, end: n.start }); items.push({ rest: false, start: n.start, end: n.end, midis: n.midis }); pos = n.end; }
@@ -2574,23 +2879,27 @@ function _voiceNotationMeasures(beatNotes, opts = {}) {
   const fullEnd = totalBars * tpm;
   if (pos < fullEnd) items.push({ rest: true, start: pos, end: fullEnd });
   const measures = Array.from({ length: totalBars }, () => []);
+  const measDiv = Math.round(bpb * q * div);
   for (const it of items) {
-    const chunks = [];                                         // all value-chunks of this item, in order (across bars)
+    const chunks = [];
     let a = it.start;
     while (a < it.end) {
       const bar = Math.floor(a / tpm);
       const b = Math.min(it.end, (bar + 1) * tpm);
-      for (const v of _noteValuesFromTicks(b - a)) chunks.push({ bar, type: v.type, dot: v.dot, divs: v.ticks * dpt });
+      if (it.rest && a === bar * tpm && b === (bar + 1) * tpm) {
+        chunks.push({ bar, type: null, dot: false, divs: measDiv, wholeMeasure: true });
+      } else {
+        for (const v of _metricValues(a - bar * tpm, b - bar * tpm, meter, it.rest)) chunks.push({ bar, type: v.type, dot: v.dot, divs: v.ticks * dpt });
+      }
       a = b;
     }
     chunks.forEach((c, ci) => {
       measures[c.bar].push({
-        rest: it.rest, midis: it.midis || null, type: c.type, dot: c.dot, divs: c.divs,
+        rest: it.rest, midis: it.midis || null, type: c.type, dot: c.dot, divs: c.divs, wholeMeasure: !!c.wholeMeasure,
         tieStop: !it.rest && ci > 0, tieStart: !it.rest && ci < chunks.length - 1,
       });
     });
   }
-  const measDiv = Math.round(bpb * q * div);
   measures.forEach((m) => { if (!m.length) m.push({ rest: true, midis: null, type: null, dot: false, divs: measDiv, wholeMeasure: true }); });
   return { measures, beatsPerBar: bpb, beatType: bt, div, measDiv };
 }
@@ -2609,68 +2918,140 @@ function _scoreToBeatNotes(score) {
   });
   return out;
 }
-
-/* parts: [{ name, score?, beatNotes?, clef? }] → ONE valid `score-partwise`
- * MusicXML with a <part>/staff per voice (parts[0] = top staff = lead). Shared
- * key + tempo + meter; barlines align because every part is padded to the same
- * measure count. Each voice is quantised to a 16th grid (see
- * `_voiceNotationMeasures`) and emitted as real notes + rests + tied values, so
- * the measures sum exactly and the file opens cleanly in MuseScore/Sibelius/
- * Finale. opts: { key, tempo, useSharp, divisions (>=480), title, beatsPerBar,
- * beatType }. Enharmonic spelling follows the key when useSharp isn't given. */
-function scoreToMultipartMusicXML(parts, opts = {}) {
+/* Shared layout for the multipart exporters: quantised measures per part, the
+ * aligned bar count, rehearsal marks by bar and the speller. */
+function _vocalLayout(parts, opts) {
   parts = (parts || []).filter((p) => p && (p.beatNotes || (p.score && p.score.bars)));
-  if (!parts.length) throw new Error("scoreToMultipartMusicXML: no parts");
-  const div = Math.max(480, opts.divisions | 0 || 480);
-  const key = opts.key || null;
-  const fifths = _keyFifths(key);
-  const useSharp = opts.useSharp != null ? opts.useSharp : fifths >= 0;
+  if (!parts.length) return null;
   const sig0 = parts[0].score && parts[0].score.timeSig || [4, 4];
   const bpb = opts.beatsPerBar || sig0[0] || 4;
   const bt = opts.beatType || sig0[1] || 4;
-  // quantise every voice; pad all to the longest so barlines align
-  const perVoice = parts.map((p) => _voiceNotationMeasures(p.beatNotes || _scoreToBeatNotes(p.score), { beatsPerBar: bpb, beatType: bt, div }));
+  const div = Math.max(480, opts.divisions | 0 || 480);
+  const nopts = { beatsPerBar: bpb, beatType: bt, div, grid: opts.grid, legatoBeats: opts.legatoBeats };
+  const perVoice = parts.map((p) => _voiceNotationMeasures(p.beatNotes || _scoreToBeatNotes(p.score), nopts));
   const maxBars = Math.max(1, ...perVoice.map((v) => v.measures.length));
   const measDiv = Math.round(bpb * (4 / bt) * div);
+  const key = opts.key || null;
+  const spell = opts.spelling === "sharps" || opts.spelling === "flats"
+    ? _keySpeller(null, opts.spelling === "sharps")
+    : (key ? _keySpeller(key) : _keySpeller(null, opts.useSharp !== false));
+  /* sections → rehearsal marks: { bar(0-based) → label }. Time → bar on the same
+   * grid the notes were quantised to (bar = startSec / (bpb · 60/bpm)), the mapping
+   * applySectionsToScore uses — so marks land on the bars the ChartPanel shows. */
+  const marks = new Map();
+  for (const r of opts.rehearsal || []) if (r && r.label && r.bar >= 0) marks.set(r.bar | 0, String(r.label));
+  if (opts.sections && opts.sections.length) {
+    const secPerBar = (60 / Math.max(20, Math.min(400, opts.tempo || 120))) * bpb;
+    for (const s of [...opts.sections].sort((a, b) => a.startSec - b.startSec)) {
+      if (!s || !s.label || !isFinite(s.startSec)) continue;
+      let bi = Math.max(0, Math.min(maxBars - 1, Math.round(s.startSec / secPerBar)));
+      while (marks.has(bi) && bi + 1 < maxBars) bi++;
+      if (!marks.has(bi)) marks.set(bi, String(s.label));
+    }
+  }
+  return { parts, bpb, bt, div, perVoice, maxBars, measDiv, key, spell, marks };
+}
+/* Per-measure accidental bookkeeping (standard practice): an accidental holds for
+ * the rest of the bar on that letter+octave; the key signature applies otherwise;
+ * a note TIED over the barline is not re-inflected (and does not set state). */
+function _accidentalTracker(key) {
+  const sig = _keySigAlters(key);
+  let bar = new Map();
+  return {
+    newBar() { bar = new Map(); },
+    need(p, tieStop) {
+      const k = p.step + p.oct;
+      const eff = bar.has(k) ? bar.get(k) : sig[p.step];
+      if (tieStop) return null;
+      if (eff === p.alter) return null;
+      bar.set(k, p.alter);
+      return p.alter;
+    },
+  };
+}
+const _ACC_XML = { "-2": "flat-flat", "-1": "flat", 0: "natural", 1: "sharp", 2: "double-sharp" };
+const _CLEF_XML = {
+  treble: "<clef><sign>G</sign><line>2</line></clef>",
+  treble8vb: "<clef><sign>G</sign><line>2</line><clef-octave-change>-1</clef-octave-change></clef>",
+  bass: "<clef><sign>F</sign><line>4</line></clef>",
+};
 
+/* parts: [{ name, abbr?, clef?, score?, beatNotes? }] → ONE valid `score-partwise`
+ * MusicXML 3.1 choral score (parts[0] = top staff). opts:
+ *   key {tonic,mode}, tempo, title, composer, arranger, beatsPerBar, beatType,
+ *   divisions (≥480), grid (4|2), legatoBeats, spelling ("key"|"sharps"|"flats"),
+ *   useSharp (spelling when no key), sections [{label,startSec}] | rehearsal
+ *   [{bar,label}], barsPerSystem, labelStaves (also print the name above bar 1),
+ *   midiProgram (GM 1-based, default 53 Choir Aahs). */
+function scoreToMultipartMusicXML(parts, opts = {}) {
+  const lay = _vocalLayout(parts, opts);
+  if (!lay) throw new Error("scoreToMultipartMusicXML: no parts");
+  const { bpb, bt, div, perVoice, maxBars, measDiv, key, spell, marks } = lay;
+  parts = lay.parts;
+  const fifths = _keyFifths(key);
+  const P = parts.length;
+  const program = Math.max(1, Math.min(128, opts.midiProgram | 0 || 53));
   const L = ['<?xml version="1.0" encoding="UTF-8"?>',
     '<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 3.1 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">',
     '<score-partwise version="3.1">'];
   if (opts.title) L.push("  <work><work-title>" + _xmlEsc(opts.title) + "</work-title></work>");
+  L.push("  <identification>");
+  if (opts.composer) L.push('    <creator type="composer">' + _xmlEsc(opts.composer) + "</creator>");
+  if (opts.arranger) L.push('    <creator type="arranger">' + _xmlEsc(opts.arranger) + "</creator>");
+  L.push("    <encoding><software>Tab Translator Pro</software></encoding>", "  </identification>");
   L.push("  <part-list>");
+  if (P > 1) L.push('    <part-group type="start" number="1"><group-symbol>bracket</group-symbol><group-barline>no</group-barline></part-group>');
   parts.forEach((p, i) => {
-    L.push('    <score-part id="P' + (i + 1) + '"><part-name>' + _xmlEsc(p.name || ("Voice " + (i + 1))) + "</part-name></score-part>");
+    const id = "P" + (i + 1);
+    const ch = i + 1 >= 10 ? i + 2 : i + 1;                    // skip GM drum channel 10
+    const pan = P > 1 ? Math.round(-45 + (90 * i) / (P - 1)) : 0;
+    L.push('    <score-part id="' + id + '">');
+    L.push("      <part-name>" + _xmlEsc(p.name || ("Voice " + (i + 1))) + "</part-name>");
+    if (p.abbr) L.push("      <part-abbreviation>" + _xmlEsc(p.abbr) + "</part-abbreviation>");
+    L.push('      <score-instrument id="' + id + '-I1"><instrument-name>Voice</instrument-name></score-instrument>');
+    L.push('      <midi-instrument id="' + id + '-I1"><midi-channel>' + ch + "</midi-channel><midi-program>" + program +
+      "</midi-program><volume>80</volume><pan>" + pan + "</pan></midi-instrument>");
+    L.push("    </score-part>");
   });
+  if (P > 1) L.push('    <part-group type="stop" number="1"/>');
   L.push("  </part-list>");
 
+  const beatUnit = bt === 8 ? "eighth" : bt === 2 ? "half" : "quarter";
+  const soundTempo = opts.tempo ? Math.round(opts.tempo * 4 / bt) : 0;
   parts.forEach((p, pi) => {
-    const clef = p.clef || (p.score ? _clefForScore(p.score) : "treble");
+    const clef = _CLEF_XML[p.clef] ? p.clef : (p.score ? _clefForScore(p.score) : "treble");
     const measures = perVoice[pi].measures;
+    const acc = _accidentalTracker(key);
     L.push('  <part id="P' + (pi + 1) + '">');
     for (let bi = 0; bi < maxBars; bi++) {
       const cells = measures[bi] || [{ rest: true, midis: null, type: null, dot: false, divs: measDiv, wholeMeasure: true }];
+      acc.newBar();
       L.push('    <measure number="' + (bi + 1) + '">');
+      if (bi > 0 && opts.barsPerSystem > 0 && bi % opts.barsPerSystem === 0) L.push('      <print new-system="yes"/>');
       if (bi === 0) {
         L.push("      <attributes>");
         L.push("        <divisions>" + div + "</divisions>");
         L.push("        <key><fifths>" + fifths + "</fifths>" + (key ? "<mode>" + (key.mode || "major") + "</mode>" : "") + "</key>");
         L.push("        <time><beats>" + bpb + "</beats><beat-type>" + bt + "</beat-type></time>");
-        L.push(clef === "bass" ? "        <clef><sign>F</sign><line>4</line></clef>" : "        <clef><sign>G</sign><line>2</line></clef>");
+        L.push("        " + _CLEF_XML[clef]);
         L.push("      </attributes>");
         if (pi === 0 && opts.tempo) {
-          const tp = Math.round(opts.tempo);
-          L.push('      <direction placement="above"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>' + tp +
-            "</per-minute></metronome></direction-type><sound tempo=\"" + tp + "\"/></direction>");
+          L.push('      <direction placement="above"><direction-type><metronome><beat-unit>' + beatUnit + "</beat-unit><per-minute>" + Math.round(opts.tempo) +
+            "</per-minute></metronome></direction-type><sound tempo=\"" + soundTempo + "\"/></direction>");
         }
-        L.push('      <direction placement="above"><direction-type><words>' + _xmlEsc(p.name || ("Voice " + (pi + 1))) + "</words></direction-type></direction>");
+        if (opts.labelStaves) L.push('      <direction placement="above"><direction-type><words>' + _xmlEsc(p.name || ("Voice " + (pi + 1))) + "</words></direction-type></direction>");
+      }
+      if (pi === 0 && marks.has(bi)) {
+        L.push('      <direction placement="above"><direction-type><rehearsal enclosure="rectangle">' + _xmlEsc(marks.get(bi)) + "</rehearsal></direction-type></direction>");
       }
       for (const c of cells) {
         if (c.rest || !c.midis || !c.midis.length) {
           L.push("      <note>" + (c.wholeMeasure ? '<rest measure="yes"/>' : "<rest/>") + "<duration>" + c.divs + "</duration><voice>1</voice>" +
-            (c.type ? "<type>" + c.type + "</type>" + (c.dot ? "<dot/>" : "") : "") + "</note>");
+            (c.type && !c.wholeMeasure ? "<type>" + c.type + "</type>" + (c.dot ? "<dot/>" : "") : "") + "</note>");
         } else {
           c.midis.forEach((m, ci) => {
-            const pit = _midiToPitchXML(m, useSharp);
+            const pit = spell(m);
+            const a = acc.need(pit, c.tieStop);
             L.push("      <note>");
             if (ci > 0) L.push("        <chord/>");
             L.push("        <pitch><step>" + pit.step + "</step>" + (pit.alter ? "<alter>" + pit.alter + "</alter>" : "") + "<octave>" + pit.oct + "</octave></pitch>");
@@ -2679,6 +3060,7 @@ function scoreToMultipartMusicXML(parts, opts = {}) {
             if (c.tieStart) L.push('        <tie type="start"/>');
             L.push("        <voice>1</voice>");
             if (c.type) { L.push("        <type>" + c.type + "</type>"); if (c.dot) L.push("        <dot/>"); }
+            if (a != null) L.push("        <accidental>" + _ACC_XML[a] + "</accidental>");
             if (c.tieStart || c.tieStop) {
               L.push("        <notations>" + (c.tieStop ? '<tied type="stop"/>' : "") + (c.tieStart ? '<tied type="start"/>' : "") + "</notations>");
             }
@@ -2686,6 +3068,8 @@ function scoreToMultipartMusicXML(parts, opts = {}) {
           });
         }
       }
+      if (bi === maxBars - 1) L.push('      <barline location="right"><bar-style>light-heavy</bar-style></barline>');
+      else if (marks.has(bi + 1)) L.push('      <barline location="right"><bar-style>light-light</bar-style></barline>');
       L.push("    </measure>");
     }
     L.push("  </part>");
@@ -2694,27 +3078,33 @@ function scoreToMultipartMusicXML(parts, opts = {}) {
   return L.join("\n");
 }
 
-/* Same voices → a multi-voice ABC document (V: fields, lead first). abcjs / most
- * ABC readers render one staff per V:. Same 16th-grid quantisation as the
- * MusicXML path; ABC expresses each span's length as a fraction of L:1/4 (ties
- * across value boundaries are implicit), and empty bars are a whole-measure
- * rest `Z`, so barlines align across every voice. */
+/* Same voices → a multi-voice ABC document (V: per part, bracketed with unjoined
+ * barlines — `%%score [1 2 3]`). Same quantisation + rehearsal marks as the
+ * MusicXML path. Pitches are written RELATIVE TO THE KEY SIGNATURE with per-bar
+ * accidental carry (ABC semantics), so every note sounds and prints as intended;
+ * a tied-over note re-states its accidental (ABC has no tie-carry rule). */
+const _ABC_ACC_TOK = { "-2": "__", "-1": "_", 0: "=", 1: "^", 2: "^^" };
+function _abcPitch(p, acc) {
+  const a = acc.need(p, false);                                  // never "tie-carried": ABC re-reads every note
+  let note = p.step;
+  if (p.oct >= 5) { note = note.toLowerCase(); for (let o = 6; o <= p.oct; o++) note += "'"; }
+  else { for (let o = p.oct; o < 4; o++) note += ","; }
+  return (a != null ? _ABC_ACC_TOK[a] : "") + note;
+}
 function scoreToMultipartABC(parts, opts = {}) {
-  parts = (parts || []).filter((p) => p && (p.beatNotes || (p.score && p.score.bars)));
-  if (!parts.length) throw new Error("scoreToMultipartABC: no parts");
-  const key = opts.key || null;
-  const useSharp = opts.useSharp != null ? opts.useSharp : _keyFifths(key) >= 0;
-  const sig0 = parts[0].score && parts[0].score.timeSig || [4, 4];
-  const b0 = opts.beatsPerBar || sig0[0] || 4, bt0 = opts.beatType || sig0[1] || 4;
-  const div = 480, grid = _NOTE_GRID, dpt = div / grid;
-  const perVoice = parts.map((p) => _voiceNotationMeasures(p.beatNotes || _scoreToBeatNotes(p.score), { beatsPerBar: b0, beatType: bt0, div }));
-  const maxBars = Math.max(1, ...perVoice.map((v) => v.measures.length));
-  const out = ["X:1", "T:" + (opts.title || "Vocal score"), "M:" + b0 + "/" + bt0, "L:1/4"];
-  if (opts.tempo) out.push("Q:1/4=" + Math.round(opts.tempo));
-  out.push("%%score " + parts.map((_, i) => i + 1).join(" "));
-  parts.forEach((p, i) => out.push("V:" + (i + 1) + " name=" + JSON.stringify(p.name || ("Voice " + (i + 1))) + " clef=" + (p.clef === "bass" ? "bass" : "treble")));
-  out.push("K:" + (keyName(key, useSharp) || "C"));
-  // ABC length multiplier relative to L:1/4 = divs / div (a quarter). Reduce.
+  const lay = _vocalLayout(parts, opts);
+  if (!lay) throw new Error("scoreToMultipartABC: no parts");
+  const { bpb, bt, div, perVoice, maxBars, key, spell, marks } = lay;
+  parts = lay.parts;
+  const out = ["X:1", "T:" + (opts.title || "Vocal score")];
+  if (opts.composer) out.push("C:" + opts.composer);
+  out.push("M:" + bpb + "/" + bt, "L:1/4");
+  if (opts.tempo) out.push("Q:1/" + bt + "=" + Math.round(opts.tempo));
+  out.push("%%score [" + parts.map((_, i) => i + 1).join(" ") + "]");
+  const abcClef = (c) => (c === "bass" ? "bass" : c === "treble8vb" ? "treble-8" : "treble");
+  parts.forEach((p, i) => out.push("V:" + (i + 1) + " name=" + JSON.stringify(p.name || ("Voice " + (i + 1))) +
+    (p.abbr ? " snm=" + JSON.stringify(p.abbr) : "") + " clef=" + abcClef(p.clef)));
+  out.push("K:" + (key ? keyName(key, _keyFifths(key) >= 0) : "C"));
   const abcLen = (divs) => {
     let num = Math.round((divs / div) * 12), den = 12;         // 12 keeps triplets/8ths integer
     if (num < 1) num = 1;
@@ -2724,25 +3114,105 @@ function scoreToMultipartABC(parts, opts = {}) {
   parts.forEach((p, i) => {
     out.push("V:" + (i + 1));
     const measures = perVoice[i].measures;
+    const acc = _accidentalTracker(key);
     let body = "";
     for (let bi = 0; bi < maxBars; bi++) {
       const cells = measures[bi];
-      let cell = "";
-      if (!cells || !cells.length || (cells.length === 1 && cells[0].wholeMeasure)) { cell = "Z"; }
+      acc.newBar();
+      let cell = i === 0 && marks.has(bi) ? '"^' + marks.get(bi).replace(/"/g, "'") + '"' : "";
+      if (!cells || !cells.length || (cells.length === 1 && cells[0].wholeMeasure)) { cell += "Z"; }
       else {
         cells.forEach((c) => {
-          const tok = (c.rest || !c.midis || !c.midis.length)
-            ? "z" + abcLen(c.divs)
-            : (c.midis.length > 1 ? "[" + c.midis.map(midiToAbc).join("") + "]" : midiToAbc(c.midis[0])) + abcLen(c.divs);
+          let tok;
+          if (c.rest || !c.midis || !c.midis.length) tok = "z" + abcLen(c.divs);
+          else {
+            const ps = c.midis.map((m) => _abcPitch(spell(m), acc));
+            tok = (ps.length > 1 ? "[" + ps.join("") + "]" : ps[0]) + abcLen(c.divs);
+          }
           cell += tok + (c.tieStart ? "-" : "") + " ";
         });
       }
-      body += cell.trim() + " |";
+      const bar = bi === maxBars - 1 ? "|]" : (marks.has(bi + 1) ? "||" : "|");
+      body += cell.trim() + " " + bar;
       body += (bi + 1) % 4 === 0 ? "\n" : " ";
     }
     out.push(body.trim());
   });
   return out.join("\n") + "\n";
+}
+
+/* ---- rehearsal / learning-track MIDI ---------------------------------------
+ * Choirs and bands learn parts from "learning tracks": every part audible, YOUR
+ * part louder and centred. scoreToVocalMidi writes a format-1 SMF (PPQ 480): a
+ * conductor track (tempo, meter, key signature, title) + one named track per part
+ * on its own channel (Choir Aahs), timed from the SAME quantised measures as the
+ * notation so what you hear is exactly what is printed (tied chunks re-joined).
+ * opts: { tempo, key, title, emphasize (part index | null), program (GM 0-based,
+ * default 52 = Choir Aahs), grid, legatoBeats, beatsPerBar, beatType }. */
+function _smfTrack(evs) {
+  evs.sort((a, b) => a.tick - b.tick || a.order - b.order);
+  const t = [];
+  let prev = 0;
+  for (const ev of evs) { t.push(..._midiVarLen(Math.max(0, ev.tick - prev)), ...ev.bytes); prev = ev.tick; }
+  const n = t.length;
+  return [0x4D, 0x54, 0x72, 0x6B, (n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff, ...t];
+}
+function _smfText(type, s) {
+  const b = Array.from(String(s || "")).map((ch) => { const c = ch.charCodeAt(0); return c < 128 ? c : 63; }).slice(0, 120);
+  return [0xFF, type, ..._midiVarLen(b.length), ...b];
+}
+function scoreToVocalMidi(parts, opts = {}) {
+  const lay = _vocalLayout(parts, { ...opts, divisions: 480 });
+  if (!lay) throw new Error("scoreToVocalMidi: no parts");
+  const { bpb, bt, perVoice, maxBars, measDiv, key } = lay;
+  parts = lay.parts;
+  const PPQ = 480, P = parts.length;
+  const qbpm = Math.max(20, Math.min(400, Math.round((opts.tempo || 120) * 4 / bt)));
+  const uspq = Math.round(60000000 / qbpm);
+  const emph = opts.emphasize != null && opts.emphasize >= 0 && opts.emphasize < P ? opts.emphasize | 0 : null;
+  const program = Math.max(0, Math.min(127, opts.program != null ? opts.program | 0 : 52));
+  const endTick = maxBars * measDiv;
+  const cond = [
+    { tick: 0, order: 0, bytes: _smfText(0x03, opts.title || "Vocal score") },
+    { tick: 0, order: 0, bytes: [0xFF, 0x51, 0x03, (uspq >> 16) & 0xff, (uspq >> 8) & 0xff, uspq & 0xff] },
+    { tick: 0, order: 0, bytes: [0xFF, 0x58, 0x04, bpb & 0xff, Math.max(0, Math.round(Math.log2(bt))) & 0xff, 24, 8] },
+  ];
+  if (key) cond.push({ tick: 0, order: 0, bytes: [0xFF, 0x59, 0x02, _keyFifths(key) & 0xff, key.mode === "minor" ? 1 : 0] });
+  cond.push({ tick: endTick, order: 3, bytes: [0xFF, 0x2F, 0x00] });
+  const tracks = [_smfTrack(cond)];
+  parts.forEach((p, pi) => {
+    const ch = pi >= 9 ? pi + 1 : pi;                          // skip GM drum channel (index 9)
+    const isEmph = emph === pi;
+    const vel = emph == null ? 90 : (isEmph ? 112 : 64);
+    const vol = emph == null ? 100 : (isEmph ? 127 : 72);
+    const pan = emph != null && isEmph ? 64 : (P > 1 ? Math.round(24 + (80 * pi) / (P - 1)) : 64);
+    const evs = [
+      { tick: 0, order: 0, bytes: _smfText(0x03, p.name || ("Voice " + (pi + 1))) },
+      { tick: 0, order: 0, bytes: [0xC0 | ch, program] },
+      { tick: 0, order: 0, bytes: [0xB0 | ch, 7, vol] },
+      { tick: 0, order: 0, bytes: [0xB0 | ch, 10, pan] },
+    ];
+    let t = 0, open = null;
+    perVoice[pi].measures.forEach((cells) => {
+      for (const c of cells) {
+        if (!c.rest && c.midis && c.midis.length) {
+          if (c.tieStop && open) open.end = t + c.divs;
+          else {
+            if (open) for (const m of open.midis) { evs.push({ tick: open.start, order: 2, bytes: [0x90 | ch, m & 0x7f, vel] }); evs.push({ tick: open.end, order: 1, bytes: [0x80 | ch, m & 0x7f, 0] }); }
+            open = { start: t, end: t + c.divs, midis: c.midis.map((m) => Math.max(0, Math.min(127, Math.round(m)))) };
+          }
+          if (!c.tieStart) { for (const m of open.midis) { evs.push({ tick: open.start, order: 2, bytes: [0x90 | ch, m & 0x7f, vel] }); evs.push({ tick: open.end, order: 1, bytes: [0x80 | ch, m & 0x7f, 0] }); } open = null; }
+        }
+        t += c.divs;
+      }
+    });
+    if (open) for (const m of open.midis) { evs.push({ tick: open.start, order: 2, bytes: [0x90 | ch, m & 0x7f, vel] }); evs.push({ tick: open.end, order: 1, bytes: [0x80 | ch, m & 0x7f, 0] }); }
+    evs.push({ tick: endTick, order: 3, bytes: [0xFF, 0x2F, 0x00] });
+    tracks.push(_smfTrack(evs));
+  });
+  const nT = tracks.length;
+  const head = [0x4D, 0x54, 0x68, 0x64, 0, 0, 0, 6, 0, 1, (nT >> 8) & 0xff, nT & 0xff, (PPQ >> 8) & 0xff, PPQ & 0xff];
+  return new Uint8Array([...head, ...tracks.flat()]);
 }
 
 /* Transpose a whole score by n semitones. Shifts every event's MIDI and lets the
@@ -4401,68 +4871,238 @@ async function transcribeWithNoteModel(pcm, sampleRate, model, opts = {}) {
 
 /* ---- SATB-style voice separation --------------------------------------------
  * The ML note transcription is polyphonic BUT UNLABELED — every simultaneous note
- * is dumped in one bucket. For a vocal-harmony stem the user usually wants each
- * VOICE as its own line: soprano / alto / tenor / bass. This is the standard
- * choral-analysis heuristic: at each time slice, sort active notes by pitch
- * DESCENDING and assign top→bottom to voices 0..V-1 (voice 0 = highest / soprano).
- * A sustained note that gets a different rank in a later slice is EMITTED AS
- * TWO NOTES (the boundary is a voice-crossing) so each per-voice line stays
- * monophonic. Notes below the requested voice count are dropped (documented —
- * they're likely below-the-bass spurious activations).
+ * is dumped in one bucket. For a vocal-harmony stem the user wants each VOICE as its
+ * own line (soprano / alto / tenor / bass, or lead + harmonies) so every singer can
+ * read THEIR part. Two methods, same output shape ({ midi, startSec, durSec, voice },
+ * voice 0 = highest slot):
  *
- * Pure → headless-tested. Composes with polyNotesToScore: caller filters the
- * output by `voice` and feeds each subset in, getting one score per voice.
+ *  - "voiceLeading" (DEFAULT, 2026-10-11) — the contig/voice-leading approach used by
+ *    symbolic voice-separation research (Chew & Wu 2004; Kilian & Hoos 2002):
+ *      1. Cut the timeline into slices where the active set is constant.
+ *      2. LEARN each voice's register from the "full-texture" slices — the moments
+ *         where all V voices sound together, so the rank → voice mapping is
+ *         unambiguous (weighted median of rank r = voice r's centre).
+ *      3. Walk the slices in time order and solve an ORDER-PRESERVING assignment of
+ *         the k active notes to the V slots (a tiny DP, O(k·V)): voices never cross
+ *         inside a simultaneity, a HELD note keeps its slot (cost 0), and otherwise
+ *         a note goes to the slot whose reference pitch — its last sung note,
+ *         decaying toward the learned register over `memorySec` of silence — is
+ *         nearest. When k > V the DP drops the notes that fit worst (an octave
+ *         ghost above the soprano is dropped, not the real bass); when k < V the
+ *         unmatched slots simply rest.
+ *    Why it exists: the register method put EVERY note into voice 0 whenever only
+ *    one part was singing, so on a real 3-part stem ("25 or 6 to 4") voice 1 spanned
+ *    MIDI 55–84 with a mean step of 7.6 semitones (37 leaps > a fifth) — not one
+ *    singer's line. Measured after: see CLAUDE.md "Vocal score v2".
+ *  - "register" (legacy) — per slice, sort by pitch and assign top→bottom to slots
+ *    0..V-1. A sustained note whose rank changes is emitted as two runs.
  *
- * Honest limits: (1) sort-by-pitch is register-based, so a genuine voice CROSSING
- * (bass singer going above the tenor briefly) will swap slots. Sung harmony rarely
- * crosses, so this is fine most of the time; when it isn't, edit fixes it. (2) A
- * note above the current top rank enters as voice 0 at its onset, so a sustained
- * "held" note stays in the slot it was ASSIGNED at first slice — no back-shuffle.
- * That matches the perceptual "which line am I hearing" model. */
-function splitVoices(notes, opts = {}) {
-  const V = Math.max(1, Math.min(8, opts.voices | 0 || 3));
-  if (!notes || !notes.length) return [];
-  /* Timeline bounds — every note-on/note-off is a potential voice-reassignment
-   * boundary because the active set changes there. Between two adjacent bounds
-   * the active set is CONSTANT, so voice assignment is stable within that slice. */
+ * Both: each per-voice line is MONOPHONIC (a held note that must change slot is
+ * emitted as two runs); notes are never invented. Pure → headless-tested. Composes
+ * with polyNotesToScore (filter by `voice`, one score per voice).
+ *
+ * Honest limits: voices cannot cross inside a simultaneity (ordering is enforced —
+ * real choral writing rarely crosses); a part that sings ALONE far outside its
+ * learned register can be attributed to the neighbouring voice — ✎ Edit fixes it. */
+const _VL_EPS = 1e-4;
+function _voiceSlices(notes) {
   const bounds = new Set();
   for (const n of notes) { bounds.add(+n.startSec.toFixed(6)); bounds.add(+(n.startSec + n.durSec).toFixed(6)); }
   const T = [...bounds].sort((a, b) => a - b);
-  const EPS = 1e-4;
-  /* Pre-index source notes for O(1) lookup in the per-slice loop (indexOf would
-   * be O(N²) — >4 min of vocal → thousands of notes → prohibitive). */
+  /* sweep: notes sorted by start, an active list pruned as slices advance — O(N·k)
+   * instead of scanning every note per slice. */
+  const byStart = notes.slice().sort((a, b) => a.startSec - b.startSec);
+  const slices = [];
+  let ni = 0, live = [];
+  for (let i = 0; i < T.length - 1; i++) {
+    const t0 = T[i], t1 = T[i + 1];
+    while (ni < byStart.length && byStart[ni].startSec <= t0 + _VL_EPS) live.push(byStart[ni++]);
+    live = live.filter((n) => n.startSec + n.durSec >= t1 - _VL_EPS);
+    if (t1 - t0 < _VL_EPS || !live.length) continue;
+    slices.push({ t0, t1, active: live.slice().sort((a, b) => b.midi - a.midi) });  // pitch DESC
+  }
+  return slices;
+}
+/* Duration-weighted median of [value, weight] pairs. */
+function _wMedian(pairs) {
+  if (!pairs.length) return null;
+  const s = pairs.slice().sort((a, b) => a[0] - b[0]);
+  const tot = s.reduce((a, p) => a + p[1], 0);
+  let acc = 0;
+  for (const p of s) { acc += p[1]; if (acc >= tot / 2) return p[0]; }
+  return s[s.length - 1][0];
+}
+/* Each voice's register, learned from the slices where the texture is FULL (exactly V
+ * notes; else ≥ V; else the widest texture present, top-aligned). Returns V centres in
+ * MIDI (descending), null for a slot the material never defines. */
+function _voiceCenters(slices, V) {
+  let pool = slices.filter((s) => s.active.length === V);
+  if (pool.reduce((a, s) => a + s.t1 - s.t0, 0) < 0.25) pool = slices.filter((s) => s.active.length >= V);
+  let width = V;
+  if (!pool.length) {
+    width = Math.max(0, ...slices.map((s) => s.active.length));
+    pool = slices.filter((s) => s.active.length === width);
+  }
+  const centers = new Array(V).fill(null);
+  for (let r = 0; r < Math.min(width, V); r++) centers[r] = _wMedian(pool.map((s) => [s.active[r].midi, s.t1 - s.t0]));
+  for (let r = 1; r < V; r++) if (centers[r] != null && centers[r - 1] != null && centers[r] > centers[r - 1]) centers[r] = centers[r - 1];
+  return centers;
+}
+function splitVoices(notes, opts = {}) {
+  const V = Math.max(1, Math.min(8, opts.voices | 0 || 3));
+  if (!notes || !notes.length) return [];
+  const slices = _voiceSlices(notes);
+  const assign = opts.method === "register" ? _assignByRegister(slices, V) : _assignByVoiceLeading(slices, V, opts);
+  /* Emission — per (source note, voice slot) run tracker: extends the last emitted note
+   * when the same source stays in the same voice across adjacent slices (no false
+   * split); a slot change starts a new run, keeping every voice line monophonic. */
   const srcIdx = new Map();
   notes.forEach((n, i) => srcIdx.set(n, i));
   const out = [];
-  /* per (source note, voice slot) run tracker — extends the last emitted note when
-   * the same source stays in the same voice across adjacent slices (no false split). */
   const runs = new Map();
-  for (let i = 0; i < T.length - 1; i++) {
-    const t0 = T[i], t1 = T[i + 1];
-    if (t1 - t0 < EPS) continue;                                  // zero-width slice
-    const active = [];
-    for (const n of notes) {
-      if (n.startSec <= t0 + EPS && t1 - EPS <= n.startSec + n.durSec) active.push(n);
-    }
-    if (!active.length) continue;
-    active.sort((a, b) => b.midi - a.midi);                       // pitch DESC → v0 highest
-    const lim = Math.min(active.length, V);
-    for (let v = 0; v < lim; v++) {
-      const n = active[v];
-      const key = srcIdx.get(n) * 8 + v;                          // (srcIdx, voice) → key
+  slices.forEach((sl, si) => {
+    for (const [n, v] of assign[si]) {
+      const key = srcIdx.get(n) * 8 + v;
       const prev = runs.get(key);
-      if (prev && Math.abs(prev.startSec + prev.durSec - t0) < EPS) {
-        prev.durSec = t1 - prev.startSec;                          // extend the run
+      if (prev && Math.abs(prev.startSec + prev.durSec - sl.t0) < _VL_EPS) {
+        prev.durSec = sl.t1 - prev.startSec;
       } else {
-        const emit = { midi: n.midi, startSec: t0, durSec: t1 - t0, voice: v };
+        const emit = { midi: n.midi, startSec: sl.t0, durSec: sl.t1 - sl.t0, voice: v };
         if (n.amp != null) emit.amp = n.amp;
         out.push(emit);
         runs.set(key, emit);
       }
     }
-  }
+  });
   out.sort((a, b) => a.startSec - b.startSec || a.voice - b.voice);
   return out;
+}
+/* Legacy register split: rank r → slot r. Returns per-slice [[note, slot]…]. */
+function _assignByRegister(slices, V) {
+  return slices.map((sl) => sl.active.slice(0, V).map((n, v) => [n, v]));
+}
+/* Voice-leading split (see the block comment above). Costs are in SEMITONES so the
+ * knobs read musically: a held note switching slots pays `switchCost` (default 6 —
+ * a tritone's worth of evidence is needed to move it), a slot with no reference
+ * pitch costs `undefinedCost` (12 — an octave), and a dropped note costs 100 plus
+ * its onset strength, which makes "keep as many notes as there are voices" the first
+ * priority and "drop the weakest misfit" the tiebreak. */
+function _assignByVoiceLeading(slices, V, opts = {}) {
+  const centers = _voiceCenters(slices, V);
+  const memory = opts.memorySec != null ? opts.memorySec : 2;
+  const SWITCH = opts.switchCost != null ? opts.switchCost : 6;
+  const UNDEF = opts.undefinedCost != null ? opts.undefinedCost : 12;
+  const out = new Array(slices.length).fill(null);
+  /* Phase A — POLYPHONIC slices (≥ 2 notes): order-preserving DP, slice by slice. */
+  const state = Array.from({ length: V }, () => ({ src: null, last: null, lastEnd: -Infinity }));
+  const slotOf = new Map();                                        // source note → slot it currently sings in
+  slices.forEach((sl, si) => {
+    const A = sl.active, k = A.length;
+    if (k < 2 && V > 1) return;                                    // monophonic → phase B
+    const refOf = (v) => {
+      const st = state[v], c = centers[v];
+      if (st.last == null) return c;
+      if (c == null) return st.last;
+      const w = Math.exp(-Math.max(0, sl.t0 - st.lastEnd) / Math.max(1e-3, memory));
+      return w * st.last + (1 - w) * c;
+    };
+    const refs = Array.from({ length: V }, (_, v) => refOf(v));
+    const match = (n, v) => {
+      if (state[v].src === n) return 0;                            // held note continues in its slot
+      const r = refs[v];
+      let c = r == null ? UNDEF : Math.abs(n.midi - r);
+      const prevSlot = slotOf.get(n);
+      if (prevSlot != null && prevSlot !== v) c += SWITCH;
+      return c;
+    };
+    const drop = (n) => 100 + (n.amp != null ? n.amp : 0.5) * 10;
+    // DP over (i notes placed, j slots consumed); 0 = slot rests, 1 = drop note, 2 = match
+    const D = Array.from({ length: k + 1 }, () => new Float64Array(V + 1).fill(Infinity));
+    const B = Array.from({ length: k + 1 }, () => new Int8Array(V + 1).fill(-1));
+    D[0][0] = 0;
+    for (let i = 0; i <= k; i++) for (let j = 0; j <= V; j++) {
+      if (i === 0 && j === 0) continue;
+      let best = Infinity, bp = -1;
+      if (j > 0 && D[i][j - 1] < best) { best = D[i][j - 1]; bp = 0; }
+      if (i > 0) { const c = D[i - 1][j] + drop(A[i - 1]); if (c < best) { best = c; bp = 1; } }
+      if (i > 0 && j > 0) { const c = D[i - 1][j - 1] + match(A[i - 1], j - 1); if (c < best) { best = c; bp = 2; } }
+      D[i][j] = best; B[i][j] = bp;
+    }
+    const pairs = [];
+    for (let i = k, j = V; i > 0 || j > 0;) {
+      const bp = B[i][j];
+      if (bp === 2) { pairs.push([A[i - 1], j - 1]); i--; j--; }
+      else if (bp === 1) i--;
+      else j--;
+    }
+    pairs.reverse();
+    for (const [n, v] of pairs) { state[v] = { src: n, last: n.midi, lastEnd: sl.t1 }; slotOf.set(n, v); }
+    for (let v = 0; v < V; v++) if (state[v].src && !pairs.some((p) => p[1] === v)) state[v] = { ...state[v], src: null };
+    out[si] = pairs;
+  });
+  if (V === 1) return out.map((p, si) => p || [[slices[si].active[0], 0]]);
+  /* Phase B — MONOPHONIC runs, assigned WHOLE (Chew & Wu's contig linking). A run is
+   * a stretch where one note sounds at a time, broken by a polyphonic slice, a
+   * silence longer than `runGapSec`, or a leap wider than `runLeap` semitones (two
+   * singers trading phrases). A melody sung alone must not be shredded across
+   * staves, so each run goes to the ONE slot that best links to the voices sounding
+   * just before and after it (pitch distance, decaying toward register fit over
+   * `memorySec` of separation), plus how well the run sits in that slot's register.
+   * Measured on a verse-solo → 3-part-chorus arrangement: the per-slice pass split
+   * the solo verse 14/15/9 across staves; run linking keeps it on the lead staff. */
+  const runGap = opts.runGapSec != null ? opts.runGapSec : 1.0;
+  const runLeap = opts.runLeap != null ? opts.runLeap : 9;
+  const slotNotes = Array.from({ length: V }, () => []);          // phase-A notes per slot: [t0, t1, midi]
+  out.forEach((pairs, si) => { if (pairs) for (const [n, v] of pairs) slotNotes[v].push([slices[si].t0, slices[si].t1, n.midi]); });
+  const runs = [];
+  let cur = null;
+  slices.forEach((sl, si) => {
+    if (out[si]) { cur = null; return; }
+    const n = sl.active[0];
+    const prev = cur && slices[cur.idx[cur.idx.length - 1]];
+    const prevN = prev && prev.active[0];
+    if (cur && sl.t0 - prev.t1 <= runGap && (prevN === n || Math.abs(prevN.midi - n.midi) <= runLeap)) cur.idx.push(si);
+    else { cur = { idx: [si] }; runs.push(cur); }
+  });
+  const regCost = (m, v) => (centers[v] == null ? UNDEF : Math.abs(m - centers[v]));
+  for (const run of runs) {
+    const first = slices[run.idx[0]], last = slices[run.idx[run.idx.length - 1]];
+    const ms = run.idx.map((i) => [slices[i].active[0].midi, slices[i].t1 - slices[i].t0]);
+    const med = _wMedian(ms);
+    let bestV = 0, bestC = Infinity;
+    for (let v = 0; v < V; v++) {
+      const reg = regCost(med, v);
+      let before = null, after = null;
+      for (const nt of slotNotes[v]) { if (nt[1] <= first.t0 + _VL_EPS) before = nt; else if (nt[0] >= last.t1 - _VL_EPS && !after) after = nt; }
+      const side = (nt, pitch, gap) => {
+        if (!nt) return reg;
+        const w = Math.exp(-Math.max(0, gap) / Math.max(1e-3, memory));
+        return w * Math.abs(pitch - nt[2]) + (1 - w) * reg;
+      };
+      const c = side(before, slices[run.idx[0]].active[0].midi, before ? first.t0 - before[1] : 0)
+        + side(after, slices[run.idx[run.idx.length - 1]].active[0].midi, after ? after[0] - last.t1 : 0) + reg;
+      if (c < bestC) { bestC = c; bestV = v; }
+    }
+    for (const i of run.idx) out[i] = [[slices[i].active[0], bestV]];
+  }
+  return out;
+}
+
+/* How many parts does this stem actually have? The largest k such that ≥ k notes
+ * sound together for a meaningful share of the sung time (≥ `minSec` AND ≥ `minFrac`
+ * of it) — so a single 80 ms chord blip doesn't summon a phantom fourth voice. The UI
+ * shows it as the suggested Split. Returns { count, coverage:{k: sec}, sungSec }. */
+function suggestVoiceCount(notes, opts = {}) {
+  const maxV = opts.maxVoices || 4;
+  if (!notes || !notes.length) return { count: 1, coverage: {}, sungSec: 0 };
+  const slices = _voiceSlices(notes);
+  const sung = slices.reduce((a, s) => a + s.t1 - s.t0, 0);
+  const coverage = {};
+  for (let k = 1; k <= maxV; k++) coverage[k] = +slices.filter((s) => s.active.length >= k).reduce((a, s) => a + s.t1 - s.t0, 0).toFixed(3);
+  const minSec = opts.minSec != null ? opts.minSec : 0.5, minFrac = opts.minFrac != null ? opts.minFrac : 0.05;
+  let count = 1;
+  for (let k = 2; k <= maxV; k++) if (coverage[k] >= minSec && coverage[k] >= minFrac * sung) count = k;
+  return { count, coverage, sungSec: +sung.toFixed(3) };
 }
 
 /* ---- audio ↔ score alignment (DTW auto-sync) ------------------------------
@@ -4754,6 +5394,17 @@ export {
   _scoreToBeatNotes,
   scoreToMultipartMusicXML,
   scoreToMultipartABC,
+  VOICE_TYPES,
+  classifyVoiceTypes,
+  _lineStats,
+  keyFromNotes,
+  _keySpeller,
+  _keySigAlters,
+  vocalRangeReport,
+  _meterLevels,
+  _metricOK,
+  _metricValues,
+  scoreToVocalMidi,
   transposeScore,
   BRASS_INSTRUMENTS,
   getBrassInstrument,
@@ -4805,6 +5456,9 @@ export {
   polyNotesToScore,
   transcribeWithNoteModel,
   splitVoices,
+  suggestVoiceCount,
+  _voiceSlices,
+  _voiceCenters,
   _cosDist,
   _dtw,
   scoreChromaSequence,
