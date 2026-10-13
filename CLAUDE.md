@@ -1631,7 +1631,8 @@ where music21 itself duplicates notes after the inline `[M:4/4]` meter change (t
 exactly 914 pitches; abcjs reads 914) — a music21 parser limit, not ours. Real browser (headless
 Chromium, iPhone UA vs desktop UA): the vocal **and** chart ABC downloads save as
 `25or6.abc.txt` on iPhone and `25or6.abc` on Linux, the toggle flips and persists, and the bytes
-start with `%abc-2.1`, no BOM.
+start with `%abc-2.1`, no BOM. **Device-verified 2026-10-13:** the owner confirmed on a real
+iPad that the ABC download now saves and opens as ABC text (no longer as an Alembic 3D file).
 
 **`npm test` guards:** line 1 `%abc-2.1`, `I:abc-charset utf-8`, empty line before `X:`, header
 order X: → T: → K:, `ABC_MIME`, multi-voice header, `_abcKeyName` (D#m/G#m/Db/F#/Bb/Am),
