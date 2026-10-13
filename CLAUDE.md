@@ -775,7 +775,9 @@ bloating the monolith. Lifting `semis`/transpose state out to the parent for per
       the existing uneven-timing + silent-lead-in mappings stay byte-identical (smoothing didn't
       shift them).
 
-`midiToAbc`/`abcDur` invariants: middle C (C4 = 60) is ABC `C`, C5 is `c`; ABC
+`midiToAbc`/`abcDur` invariants: middle C (C4 = 60) is ABC `C`, C5 is `c` (the octave
+convention `_abcPitch` keeps — but since 2026-10-13 NO exporter writes pitches with the
+K:-blind `midiToAbc`; see "ABC notation 2.1 compliance"); ABC
 duration is a reduced fraction of `L:1/4` (`durBeats·4/beatType`), so simple
 meters stay integers and 6/8-style beats become `/2`.
 
@@ -1526,9 +1528,8 @@ so an F-major chart printed A♯ for B♭. Now:
 - MusicXML now carries explicit `<accidental>` with per-bar carry (tied-over notes not
   re-inflected). **ABC was emitting WRONG PITCHES**: `midiToAbc` ignores `K:` and bar state, so
   under `K:F` a written `B` (meant B♮) is read as B♭. The multipart ABC now writes accidentals
-  relative to the key with per-bar carry. ⚠ **The single-part `scoreToABC` still uses
-  `midiToAbc` and has the same latent bug for non-diatonic notes in non-C keys** — left alone
-  here to keep the validated ABC corpus byte-identical; fix it next (reuse `_accidentalTracker`).
+  relative to the key with per-bar carry. (The single-part `scoreToABC` had the same latent
+  bug — **fixed 2026-10-13**, see "ABC notation 2.1 compliance" below.)
 
 **4. Metric note values** (`_meterLevels`, `_metricOK`, `_metricValues`): the greedy largest-
 value fill hid beats (a dotted quarter on beat 2 crossing beat 3). Values are now chosen
@@ -1573,6 +1574,72 @@ harmonies, verse-solo → chorus, rehearsal marks, G major with a ♯4).
 no downbeat detection on vocals (set ♩= and run 🔎 Detect sections); voices can't cross inside a
 chord; a part singing alone far outside its learned register can still land on a neighbour —
 ✎ Edit fixes it; output quality is bounded by basic-pitch on the stem.
+
+### ABC notation 2.1 compliance + the Alembic `.abc` collision (2026-10-13)
+
+**The report:** the ABC download "is being read as Alembic 3D" — the open-source 3D-graphics
+interchange format that also uses `.abc`. **Root cause: the extension, not the bytes.** iOS /
+iPadOS / macOS resolve a file's type from its extension, and Apple's Model I/O framework
+system-declares `.abc` as **Alembic** (`kUTTypeAlembic`), so a downloaded `song.abc` lands in
+Files/Finder as a 3D object, Quick Look tries to render geometry, and ABC apps aren't offered.
+Audited every ABC writer against the abc standard v2.1 (abcnotation.com; abcnotation.com itself
+was DNS-blocked from the dev sandbox, so the rules were taken from the standard's text via
+search excerpts + mirrors, and the output was then **verified with abcjs — the parser
+abcnotation.com's own tools use — and music21**). Findings + fixes, all three ABC exporters
+(`scoreToABC`, `scoreToMultipartABC`, and `scoreToBrassABC` through `scoreToABC`):
+
+- **File header** (`_abcFileHeader`, standard §2): line 1 is the **file identification line
+  `%abc-2.1`** (the `%abc` magic is what identifies ABC music notation, and the version makes
+  readers apply 2.1 strictly), then **`I:abc-charset utf-8`** (utf-8 is the 2.1 default, but
+  titles / part names such as "B♭ Trumpet" or "—" can be non-ASCII and pre-2.1 readers assume
+  Latin-1), a `%` comment, and the **empty line** that must separate the file header from the
+  first tune's `X:`. No BOM (the standard says readers should ignore one; we don't emit it).
+- **Media type**: `ABC_MIME = "text/vnd.abc"` (IANA-registered, the type the standard
+  prescribes). The ChartPanel download used to send ABC as `text/plain`.
+- **The Alembic collision** (`useAbcExt` / `_isApplePlatform` / `abcMimeFor` /
+  `AbcExtToggle` in `TabDecoderPro.tsx`, browser-only glue): the standard itself names `.txt` as
+  the fallback where a system restricts file types, so on **Apple platforms** downloads save as
+  **`song.abc.txt`** (`text/plain;charset=utf-8` — plain text: previews, shares, opens in any ABC
+  app; `.abc` stays visible in the name), elsewhere the standard **`song.abc`**
+  (`text/vnd.abc;charset=utf-8`). A one-tap "use .abc / use .abc.txt" toggle sits next to both
+  ABC downloads (chart export + vocal score) and is remembered per device (localStorage,
+  try/catch — a convenience only). The vocal panel also gained **⧉ Copy ABC** (paste straight
+  into abcnotation.com / abcjs / any ABC app — no file type involved at all).
+- **Wrong pitches in the single-part ABC (the follow-up flagged in Vocal score v2).**
+  `scoreToABC` wrote pitches with the K:-blind `midiToAbc`, so in `K:E` a G♮ written `G` sounded
+  G♯, and `^C … C` in one bar sounded C♯ twice. It now spells with `_keySpeller(key)` and writes
+  every pitch **relative to K:** via `_abcPitch`.
+- **`K:` names disagreed with the notes** in two minor keys: the family-default names `Ebm` /
+  `Abm` mean 6/7 **flats** in ABC, while the notes were spelled against D♯m/G♯m's sharps.
+  `_abcKeyName(key)` now names K: with the same speller (`D#m`, `G#m`, `Db`, `F#`, …).
+- **Accidental carry must survive every reader** (`_abcAccidentalTracker`). ABC readers disagree
+  on how far an accidental reaches — the 2.1 `%%propagate-accidentals` directive has three
+  settings (not / octave / pitch), abcm2ps historically carried per octave, and **music21 does
+  not carry at all** (measured: it read `=B,3/2 … B,/2` as B♭). So the ABC writer prints an
+  accidental whenever a note differs from the key signature OR from what an earlier accidental
+  in the bar would carry under the pitch-class or same-octave rule; a note equal to all of them
+  stays bare. Cost: an occasional courtesy accidental on a repeated chromatic note. MusicXML
+  keeps standard engraving (`_accidentalTracker`) because its pitches are absolute.
+- **No-chord text**: the engine's `—` placeholder is written as `"N.C."` (`_abcChordName`).
+
+**Measured** (round-trip: every exported pitch parsed back by **abcjs**, `setUpAudio({chordsOff})`,
+vs the score's MIDI; old exporter → new): Blue Sky (K:E) 2 → **0** wrong pitches, Peg 8 → **0**,
+Anthropology (K:B♭) 32 → **0**, Au Privave (K:F) 8 → **0**, Yardbird 9 → **0**, the same tune
+forced into D♯m / G♯m 378 / 380 → **0**. **0 abcjs parse warnings** on every file, including the
+multi-voice vocal samples and brass ABC. music21 agrees (0 wrong) everywhere except Blue Sky,
+where music21 itself duplicates notes after the inline `[M:4/4]` meter change (the file has
+exactly 914 pitches; abcjs reads 914) — a music21 parser limit, not ours. Real browser (headless
+Chromium, iPhone UA vs desktop UA): the vocal **and** chart ABC downloads save as
+`25or6.abc.txt` on iPhone and `25or6.abc` on Linux, the toggle flips and persists, and the bytes
+start with `%abc-2.1`, no BOM.
+
+**`npm test` guards:** line 1 `%abc-2.1`, `I:abc-charset utf-8`, empty line before `X:`, header
+order X: → T: → K:, `ABC_MIME`, multi-voice header, `_abcKeyName` (D#m/G#m/Db/F#/Bb/Am),
+K:E `=G` / re-sharpened `^G` / bare `G`, reader-robust carry (`^C ^C =C ^c` in one bar; F major
+`B`→`=B`→`=B`→`_B`), `"N.C."`, brass header + `K:D` + `%%MIDI program`, and UI guards (Apple
+`.abc.txt` default, `abcMimeFor`/`ABC_MIME`, both download sites carry the toggle). One existing
+expectation changed on purpose: the multi-voice F-major test now reads `=B =B _B` (the second
+B♮ is restated, so no reader can hear it as B♭).
 
 ### Center-channel (vocal) isolation — score sung harmony from a full mix (2026-07-07)
 
@@ -2265,6 +2332,11 @@ accordingly.
   range naming/clefs (S/A/T-8vb/B, SSA repeats, harmony + numbered modes); KK key; scale-degree
   spelling (C♯ in Dm, B♭ in F, E♮ in E♭, F𝄪 in G♯m, B♯3); metric values (4/4, 6/8, no dotted
   rests); choral MusicXML structure; ABC key-relative pitches; range report; format-1 MIDI.
+- **ABC 2.1 compliance**: `npm test` asserts the `%abc-2.1` + `I:abc-charset utf-8` file header and
+  blank line before `X:`, `text/vnd.abc`, K: names spelled like the notes (D#m/G#m/Db), pitches
+  relative to K: with reader-robust accidentals, `"N.C."`, the brass header, and the UI's Apple
+  `.abc.txt` fallback (Apple maps `.abc` → Alembic 3D). Externally verified with abcjs (0 wrong
+  pitches, 0 warnings across Blue Sky/Peg/Anthropology/Au Privave/Yardbird + vocal/brass ABC).
 - **Lyrics import (`parseLyrics`)**: `npm test` asserts the strict chord matcher accepts
   real chords and rejects note-letter lyric words (Add/Cab/Bad/Fed/Gem/Bee/Ace), the
   line-level `isChordLine` catches chord lines but spares lyric/blank lines, a full

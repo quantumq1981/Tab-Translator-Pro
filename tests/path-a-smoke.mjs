@@ -1673,7 +1673,7 @@ expect(eng.recoverChordGaps([], mud, 0.1, 0.256, { ...noSmooth, recoverMinConfid
   const fLine = [{ midi: 71, onsetBeat: 0, durBeat: 1 }, { midi: 71, onsetBeat: 1, durBeat: 1 }, { midi: 70, onsetBeat: 2, durBeat: 1 }, { midi: 71, onsetBeat: 4, durBeat: 1 }];
   const fabc = eng.scoreToMultipartABC([{ name: "Lead", beatNotes: fLine }], { key: { tonic: 5, mode: "major" } });
   const body = fabc.split("\n").slice(fabc.split("\n").indexOf("V:1", fabc.indexOf("K:")) + 1).join(" ");
-  expect(/K:F/.test(fabc) && /=B B _B/.test(body) && /\| =B/.test(body), `ABC under K:F writes B-natural as =B (carried) and Bb as _B after it: ${body}`);
+  expect(/K:F/.test(fabc) && /=B =B _B/.test(body) && /\| =B/.test(body), `ABC under K:F writes every B-natural as =B (reader-robust) and Bb as _B after it: ${body}`);
   const sabc = eng.scoreToMultipartABC(sp, { key: kC, sections: [{ label: "Chorus", startSec: 2.5 }] });
   expect(/clef=treble-8/.test(sabc) && /snm="T\."/.test(sabc), "ABC tenor uses treble-8 + short name");
   expect(/"\^Chorus"/.test(sabc) && /\|\|/.test(sabc) && /\|\]/.test(sabc), "ABC rehearsal annotation, section double bar, final bar");
@@ -1710,6 +1710,54 @@ expect(eng.recoverChordGaps([], mud, 0.1, 0.256, { ...noSmooth, recoverMinConfid
   expect(tracks[2].ons.length === 2 && tracks[2].ons.every(([, v]) => v === 112) && tracks[1].ons.every(([, v]) => v === 64), "emphasized part louder, others ducked");
   expect(tracks[4].ons.map(([m]) => m).join(",") === "48,43", `bass track plays its own line, got ${tracks[4].ons.map(([m]) => m)}`);
   console.log(`Vocal score v2: voice-leading split · ${sp.map((p) => p.name + "(" + p.clef + ")").join(" ")} · key-aware spelling · metric values · rehearsal MIDI ${mid.length} B`);
+}
+
+/* ---- ABC notation 2.1 compliance (abcnotation.com standard) ------------------
+ * Every ABC export is a standard 2.1 file: `%abc-2.1` identification line first,
+ * explicit utf-8 charset, an empty line before X:, K: spelled consistently with the
+ * notes, and pitches that read the same under every reader's accidental-carry rule. */
+{
+  const C3 = (ms, sym, beat = 0, dur = 1) => ({ symbol: sym, beat, durBeats: dur, qbeat: beat, qdur: dur, midis: ms });
+  const sc = (events, sig = [4, 4]) => ({ timeSig: sig, bars: [{ number: 1, timeSig: sig, events }] });
+  const one = eng.scoreToABC(sc([C3([60, 64, 67], "C", 0, 4)]), { title: "Hdr" });
+  const lines = one.split("\n");
+  expect(lines[0] === "%abc-2.1", `ABC line 1 must be the file identification line %abc-2.1, got ${JSON.stringify(lines[0])}`);
+  expect(lines.includes("I:abc-charset utf-8"), "ABC declares its charset (utf-8) in the file header");
+  expect(lines[lines.indexOf("X:1") - 1] === "", "an empty line separates the file header from the first tune (X:)");
+  expect(lines.indexOf("X:1") < lines.findIndex((l) => l.startsWith("T:")) && lines.findIndex((l) => l.startsWith("T:")) < lines.findIndex((l) => l.startsWith("K:")), "tune header order X: → T: → … → K:");
+  expect(eng.ABC_MIME === "text/vnd.abc", "ABC media type is the IANA-registered text/vnd.abc");
+  const mp = eng.scoreToMultipartABC([{ name: "Lead", beatNotes: [{ midi: 67, onsetBeat: 0, durBeat: 2 }] }], { key: { tonic: 7, mode: "major" } });
+  expect(mp.startsWith("%abc-2.1\nI:abc-charset utf-8\n"), "multi-voice ABC carries the same 2.1 file header");
+  // K: spelled by the note speller (the family names Ebm/Abm would mean 6/7 FLATS in ABC)
+  const kn = (t, m) => eng._abcKeyName({ tonic: t, mode: m });
+  expect(kn(3, "minor") === "D#m" && kn(8, "minor") === "G#m" && kn(1, "major") === "Db" && kn(6, "major") === "F#" && kn(10, "major") === "Bb" && kn(9, "minor") === "Am",
+    `K: names consistent with the key signature: ${[kn(3, "minor"), kn(8, "minor"), kn(1, "major"), kn(6, "major")]}`);
+  // pitches relative to K: — in E major a G-natural must be written =G (bare G sounds G#)
+  const eAbc = eng.scoreToABC(sc([C3([55], "G", 0, 1), C3([56], "G#", 1, 1)]), { key: { tonic: 4, mode: "major" } });
+  expect(/K:E\n/.test(eAbc) && /"G"\[=G,\] "G#"\[\^G,\]/.test(eAbc), `K:E: G-natural is =G, and the G# after it in the same bar is re-sharpened: ${eAbc}`);
+  const eBare = eng.scoreToABC(sc([C3([56], "G#", 0, 4)]), { key: { tonic: 4, mode: "major" } });
+  expect(/"G#"\[G,\]/.test(eBare), `K:E: a G# with nothing before it is a bare G (the key signature sharpens it): ${eBare}`);
+  // reader-robust carry: a chromatic note repeated in a bar is re-inflected; the return to the
+  // key-signature pitch in the same bar is cancelled explicitly
+  const cAbc = eng.scoreToABC(sc([C3([61], "C#", 0, 1), C3([61], "C#", 1, 1), C3([60], "C", 2, 1), C3([73], "C#", 3, 1)]), { key: { tonic: 0, mode: "major" } });
+  const cBody = cAbc.slice(cAbc.indexOf("K:C\n") + 4);
+  expect(/\[\^C\][^|]*\[\^C\][^|]*\[=C\][^|]*\[\^c\]/.test(cBody), `^C ^C =C ^c within one bar, got: ${cBody}`);
+  // a bare note never relies on an earlier accidental, and a new bar resets nothing it needs
+  const acc = eng._abcAccidentalTracker({ tonic: 5, mode: "major" });   // F major: Bb
+  const sp = eng._keySpeller({ tonic: 5, mode: "major" });
+  acc.newBar();
+  expect(acc.need(sp(70)) === null && acc.need(sp(71)) === 0 && acc.need(sp(71)) === 0 && acc.need(sp(70)) === -1, "F major: Bb bare, B-natural =B (twice), back to Bb explicit _B");
+  // no-chord placeholder → N.C.
+  expect(/"N\.C\."z/.test(eng.scoreToABC(sc([{ symbol: "—", beat: 0, durBeats: 4, qbeat: 0, qdur: 4, midis: [] }]), {})), "the engine's — no-chord symbol is written as \"N.C.\"");
+  // brass ABC keeps the header + its T:/K: insertions
+  const brass = eng.scoreToBrassABC(sc([C3([60, 64, 67], "C", 0, 4)]), "trumpet-bb", { key: { tonic: 0, mode: "major" } });
+  expect(brass.startsWith("%abc-2.1\n") && /K:D\n%%MIDI program 56/.test(brass), "brass ABC: 2.1 header, transposed K:D, MIDI program after K:");
+  // UI: ABC downloads use the ABC media type, and the Alembic-safe .abc.txt on Apple platforms
+  const ui = fs.readFileSync(UI, "utf8");
+  expect(/function _isApplePlatform/.test(ui) && /"abc\.txt"/.test(ui) && /function useAbcExt/.test(ui), "UI: Apple platforms default to .abc.txt (Apple maps .abc → Alembic 3D)");
+  expect(/abcMimeFor/.test(ui) && /ABC_MIME/.test(ui) && !/text\/vnd\.abc;charset/.test(ui), "UI: ABC blobs are typed via abcMimeFor/ABC_MIME, not a hard-coded string");
+  expect((ui.match(/<AbcExtToggle /g) || []).length === 2, "UI: both ABC download sites offer the .abc / .abc.txt toggle");
+  console.log("ABC 2.1: %abc-2.1 header · utf-8 · K: D#m/G#m/Db consistent · key-relative + reader-robust accidentals · text/vnd.abc · Apple .abc.txt");
 }
 
 /* ---- DTW audio↔score auto-sync -------------------------------------------- */

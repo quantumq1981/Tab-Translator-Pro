@@ -215,6 +215,7 @@ import {
   splitVoicesToScores,
   scoreToMultipartMusicXML,
   scoreToMultipartABC,
+  ABC_MIME,
   suggestVoiceCount,
   keyFromNotes,
   vocalRangeReport,
@@ -1122,11 +1123,12 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   // opens in the right tool (.musicxml → MuseScore/Guitar Pro, .abc → ABC players).
   const _EXPORT_EXT = { abc: "abc", musicxml: "musicxml", chordpro: "chordpro", csmpn: "csmpn", csml: "csml", midi: "mid", music: "sh" };
   const _EXPORT_MIME = { musicxml: "application/vnd.recordare.musicxml+xml", midi: "audio/midi" };
+  const [abcExt, setAbcExt] = useAbcExt();
   const download = () => {
     try {
       if (!exp) return;
-      const ext = _EXPORT_EXT[exp.fmt] || "txt";
-      const mime = _EXPORT_MIME[exp.fmt] || "text/plain";
+      const ext = exp.fmt === "abc" ? abcExt : (_EXPORT_EXT[exp.fmt] || "txt");
+      const mime = exp.fmt === "abc" ? abcMimeFor(abcExt).split(";")[0] : (_EXPORT_MIME[exp.fmt] || "text/plain");
       const base = (title || "chart").replace(/\.[^.]+$/, "").replace(/[^\w.-]+/g, "_").replace(/^_+|_+$/g, "") || "chart";
       const blob = exp.bytes ? new Blob([exp.bytes], { type: mime }) : new Blob([exp.text], { type: mime + ";charset=utf-8" });
       const url = URL.createObjectURL(blob);
@@ -1256,7 +1258,8 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
         : <GridView score={tscore} C={C} symOf={symOf} selKey={selKey} onPick={onPick} />}
 
       <ExportPanel exp={exp} setExp={setExp} C={C} bpm={bpm} semis={semis}
-        copy={copy} download={download} copied={copied} downloaded={downloaded} extOf={(f) => _EXPORT_EXT[f] || "txt"} />
+        copy={copy} download={download} copied={copied} downloaded={downloaded} extOf={(f) => (f === "abc" ? abcExt : _EXPORT_EXT[f] || "txt")}
+        abcExt={abcExt} setAbcExt={setAbcExt} />
     </>
   );
 }
@@ -1418,8 +1421,48 @@ function GridView({ score, C, symOf, selKey, onPick }) {
     </>
   );
 }
+/* ---- ABC file naming (Alembic collision) ------------------------------------
+ * iOS / iPadOS / macOS resolve a file's TYPE from its extension, and Apple's Model
+ * I/O framework system-declares `.abc` as ALEMBIC — the unrelated 3D-graphics
+ * interchange format. So a downloaded `song.abc` shows up in Files/Finder as a 3D
+ * object, Quick Look tries to render geometry, and ABC apps aren't offered. The
+ * content is fine — it's the extension. The abc 2.1 standard itself names `.txt`
+ * as the fallback where a system restricts file types, so on Apple platforms we save
+ * `song.abc.txt` (plain text: previews, shares and opens in any ABC app; the `.abc`
+ * stays visible in the name) and everywhere else the standard `song.abc` with the
+ * registered `text/vnd.abc` type. A one-tap toggle switches between them and is
+ * remembered per device (localStorage, try/catch — a convenience, never required). */
+const _ABC_EXT_KEY = "ttp:abcExt:v1";
+function _isApplePlatform() {
+  try {
+    const ua = (typeof navigator !== "undefined" && navigator.userAgent) || "";
+    return /iPad|iPhone|iPod|Macintosh|Mac OS X/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  } catch (_) { return false; }
+}
+function _abcExtDefault() {
+  try { const v = localStorage.getItem(_ABC_EXT_KEY); if (v === "abc" || v === "abc.txt") return v; } catch (_) {}
+  return _isApplePlatform() ? "abc.txt" : "abc";
+}
+function useAbcExt() {
+  const [ext, setExt] = useState(_abcExtDefault);
+  const set = (v) => { setExt(v); try { localStorage.setItem(_ABC_EXT_KEY, v); } catch (_) {} };
+  return [ext, set];
+}
+/* `.abc` → the IANA type text/vnd.abc; `.abc.txt` → text/plain, so the browser never
+ * "corrects" the extension to match the MIME type. Both are UTF-8 (the abc 2.1 default,
+ * and declared in the file header by the engine). */
+const abcMimeFor = (ext) => (ext === "abc" ? ABC_MIME : "text/plain") + ";charset=utf-8";
+function AbcExtToggle({ C, ext, setExt }) {
+  return (
+    <span style={{ fontSize: 11, color: C.dim }}>
+      Saves as <b style={{ color: C.text }}>.{ext}</b>{ext === "abc.txt" ? " — Apple devices read .abc as Alembic 3D, so the ABC standard's .txt fallback is used" : " — the standard ABC extension"}{" · "}
+      <button onClick={() => setExt(ext === "abc" ? "abc.txt" : "abc")}
+        style={{ ...chip(C), padding: "1px 7px", fontSize: 10 }}>use .{ext === "abc" ? "abc.txt" : "abc"}</button>
+    </span>
+  );
+}
 /* Export preview: the generated text (or MIDI byte summary) + copy/download. */
-function ExportPanel({ exp, setExp, C, bpm, semis, copy, download, copied, downloaded, extOf }) {
+function ExportPanel({ exp, setExp, C, bpm, semis, copy, download, copied, downloaded, extOf, abcExt, setAbcExt }) {
   if (!exp) return null;
   return (
     <div style={{ marginTop: 12 }}>
@@ -1439,7 +1482,7 @@ function ExportPanel({ exp, setExp, C, bpm, semis, copy, download, copied, downl
         <textarea readOnly value={exp.text} spellCheck={false} className="tdp-scroll"
           style={{ width: "100%", height: 120, resize: "vertical", boxSizing: "border-box", background: C.bg, color: C.text, border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, fontSize: 12, lineHeight: 1.5, fontFamily: "'IBM Plex Mono', monospace", outline: "none" }} />
       )}
-      {exp.fmt === "abc" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>Real, playable notes + chord symbols — paste into any ABC player (e.g. abcjs / editor at abcnotation.com) to hear it.</div>}
+      {exp.fmt === "abc" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6, lineHeight: 1.6 }}>ABC notation 2.1 (UTF-8, <code>%abc-2.1</code> header) — real, playable notes + chord symbols, pitches written against the key signature. Copy it into any ABC player (e.g. abcjs / the editor at abcnotation.com), or download.<br />{setAbcExt && <AbcExtToggle C={C} ext={abcExt} setExt={setAbcExt} />}</div>}
       {exp.fmt === "musicxml" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>Save as <b>.musicxml</b> and open in MuseScore / Guitar Pro — carries chord symbols + notes + meter. Round-trips back into this app.</div>}
       {exp.fmt === "csmpn" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}><b>Chord Sheet Maker Pro</b>'s native fake-book source (one chord = one bar; <code>_</code> splits a bar) — also carries the real fingering (<code>{"{tab}"}</code>) and decoded strum rhythm (<code>{"{hybrid}"}</code>). Paste into Pro's editor, or use <b>→ Chord Sheet Maker Pro</b> to send it straight there.</div>}
       {exp.fmt === "csml" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}><b>ChordSlashML</b> — Pro's beat-slotted notation (<code>{"|"}</code> measures, <code>_</code> holds, <code>.</code> rests). Paste into Pro's <b>ChordSlashML</b> live editor.</div>}
@@ -2064,6 +2107,8 @@ function AudioImport({ C, useSharp }) {
   const [vsKey, setVsKey] = useState("");                // vocal-score key override ("" = auto, from the sung notes)
   const [vsGrid, setVsGrid] = useState(2);               // notation grid: 2 = 8ths (default — easiest to sight-read), 4 = 16ths (detailed)
   const [vsLegato, setVsLegato] = useState(true);        // hold each sung note across gaps < ½ beat (the model releases early)
+  const [abcExt, setAbcExt] = useAbcExt();               // .abc vs .abc.txt (Apple reads .abc as Alembic 3D — see useAbcExt)
+  const [abcCopied, setAbcCopied] = useState(false);
   const [raw, setRaw] = useState([]);                // raw engine events (chords: {symbol,midis,…}; notes: {note,…})
   const [bpm, setBpm] = useState(120);
   const [beatInfo, setBeatInfo] = useState(null);   // detected tempo readout
@@ -2248,7 +2293,11 @@ function AudioImport({ C, useSharp }) {
         grid: vsGrid, legatoBeats: vsLegato ? 0.5 : 0, barsPerSystem: 4, sections };
       let data, mime, ext, suffix = "";
       if (fmt === "musicxml") { data = scoreToMultipartMusicXML(vocalParts, opts); mime = "application/vnd.recordare.musicxml+xml;charset=utf-8"; ext = "musicxml"; }
-      else if (fmt === "abc") { data = scoreToMultipartABC(vocalParts, opts); mime = "text/vnd.abc;charset=utf-8"; ext = "abc"; }
+      else if (fmt === "abc") { data = scoreToMultipartABC(vocalParts, opts); mime = abcMimeFor(abcExt); ext = abcExt; }
+      else if (fmt === "abc-copy") {
+        navigator.clipboard.writeText(scoreToMultipartABC(vocalParts, opts)).then(() => { setAbcCopied(true); setTimeout(() => setAbcCopied(false), 1500); }).catch(() => setErr("Copy failed — use ⬇ ABC instead."));
+        return;
+      }
       else {
         const emphIdx = fmt === "midi-part" ? vocalParts.findIndex((p) => p.voice === voiceIdx) : -1;
         data = scoreToVocalMidi(vocalParts, { ...opts, emphasize: emphIdx >= 0 ? emphIdx : null });
@@ -2508,8 +2557,10 @@ function AudioImport({ C, useSharp }) {
                 <button onClick={() => exportVocalScore("musicxml")}
                   title="ALL parts as ONE bracketed choral score (MusicXML) — opens in MuseScore / Sibelius / Finale / Dorico; sections become rehearsal marks"
                   style={{ ...chip(C), padding: "3px 9px", borderColor: C.cyan, color: C.cyan }}>⬇ Vocal score (MusicXML)</button>
-                <button onClick={() => exportVocalScore("abc")} title="all parts as one multi-voice ABC file"
+                <button onClick={() => exportVocalScore("abc")} title={`all parts as one multi-voice ABC notation file (.${abcExt}, UTF-8)`}
                   style={{ ...chip(C), padding: "3px 9px", borderColor: C.border, color: C.dim }}>⬇ ABC</button>
+                <button onClick={() => exportVocalScore("abc-copy")} title="copy the multi-voice ABC text — paste into abcnotation.com / abcjs / any ABC app"
+                  style={{ ...chip(C), padding: "3px 9px", borderColor: abcCopied ? C.green : C.border, color: abcCopied ? C.green : C.dim }}>{abcCopied ? "ABC copied ✓" : "⧉ Copy ABC"}</button>
                 <button onClick={() => exportVocalScore("midi")} title="rehearsal MIDI: one named track per part (Choir Aahs), balanced"
                   style={{ ...chip(C), padding: "3px 9px", borderColor: C.border, color: C.dim }}>⬇ Rehearsal MIDI</button>
                 {vocalParts.length > 1 && (
@@ -2517,6 +2568,7 @@ function AudioImport({ C, useSharp }) {
                     style={{ ...chip(C), padding: "3px 9px", borderColor: C.amber, color: C.amber }}>⬇ Learning track: {voiceLabel(voiceIdx)}</button>
                 )}
               </div>
+              <div style={{ marginTop: 6 }}><AbcExtToggle C={C} ext={abcExt} setExt={setAbcExt} /></div>
               <div style={{ color: C.dim, marginTop: 6 }}>
                 Set the song's real ♩= above and run 🔎 Detect sections first — bars and rehearsal marks follow them. Parts open as a bracketed choir system; extract individual parts in your notation app.
               </div>
