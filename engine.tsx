@@ -4216,6 +4216,14 @@ function transcribeChordsBeatSync(samples, sampleRate, opts = {}) {
  * short clips, or material with no discernible pulse — a rubato solo piano intro), so
  * a result is always produced. Returns { events, bpm, beats, method }. */
 function analyzeAudioChords(samples, sampleRate, opts = {}) {
+  /* SynHarmonics v2 (NNLS front-end + HMM posteriors) is the default since 2026-10-21:
+   * measured on the held-out half of the rendered-stem benchmark (tests/bench), root
+   * 54→76%, majmin 47→76%, sevenths 42→70%, bass 43→75% (docs/SYNHARMONICS-V2.md). `engine:"v1"`
+   * keeps the original HPSS-chroma + Viterbi path below, unchanged. */
+  if (opts.engine !== "v1") {
+    const r = analyzeAudioChordsV2(samples, sampleRate, opts);
+    if (r.events.length || !samples || samples.length < sampleRate) return r;
+  }
   if (opts.beatSync !== false) {
     const bt = detectBeats(samples, sampleRate, opts);
     if (bt.beats && bt.beats.length >= 3) {
@@ -4242,6 +4250,753 @@ function analyzeAudioChords(samples, sampleRate, opts = {}) {
     }
   }
   return { events: transcribeChords(samples, sampleRate, opts), bpm: 0, beats: [], key: null, method: "sliding" };
+}
+
+/* ============================================================================
+ *  SYNHARMONICS v2 — isolated-stem chord recognition (Stages A · C · D)
+ *  ---------------------------------------------------------------------------
+ *  The v2.0 engineering spec (docs/SYNHARMONICS-V2.md) applied to THIS app's
+ *  constraints: zero-dep, zero-server, iOS-Safari-first, worker-safe, no training
+ *  data → no learned TCN. Every stage below is the published, deterministic MIR
+ *  method the spec names as its baseline, and every one was MEASURED on the
+ *  rendered-stem benchmark (tests/bench) before it was allowed to stay:
+ *
+ *   Stage A  front-end   anti-aliased resampling → log-frequency spectrogram
+ *                        (3 bins/semitone) → HPSS in log-frequency → GLOBAL TUNING
+ *                        (peak-interpolated, reliability-shrunk) + re-centre → NNLS
+ *                        approximate note transcription (Mauch & Dixon 2010, "Chordino")
+ *                        → BASS from the lowest real note (sub-octave guarded), TREBLE
+ *                        from NNLS blended with harmonic salience. Kills the overtone
+ *                        bleed that fakes chord tones (Bb's 3rd harmonic F turning Gm/Bb
+ *                        into Bb6) without starving a triad's real 5th.
+ *   Stage C  posterior   an HMM over (root × quality × bass) states with a no-chord
+ *                        state; FORWARD-BACKWARD posteriors per beat; entropy confidence
+ *                        `1 − H(p)/log K`; ranked alternatives for ambiguous events.
+ *                        Inversions are STATES (C/E ≠ Em because their treble differs),
+ *                        not a post-hoc relabel.
+ *   Stage D  context     bidirectional context = forward-backward (default); plus OPT-IN
+ *                        repetition-aware chroma smoothing (Mauch, Noland & Dixon 2009) —
+ *                        v2 §5.3's "structural block conditioning" with no model. Opt-in
+ *                        because on held-out data it trades ~+1 sevenths for ~−1.2 seg.
+ *
+ *  What is deliberately NOT here (and why): a learned TCN/Transformer (no annotated
+ *  audio to train on, and the iOS/Pages no-WASM-threads wall); causal/streaming mode
+ *  (the app decodes files, not a live feed — display mode only); downbeats (pure-DSP
+ *  downbeat cues measured near-chance on real material — see CLAUDE.md).
+ * ------------------------------------------------------------------------- */
+
+/* ---- anti-aliased resampling (Kaiser-windowed sinc) -----------------------
+ * The Audio panel used to downsample with a box average (`dsChan`): a 2-tap mean has
+ * only −3 dB at the new Nyquist, so cymbal/hat energy at 18–22 kHz folds straight down
+ * into the 0–4 kHz band the chroma reads. This is a proper low-pass: Kaiser β=8.6
+ * (~−80 dB stopband), cutoff at 0.85 × the lower Nyquist, linear-interpolated kernel
+ * table. Pure; any ratio. */
+function _besselI0(x) {
+  let s = 1, t = 1;
+  for (let k = 1; k < 40; k++) { t *= (x / (2 * k)) * (x / (2 * k)); s += t; if (t < 1e-14 * s) break; }
+  return s;
+}
+function resampleTo(samples, srIn, srOut, opts = {}) {
+  if (!samples || !samples.length || !(srIn > 0) || !(srOut > 0)) return new Float32Array(0);
+  if (Math.abs(srIn - srOut) < 1e-9) return Float32Array.from(samples);
+  const ratio = srOut / srIn;
+  const cutoff = (opts.cutoff || 0.85) * Math.min(1, ratio);     // fraction of the INPUT Nyquist
+  const zc = opts.zeroCrossings || 8, beta = opts.beta || 8.6;
+  const width = zc / cutoff;                                      // kernel half-width, input samples
+  const RES = 256, tl = Math.ceil(width * RES) + 2, i0b = _besselI0(beta);
+  const tab = new Float64Array(tl);
+  for (let i = 0; i < tl; i++) {
+    const x = i / RES;
+    if (x >= width) continue;
+    const sx = x * cutoff, r = x / width;
+    const sinc = sx === 0 ? 1 : Math.sin(Math.PI * sx) / (Math.PI * sx);
+    tab[i] = cutoff * sinc * (_besselI0(beta * Math.sqrt(1 - r * r)) / i0b);
+  }
+  const outLen = Math.floor(samples.length * ratio), out = new Float32Array(outLen), last = samples.length - 1;
+  for (let n = 0; n < outLen; n++) {
+    const c = n / ratio, lo = Math.max(0, Math.ceil(c - width)), hi = Math.min(last, Math.floor(c + width));
+    let acc = 0;
+    for (let i = lo; i <= hi; i++) {
+      const d = Math.abs(i - c) * RES, k = d | 0;
+      acc += samples[i] * (tab[k] + (d - k) * (tab[k + 1] - tab[k]));
+    }
+    out[n] = acc;
+  }
+  return out;
+}
+
+/* ---- Stage A: log-frequency spectrogram ----------------------------------
+ * 3 bins per semitone (Chordino's resolution — enough to MEASURE tuning, which a
+ * nearest-semitone fold cannot), from `minMidi` to `maxMidi`. STFT frames are paired
+ * into one complex FFT (two real signals for the price of one). Each log bin is the
+ * triangular-weighted mean of the FFT bins within ±1/3 semitone of its centre, or a
+ * linear interpolation where the FFT grid is coarser than the log grid (the bass). */
+const _LF_BPS = 3;
+function _lfMap(N, sampleRate, minMidi, J) {
+  const map = [];
+  const binHz = sampleRate / N;
+  for (let j = 0; j < J; j++) {
+    const fc = 440 * Math.pow(2, (minMidi + j / _LF_BPS - 69) / 12);
+    const fLo = fc * Math.pow(2, -1 / (12 * _LF_BPS)), fHi = fc * Math.pow(2, 1 / (12 * _LF_BPS));
+    const k0 = Math.max(1, Math.ceil(fLo / binHz)), k1 = Math.min((N >> 1) - 1, Math.floor(fHi / binHz));
+    const idx = [], w = [];
+    for (let k = k0; k <= k1; k++) {
+      const d = Math.abs(Math.log2((k * binHz) / fc)) * 12 * _LF_BPS;
+      if (d < 1) { idx.push(k); w.push(1 - d); }
+    }
+    let ws = 0; for (const x of w) ws += x;
+    if (ws < 1) {                                                // coarse grid → interpolate at fc
+      const kf = fc / binHz, kk = Math.floor(kf), fr = kf - kk;
+      map.push({ idx: [kk, kk + 1], w: [1 - fr, fr], norm: 1 });
+    } else map.push({ idx, w, norm: ws });
+  }
+  return map;
+}
+function logFreqSpectrogram(samples, sampleRate, opts = {}) {
+  const minMidi = opts.minMidi != null ? opts.minMidi : 26;        // D1 — below the lowest bass partial we use
+  const maxMidi = opts.maxMidi != null ? opts.maxMidi : 107;       // B7 (~3.95 kHz): room for treble harmonics
+  // nearest power of two to `winSec` (0.25 s → 4096 at both 16 kHz and 22.05 kHz)
+  const winSec = opts.winSec || 0.25;
+  let N = Math.pow(2, Math.max(9, Math.round(Math.log2(winSec * sampleRate))));
+  while (N > samples.length && N > 512) N >>= 1;
+  const hop = Math.max(1, Math.round(sampleRate * (opts.hopSec || 0.1)));
+  const topMidi = Math.min(maxMidi, 69 + 12 * Math.log2((0.48 * sampleRate) / 440));
+  const J = Math.max(1, Math.floor((topMidi - minMidi) * _LF_BPS) + 1);
+  const map = _lfMap(N, sampleRate, minMidi, J);
+  const win = _hann(N), half = N >> 1;
+  const starts = [];
+  for (let s = 0; s + N <= samples.length; s += hop) starts.push(s);
+  const T = starts.length;
+  const spec = new Array(T), energy = new Float64Array(T);
+  const re = new Float64Array(N), im = new Float64Array(N), magA = new Float64Array(half), magB = new Float64Array(half);
+  /* Tuning evidence, gathered while the linear spectrum is at hand: every clear spectral
+   * peak (80 Hz–2 kHz, ≥ −20 dB of the frame's loudest) is located to a fraction of a
+   * bin by parabolic interpolation on log-magnitude, and its deviation from the nearest
+   * equal-tempered semitone is accumulated as a CIRCULAR mean (±50¢ wraps). Measuring
+   * on the linear spectrum is what keeps it unbiased — folding linear bins into log bins
+   * first skews a peak's apparent position by ~10¢. */
+  let tc = 0, ts = 0, tw = 0;
+  const binHz = sampleRate / N, kLo = Math.max(2, Math.ceil(80 / binHz)), kHi = Math.min(half - 2, Math.floor(2000 / binHz));
+  const tunePeaks = (mag) => {
+    let mx = 0; for (let k = kLo; k <= kHi; k++) if (mag[k] > mx) mx = mag[k];
+    if (!(mx > 0)) return;
+    for (let k = kLo; k <= kHi; k++) {
+      const v = mag[k];
+      if (v < 0.1 * mx || v <= mag[k - 1] || v < mag[k + 1]) continue;
+      const a = Math.log(mag[k - 1] + 1e-12), b = Math.log(v + 1e-12), c = Math.log(mag[k + 1] + 1e-12), den = a - 2 * b + c;
+      const d = den < 0 ? Math.max(-0.5, Math.min(0.5, (0.5 * (a - c)) / den)) : 0;
+      const cents = 1200 * Math.log2(((k + d) * binHz) / 440);
+      const ph = (2 * Math.PI * (cents - 100 * Math.round(cents / 100))) / 100;
+      tc += v * Math.cos(ph); ts += v * Math.sin(ph); tw += v;
+    }
+  };
+  const fold = (mag, t) => {
+    const row = new Float32Array(J);
+    for (let j = 0; j < J; j++) {
+      const m = map[j]; let v = 0;
+      for (let q = 0; q < m.idx.length; q++) v += m.w[q] * mag[m.idx[q]];
+      row[j] = v / m.norm;
+    }
+    spec[t] = row;
+  };
+  for (let t = 0; t < T; t += 2) {
+    const a = starts[t], b = t + 1 < T ? starts[t + 1] : -1;
+    let ea = 0, eb = 0;
+    for (let i = 0; i < N; i++) {
+      const va = samples[a + i] || 0; re[i] = va * win[i]; ea += va * va;
+      if (b >= 0) { const vb = samples[b + i] || 0; im[i] = vb * win[i]; eb += vb * vb; } else im[i] = 0;
+    }
+    _fft(re, im);
+    for (let k = 1; k < half; k++) {                              // split the two real spectra
+      const rk = re[k], ik = im[k], rn = re[N - k], inn = im[N - k];
+      magA[k] = 0.5 * Math.hypot(rk + rn, ik - inn);
+      magB[k] = 0.5 * Math.hypot(ik + inn, rn - rk);
+    }
+    fold(magA, t); energy[t] = Math.sqrt(ea / N); tunePeaks(magA);
+    if (b >= 0) { fold(magB, t + 1); energy[t + 1] = Math.sqrt(eb / N); tunePeaks(magB); }
+  }
+  const times = starts.map((s) => (s + N / 2) / sampleRate);   // frame CENTRE
+  const tuning = tc || ts ? (100 * Math.atan2(ts, tc)) / (2 * Math.PI) : 0;
+  const tuningR = tw > 0 ? Math.hypot(tc, ts) / tw : 0;              // circular resultant: 1 = every peak agrees
+  return { spec, times, energy, J, minMidi, bps: _LF_BPS, N, hop, sampleRate, tuning, tuningR };
+}
+
+/* Median-filter HPSS on the log-frequency spectrogram (in place). Same idea as
+ * `harmonicChromagram`, but in log-frequency it is ~10× cheaper (≈250 bins, not
+ * ≈2500) and the frequency kernel spans a fixed MUSICAL width at every register. */
+function _hpssLogFreq(spec, opts = {}) {
+  const T = spec.length; if (!T) return;
+  const J = spec[0].length;
+  const kt = Math.max(3, (opts.hpssTimeFrames | 0) | 1), kf = Math.max(3, (opts.hpssFreqBins || 13) | 1);
+  const buf = new Float64Array(Math.max(kt, kf));
+  const med = (n) => {
+    for (let i = 1; i < n; i++) { const v = buf[i]; let j = i - 1; while (j >= 0 && buf[j] > v) { buf[j + 1] = buf[j]; j--; } buf[j + 1] = v; }
+    return buf[(n - 1) >> 1];
+  };
+  const out = new Array(T);
+  for (let t = 0; t < T; t++) {
+    const row = new Float32Array(J);
+    for (let j = 0; j < J; j++) {
+      let n = 0;
+      for (let q = t - (kt >> 1); q <= t + (kt >> 1); q++) buf[n++] = spec[Math.min(T - 1, Math.max(0, q))][j];
+      const h = med(n);
+      n = 0;
+      for (let q = j - (kf >> 1); q <= j + (kf >> 1); q++) buf[n++] = spec[t][Math.min(J - 1, Math.max(0, q))];
+      const p = med(n);
+      const hh = h * h, pp = p * p;
+      row[j] = hh + pp > 0 ? spec[t][j] * (hh / (hh + pp)) : 0;
+    }
+    out[t] = row;
+  }
+  for (let t = 0; t < T; t++) spec[t] = out[t];
+}
+
+/* Re-centre the log-frequency grid on the measured tuning: spec[t][j] ← spec[t][j + shift].
+ * Real recordings drift (vintage varispeed, a band tuned to a piano, a capo'd guitar a
+ * little sharp); at ±40¢ a nearest-semitone fold splits every note across two pitch
+ * classes. The tuning itself is measured in logFreqSpectrogram (peak interpolation). */
+function _shiftBins(spec, shift) {                                // spec[t][j] ← spec[t][j + shift] (linear interp)
+  if (Math.abs(shift) < 1e-3) return;
+  for (let t = 0; t < spec.length; t++) {
+    const row = spec[t], J = row.length, o = new Float32Array(J);
+    for (let j = 0; j < J; j++) {
+      const x = j + shift, k = Math.floor(x), f = x - k;
+      const a = k >= 0 && k < J ? row[k] : 0, b = k + 1 >= 0 && k + 1 < J ? row[k + 1] : 0;
+      o[j] = a + f * (b - a);
+    }
+    spec[t] = o;
+  }
+}
+
+/* ---- NNLS approximate transcription --------------------------------------
+ * Each note's log-frequency PROFILE is its harmonic series (partial h at
+ * 3·12·log2(h) bins above the fundamental, amplitude s^(h−1), s = 0.7 as in Chordino)
+ * spread over ±1.5 bins. A frame's whitened spectrum b is explained as A·x with x ≥ 0
+ * (Lawson–Hanson active set, on the Gram matrix so each solve is |P|×|P|). Because a
+ * note's overtones are part of ITS column, the 3rd harmonic of B♭ is attributed to B♭
+ * — it no longer appears as an F. */
+const _nnlsDictCache = new Map();
+function _nnlsDict(J, minMidi, noteLo, noteHi, s, H) {
+  const key = [J, minMidi, noteLo, noteHi, s, H].join(",");
+  let d = _nnlsDictCache.get(key);
+  if (d) return d;
+  const notes = [], cols = [];
+  for (let m = noteLo; m <= noteHi; m++) {
+    const col = new Float64Array(J);
+    for (let h = 1; h <= H; h++) {
+      const pos = (m - minMidi + 12 * Math.log2(h)) * _LF_BPS;
+      if (pos > J - 1 + 1.5) break;
+      const amp = Math.pow(s, h - 1);
+      for (let j = Math.max(0, Math.ceil(pos - 1.5)); j <= Math.min(J - 1, Math.floor(pos + 1.5)); j++) {
+        const x = (j - pos) / 1.5;
+        col[j] += amp * Math.cos((Math.PI / 2) * x) * Math.cos((Math.PI / 2) * x);
+      }
+    }
+    let n = 0; for (let j = 0; j < J; j++) n += col[j] * col[j];
+    n = Math.sqrt(n) || 1;
+    const idx = [], val = [];
+    for (let j = 0; j < J; j++) if (col[j] > 1e-6) { idx.push(j); val.push(col[j] / n); }
+    notes.push(m); cols.push({ idx: Int32Array.from(idx), val: Float64Array.from(val) });
+  }
+  const M = notes.length, G = new Float64Array(M * M);
+  for (let a = 0; a < M; a++) {
+    const dense = new Float64Array(J);
+    for (let q = 0; q < cols[a].idx.length; q++) dense[cols[a].idx[q]] = cols[a].val[q];
+    for (let b = a; b < M; b++) {
+      let v = 0;
+      for (let q = 0; q < cols[b].idx.length; q++) v += dense[cols[b].idx[q]] * cols[b].val[q];
+      G[a * M + b] = G[b * M + a] = v;
+    }
+  }
+  d = { notes, cols, G, M };
+  _nnlsDictCache.set(key, d);
+  return d;
+}
+/* Lawson–Hanson NNLS given the Gram matrix G (M×M) and c = Aᵀb. Returns x ≥ 0. */
+function _nnlsGram(G, c, M, maxIter) {
+  const x = new Float64Array(M), inP = new Uint8Array(M), w = new Float64Array(M);
+  const P = [];
+  const tol = 1e-10;
+  const solveP = () => {                                          // Cholesky on G[P,P] z = c[P]
+    const n = P.length, L = new Float64Array(n * n), z = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j <= i; j++) {
+        let v = G[P[i] * M + P[j]];
+        for (let k = 0; k < j; k++) v -= L[i * n + k] * L[j * n + k];
+        if (i === j) L[i * n + i] = Math.sqrt(Math.max(v, 1e-12)); else L[i * n + j] = v / L[j * n + j];
+      }
+    }
+    for (let i = 0; i < n; i++) { let v = c[P[i]]; for (let k = 0; k < i; k++) v -= L[i * n + k] * z[k]; z[i] = v / L[i * n + i]; }
+    for (let i = n - 1; i >= 0; i--) { let v = z[i]; for (let k = i + 1; k < n; k++) v -= L[k * n + i] * z[k]; z[i] = v / L[i * n + i]; }
+    return z;
+  };
+  let iter = 0;
+  const lim = maxIter || 3 * M;
+  for (;;) {
+    for (let j = 0; j < M; j++) { let v = c[j]; for (const p of P) v -= G[j * M + p] * x[p]; w[j] = v; }
+    let t = -1, best = tol;
+    for (let j = 0; j < M; j++) if (!inP[j] && w[j] > best) { best = w[j]; t = j; }
+    if (t < 0 || iter++ > lim) break;
+    inP[t] = 1; P.push(t);
+    for (let inner = 0; inner < 3 * M; inner++) {
+      const z = solveP();
+      let allPos = true;
+      for (let i = 0; i < P.length; i++) if (z[i] <= tol) { allPos = false; break; }
+      if (allPos) { for (let i = 0; i < P.length; i++) x[P[i]] = z[i]; break; }
+      let alpha = Infinity;
+      for (let i = 0; i < P.length; i++) if (z[i] <= tol) { const a = x[P[i]] / (x[P[i]] - z[i]); if (a < alpha) alpha = a; }
+      if (!isFinite(alpha)) alpha = 0;
+      for (let i = 0; i < P.length; i++) x[P[i]] += alpha * (z[i] - x[P[i]]);
+      for (let i = P.length - 1; i >= 0; i--) if (x[P[i]] <= tol) { x[P[i]] = 0; inP[P[i]] = 0; P.splice(i, 1); }
+      if (!P.length) break;
+    }
+  }
+  return x;
+}
+
+/* Bass / treble pitch profiles (MIDI-weighted, as Chordino's). The bass profile
+ * covers the register a bass line or a guitar's low strings live in; treble starts
+ * an octave higher and carries the chord colour. Overlap in the middle is deliberate
+ * — a guitar's 5th-string root is both. */
+function _bassWeight(m) { return m <= 47 ? 1 : m >= 60 ? 0 : (60 - m) / 13; }
+function _trebleWeight(m) { return m <= 40 ? 0 : m >= 52 ? (m > 88 ? Math.max(0.3, 1 - (m - 88) / 16) : 1) : (m - 40) / 12; }
+
+/* PCM → NNLS chroma frames { t, chroma (treble), bass, level (dB) } + { tuning }.
+ * The frame shape is the one `beatSegments` already consumes (plus `level`), so the
+ * downstream segmentation is shared. */
+function nnlsChromagram(samples, sampleRate, opts = {}) {
+  const lf = logFreqSpectrogram(samples, sampleRate, opts);
+  const { spec, times, J, minMidi } = lf;
+  const T = spec.length;
+  if (!T) return { frames: [], tuning: 0 };
+  // raw level per frame (dB), BEFORE any masking — the gate's evidence
+  const level = new Float64Array(T);
+  for (let t = 0; t < T; t++) { let e = 0; const r = spec[t]; for (let j = 0; j < J; j++) e += r[j] * r[j]; level[t] = 10 * Math.log10(e + 1e-20); }
+  if (opts.hpss !== false) {
+    const hopS = lf.hop / sampleRate;
+    _hpssLogFreq(spec, { hpssTimeFrames: Math.round((opts.hpssTimeSec != null ? opts.hpssTimeSec : 0.6) / hopS), hpssFreqBins: opts.hpssFreqBins });
+  }
+  /* Compensation is SHRUNK by the estimate's own reliability (the circular resultant R:
+   * 1 = every spectral peak agrees on the offset). In-tune instruments read R ≈ 0.6–1;
+   * a sung line with vibrato/portamento reads R ≈ 0.04–0.3, where the "offset" is mostly
+   * the singer's pitch drift — re-centring the grid on that would mis-place every note. */
+  const rel = Math.max(0, Math.min(1, (lf.tuningR - 0.15) / 0.35));
+  const tuning = opts.tuning != null ? opts.tuning : opts.estimateTuning === false ? 0 : lf.tuning * rel;
+  _shiftBins(spec, (tuning / 100) * _LF_BPS);
+  // optional spectral whitening (running mean/std over ±`whitenBins` log bins). OFF by
+  // default: Chordino uses it, but here it cost 6–8 majmin points on the dev split.
+  const wb = opts.whitenBins != null ? opts.whitenBins : 0, wexp = opts.whitening != null ? opts.whitening : 1;
+  const noteLo = opts.noteLo != null ? opts.noteLo : 28, noteHi = opts.noteHi != null ? opts.noteHi : 96;
+  const dict = _nnlsDict(J, minMidi, noteLo, noteHi, opts.spectralShape != null ? opts.spectralShape : 0.8, opts.partials || 16);
+  const { notes, cols, G, M } = dict;
+  const frames = new Array(T);
+  const b = new Float64Array(J), c = new Float64Array(M);
+  const cs = new Float64Array(J + 1), cs2 = new Float64Array(J + 1);
+  for (let t = 0; t < T; t++) {
+    const row = spec[t];
+    cs[0] = 0; cs2[0] = 0;
+    for (let j = 0; j < J; j++) { cs[j + 1] = cs[j] + row[j]; cs2[j + 1] = cs2[j] + row[j] * row[j]; }
+    for (let j = 0; j < J; j++) {
+      const lo = Math.max(0, j - wb), hi = Math.min(J, j + wb + 1), n = hi - lo;
+      const mu = (cs[hi] - cs[lo]) / n, sd = Math.sqrt(Math.max(1e-24, (cs2[hi] - cs2[lo]) / n - mu * mu));
+      b[j] = wb > 0 ? (row[j] > mu ? (row[j] - mu) / Math.pow(sd, wexp) : 0) : row[j];
+    }
+    for (let a = 0; a < M; a++) { let v = 0; const col = cols[a]; for (let q = 0; q < col.idx.length; q++) v += col.val[q] * b[col.idx[q]]; c[a] = v; }
+    const x = opts.nnls === false ? Float64Array.from(c, (v) => Math.max(0, v)) : _nnlsGram(G, c, M);
+    const tr = new Float64Array(12), bs = new Float64Array(12);
+    let xmax = 0;
+    for (let a = 0; a < M; a++) if (x[a] > xmax) xmax = x[a];
+    /* TREBLE = an even blend of the NNLS activations and the raw harmonic SALIENCE
+     * (c = Aᵀb, the energy summed over each note's partials). Measured, not assumed:
+     * NNLS alone wins root/majmin but under-weights real chord tones that coincide with
+     * another note's overtones (a triad's 5th IS its root's 3rd harmonic), costing the
+     * 7th/extension detail — sevenths −2.8 and exact pitch-set −1.6 on the held-out
+     * half. The blend keeps most of the root accuracy and recovers the quality. The BASS
+     * stays pure NNLS (+6 bass accuracy over salience — overtones must not pick the bass). */
+    const trebleSrc = opts.treble || "blend";
+    if (trebleSrc === "nnls" || opts.nnls === false) { for (let a = 0; a < M; a++) if (x[a] > 0) tr[notes[a] % 12] += x[a] * _trebleWeight(notes[a]); }
+    else {
+      let cmax = 0; for (let a = 0; a < M; a++) if (c[a] > cmax) cmax = c[a];
+      const blend = trebleSrc === "blend" ? (opts.trebleBlend != null ? opts.trebleBlend : 0.5) : 1;
+      for (let a = 0; a < M; a++) {
+        const sal = c[a] > 0 && cmax > 0 ? c[a] / cmax : 0, nn = xmax > 0 ? x[a] / xmax : 0;
+        const v = blend * sal + (1 - blend) * nn;
+        if (v > 0) tr[notes[a] % 12] += v * _trebleWeight(notes[a]);
+      }
+    }
+    /* BASS = the lowest note that is really sounding (≥ `bassRatio` of the frame's
+     * strongest note), not a register-weighted sum: a voicing with its 5th on the bottom
+     * (C/G) still has its root an octave up, and a summed profile lets that root outvote
+     * the true bass. The ear hears the LOWEST note as the bass; so does this. */
+    const br = opts.bassRatio != null ? opts.bassRatio : 0.4;
+    /* SUB-OCTAVE GUARD. NNLS's classic ambiguity: a note an octave (or a 12th) below a
+     * real one shares most of its partials, so a phantom E3 can activate under a
+     * B3–E4–G4 voicing — and the phantom is LOWER, so it would be read as the bass. A
+     * real note has energy at its OWN fundamental; a phantom does not. Bass evidence is
+     * scaled by the spectrum's level at the candidate's fundamental bin. */
+    let rmax = 0; for (let j = 0; j < J; j++) if (row[j] > rmax) rmax = row[j];
+    const fr0 = opts.fundamentalRatio != null ? opts.fundamentalRatio : 0.05;
+    const fund = (m) => {
+      if (!(rmax > 0) || fr0 <= 0) return 1;
+      const j0 = Math.round((m - minMidi) * _LF_BPS);
+      let v = 0; for (let j = Math.max(0, j0 - 1); j <= Math.min(J - 1, j0 + 1); j++) if (row[j] > v) v = row[j];
+      return Math.min(1, v / (fr0 * rmax));
+    };
+    const mode = opts.bassMode || "blend";
+    if (mode !== "lowest") for (let a = 0; a < M; a++) if (x[a] > 0 && _bassWeight(notes[a]) > 0) bs[notes[a] % 12] += x[a] * _bassWeight(notes[a]) * fund(notes[a]);
+    if (mode !== "profile") {
+      let pm = 0; for (let p = 0; p < 12; p++) if (bs[p] > pm) pm = bs[p];
+      const lw = mode === "lowest" ? 1 : (opts.lowestWeight != null ? opts.lowestWeight : 1);
+      for (let a = 0; a < M; a++) if (x[a] >= br * xmax && x[a] > 0 && notes[a] <= 64 && fund(notes[a]) >= 1) { bs[notes[a] % 12] += lw * (pm || x[a]); break; }
+    }
+    frames[t] = { t: times[t], chroma: tr, bass: bs, level: level[t], energy: lf.energy[t] };
+  }
+  return { frames, tuning, tuningMeasured: lf.tuning, tuningReliability: +lf.tuningR.toFixed(3) };
+}
+
+/* ---- Stage C: chord states with inversions -------------------------------
+ * State = (root, quality, bass pc). Root position for every quality; for the plain
+ * triads/7ths (rank ≤ 14, three or four tones, not power/sus) also each NON-root
+ * chord tone in the bass. The treble template is the chord's pitch-class set (unit
+ * norm); the bass "template" is one pitch class. C/E and Em share a bass but not a
+ * treble, so the joint model separates them where the old post-hoc relabel could not. */
+function chordStatesV2(opts = {}) {
+  const states = [];
+  const inv = opts.inversions !== false;
+  for (const q of QUALITIES) {
+    if (opts.maxRank != null && q.rank > opts.maxRank) continue;
+    const invertible = inv && q.rank <= 14 && q.intervals.length >= 3 && q.intervals.length <= 4;
+    for (let root = 0; root < 12; root++) {
+      const vec = new Float64Array(12);
+      for (const iv of q.intervals) vec[(root + iv) % 12] = 1;
+      const nrm = Math.sqrt(q.intervals.length);
+      for (let p = 0; p < 12; p++) vec[p] /= nrm;
+      const basses = invertible ? q.intervals.map((iv) => (root + iv) % 12) : [root];
+      for (const bassPc of basses) states.push({ root, quality: q, vec, bassPc, inversion: bassPc !== root });
+      /* Triads over a FOREIGN bass — D/C, F/G, Bb/C (the sus-dominant voicing), F#m/G.
+       * Everywhere in pop/jazz comping, and unrepresentable as a chord-tone inversion.
+       * A separate, larger prior (`slashPenalty`) keeps a passing bass note from
+       * inventing one: it must be the bass for long enough to outweigh it. */
+      if (opts.slashChords !== false && (q.suffix === "" || q.suffix === "m")) {
+        for (let bp = 0; bp < 12; bp++) if (q.intervals.indexOf((bp - root + 12) % 12) < 0) states.push({ root, quality: q, vec, bassPc: bp, inversion: true, foreign: true });
+      }
+    }
+  }
+  return states;
+}
+
+/* Emission score per (beat, state). Cosine of the treble chroma to the template, plus
+ * the bass register's vote for the state's bass note, minus a rarity prior (`rank`,
+ * as in `recognise`) and an inversion prior; optional diatonic key bonus. */
+function _emitV2(seg, states, opts, keyFit) {
+  const S = states.length, out = new Float64Array(S + 1);
+  const c = seg.chroma, b = seg.bass;
+  let cn = 0; for (let p = 0; p < 12; p++) cn += c[p] * c[p];
+  cn = Math.sqrt(cn) || 1;
+  let bmax = 0, bsum = 0; for (let p = 0; p < 12; p++) { if (b[p] > bmax) bmax = b[p]; bsum += b[p]; }
+  const bassW = opts.bassWeight != null ? opts.bassWeight : 0.25;
+  const rankBias = opts.rankBias != null ? opts.rankBias : 0.007;
+  const invPen = opts.inversionPenalty != null ? opts.inversionPenalty : 0.03;
+  const keyW = opts.keyWeight != null ? opts.keyWeight : 0.08;
+  /* A power chord (root+5th) is a strict SUBSET of every major/minor triad, and a
+   * guitar voicing doubles its root and 5th while sounding the 3rd once — so on raw
+   * cosine "5" wins whenever the 3rd is a little quiet (measured: 2.7% of all frames on
+   * clean comping, 9% under room reverb). It needs evidence of an ABSENT 3rd, not a
+   * weak one: hence a prior. */
+  const powPen = opts.powerPenalty != null ? opts.powerPenalty : 0.06;
+  const slashPen = opts.slashPenalty != null ? opts.slashPenalty : 0.1;
+  for (let s = 0; s < S; s++) {
+    const st = states[s];
+    let dot = 0; for (let p = 0; p < 12; p++) dot += c[p] * st.vec[p];
+    let sc = dot / cn - rankBias * st.quality.rank;
+    if (bmax > 0) sc += bassW * (b[st.bassPc] / bmax);
+    else if (st.inversion) sc -= bassW;                       // no bass evidence → never invent a slash
+    if (st.inversion) sc -= st.foreign ? slashPen : invPen;
+    if (st.quality.intervals.length === 2) sc -= powPen;
+    if (keyFit) sc += keyW * keyFit[s];
+    out[s] = sc;
+  }
+  out[S] = opts.ncScore != null ? opts.ncScore : 0.55;
+  return out;
+}
+
+/* Forward–backward + Viterbi on the "stay, or jump anywhere" chord HMM. Emissions
+ * are exp(score/τ); a jump costs exp(−changePenalty/τ). The Viterbi path is the MAP
+ * chord SEQUENCE (consistent labels); the posteriors γ_t are the bidirectional,
+ * per-beat belief (v2 Stage C/D) that confidence + alternatives are read from.
+ * O(T·S) both ways — the uniform jump lets each step use one running sum. `gated[t]`
+ * forces the no-chord state (silence is not a chord). */
+function hmmChordDecode(E, gated, opts = {}) {
+  const T = E.length;
+  if (!T) return { path: [], post: [] };
+  const K = E[0].length;                                          // S chord states + no-chord
+  const tau = opts.temperature != null ? opts.temperature : 0.05;
+  const cp = opts.changePenalty != null ? opts.changePenalty : 0.14;
+  const m = Math.exp(-cp / tau);
+  const em = new Array(T);
+  for (let t = 0; t < T; t++) {
+    const e = new Float64Array(K);
+    if (gated && gated[t] === "skip") { e.fill(1); e[K - 1] = 0.5; em[t] = e; continue; }
+    if (gated && gated[t]) { e[K - 1] = 1; em[t] = e; continue; }
+    let mx = -Infinity; for (let k = 0; k < K; k++) if (E[t][k] > mx) mx = E[t][k];
+    for (let k = 0; k < K; k++) e[k] = Math.exp((E[t][k] - mx) / tau);
+    em[t] = e;
+  }
+  // forward (scaled)
+  const alpha = new Array(T);
+  let prev = new Float64Array(K).fill(1 / K);
+  for (let t = 0; t < T; t++) {
+    const a = new Float64Array(K);
+    let tot = 0; for (let k = 0; k < K; k++) tot += prev[k];
+    let z = 0;
+    for (let k = 0; k < K; k++) { a[k] = em[t][k] * (t ? prev[k] + m * (tot - prev[k]) : prev[k]); z += a[k]; }
+    z = z || 1; for (let k = 0; k < K; k++) a[k] /= z;
+    alpha[t] = a; prev = a;
+  }
+  // backward (scaled) → posteriors
+  const post = new Array(T);
+  let beta = new Float64Array(K).fill(1);
+  for (let t = T - 1; t >= 0; t--) {
+    const g = new Float64Array(K);
+    let z = 0; for (let k = 0; k < K; k++) { g[k] = alpha[t][k] * beta[k]; z += g[k]; }
+    z = z || 1; for (let k = 0; k < K; k++) g[k] /= z;
+    post[t] = g;
+    if (t > 0) {
+      const nb = new Float64Array(K);
+      let s = 0; for (let k = 0; k < K; k++) s += em[t][k] * beta[k];
+      let zz = 0;
+      for (let k = 0; k < K; k++) { nb[k] = em[t][k] * beta[k] + m * (s - em[t][k] * beta[k]); zz += nb[k]; }
+      zz = zz || 1; for (let k = 0; k < K; k++) nb[k] /= zz;
+      beta = nb;
+    }
+  }
+  // Viterbi in the score domain (identical model: Σ score − cp·#changes)
+  const path = new Array(T);
+  const back = new Array(T);
+  let pv = new Float64Array(K);
+  const emitAt = (t, k) => gated && gated[t] === "skip" ? (k === K - 1 ? -cp : 0) : gated && gated[t] ? (k === K - 1 ? 0 : -1e9) : E[t][k];
+  for (let k = 0; k < K; k++) pv[k] = emitAt(0, k);
+  for (let t = 1; t < T; t++) {
+    let bi = 0; for (let k = 1; k < K; k++) if (pv[k] > pv[bi]) bi = k;
+    const cur = new Float64Array(K), bp = new Int32Array(K);
+    for (let k = 0; k < K; k++) {
+      const stay = pv[k], move = pv[bi] - cp;
+      const base = stay >= move ? stay : move;
+      bp[k] = stay >= move ? k : bi;
+      cur[k] = base + emitAt(t, k);
+    }
+    back[t] = bp; pv = cur;
+  }
+  let end = 0; for (let k = 1; k < K; k++) if (pv[k] > pv[end]) end = k;
+  path[T - 1] = end;
+  for (let t = T - 1; t > 0; t--) path[t - 1] = back[t][path[t]];
+  return { path, post };
+}
+
+/* ---- Stage D: repetition-aware smoothing ----------------------------------
+ * Mauch, Noland & Dixon (ISMIR 2009): songs repeat, and a chord heard four times is
+ * better evidenced than one heard once. Each beat's feature [treble | bass] is
+ * stacked over an `embed`-beat window; beats whose CONTEXT recurs elsewhere
+ * (cosine ≥ `threshold`, not overlapping) average in their repeats' chroma,
+ * weighted by how well the context matches. A one-off beat keeps its own evidence. */
+function repetitionSmooth(segs, opts = {}) {
+  const T = segs.length;
+  const L = opts.embed || 8, thr = opts.threshold != null ? opts.threshold : 0.82, K = opts.maxMatches || 8;
+  const lam = opts.strength != null ? opts.strength : 1;
+  if (T < 2 * L || T > (opts.maxBeats || 3000)) return segs;
+  const D = 24;
+  const feat = segs.map((s) => {
+    const v = new Float64Array(D);
+    let a = 0, b = 0; for (let p = 0; p < 12; p++) { a = Math.max(a, s.chroma[p]); b = Math.max(b, s.bass[p]); }
+    for (let p = 0; p < 12; p++) { v[p] = a ? s.chroma[p] / a : 0; v[12 + p] = b ? (0.5 * s.bass[p]) / b : 0; }
+    return v;
+  });
+  const h = L >> 1;
+  const emb = new Array(T);
+  for (let i = 0; i < T; i++) {
+    const v = new Float64Array(D * L);
+    for (let k = 0; k < L; k++) { const j = Math.min(T - 1, Math.max(0, i - h + k)); v.set(feat[j], k * D); }
+    let n = 0; for (let q = 0; q < v.length; q++) n += v[q] * v[q];
+    n = Math.sqrt(n) || 1; for (let q = 0; q < v.length; q++) v[q] /= n;
+    emb[i] = v;
+  }
+  const out = new Array(T);
+  for (let i = 0; i < T; i++) {
+    const cand = [];
+    for (let j = 0; j < T; j++) {
+      if (Math.abs(i - j) < L) continue;
+      let d = 0; const a = emb[i], b = emb[j];
+      for (let q = 0; q < a.length; q++) d += a[q] * b[q];
+      if (d >= thr) cand.push([d, j]);
+    }
+    cand.sort((x, y) => y[0] - x[0]);
+    const ch = Float64Array.from(segs[i].chroma), bs = Float64Array.from(segs[i].bass);
+    let wsum = 1;
+    for (let c = 0; c < Math.min(K, cand.length); c++) {
+      const [d, j] = cand[c], w = lam * ((d - thr) / (1 - thr));
+      for (let p = 0; p < 12; p++) { ch[p] += w * segs[j].chroma[p]; bs[p] += w * segs[j].bass[p]; }
+      wsum += w;
+    }
+    for (let p = 0; p < 12; p++) { ch[p] /= wsum; bs[p] /= wsum; }
+    out[i] = { ...segs[i], chroma: ch, bass: bs, repeats: Math.min(K, cand.length) };
+  }
+  return out;
+}
+
+/* Frames → per-beat (or per-subdivision) segments: mean treble/bass chroma, mean
+ * level in dB. Shared by the v2 decoder and testable on its own. */
+function _segmentFrames(frames, grid) {
+  const segs = [];
+  let fi = 0;
+  for (let b = 0; b + 1 < grid.length; b++) {
+    const t0 = grid[b], t1 = grid[b + 1];
+    while (fi < frames.length && frames[fi].t < t0) fi++;
+    const chroma = new Float64Array(12), bass = new Float64Array(12);
+    let n = 0, lev = 0;
+    for (let j = fi; j < frames.length && frames[j].t < t1; j++) {
+      for (let p = 0; p < 12; p++) { chroma[p] += frames[j].chroma[p]; bass[p] += frames[j].bass[p]; }
+      lev += Math.pow(10, frames[j].level / 10); n++;
+    }
+    if (!n) {
+      const j = Math.max(0, Math.min(frames.length - 1, fi > 0 && fi < frames.length && Math.abs(frames[fi - 1].t - (t0 + t1) / 2) < Math.abs(frames[fi].t - (t0 + t1) / 2) ? fi - 1 : fi));
+      if (!frames[j]) continue;
+      for (let p = 0; p < 12; p++) { chroma[p] = frames[j].chroma[p]; bass[p] = frames[j].bass[p]; }
+      lev = Math.pow(10, frames[j].level / 10); n = 1;
+    }
+    for (let p = 0; p < 12; p++) { chroma[p] /= n; bass[p] /= n; }
+    segs.push({ t0, t1, chroma, bass, level: 10 * Math.log10(lev / n + 1e-20) });
+  }
+  return segs;
+}
+
+/* PCM → v2 chord events. Same event shape as transcribeChords / BeatSync
+ * ({ symbol, midis, startSec, durSec }) PLUS { confidence, prob, alternatives[],
+ * ambiguous } so the chart/exporters consume it unchanged and the UI can grade it. */
+function transcribeChordsV2(samples, sampleRate, opts = {}) {
+  const bt = opts.beats ? { beats: opts.beats, bpm: opts.bpm || 0 } : detectBeats(samples, sampleRate, opts);
+  const fr = opts._frames || nnlsChromagram(samples, sampleRate, opts);
+  const frames = fr.frames;
+  if (!frames.length) return { events: [], tuning: fr.tuning, beats: bt.beats || [], bpm: bt.bpm };
+  // analysis grid: beats (optionally subdivided), or a fixed 0.25 s grid with no pulse
+  let grid = opts.grid !== "fixed" && bt.beats && bt.beats.length >= 3 ? bt.beats.slice() : null;
+  if (grid) {
+    const sub = Math.max(1, opts.subdivide != null ? opts.subdivide : 2);
+    if (sub > 1) { const g = []; for (let i = 0; i + 1 < grid.length; i++) for (let k = 0; k < sub; k++) g.push(grid[i] + ((grid[i + 1] - grid[i]) * k) / sub); g.push(grid[grid.length - 1]); grid = g; }
+  } else {
+    const step = opts.gridSec || 0.25;
+    grid = []; const end = frames[frames.length - 1].t + step;
+    for (let t = 0; t <= end; t += step) grid.push(+t.toFixed(4));
+  }
+  if (grid[0] > 0.05) grid.unshift(0);
+  // the beat tracker's last beat is rarely the end of the audio — keep decoding the tail
+  const tEnd = frames[frames.length - 1].t + 0.05;
+  if (grid.length >= 2) { const step = grid[grid.length - 1] - grid[grid.length - 2]; while (grid[grid.length - 1] + 0.5 * step < tEnd) grid.push(Math.min(tEnd, grid[grid.length - 1] + step)); }
+  let segs = _segmentFrames(frames, grid);
+  if (!segs.length) return { events: [], tuning: fr.tuning, beats: bt.beats || [], bpm: bt.bpm };
+  // gate: a segment far below the recording's loud passages is silence, not a chord.
+  // Relative to a high PERCENTILE in dB (not a linear fraction of the peak — a strummed
+  // guitar decays 60 dB in ~3 s and is still that chord at −30 dB).
+  const lv = segs.map((s) => s.level).sort((a, b) => a - b);
+  const ref = lv[Math.min(lv.length - 1, Math.floor(0.95 * lv.length))];
+  const gateDb = opts.gateDb != null ? opts.gateDb : 45;
+  const quiet = segs.map((s) => s.level < ref - gateDb);
+  /* Only a SUSTAINED silence is a rest. A short gap (a staccato chop, a breath between
+   * strums) carries no evidence either way — it is marked 'skip' and gets a flat
+   * emission, so the HMM carries the surrounding chord across it, the way a chart does. */
+  const minRest = opts.minRestSec != null ? opts.minRestSec : 1.0;
+  const gated = new Array(segs.length).fill(false);
+  for (let i = 0; i < segs.length;) {
+    if (!quiet[i]) { i++; continue; }
+    let j = i; while (j < segs.length && quiet[j]) j++;
+    const long = segs[j - 1].t1 - segs[i].t0 >= minRest || i === 0 || j === segs.length;
+    for (let k = i; k < j; k++) gated[k] = long ? true : "skip";
+    i = j;
+  }
+  /* Stage D is OPT-IN. Measured: +1.2 majmin on the dev split, −0.3 on the held-out
+   * split (−6 on a 12-bar blues, where bars sharing a groove but not a chord borrow each
+   * other's evidence); a longer 4-bar context erased the dev gain. It did not
+   * generalise, so it is not a default. */
+  if (opts.repetition === true) segs = repetitionSmooth(segs, opts);
+  const states = chordStatesV2(opts);
+  let keyFit = null;
+  if (opts.keyScale && opts.keyScale.length === 12) {
+    keyFit = states.map((st) => st.quality.intervals.reduce((a, i) => a + (opts.keyScale[(st.root + i) % 12] ? 1 : 0), 0) / st.quality.intervals.length);
+  }
+  const E = segs.map((s) => _emitV2(s, states, opts, keyFit));
+  const { path, post } = hmmChordDecode(E, gated, opts);
+  const S = states.length, K = S + 1;
+  const useSharp = opts.useSharp !== false, names = useSharp ? NOTE_SHARP : NOTE_FLAT;
+  const symOf = (st) => names[st.root] + st.quality.suffix + (st.inversion ? "/" + names[st.bassPc] : "");
+  // a playable voicing: chord tones from C3 up, the bass note an octave below when inverted
+  const midisOf = (st) => (st.inversion ? [36 + st.bassPc] : []).concat(st.quality.intervals.map((i) => 48 + st.root + i));
+  const logK = Math.log(K);
+  // collapse runs of one state into events
+  const events = [];
+  let cur = null;
+  for (let t = 0; t < segs.length; t++) {
+    const s = path[t];
+    if (s === S) { if (cur) { events.push(cur); cur = null; } continue; }
+    if (cur && cur.state === s) { cur.t1 = segs[t].t1; cur.beats.push(t); continue; }
+    if (cur) events.push(cur);
+    cur = { state: s, t0: segs[t].t0, t1: segs[t].t1, beats: [t] };
+  }
+  if (cur) events.push(cur);
+  const ambThr = opts.ambiguityThreshold != null ? opts.ambiguityThreshold : 0.4;
+  const out = events.map((e) => {
+    const st = states[e.state];
+    // per-label posterior mass averaged over the event's beats
+    const mass = new Map();
+    let ent = 0;
+    for (const t of e.beats) {
+      const g = post[t];
+      let H = 0; for (let k = 0; k < K; k++) if (g[k] > 1e-12) H -= g[k] * Math.log(g[k]);
+      ent += 1 - H / logK;
+      for (let k = 0; k < S; k++) if (g[k] > 1e-4) {
+        const lab = symOf(states[k]), prevM = mass.get(lab);
+        mass.set(lab, { p: (prevM ? prevM.p : 0) + g[k] / e.beats.length, k });
+      }
+    }
+    const label = symOf(st);
+    const prob = mass.has(label) ? mass.get(label).p : 0;
+    const alternatives = [...mass.entries()].filter(([l]) => l !== label).sort((a, b) => b[1].p - a[1].p).slice(0, 3)
+      .map(([symbol, v]) => ({ symbol, prob: +v.p.toFixed(3), midis: midisOf(states[v.k]) }));
+    return {
+      symbol: label,
+      midis: midisOf(st),
+      startSec: +e.t0.toFixed(3),
+      durSec: +(e.t1 - e.t0).toFixed(3),
+      confidence: +(ent / e.beats.length).toFixed(3),
+      prob: +prob.toFixed(3),
+      alternatives,
+      ambiguous: prob < ambThr,
+    };
+  });
+  return { events: out, tuning: fr.tuning, beats: bt.beats || [], bpm: bt.bpm, segments: segs.length };
+}
+
+/* The v2 panel entry point (same contract as analyzeAudioChords, plus `tuning`).
+ * Two passes like v1: decode, read the key off the decode, re-decode with the
+ * diatonic prior when the key reading is confident. The NNLS front-end is computed
+ * ONCE and shared by both passes. */
+function analyzeAudioChordsV2(samples, sampleRate, opts = {}) {
+  const bt = detectBeats(samples, sampleRate, opts);
+  const fr = nnlsChromagram(samples, sampleRate, opts);
+  const base = { ...opts, beats: bt.beats && bt.beats.length >= 3 ? bt.beats : null, bpm: bt.bpm, _frames: fr };
+  let r = transcribeChordsV2(samples, sampleRate, base);
+  let key = null;
+  if (r.events.length && opts.keyPrior !== false) {
+    const bpb = opts.beatsPerBar || 4, spb = 60 / (bt.bpm || 120);
+    const probe = { bars: r.events.map((e, i) => ({ number: i + 1, events: [{ symbol: e.symbol, durBeats: Math.max(1, Math.round(e.durSec / spb)) }] })), timeSig: [bpb, 4] };
+    key = analyzeKey(probe);
+    if (key && key.confidence >= (opts.keyMinConfidence != null ? opts.keyMinConfidence : 0.5)) {
+      const idx = key.mode === "major" ? _MAJ : _MIN;
+      const scale = new Array(12).fill(false);
+      for (const rel of Object.keys(idx)) scale[(key.tonic + Number(rel)) % 12] = true;
+      const second = transcribeChordsV2(samples, sampleRate, { ...base, keyScale: scale });
+      if (second.events.length) r = second;
+    } else key = null;
+  }
+  return { events: r.events, bpm: base.beats ? bt.bpm : 0, beats: bt.beats || [], key, tuning: +fr.tuning.toFixed(1), method: base.beats ? "synharmonics-v2" : "synharmonics-v2-grid" };
 }
 
 /* ============================================================================
@@ -4817,14 +5572,14 @@ function audioEventsToScore(events, opts = {}) {
   const secPerBeat = 60 / bpm;
   const placed = (events || []).filter((e) => e.symbol).map((e) => {
     const onsetBeat = e.startSec / secPerBeat;                 // global beat position
-    return { symbol: e.symbol, midis: e.midis || [], onsetBeat: Math.max(0, onsetBeat), durBeat: Math.max(0.25, (e.durSec || secPerBeat) / secPerBeat) };
+    return { symbol: e.symbol, midis: e.midis || [], onsetBeat: Math.max(0, onsetBeat), durBeat: Math.max(0.25, (e.durSec || secPerBeat) / secPerBeat), uncertain: !!e.ambiguous };
   }).sort((a, b) => a.onsetBeat - b.onsetBeat);
   const barsMap = new Map();                                   // barIndex -> events
   for (const p of placed) {
     const bar = Math.floor(p.onsetBeat / beatsPerBar + 1e-6);
     const inBar = p.onsetBeat - bar * beatsPerBar;
     if (!barsMap.has(bar)) barsMap.set(bar, []);
-    barsMap.get(bar).push({ symbol: p.symbol, midis: p.midis, qbeat: Math.max(0, Math.min(beatsPerBar - 1e-6, inBar)) });
+    barsMap.get(bar).push({ symbol: p.symbol, midis: p.midis, qbeat: Math.max(0, Math.min(beatsPerBar - 1e-6, inBar)), uncertain: p.uncertain });
   }
   const lastBar = barsMap.size ? Math.max(...barsMap.keys()) : -1;
   // A bar with no ONSET is not "no chord" — the previous chord is often still sounding
@@ -4849,7 +5604,7 @@ function audioEventsToScore(events, opts = {}) {
     for (let i = 1; i < evs.length; i++) if (evs[i].beat <= evs[i - 1].beat) evs[i].beat = Math.min(beatsPerBar - 1, evs[i - 1].beat + 1);
     evs.forEach((e, i) => { e.durBeats = (i + 1 < evs.length ? evs[i + 1].beat : beatsPerBar) - e.beat; });
     _fillTrueDur(evs, beatsPerBar);
-    bars.push({ number: b + 1, timeSig: [beatsPerBar, beatType], events: evs.map((e) => ({ symbol: e.symbol, midis: e.midis, beat: e.beat, durBeats: e.durBeats, qbeat: e.qbeat, qdur: e.qdur, ...(e.held ? { held: true } : {}) })) });
+    bars.push({ number: b + 1, timeSig: [beatsPerBar, beatType], events: evs.map((e) => ({ symbol: e.symbol, midis: e.midis, beat: e.beat, durBeats: e.durBeats, qbeat: e.qbeat, qdur: e.qdur, ...(e.held ? { held: true } : {}), ...(e.uncertain ? { uncertain: true } : {}) })) });
   }
   return { source: "audio", timeSig: [beatsPerBar, beatType], tempo: bpm, bars };
 }
@@ -5498,6 +6253,15 @@ export {
   viterbiChords,
   transcribeChordsBeatSync,
   analyzeAudioChords,
+  resampleTo,
+  logFreqSpectrogram,
+  nnlsChromagram,
+  chordStatesV2,
+  hmmChordDecode,
+  repetitionSmooth,
+  transcribeChordsV2,
+  analyzeAudioChordsV2,
+  _nnlsGram,
   _bandFeatures,
   _cosSim,
   _footeNovelty,

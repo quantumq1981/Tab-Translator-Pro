@@ -1973,6 +1973,73 @@ Isolated stems remain the sweet spot. And 38.7% root accuracy is well under the 
 published systems reach on pop: the remaining gap is a key/harmony prior, downbeat
 detection, and the fact that the ground truth here is one partial rhythm-guitar part.
 
+### SynHarmonics v2 — isolated-stem chord recognition, now the DEFAULT (2026-10-21)
+
+The *SynHarmonics Engine v2.0* spec (an expert critique of a v1.0 proposal) applied to this
+app's constraints. **Full write-up, ablations and the spec-by-spec mapping: `docs/SYNHARMONICS-V2.md`.**
+`analyzeAudioChords` now routes to **`analyzeAudioChordsV2`** by default; `engine:"v1"` keeps
+the HPSS-chroma + Viterbi path described above **byte-identical** (all its tests still pin it).
+The legacy sliding-window knobs (`hopSec/smoothSec/recoverGaps`) are v1-only — the UI no
+longer sends them.
+
+- **Benchmark first (v2 §8 "falsifiable").** `tests/bench` renders 28 comp/rhythm tracks from
+  the repo's GP files as isolated stems (exact-pitch Karplus–Strong guitar, inharmonic piano,
+  organ) × 5 conditions (clean / 20 dB noise / RT60 1.4 s room / +40¢ / drum+bass bleed),
+  ground truth = the oracle's name for the NOTATED voicing, MIREX-style metrics. **Even indices
+  = dev (all tuning), odd = test (reported only).** `npm run bench`, `npm run bench:calib`.
+  Held-out result: **root 54→76, majmin 47→76, sevenths 42→70, exact pcs 38→65, bass 43→75,
+  seg 72→81**; under +40¢ detune v1 majmin collapses to 42, v2 holds 80. ~1% real-time.
+- **Stage A front-end** (`resampleTo`, `logFreqSpectrogram`, `nnlsChromagram`): Kaiser-sinc
+  resampling (the UI's old box-average `dsChan` aliased a 15 kHz tone into the chroma band at
+  −3…−10 dB) → 3 bins/semitone log-freq spectrogram (0.25 s window) → HPSS in log-freq (0.6 s ×
+  13 bins; the v1 2.5 s kernel smeared fast changes) → **global tuning** from parabolic peak
+  interpolation as a circular mean, **shrunk by its reliability R** (in-tune instruments R ≈
+  0.6–1; vibrato vocals 0.04–0.3 — don't re-centre the grid on a singer's drift) → **NNLS**
+  note transcription (s = 0.8, Lawson–Hanson on the Gram matrix) → **bass** = lowest real
+  note, with a **sub-octave guard** (energy required at the candidate's own fundamental — NNLS
+  activates phantom notes an octave down) → **treble** = NNLS blended 50/50 with raw harmonic
+  salience.
+- **Stage C** (`chordStatesV2`, `hmmChordDecode`): HMM over root × quality × **bass** — chord-
+  tone inversions AND triads over a foreign bass (`F#m/G`, `Bb/C`) are STATES, not a post-hoc
+  relabel; Viterbi for the labels, forward–backward for per-beat posteriors; τ = 0.05 fitted on
+  dev → **held-out ECE 5.2%** (p ≥ 0.7 → 93% right, p < 0.3 → 22%). Events gain `confidence`
+  (`1−H/logK`), `prob`, `alternatives[]` (with voicings), `ambiguous` (prob < 0.4). Beat grid
+  subdivided ×2; a **short silence (< 1 s) gets a flat emission** so the chord carries across a
+  staccato chop; a long one is N.C. (dB gate vs the 95th-percentile level, not a linear
+  fraction of the peak — a strummed chord is still that chord at −30 dB).
+- **UI** (browser glue): decode resamples via `resampleOffThread`; the readout shows a
+  compensated tuning offset; **`ChordReview`** (v2 §7 progressive disclosure) lists only the
+  uncertain chords with ▶ seek + one-tap alternatives (edits the source event → the chart
+  re-quantises and every export carries it); `LeadSheetView` fades uncertain chords with a `?`.
+  Smoke-tested in headless Chromium (real app, real WAV, +30¢ file read as +28¢).
+
+**Measured findings — do not re-derive:**
+- **NNLS alone is NOT the win.** It kills phantom overtones (Bb's 3rd harmonic ≠ F) but explains
+  a triad's REAL 5th as its root's 3rd harmonic → loses 7th/extension detail. The treble blend
+  beat NNLS-only on held-out by +3.3 majmin / +4.0 sevenths; bass stays NNLS (+6 bass vs salience).
+- Biggest single gains (held-out ablation): inversion states (root +11), sub-octave guard
+  (bass +18), lowest-note bass (+6), tuning (sevenths +3.4), subdivision (root +2.5), foreign
+  slash states (root +1.9), power-chord prior (majmin +1.4 — a guitar voicing doubles root+5th
+  and sounds the 3rd once, so raw cosine says "5").
+- **Stage D repetition smoothing (`repetition:true`) stays OPT-IN**: ~+1 sevenths but −1.0…−1.3
+  seg on BOTH splits; its first, short-context version cost a 12-bar blues 6 points (bars
+  sharing a groove but not a chord borrow each other's evidence).
+- Chordino's spectral **whitening** cost 6–8 majmin here (default off, `whitenBins`); its
+  **phase tuning estimator** had a −11¢ bias from the linear→log fold (replaced); a
+  **frame-grid** (beatless) decoder lost ~1 point to the subdivided beat grid; Ellis **TPS2/
+  TPS3** tempo scoring moved tempo Acc2 only 18→19–20/28 (not shipped — sustained comping is
+  genuinely tempo-ambiguous: bar-rate and 4/3 locks).
+- The engine caught two **benchmark** bugs: a Karplus–Strong delay 2 samples long (every
+  rendered guitar note flat, read as −12¢) and backwards piano inharmonicity. Both fixed and
+  the corpus re-rendered before any reported number. If you touch the synths, re-render
+  (`rm -rf tests/bench/.cache`).
+
+**Honest limits:** the bench stems are synthetic (deltas are the read, absolutes optimistic);
+real VOCAL stems are flagged mostly uncertain — correctly — the vocal path is still Voices (ML);
+heavy bleed is the hardest condition (majmin 73); no learned TCN/re-ranker (no training audio,
+iOS/Pages wall) — a learned front-end only has to emit the same `{chroma, bass}` frames;
+Stage E fingering DP not built (audio charts still carry no `{tab}`).
+
 ### Key detection v2 — harmonic FUNCTION weights, not scale membership (2026-09-10)
 
 **The reported defect.** An audio-decoded chart of Marshall Tucker's *Can't You See*
@@ -2309,6 +2376,14 @@ accordingly.
   and tempo survive; an `A7` override surfaces as a `<kind>dominant</kind>`
   harmony; and the **full Blue Sky score** round-trips to 165 bars with the verse
   intact.
+- **SynHarmonics v2 (audio chords)**: `npm test` pins the anti-aliased resampler (15 kHz tone
+  −40 dB+ vs box decimation), tuning (+35¢ read within 10¢; compensation concentrates chroma on
+  the chord tones at +45¢), NNLS overtone attribution (Bb's 3rd harmonic not an F) without
+  starving a real 5th, the sub-octave bass guard (B3-E4-G4 → bass B), C G Am F with bounded
+  confidence/prob + alternatives, inversion STATES (C/E vs Em), foreign-bass slash (`F#m/G`,
+  `Bb/C`, and `D7/C` = the oracle's name), short-gap carry vs long rest, posterior
+  normalisation, the v2 default + `engine:"v1"` routing, and the UI glue (resampler, review
+  strip, uncertain rendering). Accuracy itself is measured by `tests/bench` (dev/test split).
 - **Key model v2 + manual override**: `npm test` asserts the reported defect is fixed
   (`D · C · G` reads **D major**, and E minor — whose tonic never sounds — loses by >20%),
   the same shape a step round the circle (`G · F · C` → G), that a genuine minor tune and a

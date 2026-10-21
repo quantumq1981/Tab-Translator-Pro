@@ -224,6 +224,7 @@ import {
   detectChord,
   transcribeChords,
   analyzeAudioChords,
+  resampleTo,
   audioEventsToScore,
   _cosDist,
   _dtw,
@@ -418,6 +419,13 @@ async function analyzeAudioOffThread(samples, sr, kind, opts = {}) {
 async function analyzeChordsOffThread(samples, sr, opts = {}) {
   try { return await _engineRPC("analyzeAudioChords", [samples, sr, opts]); }
   catch (_) { return analyzeAudioChords(samples, sr, opts); }
+}
+/* Anti-aliased (Kaiser-windowed sinc) resampling off-thread, main-thread fallback. The
+ * decode used to box-average down to the analysis rate, which lets cymbal/hat energy
+ * above the new Nyquist fold straight into the chroma band. */
+async function resampleOffThread(samples, srIn, srOut) {
+  try { return await _engineRPC("resampleTo", [samples, srIn, srOut]); }
+  catch (_) { return resampleTo(samples, srIn, srOut); }
 }
 /* DTW audio↔score alignment off-thread (heavy: FFTs + DP), main-thread fallback. */
 async function alignPcmToScoreOffThread(samples, sr, score, opts = {}) {
@@ -1338,7 +1346,7 @@ function LeadSheetView({ score, C, overrides, setOverrides, editMode, editKey, s
                   return (
                     <button key={i} onClick={() => (editMode ? (setEditKey(k), setDraft(cur)) : onPick(k, e))} title={editMode ? "click to re-label" : `beat ${e.beat + 1}`}
                       style={{ gridColumn: gridCol, justifySelf: "start", textAlign: "left", background: isPlaying ? `${C.green}22` : "transparent", borderRadius: 4, border: "none", borderBottom: isSel ? `2px solid ${C.amber}` : "2px solid transparent", padding: "0 2px", cursor: "pointer", color: isPlaying ? C.green : edited ? C.green : isSel ? C.amber : C.cyan, fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: cur.length > 4 ? 13 : 16, lineHeight: 1.2, transition: "background .1s, color .1s" }}>
-                      <span style={{ display: "block" }}>{cur}{edited ? "*" : ""}</span>
+                      <span style={{ display: "block", opacity: e.uncertain && !edited ? 0.55 : 1, borderBottom: e.uncertain && !edited ? `1px dashed ${C.amber}` : "none" }} title={e.uncertain && !edited ? "uncertain — see the review list" : undefined}>{cur}{edited ? "*" : ""}{e.uncertain && !edited ? <sup style={{ color: C.amber, fontSize: 9 }}>?</sup> : null}</span>
                       {showRoman && musicKey && <span style={{ display: "block", fontSize: 9, fontWeight: 400, color: C.dim, marginTop: 1 }}>{romanFor(cur, musicKey)}</span>}
                     </button>
                   );
@@ -2137,7 +2145,9 @@ function AudioImport({ C, useSharp }) {
     setBusy(true); setErr("");
     // recoverGaps: re-read the spans the main pass left unlabelled at a lower threshold
     // (guarded by confidence + gap length) so a chart isn't littered with false N.C. bars.
-    const opts = k === "notes" ? { hop: Math.floor(sr * 0.08) } : { hopSec: 0.12, smoothSec: 0.5, recoverGaps: true, ...(simple ? { maxRank: 14 } : {}) };
+    // chords: SynHarmonics v2 (the engine default) — NNLS front-end + HMM posteriors; the
+    // legacy sliding-window knobs (hopSec/smoothSec/recoverGaps) are v1-only.
+    const opts = k === "notes" ? { hop: Math.floor(sr * 0.08) } : { useSharp, ...(simple ? { maxRank: 14 } : {}) };
     setTimeout(async () => {                          // let "Analyzing…" paint first
       try {
         if (k === "notes") { setRaw((await analyzeAudioOffThread(ds, sr, k, opts)) || []); }
@@ -2149,7 +2159,7 @@ function AudioImport({ C, useSharp }) {
           const r = (await analyzeChordsOffThread(ds, sr, opts)) || {};
           setRaw(r.events || []);
           if (r.bpm) setBpm(Math.round(r.bpm));
-          setBeatInfo(r.bpm ? { bpm: r.bpm, method: r.method } : null);
+          setBeatInfo(r.bpm || r.tuning != null ? { bpm: r.bpm || 0, method: r.method, tuning: r.tuning, key: r.key } : null);
           // cache the beat grid: the structure pass reuses it instead of tracking twice
           ref.current.beats = r.beats && r.beats.length ? r.beats : null;
           ref.current.beatBpm = r.bpm || 0;
@@ -2173,11 +2183,11 @@ function AudioImport({ C, useSharp }) {
       const factor = Math.max(1, Math.floor(audioBuf.sampleRate / TARGET));
       const sr = audioBuf.sampleRate / factor;
       // Downsample each channel to ~16k (plenty for chroma) so the STFT isolation + the
-      // analysis both stay light. Keep L/R so we can center-extract on demand.
-      const dsChan = (d) => { const L = Math.floor(d.length / factor), o = new Float32Array(L); for (let i = 0; i < L; i++) { let v = 0; for (let j = 0; j < factor; j++) v += d[i * factor + j]; o[i] = v / factor; } return o; };
+      // analysis both stay light. Keep L/R so we can center-extract on demand. A real
+      // anti-aliasing low-pass (resampleTo), not a box average — see resampleOffThread.
       const l = audioBuf.getChannelData(0);
-      const r = chs >= 2 ? audioBuf.getChannelData(1) : l;
-      const L16 = dsChan(l), R16 = dsChan(r);
+      const L16 = await resampleOffThread(l, audioBuf.sampleRate, sr);
+      const R16 = chs >= 2 ? await resampleOffThread(audioBuf.getChannelData(1), audioBuf.sampleRate, sr) : L16;
       const mono = new Float32Array(L16.length);
       for (let i = 0; i < L16.length; i++) mono[i] = (L16[i] + R16[i]) / 2;
       ref.current = { audioBuf, L16, R16, mono, sr, stereo: chs >= 2 };
@@ -2198,6 +2208,10 @@ function AudioImport({ C, useSharp }) {
     run(s.cur, s.sr, k);
   };
   const switchKind = (k) => { setKind(k); setOverrides({}); const s = ref.current; if (s.cur) run(s.cur, s.sr, k); };
+  // Review: adopt one of the decoder's ranked alternatives for an uncertain chord. It edits
+  // the SOURCE event, so the chart re-quantises and every export carries the choice.
+  const pickAlternative = (i, alt) => setRaw((evs) => evs.map((e, j) => (j === i ? { ...e, symbol: alt.symbol, midis: alt.midis || e.midis, ambiguous: false, reviewed: true } : e)));
+  const confirmChord = (i) => setRaw((evs) => evs.map((e, j) => (j === i ? { ...e, ambiguous: false, reviewed: true } : e)));
   // Re-analyse when the Simple (no-extensions) toggle flips — `run` reads the fresh `simple`.
   const simpleRef = useRef(simple);
   useEffect(() => { if (simpleRef.current !== simple) { simpleRef.current = simple; const s = ref.current; if (s.cur) run(s.cur, s.sr, kind); } }, [simple]);
@@ -2606,12 +2620,14 @@ function AudioImport({ C, useSharp }) {
               <option value={4}>4/4</option><option value={3}>3/4</option><option value={6}>6/8</option>
             </select>
             <span style={{ color: C.dim }}>
-              {beatInfo ? <>detected <b style={{ color: C.green }}>♩={Math.round(beatInfo.bpm)}</b> from the audio — nudge if the bars drift</> : "set tempo so the bars line up"}
+              {beatInfo && beatInfo.bpm ? <>detected <b style={{ color: C.green }}>♩={Math.round(beatInfo.bpm)}</b> from the audio — nudge if the bars drift</> : "set tempo so the bars line up"}
+              {beatInfo && beatInfo.tuning != null && Math.abs(beatInfo.tuning) >= 5 && <> · tuning <b style={{ color: C.amber }}>{beatInfo.tuning > 0 ? "+" : ""}{Math.round(beatInfo.tuning)}¢</b> (compensated)</>}
             </span>
           </div>
+          <ChordReview events={raw} C={C} fmt={fmt} onSeek={(t) => play(t)} onPick={pickAlternative} onConfirm={confirmChord} />
           <ChartPanel score={audioScore} title={name || "Audio stem"} meta={`${audioScore.bars.length} bars · ♩=${bpm} · from audio`} C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey="" onPick={() => {}} />
           <div style={{ fontSize: 11, color: C.dim, marginTop: 10, lineHeight: 1.6 }}>
-            Rough sketch from a clean stem — tap <b>✎ Edit</b> to fix labels, set <b>♩=</b> so bars align, then <b>CSMPN</b> / <b>→ Chord Sheet Maker Pro</b> to send it on. Dense voicings / bleed will mislabel.
+            Decoded with <b>SynHarmonics v2</b> (note-level NNLS transcription, tuning compensation, inversions + slash chords, calibrated confidence). Faded chords with a <b style={{ color: C.amber }}>?</b> are the uncertain ones — fix them from the review list or <b>✎ Edit</b>, set <b>♩=</b> so bars align, then <b>CSMPN</b> / <b>→ Chord Sheet Maker Pro</b> to send it on. Dense voicings / heavy bleed still mislabel.
           </div>
         </>
       )}
@@ -2636,6 +2652,51 @@ function AudioImport({ C, useSharp }) {
         </>
       )}
     </section>
+  );
+}
+
+/* ChordReview — SynHarmonics v2 §7 "primary tier + on-demand overlay". The chart shows ONE
+ * label per chord (de-emphasised when the decoder is unsure); this strip is the overlay:
+ * only the chords whose calibrated posterior is low (`ambiguous`, prob < 0.4 — on the
+ * benchmark those are right less than half the time), each with ▶ seek-to-listen and the
+ * decoder's ranked alternatives as one-tap fixes. Pure presentational: events in,
+ * callbacks out. Renders nothing when every chord is confident. */
+function ChordReview({ events, C, fmt, onSeek, onPick, onConfirm }) {
+  const [open, setOpen] = useState(false);
+  const flagged = (events || []).map((e, i) => ({ e, i })).filter(({ e }) => e && e.ambiguous && e.alternatives);
+  const confident = (events || []).filter((e) => e && typeof e.prob === "number");
+  if (!flagged.length) {
+    return confident.length ? <div style={{ fontSize: 11, color: C.dim, marginBottom: 8 }}>✓ All {confident.length} chords decoded with confidence — none flagged for review.</div> : null;
+  }
+  const shown = open ? flagged : flagged.slice(0, 6);
+  const pct = (p) => `${Math.round(100 * p)}%`;
+  return (
+    <div style={{ border: `1px dashed ${C.amber}66`, borderRadius: 8, padding: "8px 10px", marginBottom: 10, background: `${C.amber}0d` }}>
+      <div style={{ fontSize: 11, color: C.amber, marginBottom: 6 }}>
+        ⚠ <b>{flagged.length}</b> of {confident.length || events.length} chords are uncertain — listen, then keep the label or tap an alternative.
+      </div>
+      <div style={{ display: "grid", gap: 6 }}>
+        {shown.map(({ e, i }) => (
+          <div key={i} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, fontSize: 12 }}>
+            <button onClick={() => onSeek(e.startSec)} title="play from here" style={{ ...chip(C), padding: "2px 8px" }}>▶ {fmt(e.startSec)}</button>
+            <button onClick={() => onConfirm(i)} title={`keep ${e.symbol}`}
+              style={{ ...chip(C), padding: "2px 8px", color: C.cyan, fontFamily: "'Space Mono', monospace", fontWeight: 700 }}>
+              {e.symbol} <span style={{ fontWeight: 400, color: C.dim }}>{pct(e.prob)}</span>
+            </button>
+            <span style={{ color: C.dim }}>or</span>
+            {e.alternatives.map((a) => (
+              <button key={a.symbol} onClick={() => onPick(i, a)} title={`use ${a.symbol}`}
+                style={{ ...chip(C), padding: "2px 8px", fontFamily: "'Space Mono', monospace" }}>
+                {a.symbol} <span style={{ color: C.dim }}>{pct(a.prob)}</span>
+              </button>
+            ))}
+          </div>
+        ))}
+      </div>
+      {flagged.length > shown.length || open ? (
+        <button onClick={() => setOpen((v) => !v)} style={{ ...chip(C), padding: "2px 10px", marginTop: 6 }}>{open ? "show fewer" : `show all ${flagged.length}`}</button>
+      ) : null}
+    </div>
   );
 }
 
