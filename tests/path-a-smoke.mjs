@@ -1111,8 +1111,8 @@ expect(/N\.C\./.test(hcs), "the genuinely uncovered bar still exports as N.C.");
   }
   const r = eng.analyzeAudioChords(sig, SR);
   expect(Array.isArray(r.events) && r.events.length > 0, "analyzeAudioChords returns events");
-  expect(r.method === "beat-sync" || r.method === "sliding", `method is reported, got ${r.method}`);
-  expect(r.method !== "beat-sync" || Math.abs(r.bpm - bpmT) / bpmT < 0.1, `beat-sync path reports the tempo (~${bpmT}), got ${r.bpm}`);
+  expect(["beat-sync", "sliding", "synharmonics-v2", "synharmonics-v2-grid"].includes(r.method), `method is reported, got ${r.method}`);
+  expect(!/beat-sync|synharmonics-v2$/.test(r.method) || Math.abs(r.bpm - bpmT) / bpmT < 0.1, `beat-synchronous path reports the tempo (~${bpmT}), got ${r.bpm}`);
   // no beat grid (pure silence) must still produce a result via the sliding fallback
   const quiet = eng.analyzeAudioChords(new Float32Array(SR), SR);
   expect(Array.isArray(quiet.events), "falls back rather than throwing when there is no pulse");
@@ -1135,6 +1135,169 @@ expect(/N\.C\./.test(hcs), "the genuinely uncovered bar still exports as N.C.");
   const inKey = rootOfState(eng.viterbiChords(segsOf(amb), st, { keyScale: cMajScale, keyWeight: 0.3 }));
   expect(cMajScale[noKey] === false, `without a key the louder non-diatonic reading should win, got pc ${noKey}`);
   expect(cMajScale[inKey] === true, `the key prior should tip it to the diatonic reading, got pc ${inKey}`);
+}
+
+/* ---- SynHarmonics v2 — isolated-stem chord recognition (Stages A · C · D) -----
+ * Every claim the v2 front-end/decoder makes, pinned headlessly with synthesized
+ * HARMONIC tones (partials 1..8 at 1/h — real instruments have overtones, which is
+ * exactly what pure-sine fixtures hide). Benchmark numbers live in tests/bench. */
+let synhSummary = "";
+{
+  const VSR = 16000;
+  const tone = (out, f, t0, t1, amp = 0.2, H = 8) => {
+    for (let i = Math.floor(t0 * VSR); i < Math.min(out.length, Math.floor(t1 * VSR)); i++) {
+      const t = i / VSR; let v = 0;
+      for (let h = 1; h <= H; h++) if (h * f < VSR / 2) v += Math.sin(2 * Math.PI * h * f * t) / h;
+      out[i] += amp * v;
+    }
+  };
+  const hz = (m, cents = 0) => 440 * Math.pow(2, (m - 69 + cents / 100) / 12);
+  const chordSig = (dur, plan, cents = 0) => {            // plan: [[t0,t1,[midis]],...]
+    const s = new Float32Array(Math.ceil(dur * VSR));
+    for (const [a, b, ms] of plan) for (const m of ms) tone(s, hz(m, cents), a, b, 0.25 / Math.sqrt(ms.length));
+    return s;
+  };
+  const beatsOf = (dur, step = 0.5) => { const b = []; for (let t = 0; t <= dur + 1e-9; t += step) b.push(+t.toFixed(3)); return b; };
+  const syms = (r) => (r.events || r).map((e) => e.symbol);
+  const majority = (ev, t0, t1) => { let best = null, bd = 0; for (const e of ev) { const o = Math.min(t1, e.startSec + e.durSec) - Math.max(t0, e.startSec); if (o > bd) { bd = o; best = e.symbol; } } return best; };
+
+  // Stage A · anti-aliased resampling: a tone ABOVE the new Nyquist must not fold back
+  {
+    const R = 44100, n = R; const hi = new Float32Array(n), lo = new Float32Array(n);
+    for (let i = 0; i < n; i++) { hi[i] = Math.sin(2 * Math.PI * 15000 * i / R); lo[i] = Math.sin(2 * Math.PI * 1000 * i / R); }
+    const rms = (a) => Math.sqrt(a.reduce((s, v) => s + v * v, 0) / a.length);
+    const outHi = eng.resampleTo(hi, R, 16000), outLo = eng.resampleTo(lo, R, 16000);
+    expect(Math.abs(outLo.length - 16000) <= 1, `resampleTo length follows the ratio (got ${outLo.length})`);
+    expect(Math.abs(rms(outLo.subarray(400, -400)) - Math.SQRT1_2) < 0.02, `an in-band 1 kHz tone passes at unity (rms ${rms(outLo.subarray(400, -400)).toFixed(3)})`);
+    // box-average decimation (the old dsChan, factor 2 → 22.05k) lets a 15 kHz tone alias to 7.05 kHz at −3..−10 dB
+    const box = new Float32Array(n >> 1); for (let i = 0; i < box.length; i++) box[i] = (hi[2 * i] + hi[2 * i + 1]) / 2;
+    const out22 = eng.resampleTo(hi, R, R / 2);
+    expect(20 * Math.log10(rms(out22.subarray(400, -400)) / Math.SQRT1_2) < -40 && 20 * Math.log10(rms(box) / Math.SQRT1_2) > -12,
+      `a 15 kHz tone is suppressed >40 dB by resampleTo but not by box decimation (sinc ${(20 * Math.log10(rms(out22.subarray(400, -400)) / Math.SQRT1_2)).toFixed(1)} dB vs box ${(20 * Math.log10(rms(box) / Math.SQRT1_2)).toFixed(1)} dB)`);
+    expect(eng.resampleTo(new Float32Array(0), R, 16000).length === 0, "resampleTo: empty in → empty out");
+  }
+
+  // Stage A · global tuning: a +35-cent recording is measured and re-centred
+  let tuneSharp = 0;
+  {
+    const sharp = chordSig(4, [[0, 4, [48, 52, 55, 60]]], 35), flat = chordSig(4, [[0, 4, [48, 52, 55, 60]]], 0);
+    tuneSharp = eng.nnlsChromagram(sharp, VSR, {}).tuning;
+    const t0 = eng.nnlsChromagram(flat, VSR, {}).tuning;
+    expect(Math.abs(tuneSharp - 35) < 10, `tuning estimate reads a +35¢ recording within 10¢ (got ${tuneSharp.toFixed(1)}¢)`);
+    expect(Math.abs(t0) < 6, `an in-tune recording reads ~0¢ (got ${t0.toFixed(1)}¢)`);
+    // and the decode is tuning-proof: a +40¢ C major still reads C
+    const det = chordSig(6, [[0, 6, [48, 52, 55, 60, 64]]], 45);
+    const ev = eng.transcribeChordsV2(det, VSR, { beats: beatsOf(6) }).events;
+    expect(majority(ev, 0.5, 5.5) === "C", `a +45¢ detuned C major still decodes as C (got ${syms(ev)})`);
+    // …and the compensation is what keeps the evidence ON the chord tones (half of it
+    // leaks to the neighbouring semitones without it)
+    const share = (o) => { let on = 0, all = 0; for (const f of eng.nnlsChromagram(det, VSR, o).frames.slice(5, -5)) for (let p = 0; p < 12; p++) { all += f.chroma[p]; if (p === 0 || p === 4 || p === 7) on += f.chroma[p]; } return on / all; };
+    const withT = share({}), without = share({ estimateTuning: false });
+    expect(withT > 0.75 && withT > without + 0.15, `tuning compensation concentrates chroma on C-E-G at +45¢ (${withT.toFixed(2)} vs ${without.toFixed(2)} uncompensated)`);
+  }
+
+  // Stage A · NNLS attributes overtones to their note: Bb2's 3rd harmonic is NOT an F.
+  // (The legacy fold "solved" this by damping every 5th — which also damps a REAL 5th;
+  // the default treble blends NNLS with raw salience so real chord tones stay strong.)
+  {
+    const avg = (fr, pc) => { const m = fr.slice(5, -5); return m.reduce((s, f) => s + f.chroma[pc], 0) / m.length; };
+    const nn = eng.nnlsChromagram(chordSig(3, [[0, 3, [46]]]), VSR, { treble: "nnls" }).frames;
+    expect(avg(nn, 5) / avg(nn, 10) < 0.05, `NNLS activations keep Bb's 3rd harmonic out of F (F/Bb = ${(avg(nn, 5) / avg(nn, 10)).toFixed(3)})`);
+    const tri = chordSig(3, [[0, 3, [48, 52, 55]]]);
+    const legacy = eng.pcmToChroma(tri.subarray(VSR, VSR + 4096), VSR);
+    const bl = eng.nnlsChromagram(tri, VSR, {}).frames;
+    expect(avg(bl, 7) / avg(bl, 0) > 1.0 && legacy[7] / legacy[0] < 0.8,
+      `a REAL 5th survives (C-E-G: default G/C ${(avg(bl, 7) / avg(bl, 0)).toFixed(2)}; the legacy harmonic damping cuts it to ${(legacy[7] / legacy[0]).toFixed(2)})`);
+  }
+
+  // Stage A · sub-octave guard: the bass of B3–E4–G4 is B, not a phantom E an octave down
+  {
+    const fr = eng.nnlsChromagram(chordSig(3, [[0, 3, [59, 64, 67]]]), VSR, {}).frames.slice(5, -5);
+    const b = new Float64Array(12); for (const f of fr) for (let p = 0; p < 12; p++) b[p] += f.bass[p];
+    let top = 0; for (let p = 1; p < 12; p++) if (b[p] > b[top]) top = p;
+    expect(top === 11, `bass chroma of B3-E4-G4 peaks on B (got pc ${top})`);
+  }
+
+  // Stage C · progression, event shape, posteriors
+  const prog = chordSig(8, [[0, 2, [48, 55, 64, 67]], [2, 4, [43, 50, 59, 67]], [4, 6, [45, 52, 60, 64]], [6, 8, [41, 48, 57, 65]]]);
+  const pr = eng.transcribeChordsV2(prog, VSR, { beats: beatsOf(8) });
+  {
+    const seq = [[0.3, 1.7], [2.3, 3.7], [4.3, 5.7], [6.3, 7.7]].map(([a, b]) => majority(pr.events, a, b));
+    expect(seq.join(" ") === "C G Am F", `v2 decodes C G Am F (got ${seq.join(" ")}; events ${syms(pr)})`);
+    const e0 = pr.events[0];
+    expect(e0 && typeof e0.confidence === "number" && typeof e0.prob === "number" && Array.isArray(e0.alternatives) && typeof e0.ambiguous === "boolean",
+      "v2 events carry confidence, prob, alternatives[] and an ambiguous flag (v2 §4.3)");
+    expect(pr.events.every((e) => e.confidence >= 0 && e.confidence <= 1 && e.prob >= 0 && e.prob <= 1), "confidence/prob are bounded 0..1");
+    expect(pr.events.filter((e) => e.durSec > 1).every((e) => e.prob > 0.5 && !e.ambiguous), `clean, sustained chords are confident (probs ${pr.events.map((e) => e.prob)})`);
+    expect(e0.alternatives.every((a) => a.symbol !== e0.symbol && Array.isArray(a.midis) && a.midis.length >= 2), "alternatives are distinct labels with playable voicings");
+    const onGrid = (t) => beatsOf(8, 0.25).some((g) => Math.abs(g - t) < 1e-3);
+    expect(pr.events.every((e) => onGrid(e.startSec)), "every v2 chord change lands on the (subdivided) beat grid");
+  }
+  // HMM: posteriors are distributions; a gated beat is no-chord; an ambiguous beat is unconfident
+  {
+    const E = [new Float64Array([1, 0.2, 0.1]), new Float64Array([0.5, 0.5, 0.1]), new Float64Array([0.1, 1, 0.1])];
+    const h = eng.hmmChordDecode(E, [false, false, true], { temperature: 0.05, changePenalty: 0.1 });
+    expect(h.post.every((g) => Math.abs(g.reduce((a, b) => a + b, 0) - 1) < 1e-9), "forward-backward posteriors sum to 1 per beat");
+    expect(h.path[2] === 2, "a gated (silent) beat decodes to the no-chord state");
+    expect(h.path[0] === 0, "a clear beat decodes to its best state");
+  }
+
+  // Stage C · inversions are STATES: C/E ≠ Em (same bass, different treble)
+  {
+    const ce = eng.transcribeChordsV2(chordSig(4, [[0, 4, [40, 60, 64, 67]]]), VSR, { beats: beatsOf(4) }).events;
+    const em = eng.transcribeChordsV2(chordSig(4, [[0, 4, [40, 52, 55, 59]]]), VSR, { beats: beatsOf(4) }).events;
+    expect(majority(ce, 0.5, 3.5) === "C/E", `E bass under C-E-G is C/E (got ${syms(ce)})`);
+    expect(majority(em, 0.5, 3.5) === "Em", `E bass under E-G-B is Em, not an inversion (got ${syms(em)})`);
+    // a triad over a FOREIGN (non-chord-tone) bass — the Lowdown voicing G | F#-A-C#
+    const fg = [43, 66, 69, 73];
+    const dc = eng.transcribeChordsV2(chordSig(4, [[0, 4, fg]]), VSR, { beats: beatsOf(4) }).events;
+    expect(majority(dc, 0.5, 3.5) === "F#m/G" && eng.symbolForMidis(fg, true) === "F#m/G", `F#m over a G bass reads F#m/G, as the notation oracle does (got ${syms(dc)})`);
+    const noSlash = eng.transcribeChordsV2(chordSig(4, [[0, 4, fg]]), VSR, { beats: beatsOf(4), slashChords: false }).events;
+    expect(majority(noSlash, 0.5, 3.5) !== "F#m/G", "slashChords:false removes the foreign-bass states");
+    const sus = eng.transcribeChordsV2(chordSig(4, [[0, 4, [36, 58, 62, 65]]]), VSR, { beats: beatsOf(4) }).events;
+    expect(majority(sus, 0.5, 3.5) === "Bb/C", `the sus-dominant voicing C | Bb-D-F reads Bb/C (got ${syms(sus)})`);
+    const d7 = eng.transcribeChordsV2(chordSig(4, [[0, 4, [36, 62, 66, 69]]]), VSR, { beats: beatsOf(4) }).events;
+    expect(majority(d7, 0.5, 3.5) === eng.symbolForMidis([36, 62, 66, 69], true), `C under D-F#-A is the oracle's ${eng.symbolForMidis([36, 62, 66, 69], true)} (got ${syms(d7)})`);
+    const inv = majority(ce, 0.5, 3.5);
+    const ceEv = ce.find((e) => e.symbol === inv);
+    expect(ceEv && ceEv.midis[0] % 12 === 4 && ceEv.midis[0] < Math.min(...ceEv.midis.slice(1)), "an inverted event's voicing puts its bass note at the bottom");
+  }
+
+  // gaps: a short staccato gap carries the chord; a long silence is a rest
+  {
+    const shortGap = chordSig(6, [[0, 2.5, [48, 52, 55, 60]], [3.3, 6, [48, 52, 55, 60]]]);
+    const sg = eng.transcribeChordsV2(shortGap, VSR, { beats: beatsOf(6) }).events;
+    expect(sg.length === 1 && sg[0].symbol === "C", `a 0.8 s gap does not break the chord into C · N.C. · C (got ${sg.map((e) => `${e.symbol}@${e.startSec}`)})`);
+    expect(eng.transcribeChordsV2(shortGap, VSR, { beats: beatsOf(6), minRestSec: 0 }).events.length === 2, "…because of the short-gap carry (minRestSec:0 splits it)");
+    const longGap = chordSig(8, [[0, 2.5, [48, 52, 55, 60]], [5.5, 8, [48, 52, 55, 60]]]);
+    const lg = eng.transcribeChordsV2(longGap, VSR, { beats: beatsOf(8) }).events;
+    expect(lg.length === 2 && lg.every((e) => e.startSec + e.durSec <= 3.1 || e.startSec >= 5.0), `a 3 s silence is a rest (got ${lg.map((e) => `${e.symbol}@${e.startSec}+${e.durSec}`)})`);
+    expect(eng.transcribeChordsV2(new Float32Array(VSR), VSR, {}).events.length === 0, "pure silence yields no chords, not a crash");
+  }
+
+  // Stage D · repetition smoothing is opt-in and shape-preserving
+  {
+    const segs = Array.from({ length: 40 }, (_, i) => ({ t0: i, t1: i + 1, chroma: Float64Array.from({ length: 12 }, (_, p) => ((p + i) % 4 === 0 ? 1 : 0.1)), bass: new Float64Array(12).fill(0.1), level: -20 }));
+    const sm = eng.repetitionSmooth(segs, { embed: 4, threshold: 0.8 });
+    expect(sm.length === segs.length && sm.every((s) => s.chroma.length === 12 && s.bass.length === 12), "repetitionSmooth keeps one 12+12-d segment per beat");
+    expect(sm.some((s) => s.repeats > 0), "a periodic sequence finds its repeats");
+    const plain = eng.transcribeChordsV2(prog, VSR, { beats: beatsOf(8) }), rep = eng.transcribeChordsV2(prog, VSR, { beats: beatsOf(8), repetition: true });
+    expect(Array.isArray(rep.events) && plain.events.length > 0, "repetition:true runs end-to-end (it is opt-in: it did not generalise on the held-out benchmark)");
+  }
+
+  // routing: analyzeAudioChords → v2 by default; engine:"v1" keeps the legacy path
+  {
+    const click = new Float32Array(prog);
+    for (let b = 0; b * 0.5 < 8; b++) { const at = Math.floor(b * 0.5 * VSR); for (let i = 0; i < VSR * 0.02 && at + i < click.length; i++) click[at + i] += Math.sin(2 * Math.PI * 1500 * i / VSR) * Math.exp(-i / (VSR * 0.004)); }
+    const r2 = eng.analyzeAudioChords(click, VSR);
+    expect(r2.method === "synharmonics-v2" && typeof r2.tuning === "number", `analyzeAudioChords defaults to SynHarmonics v2 (got ${r2.method})`);
+    const r1 = eng.analyzeAudioChords(click, VSR, { engine: "v1" });
+    expect(r1.method === "beat-sync" || r1.method === "sliding", `engine:"v1" keeps the legacy decoder (got ${r1.method})`);
+    // uncertainty reaches the chart
+    const sc = eng.audioEventsToScore([{ symbol: "C", midis: [48, 52, 55], startSec: 0, durSec: 2, ambiguous: true }, { symbol: "G", midis: [43, 47, 50], startSec: 2, durSec: 2 }], { bpm: 120 });
+    expect(sc.bars[0].events[0].uncertain === true && !sc.bars[1].events[0].uncertain, "audioEventsToScore carries the uncertain flag onto chart events");
+  }
+  synhSummary = `SynHarmonics v2: C G Am F ✓ · C/E vs Em ✓ · F#m/G + Bb/C ✓ · +35¢ read as ${tuneSharp.toFixed(0)}¢ · Bb 3rd-harmonic F suppressed · 15 kHz alias −40 dB+`;
 }
 
 /* ---- adaptive energy gate: quiet passages are music, not silence -------------
@@ -2271,6 +2434,7 @@ const secBack = eng.parseMusicXML(secXml, true);
 expect(secBack.bars[0].section === "Intro" && secBack.bars[6].section === "Chorus",
   "…and parseMusicXML reads them back — the structure round-trips");
 console.log(`Structure: synthetic A-B-A-B-C-B → ${struct.sections.length} parts, boundaries ${struct.boundaries.map((b) => b.toFixed(1)).join("/")}s (truth 4/12/20/28/36/44) · labels round-trip CSMPN/CSML/MusicXML`);
+console.log(synhSummary);
 
 /* ---- UI contract guards for the two features (static, like the module split) -- */
 expect(/function KeyPicker\(/.test(uiSrc) && /<KeyPicker\b/.test(uiSrc), "the UI ships a key picker");
@@ -2296,6 +2460,15 @@ expect(/mode === "lyrics" \? <LyricsPanel\b/.test(uiSrc), "the Lyrics mode rende
   expect(/<input type="file"[^>]*onChange=\{onFile\}/.test(fileInput) && !/<input type="file"[^>]*accept=/.test(fileInput),
     "the lyrics-import file input has NO accept attribute (iOS greys out .cho/.crd/.pro UTIs otherwise)");
 }
+
+/* SynHarmonics v2 UI glue — the decoder is the pure engine (tested above); the UI only
+ * resamples properly, routes to the default (v2) entry point, and surfaces uncertainty. */
+expect(/resampleOffThread/.test(uiSrc) && /catch \(_\) \{ return resampleTo\(samples, srIn, srOut\); \}/.test(uiSrc),
+  "the decode resamples with the anti-aliased resampleTo (off-thread, main-thread fallback)");
+expect(!/const dsChan = \(d\) =>/.test(uiSrc), "the box-average decimator (aliasing) is gone from the decode path");
+expect(/function ChordReview\(/.test(uiSrc) && /<ChordReview\b/.test(uiSrc), "the Audio panel ships the uncertain-chord review strip (v2 §7 overlay)");
+expect(/e\.uncertain && !edited/.test(uiSrc), "the lead sheet de-emphasises uncertain chords (confidence-graded rendering)");
+expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the chord run no longer sends v1-only sliding-window knobs to the v2 decoder");
 
 if (fails.length) {
   console.error("\nFAIL:\n  " + fails.join("\n  "));

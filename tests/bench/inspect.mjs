@@ -1,0 +1,11 @@
+import fs from "node:fs"; import path from "node:path"; import * as L from "./lib.mjs";
+const eng = await L.loadEngine(process.argv[4] ? path.resolve(process.argv[4]) : undefined);
+const idx = +process.argv[2], cond = process.argv[3] || "clean";
+const key = `${idx}-${cond}`.replace(/\W/g, "_"); const meta = JSON.parse(fs.readFileSync(path.join(L.here, ".cache", key + ".json")));
+const b = fs.readFileSync(path.join(L.here, ".cache", key + ".f32")); const a = new Float32Array(b.buffer, b.byteOffset, b.byteLength / 4);
+const ds = L.boxDecimate(a, meta.sr, 16000);
+const r = process.env.V1 ? eng.analyzeAudioChords(ds.audio, ds.sr, { engine: "v1", hopSec: 0.12, smoothSec: 0.5, recoverGaps: true }) : eng.analyzeAudioChords(ds.audio, ds.sr, {});
+console.log(meta.file, meta.part, "bpm gt", meta.bpm, "detected", r.bpm, "key", r.key && r.key.tonic, r.key && r.key.mode);
+const at = (segs, t) => { for (const s of segs) if (t >= s.t0 && t < s.t1) return s.label; return "·"; };
+const est = r.events.map((e) => ({ t0: e.startSec, t1: e.startSec + e.durSec, label: e.symbol }));
+for (let t = 0; t < Math.min(40, meta.gt[meta.gt.length - 1].t1); t += 0.5) console.log(t.toFixed(1).padStart(5), String(at(meta.gt, t)).padEnd(10), at(est, t));

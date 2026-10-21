@@ -6,7 +6,9 @@
   "description": "Headless harness for the Path A PDF pipeline. Not part of the app — the app (TabDecoderPro.tsx) stays zero-dependency.",
   "scripts": {
     "test": "node path-a-smoke.mjs",
-    "tokens": "node path-a-smoke.mjs --log-tokens"
+    "tokens": "node path-a-smoke.mjs --log-tokens",
+    "bench": "node bench/run.mjs --resample sinc --variants v1,v2",
+    "bench:calib": "node bench/calib.mjs test 0.05"
   },
   "devDependencies": {
     "pdfjs-dist": "3.11.174",
