@@ -2759,6 +2759,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   expect(/localStorage\.setItem\("ttp:stems:inflight"/.test(ui) && (ui.match(/localStorage\.removeItem\("ttp:stems:inflight"\)/g) || []).length >= 3, "a split marks itself in flight and clears the mark on success and failure");
   expect(/ran out of memory and reloaded the page\. Low-memory mode is now on/.test(ui) && /if \(!last\.compact\) \{\s*setCompact\(true\)/.test(ui), "after iOS kills the tab mid-split, the next load says so and turns Low-memory mode on");
   expect(/📱 Low-memory \{compact \? "on" : "off"\}/.test(ui) && /"ttp:stems:compact"/.test(ui), "the Low-memory toggle is visible and remembered per device");
+  expect(/loading && sourceName \? "The song is still loading — try again in a moment\."/.test(ui) && /fmt=\{fmt\} loading=\{busy\}/.test(ui), "pressing Split while a long song is still decoding says so (not 'Upload a song above first')");
   const pagesSrc = fs.readFileSync(path.join(repo, ".github", "workflows", "pages.yml"), "utf8");
   expect(/cp models\/scnet-compact\/scnet-f120\.int8\.onnx models\/scnet-compact\/NOTICE _site\/models\/scnet-compact\//.test(pagesSrc), "Pages ships the compact model + its notice");
   expect(/const hint = \/memory\|allocat\|RangeError/.test(ui), "the separation error only blames memory when the error is about memory");

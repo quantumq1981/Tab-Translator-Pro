@@ -163,6 +163,13 @@ const sampleMem = () => { const v = chromePids().map(pss); const s = v.reduce((a
   memBase = sampleMem(); memPeak = memBase; memPeakProc = 0;
   const tClick = Date.now(); memT0 = tClick; memLine.length = 0;
   await page.getByRole("button", { name: "✂ Split this mix into stems" }).click();
+  // a long mix may still be decoding: the panel says so; wait and press again (up to 5 min)
+  for (let i = 0; i < 150; i++) {
+    await page.waitForTimeout(2000);
+    const t = await page.evaluate(() => document.body.innerText).catch(() => "");
+    if (!/still loading|Upload a song above first\./.test(t)) break;
+    await page.getByRole("button", { name: "✂ Split this mix into stems" }).click();
+  }
   const timer = setInterval(sampleMem, 250);
   const deadline = Date.now() + TIMEOUT_MIN * 60000;
   let uiErr = ""; const uiProg = [];
