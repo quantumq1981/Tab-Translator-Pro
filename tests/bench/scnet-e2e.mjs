@@ -166,12 +166,14 @@ async function driveApp() {
     await page.waitForTimeout(2000);
     const st = await page.evaluate(() => {
       const t = document.body.innerText;
-      return { err: (t.match(/Stem separation failed[^\n]*|Charting the stems failed[^\n]*/) || [""])[0], busy: (t.match(/Separating stems[^\n]*|Charting every instrument[^\n]*/) || [""])[0] };
+      const panel = (t.match(/STEMS → PER-INSTRUMENT CHARTS[\s\S]{0,700}/) || [""])[0];
+    return { err: (t.match(/Stem separation failed[^\n]*|Charting the stems failed[^\n]*|Upload a song above first\.|The stem separator isn't loaded[^\n]*/) || [""])[0], busy: (t.match(/Separating stems[^\n]*|Charting every instrument[^\n]*/) || [""])[0], panel };
     }).catch(() => ({}));
     if (st.busy) uiProg.push([Date.now() - tClick, st.busy]);
     if (st.err) { uiErr = st.err; break; }
     if (received.meta && !st.busy) break;
     if ((Date.now() - tClick) % 30000 < 2100) console.error(`  … ${((Date.now() - tClick) / 1000).toFixed(0)} s ${st.busy || ""}`);
+  if (!st.busy && !received.meta && Date.now() - tClick > 20000 && !st.err) { uiErr = "split never started; stems panel: " + JSON.stringify((st.panel || "").slice(0, 600)); break; }
   }
   clearInterval(timer);
   const wallMs = Date.now() - tClick;
