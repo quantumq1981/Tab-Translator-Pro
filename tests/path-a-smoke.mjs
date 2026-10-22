@@ -2752,12 +2752,14 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
     const smSrc = fs.readFileSync(path.join(repo, "stem-model.js"), "utf8");
     expect(/compact: opts\.compact != null \? !!opts\.compact : isAppleMobile\(\)/.test(smSrc) && /compact: opts\.compact \}/.test(smSrc), "stem-model.js defaults compact from the device and forwards it to the worker");
     expect(/TTP_STEM_COMPACT_DEFAULT = isAppleMobile\(\)/.test(smSrc), "the page learns the device default (for the UI toggle)");
+    expect(/if \(!_pending\.size\) \{ try \{ w\.terminate\(\); \} catch \(_\) \{\} if \(_worker === w\) _worker = null; \}/.test(smSrc), "the stem worker is ended once its split settles (a WASM heap never shrinks; charting ran ~650 MB higher with it alive)");
   }
   const ui = fs.readFileSync(path.join(repo, "TabDecoderPro.tsx"), "utf8");
   expect(/TTP_STEM_MODEL\(L, R, src\.sampleRate, \{ compact,/.test(ui), "the UI passes Low-memory mode to the separator");
   expect(/localStorage\.setItem\("ttp:stems:inflight"/.test(ui) && (ui.match(/localStorage\.removeItem\("ttp:stems:inflight"\)/g) || []).length >= 3, "a split marks itself in flight and clears the mark on success and failure");
   expect(/ran out of memory and reloaded the page\. Low-memory mode is now on/.test(ui) && /if \(!last\.compact\) \{\s*setCompact\(true\)/.test(ui), "after iOS kills the tab mid-split, the next load says so and turns Low-memory mode on");
   expect(/📱 Low-memory \{compact \? "on" : "off"\}/.test(ui) && /"ttp:stems:compact"/.test(ui), "the Low-memory toggle is visible and remembered per device");
+  expect(/loading && sourceName \? "The song is still loading — try again in a moment\."/.test(ui) && /fmt=\{fmt\} loading=\{busy\}/.test(ui), "pressing Split while a long song is still decoding says so (not 'Upload a song above first')");
   const pagesSrc = fs.readFileSync(path.join(repo, ".github", "workflows", "pages.yml"), "utf8");
   expect(/cp models\/scnet-compact\/scnet-f120\.int8\.onnx models\/scnet-compact\/NOTICE _site\/models\/scnet-compact\//.test(pagesSrc), "Pages ships the compact model + its notice");
   expect(/const hint = \/memory\|allocat\|RangeError/.test(ui), "the separation error only blames memory when the error is about memory");

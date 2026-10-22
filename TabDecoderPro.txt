@@ -2633,7 +2633,7 @@ function AudioImport({ C, useSharp }) {
       )}
 
       {/* STEMS → split a full mix (or import stems) → a chart per instrument */}
-      <StemsPanel C={C} useSharp={useSharp} getSource={() => ref.current.audioBuf || null} sourceName={name} fmt={fmt} />
+      <StemsPanel C={C} useSharp={useSharp} getSource={() => ref.current.audioBuf || null} sourceName={name} fmt={fmt} loading={busy} />
 
       {/* SONG STRUCTURE → detected + editable, applied to the chart below */}
       {!!raw.length && !!ref.current.cur && (
@@ -2798,7 +2798,7 @@ function LiveCapture({ C, onCaptured, disabled }) {
  * drum stem's pulse), so bar n is the same moment in every chart; all charts quantise with
  * the same ♩= here, so they stay in sync when you nudge it. A mixer solos / mutes stems
  * (sample-aligned, one clock) and every stem downloads as WAV. Browser glue only. */
-function StemsPanel({ C, useSharp, getSource, sourceName, fmt }) {
+function StemsPanel({ C, useSharp, getSource, sourceName, fmt, loading }) {
   const [tracks, setTracks] = useState(null);           // { sampleRate, list:[{ role, name, L, R }] } at FULL rate
   const [busy, setBusy] = useState(""), [prog, setProg] = useState(null), [err, setErr] = useState("");
   const [res, setRes] = useState(null);                 // chartsFromStems result
@@ -2866,7 +2866,8 @@ function StemsPanel({ C, useSharp, getSource, sourceName, fmt }) {
 
   const split = async () => {
     const src = getSource && getSource();
-    if (!src) { setErr("Upload a song above first."); return; }
+    // a long song takes a while to decode: say so instead of claiming nothing was uploaded
+    if (!src) { setErr(loading && sourceName ? "The song is still loading — try again in a moment." : "Upload a song above first."); return; }
     if (typeof window === "undefined" || typeof window.TTP_STEM_MODEL !== "function") { setErr("The stem separator isn't loaded (it needs a connection the first time) — reload the page and try again."); return; }
     stop(); setErr(""); setRecovered(""); setRes(null); setBusy(`Separating stems${compact ? " (low-memory)" : ""} (first time: ~${compact ? 11 : 13} MB model download)…`); setProg({ done: 0, total: 1, t0: Date.now() });
     try { localStorage.setItem("ttp:stems:inflight", JSON.stringify({ t: Date.now(), compact, sec: src.duration })); } catch (_) {}
