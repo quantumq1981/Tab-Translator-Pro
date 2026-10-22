@@ -98,6 +98,22 @@ export function pluck(out, sr, start, len, freq, amp, R, opts = {}) {
     if (start + n >= 0 && start + n < out.length) out[start + n] += amp * s[n];
   }
 }
+/* Electric bass: additive, fundamental-dominant (partial k at 1/k² with faster decay for
+ * upper partials), 5 ms attack, finger-style. The guitar `pluck` above is no bass: its
+ * pick-position comb strips the fundamental (2% of its energy sits below 150 Hz), so a
+ * separator rightly files it under "other" and YIN can't lock onto it. */
+export function bassNote(out, sr, start, len, freq, amp) {
+  const rel = Math.floor(0.05 * sr), total = len + rel, att = Math.floor(0.005 * sr);
+  for (let k = 1; k <= 10; k++) {
+    const fk = k * freq; if (fk > 0.45 * sr) break;
+    const ak = amp / (k * k), tau = 1.6 / (1 + 0.6 * (k - 1)), w = 2 * Math.PI * fk / sr;
+    for (let n = 0; n < total; n++) {
+      const i = start + n; if (i < 0 || i >= out.length) continue;
+      const env = (n < att ? n / att : 1) * Math.exp(-n / (tau * sr)) * (n < len ? 1 : Math.exp(-(n - len) / (0.012 * sr)));
+      out[i] += ak * env * Math.sin(w * n);
+    }
+  }
+}
 /* Inharmonic additive piano/e-piano: partial k at k·f·sqrt(1+B·k²), 1/k^1.1 rolloff,
  * per-partial exponential decay (upper partials die faster), 4 ms attack. */
 export function pianoNote(out, sr, start, len, freq, amp, opts = {}) {
@@ -176,6 +192,7 @@ export function renderPart(eng, score, opts = {}) {
       const s0 = Math.floor((st + order * spread) * sr), len = Math.max(1, Math.floor(dur * sr));
       const f = mtof(m, cents), a = (vel * 0.5) / Math.sqrt(mids.length);
       if (inst === "guitar") pluck(out, sr, s0, len, f, a, R, { bright: 0.35 + 0.4 * vel, pickPos: 0.1 + 0.08 * R() });
+      else if (inst === "bass") bassNote(out, sr, s0, len, f, a);
       else if (inst === "organ") organNote(out, sr, s0, len, f, a * 0.6);
       else pianoNote(out, sr, s0, len, f, a, { B: 0.00015 * Math.pow(10, (m - 48) / 36) });   // Fletcher-like: wound bass strings ~1e-4, treble ~1e-3
     });

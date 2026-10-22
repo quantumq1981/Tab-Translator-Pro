@@ -2097,9 +2097,50 @@ separator and capture are browser glue (device check remains for the real model)
     [1,4,2049,476] in → `stems_spec` [1,16,2049,476] out, drums/bass/other/vocals × ch × re/im —
     read via the Hugging Face connector, which also confirmed the 12,900,277-byte file and its
     SHA-256 match the pin; the connector can't deliver binaries, so the weights themselves still
-    need `huggingface.co` + `cdn.jsdelivr.net` allowed in the environment's network). A headless-Chromium run of the real Worker with the real
-    bundle now reaches the pinned Hugging Face download. **Lesson: never stub the module whose
-    binding you're testing** — fake below it (the session), not at it.
+    need `huggingface.co` + **`us.aws.cdn.hf.co`** (HF 302-redirects the file to its Xet CDN;
+    `cdn-lfs.huggingface.co` is not used) + `cdn.jsdelivr.net` allowed in the environment's
+    network). **Lesson: never stub the module whose binding you're testing** — fake below it
+    (the session), not at it.
+  - **First REAL run — measured 2026-10-22** (`tests/bench/scnet-e2e.mjs`: the actual app in
+    headless Chromium, real vendor bundle + worker + pinned weights + ORT 1.30.0, NO stubs; only
+    the boot CDNs esm.sh/unpkg served locally). Mix = 3 GP songs × ~33 s (Peg · Black Cow · Kid
+    Charlemagne) rendered as comp + bass + drums stems, panned, summed (99.9 s). Single-thread
+    WASM (no COOP/COEP on Pages), 4-core Linux container:
+    - **Speed: 6.0× real time** — 601 s for 99.9 s of audio, **~6 min per minute of song** (a
+      16 s clip: 6.9×, fixed per-chunk overhead). A 4-minute song ≈ 24 min on this CPU; phones
+      are likely slower. WebGPU not measured (no GPU in the container).
+    - **Memory: peak +1.96 GB** over the page baseline (2.13 GB in one process) for 100 s; a 16 s
+      clip already peaks at +1.5 GB. It's the model's working set for its fixed 11 s window
+      (`mix_spec` frames = 476), not clip length, and the library already disables ORT's memory
+      arena + memory pattern — there is no cheap lever. **Expect iPhone Safari (tab limit
+      ~1–1.5 GB) to be killed mid-split**; iPad/desktop OK. Moises/Demucs stem import is the
+      phone route. This is the device check that remains.
+    - **SDR** (global / median 1 s frame): drums **16.7 / 20.2 dB**, bass **22.5 / 24.7**, other
+      **15.2 / 15.4**; the empty vocals stem holds −51 dB of the mix; stems sum back to the mix
+      within −21 dB. Synthetic, clean, unmastered stems — out of MUSDB's distribution in the easy
+      direction, so these are NOT comparable to the published 9.4/8.4/6.2 dB; they show the
+      pipeline is correct, not how a real record will separate.
+    - **Charts from the separated stems** (per song, then averaged — songs differ in tempo):
+      all 5 tabs render (band · other · bass · vocals · drums), tempo exact per song (117.7 /
+      92.3 / 98.4), bass-line note counts = the perfect-stem ones (15/17, 44/43, 94/94), drums
+      F kick 93 · snare 96 · hat 95. Band chart root/majmin/sevenths **56.7 / 58.7 / 45.5**
+      vs perfect stems 65.2 / 64.1 / 51.0 vs the mix decoded directly 51.6 / 54.3 / 37.8 —
+      separation beats the mix on every metric. The ~5-point gap to perfect is within the
+      decoder's sensitivity on 40 s clips: adding ANY −16 dB leak to the perfect comp stem moves a
+      song ±10–15 points (bass leak raised Peg 70.8 → 85.5; drums dropped Black Cow 55.6 → 43.2).
+      `bassFusion` on separated stems: 58.3 vs 58.7 off — stays off.
+    - **Bug found + fixed: the progress/ETA lied.** The library calls `progress({chunk: i+1})`
+      BEFORE running chunk i, so the core reported chunks *started* — "4% · ~3 min left" with 10
+      min to go — and the ETA only recomputed on a progress event (one chunk ≈ 20–70 s), then
+      lingered as "~1 min left" through charting. Now: chunks *completed*, pure `progressEta`
+      (rate to the last event minus the time since), a 1 s UI tick, cleared when charting starts.
+      Verified in the real run: 20% → "~2 min left" with 100 s to go, 40% → "~1 min" with 77 s.
+      `npm test` fails on the old formula (first event "0.25 done after 0 model runs").
+    - **Bench bug found (not the app):** the bench's "bass" was the guitar Karplus–Strong pluck an
+      octave down — its pick-position comb leaves 2% of the energy below 150 Hz, so SCNet filed it
+      under "other" (bass SDR 0.4 dB) and even the perfect stem transcribed badly. `lib.mjs` now
+      has a fundamental-dominant `bassNote` voice. A bench bass must have a bass's spectrum.
+    - Re-score saved stems without the 10-min browser run: `--reuse <run dir>` (+ `--chart-opts`).
 - **Live capture** (`LiveCapture`): `🖥 Capture a tab` (getDisplayMedia, desktop Chrome/Edge,
   "Share tab audio") + `🎙 Record` (mic), raw PCM (ScriptProcessor — the one raw tap iOS
   still has), 15 min cap, silent-take = DRM message, → the SAME `loadBuffer` path as an upload.
@@ -2463,7 +2504,8 @@ accordingly.
   SCNet-not-htdemucs, worker + fallback, blocks, deploy list, no `accept`, raw capture, no
   stream-ripping code). Plus the separator core run end-to-end through the REAL vendored
   library with a fake session (named-export binding, private-mode cache guard, 3 blocks,
-  stems = mask × input, stems sum to the mix).
+  stems = mask × input, stems sum to the mix), progress that reports work COMPLETED (first event
+  0 done after 0 runs, monotone) and `progressEta`. Real-model numbers: `tests/bench/scnet-e2e.mjs`.
 - **Key model v2 + manual override**: `npm test` asserts the reported defect is fixed
   (`D · C · G` reads **D major**, and E minor — whose tonic never sounds — loses by >20%),
   the same shape a step round the circle (`G · F · C` → G), that a genuine minor tune and a

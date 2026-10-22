@@ -68,3 +68,10 @@ node bench/scnet-e2e.mjs --deps $D/out --tracks 3 --sec 40 --playwright /opt/nod
 ```
 
 React and react-dom are bundled into one module so the page gets a single React instance.
+
+Charts are scored per song (the songs have different tempi). The run directory keeps the separated
+and reference stems as WAVs plus `run.json`, so `--reuse <run dir>` re-scores them in seconds without
+the ~10-minute browser run; `--chart-opts '{"bassFusion":true}'` passes options to `chartsFromStems`.
+The bass stem uses `lib.mjs`'s `bassNote` voice — a guitar pluck an octave down has almost no
+fundamental, and a separator correctly calls it "other". Measured results are in CLAUDE.md (v2.1 →
+"First REAL run").

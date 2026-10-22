@@ -82,7 +82,10 @@ export async function separateInBlocks(left, right, sampleRate, opts = {}) {
       sampleRate, model: STEM_MODEL, device, wasmPaths: ORT_WASM_PATHS,   // single-threaded WASM without COOP/COEP (ORT falls back itself)
       step: opts.step != null ? opts.step : 0.5,                 // 0.5: half the compute of 0.25 for ~0.1 dB
       session: opts.session,                                     // test seam: the library's own session hook (never set by the app)
-      progress: opts.onProgress ? (p) => opts.onProgress(bi + p.chunk / p.totalChunks, starts.length) : undefined,
+      // The library calls progress({ chunk: i + 1 }) BEFORE running chunk i, so `chunk` counts
+      // chunks STARTED. Report chunks COMPLETED, or every estimate runs one chunk (over a minute
+      // on single-thread WASM) ahead of the work actually done.
+      progress: opts.onProgress ? (p) => opts.onProgress(bi + (p.chunk - 1) / p.totalChunks, starts.length) : undefined,
     });
     // linear cross-fade over the padded overlap so block seams are inaudible
     for (let i = a; i < b; i++) {
