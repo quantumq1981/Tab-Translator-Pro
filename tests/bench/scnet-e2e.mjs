@@ -139,7 +139,9 @@ const sampleMem = () => { const v = chromePids().map(pss); const s = v.reduce((a
         const t0 = performance.now(); window.__stemProgress = [];
         const o = await real(L, R, sr, { ...opts, onProgress: (d, t) => { window.__stemProgress.push([performance.now() - t0, d, t]); if (opts && opts.onProgress) opts.onProgress(d, t); } });
         const ms = performance.now() - t0;
-        for (const [k, chs] of Object.entries(o.stems)) for (let c = 0; c < chs.length; c++) await fetch(`/__e2e/stem/${k}_${c}`, { method: "POST", body: chs[c] });
+        // Keep the stems for the harness to collect AFTER charting: uploading them here copied ~140 MB
+        // inside the measured window and showed up as a fake end-of-separation peak.
+        window.__stemOut = o;
         await fetch("/__e2e/meta", { method: "POST", body: JSON.stringify({ ms, device: o.device, compact: !!o.compact, sampleRate: o.sampleRate, progress: window.__stemProgress, keys: Object.keys(o.stems) }) });
         return o;
       }); },
@@ -180,6 +182,8 @@ const sampleMem = () => { const v = chromePids().map(pss); const s = v.reduce((a
   }
   clearInterval(timer);
   const wallMs = Date.now() - tClick;
+  // collect the stems now that the measured window is over
+  if (received.meta) await page.evaluate(async () => { const o = window.__stemOut; for (const [k, chs] of Object.entries(o.stems)) for (let c = 0; c < chs.length; c++) await fetch(`/__e2e/stem/${k}_${c}`, { method: "POST", body: chs[c] }); window.__stemOut = null; });
   const uiText = await page.evaluate(() => document.body.innerText).catch(() => "");
   fs.writeFileSync(path.join(OUT, "console.log"), logs.join("\n"));
   fs.writeFileSync(path.join(OUT, "network.json"), JSON.stringify(net, null, 1));

@@ -2752,6 +2752,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
     const smSrc = fs.readFileSync(path.join(repo, "stem-model.js"), "utf8");
     expect(/compact: opts\.compact != null \? !!opts\.compact : isAppleMobile\(\)/.test(smSrc) && /compact: opts\.compact \}/.test(smSrc), "stem-model.js defaults compact from the device and forwards it to the worker");
     expect(/TTP_STEM_COMPACT_DEFAULT = isAppleMobile\(\)/.test(smSrc), "the page learns the device default (for the UI toggle)");
+    expect(/if \(!_pending\.size\) \{ try \{ w\.terminate\(\); \} catch \(_\) \{\} if \(_worker === w\) _worker = null; \}/.test(smSrc), "the stem worker is ended once its split settles (a WASM heap never shrinks; charting ran ~650 MB higher with it alive)");
   }
   const ui = fs.readFileSync(path.join(repo, "TabDecoderPro.tsx"), "utf8");
   expect(/TTP_STEM_MODEL\(L, R, src\.sampleRate, \{ compact,/.test(ui), "the UI passes Low-memory mode to the separator");

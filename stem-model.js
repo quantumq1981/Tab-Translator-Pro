@@ -36,6 +36,11 @@ function getWorker() {
       if (!p) return;
       if (m.type === "progress") { if (p.onProgress) p.onProgress(m.done, m.total); return; }
       _pending.delete(m.id);
+      // A WASM heap never shrinks: the worker would keep the model's ~0.65–1.8 GB peak for the rest
+      // of the visit, right while the page charts the stems (measured: the page sat ~650 MB higher
+      // through charting). End it once nothing is pending; the next split starts a fresh one and
+      // reads the weights from the Cache API.
+      if (!_pending.size) { try { w.terminate(); } catch (_) {} if (_worker === w) _worker = null; }
       if (m.type === "result") p.resolve({ sampleRate: m.sampleRate, stems: m.stems, device: m.device, compact: m.compact });
       else p.reject(new Error(m.message || "stem separation failed"));
     };
