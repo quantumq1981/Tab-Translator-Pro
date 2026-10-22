@@ -111,7 +111,9 @@ async function driveApp() {
   const chromePids = () => fs.readdirSync("/proc").filter((p) => /^\d+$/.test(p)).filter((p) => { try { return /chrom|headless_shell/i.test(fs.readFileSync(`/proc/${p}/cmdline`, "utf8").split("\0")[0]); } catch (_) { return false; } });
   const pss = (p) => { try { const m = /Pss:\s+(\d+)/.exec(fs.readFileSync(`/proc/${p}/smaps_rollup`, "utf8")); return m ? +m[1] * 1024 : 0; } catch (_) { return 0; } };
   let memPeak = 0, memPeakProc = 0, memBase = 0;
-  const sampleMem = () => { const v = chromePids().map(pss); const s = v.reduce((a, b) => a + b, 0); memPeak = Math.max(memPeak, s); memPeakProc = Math.max(memPeakProc, ...v, 0); return s; };
+  let memT0 = Date.now(), memPhase = "";
+const memLine = [];                                   // [s since click, MB total, phase] — WHEN the peak happens, not just how high
+const sampleMem = () => { const v = chromePids().map(pss); const s = v.reduce((a, b) => a + b, 0); memPeak = Math.max(memPeak, s); memPeakProc = Math.max(memPeakProc, ...v, 0); memLine.push([+((Date.now() - memT0) / 1000).toFixed(1), Math.round(s / 2 ** 20), memPhase]); return s; };
 
   const browser = await chromium.launch({ executablePath: arg("chromium", undefined), args: ["--enable-features=SharedArrayBuffer"] });
   const ctx = await browser.newContext({ acceptDownloads: true });
@@ -157,7 +159,7 @@ async function driveApp() {
   await page.waitForFunction(() => typeof window.TTP_STEM_MODEL === "function", null, { timeout: 60000 });
   await page.waitForTimeout(1500);                    // let the upload's own chord pass settle
   memBase = sampleMem(); memPeak = memBase; memPeakProc = 0;
-  const tClick = Date.now();
+  const tClick = Date.now(); memT0 = tClick; memLine.length = 0;
   await page.getByRole("button", { name: "✂ Split this mix into stems" }).click();
   const timer = setInterval(sampleMem, 250);
   const deadline = Date.now() + TIMEOUT_MIN * 60000;
@@ -170,6 +172,7 @@ async function driveApp() {
     return { err: (t.match(/Stem separation failed[^\n]*|Charting the stems failed[^\n]*|Upload a song above first\.|The stem separator isn't loaded[^\n]*/) || [""])[0], busy: (t.match(/Separating stems[^\n]*|Charting every instrument[^\n]*/) || [""])[0], panel };
     }).catch(() => ({}));
     if (st.busy) uiProg.push([Date.now() - tClick, st.busy]);
+  memPhase = /Charting/.test(st.busy || "") ? "charting" : st.busy ? "separating" : received.meta ? "done" : "";
     if (st.err) { uiErr = st.err; break; }
     if (received.meta && !st.busy) break;
     if ((Date.now() - tClick) % 30000 < 2100) console.error(`  … ${((Date.now() - tClick) / 1000).toFixed(0)} s ${st.busy || ""}`);
@@ -186,7 +189,7 @@ async function driveApp() {
     console.log(JSON.stringify({ ok: false, uiErr, wallMs, network: net.map((n) => n.url.slice(0, 100)), lastLogs: logs.slice(-15) }, null, 1));
     process.exit(1);
   }
-  fs.writeFileSync(path.join(OUT, "run.json"), JSON.stringify({ meta: received.meta, wallMs, uiText, network: net, uiProg, memory: { memBase, memPeak, memPeakProc } }));
+  fs.writeFileSync(path.join(OUT, "run.json"), JSON.stringify({ meta: received.meta, wallMs, uiText, network: net, uiProg, memLine, memory: { memBase, memPeak, memPeakProc } }));
   const est = Object.fromEntries(received.meta.keys.map((k) => [k, [received[k + "_0"], received[k + "_1"]]]));
   return { est, run: JSON.parse(fs.readFileSync(path.join(OUT, "run.json"), "utf8")) };
 
