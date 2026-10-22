@@ -2882,7 +2882,9 @@ function StemsPanel({ C, useSharp, getSource, sourceName, fmt, loading }) {
       try { localStorage.removeItem("ttp:stems:inflight"); } catch (_) {}
       const msg = String((e && e.message) || e);
       // Only blame memory when the error actually looks like memory — otherwise the hint sends the user chasing the wrong cause.
-      const hint = /memory|allocat|RangeError|out of bounds|OOM/i.test(msg + (e && e.name))
+      // ("allocation_planner" is ONNX Runtime refusing a graph, not memory — exclude it.)
+      const memLike = /memory|allocat(?!ion_planner)|RangeError|out of bounds|OOM/i.test(msg + (e && e.name)) && !/Can't create a session/i.test(msg);
+      const hint = memLike
         ? (!compact ? " Turn on 📱 Low-memory mode and try again, or import stems from Moises/Demucs."
           : /backend|wasm/i.test(msg) ? " The browser couldn't set aside memory for the separator. Reload the page, load the song and split it straight away (before Isolate vocals, A/B clarity or other analyses), and close other tabs — or import stems from Moises/Demucs."
           : " Long songs need a lot of memory on a phone — try a shorter clip, or import stems from Moises/Demucs.")

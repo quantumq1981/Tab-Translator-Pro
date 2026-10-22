@@ -2709,6 +2709,22 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
     for (const k of SRC) for (let c = 0; c < 2; c++) { const inp = c ? R : L, st = cres.stems[k][c]; let e = 0, p = 0; for (let i = sr; i < n - sr; i++) { const d = st[i] - W[k] * inp[i]; e += d * d; p += (W[k] * inp[i]) ** 2; } worstC = Math.max(worstC, Math.sqrt(e / p)); }
     expect(worstC < 1e-4, `compact: stems still = mask × input through the shorter STFT windows (worst rel. error ${worstC.toExponential(1)})`);
   }
+  // iPhone (iOS 26 Safari has WebGPU): the compact session turns the graph optimiser off, and ORT's
+  // WebGPU EP can't build an unoptimised graph — "allocation_planner.cc:237 Could not find OrtValue
+  // with name '_sw'" (reported on-device). Low-memory mode must run on WASM; a GPU that fails at all
+  // must not end the split.
+  expect(core.deviceFor(true, "webgpu") === "wasm" && core.deviceFor(false, "webgpu") === "webgpu" && core.deviceFor(false, "wasm") === "wasm", "low-memory mode always runs on WASM; the full model keeps WebGPU where available");
+  {
+    const g = await core.separateInBlocks(L, R, sr, { session: cSession, compact: true, device: "webgpu" });
+    expect(g.device === "wasm" && !g.fellBackFrom, `compact + a WebGPU device: separation runs on WASM directly (got ${g.device})`);
+    let calls = 0;
+    const flaky = async (spec) => { if (++calls === 1) throw new Error("Can't create a session. ERROR_CODE: 1, ERROR_MESSAGE: allocation_planner.cc:237 Could not find OrtValue with name '_sw'"); return session(spec); };
+    let fb = null, fe = ""; try { fb = await core.separateInBlocks(L, R, sr, { session: flaky, device: "webgpu", blockSec: 30 }); } catch (e) { fe = e.message; }
+    expect(fb && fb.device === "wasm" && fb.fellBackFrom === "webgpu" && /_sw/.test(fb.fallbackReason) && fb.stems.vocals[0].length === n, "a WebGPU session failure is retried on WASM and the split completes" + (fe ? " — " + fe : ""));
+    let wcalls = 0, we = "";
+    try { await core.separateInBlocks(L, R, sr, { session: async () => { wcalls++; throw new Error("wasm broke"); }, device: "wasm" }); } catch (e) { we = e.message; }
+    expect(/wasm broke/.test(we) && wcalls === 1, "a WASM failure surfaces as is (no pointless retry)");
+  }
   // integrity + cache: the bytes must match the pin, from the network or the Cache API
   if (compactBytes) {
     const store = new Map(); let fetches = 0;
@@ -2784,11 +2800,12 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   expect(/TTP_STEM_MODEL\(L, R, src\.sampleRate, \{ compact,/.test(ui), "the UI passes Low-memory mode to the separator");
   expect(/localStorage\.setItem\("ttp:stems:inflight"/.test(ui) && (ui.match(/localStorage\.removeItem\("ttp:stems:inflight"\)/g) || []).length >= 3, "a split marks itself in flight and clears the mark on success and failure");
   expect(/ran out of memory and reloaded the page\. Low-memory mode is now on/.test(ui) && /if \(!last\.compact\) \{\s*setCompact\(true\)/.test(ui), "after iOS kills the tab mid-split, the next load says so and turns Low-memory mode on");
+  expect(/allocat\(\?!ion_planner\)/.test(ui) && /Can't create a session/.test(ui), "an ONNX Runtime graph error isn't blamed on memory");
   expect(/📱 Low-memory \{compact \? "on" : "off"\}/.test(ui) && /"ttp:stems:compact"/.test(ui), "the Low-memory toggle is visible and remembered per device");
   expect(/loading && sourceName \? "The song is still loading — try again in a moment\."/.test(ui) && /fmt=\{fmt\} loading=\{busy\}/.test(ui), "pressing Split while a long song is still decoding says so (not 'Upload a song above first')");
   const pagesSrc = fs.readFileSync(path.join(repo, ".github", "workflows", "pages.yml"), "utf8");
   expect(/cp models\/scnet-compact\/scnet-f120\.int8\.onnx models\/scnet-compact\/NOTICE _site\/models\/scnet-compact\//.test(pagesSrc), "Pages ships the compact model + its notice");
-  expect(/const hint = \/memory\|allocat\|RangeError/.test(ui), "the separation error only blames memory when the error is about memory");
+  expect(/const memLike = \/memory\|allocat\(\?!ion_planner\)\|RangeError/.test(ui) && /const hint = memLike/.test(ui), "the separation error only blames memory when the error is about memory");
   expect(/progressEta\(prog, Date\.now\(\)\)/.test(ui) && /tAt: Date\.now\(\)/.test(ui), "the stems countdown uses progressEta with each event's timestamp");
   expect(/setInterval\(\(\) => setTick/.test(ui), "the countdown re-renders between progress events");
   expect(/Charting every instrument…"\); setErr\(""\); setRes\(null\); setProg\(null\)/.test(ui), "the separator's countdown is cleared when charting starts");

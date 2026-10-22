@@ -169,10 +169,31 @@ export async function compactSession(device, bytes, ortImport = (u) => import(/*
   };
 }
 
+/* Low-memory mode always runs on WASM. Its session turns ORT's graph optimiser off (the optimiser's
+ * weight pre-packing costs ~200 MB), and ORT's WebGPU EP cannot run an unoptimised graph: on an
+ * iPhone (iOS 26 Safari has WebGPU) session creation failed with "allocation_planner.cc:237 Could
+ * not find OrtValue with name '_sw'" (reported on-device), and on a software WebGPU adapter the
+ * same session fails at run time on an f16 Cast. WASM with the same options is the measured path. */
+export function deviceFor(compact, picked) { return compact ? "wasm" : picked; }
+
 export async function separateInBlocks(left, right, sampleRate, opts = {}) {
+  const compact = !!opts.compact;
+  const device = deviceFor(compact, await pickDevice(opts.device));
+  try {
+    return await separateOn(device, left, right, sampleRate, opts);
+  } catch (e) {
+    // A GPU that can't build or run the graph shouldn't end the split: redo it on WASM (same
+    // stems, slower). Anything that already failed on WASM is a real error and surfaces as is.
+    if (device !== "webgpu") throw e;
+    if (opts.onProgress) opts.onProgress(0, 1);
+    const r = await separateOn("wasm", left, right, sampleRate, opts);
+    return { ...r, fellBackFrom: "webgpu", fallbackReason: String(e && e.message || e).slice(0, 200) };
+  }
+}
+
+async function separateOn(device, left, right, sampleRate, opts) {
   const separate = resolveSeparate(await lib());
   await ensureCacheUsable();
-  const device = await pickDevice(opts.device);
   const n = Math.min(left.length, right.length);
   const compact = !!opts.compact;
   if (compact) capWasmMemory();                // before ORT is imported (see capWasmMemory)
