@@ -4899,7 +4899,15 @@ function transcribeChordsV2(samples, sampleRate, opts = {}) {
   const lv = segs.map((s) => s.level).sort((a, b) => a - b);
   const ref = lv[Math.min(lv.length - 1, Math.floor(0.95 * lv.length))];
   const gateDb = opts.gateDb != null ? opts.gateDb : 45;
-  const quiet = segs.map((s) => s.level < ref - gateDb);
+  /* A rest is also "well below the loud passages AND harmonically FLAT". Under a noise
+   * floor (hiss, bleed, room tone) a rest is not silent, and its noise chroma still gets
+   * a chord name — measured: a pad part that rests 54% of the time read 98% clean but 43%
+   * with 20 dB noise, the hiss in every rest decoded as Em7. Noise-only frames read a
+   * normalised chroma entropy of 0.99–1.00; real chords 0.68–0.83 (p90 ≤ 0.95 even quiet
+   * and noisy), so the flatness test cannot eat a real chord. */
+  const flatGate = opts.flatEntropy != null ? opts.flatEntropy : 0.97, flatDb = opts.flatDb != null ? opts.flatDb : 12;
+  const entropy = (v) => { let sum = 0; for (let p = 0; p < 12; p++) sum += v[p]; if (!(sum > 0)) return 1; let h = 0; for (let p = 0; p < 12; p++) if (v[p] > 0) { const q = v[p] / sum; h -= q * Math.log(q); } return h / Math.log(12); };
+  const quiet = segs.map((s) => s.level < ref - gateDb || (flatGate < 1 && s.level < ref - flatDb && entropy(s.chroma) >= flatGate));
   /* Only a SUSTAINED silence is a rest. A short gap (a staccato chop, a breath between
    * strums) carries no evidence either way — it is marked 'skip' and gets a flat
    * emission, so the HMM carries the surrounding chord across it, the way a chart does. */
@@ -4979,8 +4987,10 @@ function transcribeChordsV2(samples, sampleRate, opts = {}) {
  * diatonic prior when the key reading is confident. The NNLS front-end is computed
  * ONCE and shared by both passes. */
 function analyzeAudioChordsV2(samples, sampleRate, opts = {}) {
-  const bt = detectBeats(samples, sampleRate, opts);
-  const fr = nnlsChromagram(samples, sampleRate, opts);
+  // a caller that already has the beat grid (another stem of the same song) or the NNLS
+  // frames passes them in, so every chart of a song shares ONE grid (see chartsFromStems)
+  const bt = opts.beats && opts.beats.length >= 3 ? { beats: opts.beats, bpm: opts.bpm || 0 } : detectBeats(samples, sampleRate, opts);
+  const fr = opts._frames || nnlsChromagram(samples, sampleRate, opts);
   const base = { ...opts, beats: bt.beats && bt.beats.length >= 3 ? bt.beats : null, bpm: bt.bpm, _frames: fr };
   let r = transcribeChordsV2(samples, sampleRate, base);
   let key = null;
@@ -4997,6 +5007,271 @@ function analyzeAudioChordsV2(samples, sampleRate, opts = {}) {
     } else key = null;
   }
   return { events: r.events, bpm: base.beats ? bt.bpm : 0, beats: bt.beats || [], key, tuning: +fr.tuning.toFixed(1), method: base.beats ? "synharmonics-v2" : "synharmonics-v2-grid" };
+}
+
+/* ============================================================================
+ *  PER-INSTRUMENT CHARTS FROM STEMS
+ *  ---------------------------------------------------------------------------
+ *  A full mix → stems (an ML separator, or stems the user already has from Moises /
+ *  Demucs / LALAL) → one chart per instrument, all on ONE shared beat grid so bar n is
+ *  the same moment in every chart (tracked on the drum stem when there is one — drums
+ *  carry the cleanest pulse). Pure + worker-safe; the separator itself is browser glue.
+ *
+ *   band     chords from the HARMONIC stems (guitar / piano / other), with the BASS
+ *            stem's lowest note as the bass evidence — the separated bass is the cleanest
+ *            root/inversion signal a chord decoder can get
+ *   guitar / piano / other   chords per harmonic stem
+ *   bass     the bass line (YIN notes) — the root movement, on a bass staff
+ *   vocals   the lead melody (YIN notes); the full harmony split is Voices (ML)
+ *   drums    kick / snare / hi-hat hits → a 16th-note groove grid per bar
+ * ------------------------------------------------------------------------- */
+
+/* A stem file's instrument from its name — Moises ("Song - Guitar.wav"), Demucs
+ * ("vocals.wav"), LALAL ("song_vocals.mp3"), Spleeter ("accompaniment.wav"). Order
+ * matters: "bass drum" is drums, "backing vocals" is vocals. null = unknown. */
+const _STEM_PATTERNS = [
+  ["drums", /drum|percussion|perc\b|kick|snare|beat/i],
+  ["vocals", /vocal|voice|vox|lead.?vox|singer|acapella|a cappella/i],
+  ["bass", /\bbass(?!oon)|bajo/i],
+  ["guitar", /guitar|gtr|guitarra/i],
+  ["piano", /piano|keys|keyboard|rhodes|organ|synth/i],
+  ["other", /other|instrumental|accompaniment|backing|music|no.?vocals|karaoke|rest/i],
+];
+function stemRoleFromName(name) {
+  const base = String(name || "").replace(/\.[a-z0-9]+$/i, "");
+  for (const [role, re] of _STEM_PATTERNS) if (re.test(base)) return role;
+  return null;
+}
+const STEM_ROLE_NAMES = { band: "Full band", guitar: "Guitar", piano: "Keys", other: "Guitar / keys (other)", bass: "Bass", vocals: "Vocals", drums: "Drums" };
+
+/* Drum hits — semi-adaptive NMF drum transcription (after Dittmar & Gärtner 2014;
+ * Wu et al. 2018's ADT review). A band-energy detector fails on real kits for a physical
+ * reason: a snare's noise reaches below 150 Hz, a kick's beater click above 1 kHz, a hat's
+ * sizzle into the snare's band — so every band "hears" every drum (measured: snare
+ * precision 27%). NMF instead EXPLAINS the log-band spectrogram V ≈ W·H with one spectral
+ * template per drum (kick: a low body; snare: a 150–250 Hz body + broadband wires; hat:
+ * high band), so energy two drums share is divided between them, not counted twice.
+ * Templates start from those canonical shapes and adapt to the recording, pulled back
+ * toward their shape each iteration so a component cannot swap identity. Onsets are peaks
+ * of each activation's rise. Run it on a FULL-RATE stem (44.1/48 kHz) — at the 16 kHz
+ * chord-analysis rate most of a real hi-hat is above Nyquist. Returns [{ t, type, strength }]. */
+function transcribeDrums(samples, sampleRate, opts = {}) {
+  let N = 1; while (N < 0.04 * sampleRate) N <<= 1;
+  const hop = Math.max(1, Math.round(sampleRate * 0.01)), half = N >> 1, binHz = sampleRate / N;
+  const win = _hann(N), fLo = 30, fHi = Math.min(16000, sampleRate / 2 - 1), B = 48;
+  const edges = Array.from({ length: B + 1 }, (_, i) => fLo * Math.pow(fHi / fLo, i / B));
+  const centres = edges.slice(0, B).map((e, i) => Math.sqrt(e * edges[i + 1]));
+  const binBand = new Int16Array(half).fill(-1);
+  for (let k = 1; k < half; k++) { const f = k * binHz; for (let b = 0; b < B; b++) if (f >= edges[b] && f < edges[b + 1]) { binBand[k] = b; break; } }
+  const V = [], times = [];
+  const re = new Float64Array(N), im = new Float64Array(N);
+  for (let s = 0; s + N <= samples.length; s += hop) {
+    for (let i = 0; i < N; i++) { re[i] = (samples[s + i] || 0) * win[i]; im[i] = 0; }
+    _fft(re, im);
+    const col = new Float64Array(B);
+    for (let k = 1; k < half; k++) if (binBand[k] >= 0) col[binBand[k]] += Math.hypot(re[k], im[k]);
+    for (let b = 0; b < B; b++) col[b] = Math.sqrt(col[b]);                 // mild compression
+    V.push(col); times.push((s + N / 2) / sampleRate);
+  }
+  const T = V.length;
+  if (T < 3) return [];
+  const types = ["kick", "snare", "hat"];
+  const lg = (f) => Math.log2(f);
+  const shape = [
+    (f) => Math.exp(-0.5 * Math.pow((lg(f) - lg(65)) / 0.9, 2)) + 0.04,                                  // kick body ~65 Hz
+    (f) => 0.9 * Math.exp(-0.5 * Math.pow((lg(f) - lg(200)) / 0.7, 2)) + (f > 1000 ? 0.45 : f > 300 ? 0.25 : 0.05),   // snare body + wires
+    (f) => (f > 6000 ? 1 : f > 3000 ? 0.4 : 0.02),                                                         // hats / cymbals
+  ];
+  const W0 = shape.map((fn) => { const w = centres.map(fn); const n = Math.hypot(...w) || 1; return w.map((x) => x / n); });
+  const W = W0.map((w) => w.slice());
+  const H = types.map(() => new Float64Array(T).fill(0.1));
+  const iters = opts.drumIterations || 30, pull = opts.drumTemplatePull != null ? opts.drumTemplatePull : 0.5, eps = 1e-9;
+  const R = new Float64Array(B * T);
+  for (let it = 0; it < iters; it++) {
+    // R = V / (W·H)   (KL-divergence multiplicative updates)
+    for (let t = 0; t < T; t++) for (let b = 0; b < B; b++) { let v = eps; for (let c = 0; c < 3; c++) v += W[c][b] * H[c][t]; R[b * T + t] = V[t][b] / v; }
+    for (let c = 0; c < 3; c++) {
+      let wsum = 0; for (let b = 0; b < B; b++) wsum += W[c][b];
+      for (let t = 0; t < T; t++) { let num = 0; for (let b = 0; b < B; b++) num += W[c][b] * R[b * T + t]; H[c][t] *= num / (wsum + eps); }
+    }
+    for (let t = 0; t < T; t++) for (let b = 0; b < B; b++) { let v = eps; for (let c = 0; c < 3; c++) v += W[c][b] * H[c][t]; R[b * T + t] = V[t][b] / v; }
+    for (let c = 0; c < 3; c++) {
+      let hsum = 0; for (let t = 0; t < T; t++) hsum += H[c][t];
+      for (let b = 0; b < B; b++) { let num = 0; for (let t = 0; t < T; t++) num += H[c][t] * R[b * T + t]; W[c][b] *= num / (hsum + eps); }
+      let n = 0; for (let b = 0; b < B; b++) { W[c][b] = (1 - pull) * W[c][b] + pull * W0[c][b] * (Math.hypot(...W[c]) || 1); n += W[c][b] * W[c][b]; }
+      n = Math.sqrt(n) || 1; for (let b = 0; b < B; b++) W[c][b] /= n;
+    }
+  }
+  // onsets: peaks of each component's RISE (rectified first difference of its activation)
+  const rel = opts.drumThreshold != null ? opts.drumThreshold : 0.4;
+  const gap = Math.round(0.06 / (hop / sampleRate)), Wn = Math.round(1.5 / (hop / sampleRate));
+  const hits = [], peak = {};
+  types.forEach((type, c) => {
+    const d = new Float64Array(T);
+    for (let t = 1; t < T; t++) d[t] = Math.max(0, H[c][t] - H[c][t - 1]);
+    let gmax = 0; for (let t = 0; t < T; t++) if (d[t] > gmax) gmax = d[t];
+    if (!(gmax > 0)) return;
+    peak[type] = gmax;
+    let last = -1e9;
+    for (let t = 1; t + 1 < T; t++) {
+      if (!(d[t] > d[t - 1] && d[t] >= d[t + 1]) || d[t] < 0.1 * gmax) continue;
+      let lmax = 0; for (let j = Math.max(0, t - Wn); j < Math.min(T, t + Wn + 1); j++) if (d[j] > lmax) lmax = d[j];
+      if (d[t] < rel * lmax) continue;
+      if (t - last < gap) { if (hits.length && hits[hits.length - 1].type === type && d[t] > hits[hits.length - 1].strength) { hits[hits.length - 1] = { t: +times[t].toFixed(3), type, strength: d[t] }; last = t; } continue; }
+      last = t; hits.push({ t: +times[t].toFixed(3), type, strength: d[t] });
+    }
+  });
+  /* A kick's beater click is broadband and a snare's body reaches low, so at a COINCIDENT
+   * kick+snare onset NMF still lends the other component a weaker rise (measured on a
+   * rendered kit: false snares under kicks at 0.68–0.71 of the snare's peak, real snares
+   * 0.87–1.0). Keep the weaker of a coincident kick/snare only at ≥ 0.8 of its own peak.
+   * Ghost notes softer than the onset threshold (0.4 of the local loudest) are not drawn. */
+  const norm = (h) => h.strength / (peak[h.type] || 1);
+  const shadowed = (h) => (h.type === "kick" || h.type === "snare") && norm(h) < 0.8 &&
+    hits.some((o) => o !== h && (o.type === "kick" || o.type === "snare") && o.type !== h.type && Math.abs(o.t - h.t) < 0.03 && norm(o) > norm(h));
+  return hits.filter((h) => !shadowed(h)).sort((a, b) => a.t - b.t);
+}
+
+/* Hits → a groove grid: per bar, `steps` slots (16 = sixteenths in 4/4) for each drum, on
+ * the SHARED beat grid when one is given (else a fixed bpm grid from t = 0, the same grid
+ * audioEventsToScore uses). Returns { bars:[{ number, kick, snare, hat }] } with each row a
+ * string of "x"/"." — readable as a drum chart, exportable as MIDI. */
+function drumPattern(hits, opts = {}) {
+  const bpb = opts.beatsPerBar || 4, sub = opts.subdivisions || 4, bpm = opts.bpm || 120;
+  const beatT = (b) => b * 60 / bpm;
+  const slotOf = (t) => {
+    const g = t / (60 / bpm);                                      // fractional beat on the chart's grid
+    return Math.round(g * sub);
+  };
+  const bars = new Map();
+  for (const h of hits || []) {
+    const slot = slotOf(h.t);
+    if (slot < 0) continue;
+    const bar = Math.floor(slot / (bpb * sub)), pos = slot - bar * bpb * sub;
+    if (!bars.has(bar)) bars.set(bar, { kick: new Array(bpb * sub).fill("."), snare: new Array(bpb * sub).fill("."), hat: new Array(bpb * sub).fill(".") });
+    bars.get(bar)[h.type][pos] = "x";
+  }
+  const last = bars.size ? Math.max(...bars.keys()) : -1;
+  const out = [];
+  for (let b = 0; b <= last; b++) {
+    const r = bars.get(b) || { kick: [], snare: [], hat: [] };
+    const fill = (a) => (a.length ? a.join("") : ".".repeat(bpb * sub));
+    out.push({ number: b + 1, startSec: +beatT(b * bpb).toFixed(3), kick: fill(r.kick), snare: fill(r.snare), hat: fill(r.hat) });
+  }
+  return { bars: out, beatsPerBar: bpb, subdivisions: sub, bpm };
+}
+
+/* Drum hits → a Standard MIDI File on channel 10 (GM: kick 36, snare 38, closed hat 42),
+ * format 0, PPQ 480 — the same container scoreToMidi writes. */
+function drumHitsToMidi(hits, opts = {}) {
+  const PPQ = 480, bpm = Math.max(20, Math.min(400, Math.round(opts.bpm || 120))), uspq = Math.round(60000000 / bpm);
+  const note = { kick: 36, snare: 38, hat: 42 };
+  const evs = [{ tick: 0, o: 0, b: [0xff, 0x51, 0x03, (uspq >> 16) & 255, (uspq >> 8) & 255, uspq & 255] }];
+  for (const h of hits || []) {
+    const tick = Math.max(0, Math.round((h.t * bpm / 60) * PPQ)), n = note[h.type];
+    if (n == null) continue;
+    evs.push({ tick, o: 2, b: [0x99, n, 100] }, { tick: tick + 60, o: 1, b: [0x89, n, 0] });
+  }
+  evs.sort((a, b) => a.tick - b.tick || a.o - b.o);
+  const end = (evs.length ? evs[evs.length - 1].tick : 0) + PPQ;
+  evs.push({ tick: end, o: 3, b: [0xff, 0x2f, 0x00] });
+  const body = []; let t = 0;
+  const vlq = (v) => { const st = [v & 0x7f]; while ((v >>= 7)) st.unshift((v & 0x7f) | 0x80); return st; };
+  for (const e of evs) { body.push(...vlq(e.tick - t), ...e.b); t = e.tick; }
+  const u32 = (v) => [(v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255];
+  return Uint8Array.from([0x4d, 0x54, 0x68, 0x64, 0, 0, 0, 6, 0, 0, 0, 1, (PPQ >> 8) & 255, PPQ & 255, 0x4d, 0x54, 0x72, 0x6b, ...u32(body.length), ...body]);
+}
+
+/* PCM → a 16-bit PCM WAV file (RIFF), for downloading separated stems. Channels are
+ * Float32Arrays at `sampleRate`, clipped to ±1. Pure. */
+function encodeWav16(channels, sampleRate) {
+  const chs = (channels || []).filter(Boolean), nc = Math.max(1, chs.length);
+  const n = chs.length ? Math.min(...chs.map((c) => c.length)) : 0;
+  const data = n * nc * 2, buf = new ArrayBuffer(44 + data), v = new DataView(buf);
+  const str = (o, t) => { for (let i = 0; i < t.length; i++) v.setUint8(o + i, t.charCodeAt(i)); };
+  str(0, "RIFF"); v.setUint32(4, 36 + data, true); str(8, "WAVE"); str(12, "fmt ");
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, nc, true);
+  v.setUint32(24, sampleRate, true); v.setUint32(28, sampleRate * nc * 2, true); v.setUint16(32, nc * 2, true); v.setUint16(34, 16, true);
+  str(36, "data"); v.setUint32(40, data, true);
+  let o = 44;
+  for (let i = 0; i < n; i++) for (let c = 0; c < nc; c++) {
+    const x = Math.max(-1, Math.min(1, chs[c] ? chs[c][i] : 0));
+    v.setInt16(o, x < 0 ? Math.round(x * 32768) : Math.round(x * 32767), true); o += 2;
+  }
+  return new Uint8Array(buf);
+}
+
+function _sumStems(list) {
+  const arrs = list.filter((a) => a && a.length);
+  if (!arrs.length) return null;
+  const n = Math.max(...arrs.map((a) => a.length)), out = new Float32Array(n);
+  for (const a of arrs) for (let i = 0; i < a.length; i++) out[i] += a[i];
+  return out;
+}
+const _HARMONIC_ROLES = ["guitar", "piano", "other"];
+
+/* stems: { vocals?, drums?, bass?, guitar?, piano?, other?, mix? } — mono Float32Arrays at
+ * `sampleRate`, sample-aligned (as a separator or a stem export delivers them). Returns
+ * { bpm, beats, key, tuning, charts:[{ role, name, kind:"chords"|"notes"|"drums", … }] }. */
+function chartsFromStems(stems, sampleRate, opts = {}) {
+  const S = stems || {};
+  const has = (r) => S[r] && S[r].length > 0;
+  // ONE grid for every chart: the drum stem's pulse when present, else the whole song
+  const gridSrc = has("drums") ? S.drums : S.mix || _sumStems(Object.keys(S).map((k) => S[k]));
+  let bt = opts.beats && opts.beats.length >= 3 ? { beats: opts.beats, bpm: opts.bpm || 0 } : gridSrc ? detectBeats(gridSrc, sampleRate, opts) : { beats: [], bpm: 0 };
+  if ((!bt.beats || bt.beats.length < 3) && has("drums") && (S.mix || _HARMONIC_ROLES.some(has))) {
+    bt = detectBeats(S.mix || _sumStems(_HARMONIC_ROLES.map((r) => S[r])), sampleRate, opts);   // a sparse drum stem: fall back
+  }
+  const beats = bt.beats && bt.beats.length >= 3 ? bt.beats : null;
+  const shared = { ...opts, beats, bpm: bt.bpm };
+  const charts = [];
+  let key = null, tuning = 0;
+  const harmonic = _HARMONIC_ROLES.filter(has);
+  // the full band: harmonic stems for the chord, the bass stem for the bass note
+  if (harmonic.length || has("bass")) {
+    const treble = harmonic.length ? _sumStems(harmonic.map((r) => S[r])) : S.bass;
+    const fr = nnlsChromagram(treble, sampleRate, opts);
+    /* Bass-stem fusion is OPT-IN: on the stems benchmark it was within ±1 point of no fusion
+     * with perfect stems and cost 2–3 points with realistically leaky ones (a walking bass's
+     * passing notes pull roots off). The harmonic stems' own lowest notes stay the default. */
+    if (has("bass") && harmonic.length && opts.bassFusion === true) {
+      const fb = nnlsChromagram(S.bass, sampleRate, { ...opts, tuning: fr.tuning });
+      const n = Math.min(fr.frames.length, fb.frames.length);
+      for (let i = 0; i < n; i++) {
+        const b = fb.frames[i].bass, tb = fr.frames[i].bass;
+        let bm = 0, tm = 0; for (let p = 0; p < 12; p++) { if (b[p] > bm) bm = b[p]; if (tb[p] > tm) tm = tb[p]; }
+        // the separated bass decides; the harmonic stems' own low notes only break a silence
+        const fused = new Float64Array(12);
+        const wB = opts.bassFusionWeight != null ? opts.bassFusionWeight : 1;
+        for (let p = 0; p < 12; p++) fused[p] = wB * (bm > 0 ? b[p] / bm : 0) + (tm > 0 ? tb[p] / tm : 0);
+        fr.frames[i] = { ...fr.frames[i], bass: fused };
+      }
+    }
+    const r = analyzeAudioChordsV2(treble, sampleRate, { ...shared, _frames: fr });
+    key = r.key; tuning = r.tuning;
+    charts.push({ role: "band", name: STEM_ROLE_NAMES.band, kind: "chords", events: r.events });
+  }
+  if (opts.perStemChords !== false) for (const role of harmonic) {
+    if (harmonic.length === 1 && !has("bass")) break;                      // identical to the band chart
+    const r = analyzeAudioChordsV2(S[role], sampleRate, shared);
+    charts.push({ role, name: STEM_ROLE_NAMES[role], kind: "chords", events: r.events });
+  }
+  const yinWin = (minF) => { let w = 512; while (w < (2.2 * sampleRate) / minF) w <<= 1; return w; };
+  if (has("bass")) {
+    const notes = transcribeMonophonic(S.bass, sampleRate, { minFreq: 36, maxFreq: 420, window: yinWin(36), hop: Math.round(sampleRate * 0.02), minClarity: 0.5, minDurSec: 0.08 });
+    charts.push({ role: "bass", name: STEM_ROLE_NAMES.bass, kind: "notes", notes });
+  }
+  if (has("vocals")) {
+    const notes = transcribeMonophonic(S.vocals, sampleRate, { minFreq: 75, maxFreq: 1100, window: yinWin(75), hop: Math.round(sampleRate * 0.02), minClarity: 0.6, minDurSec: 0.08 });
+    charts.push({ role: "vocals", name: STEM_ROLE_NAMES.vocals, kind: "notes", notes });
+  }
+  if (has("drums")) {
+    // drums want the FULL-RATE stem (hats live above the 16 kHz analysis Nyquist) when given
+    const fr = opts.fullRate && opts.fullRate.drums && opts.fullRate.sampleRate ? opts.fullRate : null;
+    const hits = fr ? transcribeDrums(fr.drums, fr.sampleRate, opts) : transcribeDrums(S.drums, sampleRate, opts);
+    charts.push({ role: "drums", name: STEM_ROLE_NAMES.drums, kind: "drums", hits });
+  }
+  return { bpm: beats ? bt.bpm : 0, beats: bt.beats || [], key, tuning, charts };
 }
 
 /* ============================================================================
@@ -5565,6 +5840,44 @@ function harmonicClarity(samples, sampleRate, opts = {}) {
  * handoff, transpose, etc. Quantises each event's `startSec` to a beat at `bpm`
  * (a "beat" = a quarter note); collapses to bars of `beatsPerBar`. No tempo detection
  * yet — the caller supplies bpm (a tempo control / future beat-tracking). */
+/* ---- review: batch commit + auto-resolve (pure; the Audio panel's ChordReview drives it) ----
+ * `picks` = [{ index, symbol }] — for each, the event's label becomes `symbol` (one of its own
+ * candidates: the detected label or an alternative, whose voicing comes with it) and the
+ * event is marked reviewed. A symbol that is not one of the event's candidates is ignored —
+ * a batch commit can only choose among what the decoder offered. Returns a NEW array. */
+function commitChordChoices(events, picks) {
+  const out = (events || []).slice();
+  for (const pk of picks || []) {
+    const e = out[pk.index];
+    if (!e) continue;
+    let symbol = e.symbol, midis = e.midis;
+    if (pk.symbol != null && pk.symbol !== e.symbol) {
+      const alt = (e.alternatives || []).find((a) => a.symbol === pk.symbol);
+      if (!alt) continue;
+      symbol = alt.symbol; midis = alt.midis || e.midis;
+      // the replaced label stays one tap away: it becomes an alternative of the new choice
+      const rest = (e.alternatives || []).filter((a) => a.symbol !== pk.symbol);
+      out[pk.index] = { ...e, symbol, midis, alternatives: [{ symbol: e.symbol, prob: e.prob, midis: e.midis }, ...rest], prob: alt.prob, ambiguous: false, autoResolved: false, reviewed: true };
+      continue;
+    }
+    out[pk.index] = { ...e, ambiguous: false, autoResolved: false, reviewed: true };
+  }
+  return out;
+}
+/* AUTO mode: accept the decoder's own best (posterior-MAP, context-decoded) label for every
+ * uncertain chord, so the chart is complete with nothing pending. The events stay marked
+ * `autoResolved` (with their alternatives) so the choice is auditable and reversible —
+ * `reopenAutoChords` puts them back in the manual review queue. Measured on the benchmark:
+ * uncertain chords are ~10% of the timeline and their top choice is right ~40% of the time;
+ * the right answer is among the alternatives another ~24% — which is why the review list
+ * stays one tap away rather than being hidden. */
+function autoResolveChords(events) {
+  return (events || []).map((e) => (e && e.ambiguous ? { ...e, ambiguous: false, autoResolved: true } : e));
+}
+function reopenAutoChords(events) {
+  return (events || []).map((e) => (e && e.autoResolved && !e.reviewed ? { ...e, ambiguous: true, autoResolved: false } : e));
+}
+
 function audioEventsToScore(events, opts = {}) {
   const bpm = Math.max(20, Math.min(400, opts.bpm || 120));
   const beatsPerBar = opts.beatsPerBar || 4;
@@ -6261,6 +6574,13 @@ export {
   repetitionSmooth,
   transcribeChordsV2,
   analyzeAudioChordsV2,
+  stemRoleFromName,
+  STEM_ROLE_NAMES,
+  transcribeDrums,
+  drumPattern,
+  drumHitsToMidi,
+  chartsFromStems,
+  encodeWav16,
   _nnlsGram,
   _bandFeatures,
   _cosSim,
@@ -6275,6 +6595,9 @@ export {
   transcribeChords,
   harmonicClarity,
   audioEventsToScore,
+  commitChordChoices,
+  autoResolveChords,
+  reopenAutoChords,
   notesFromActivations,
   polyNotesToScore,
   transcribeWithNoteModel,

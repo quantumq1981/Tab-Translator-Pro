@@ -2040,6 +2040,58 @@ heavy bleed is the hardest condition (majmin 73); no learned TCN/re-ranker (no t
 iOS/Pages wall) — a learned front-end only has to emit the same `{chroma, bass}` frames;
 Stage E fingering DP not built (audio charts still carry no `{tab}`).
 
+### v2.1 — batch review, ⚡ Auto, stems → per-instrument charts, live capture (2026-10-22)
+
+Full write-up: `docs/SYNHARMONICS-V2.md` §8. All engine pieces pure + headless-tested; the
+separator and capture are browser glue (device check remains for the real model).
+
+- **Batch review** (`ChordReview`): per-row checkbox + radio choice among the decoder's own
+  candidates; **Select all / Commit selected / Commit all** via the pure `commitChordChoices`
+  (only the event's candidates are accepted; the replaced label stays an alternative).
+  **⚡ Auto** (`autoResolveChords` / `reopenAutoChords`, `localStorage["ttp:autoPick"]`)
+  commits the decoder's MAP choice for every uncertain chord, still listed as "auto".
+  Auto is NOT a second model: uncertain chords are ~10–12% of the timeline and a perfect
+  re-ranker among the alternatives could add ≤ ~2.5 points (`tests/bench/ambig.mjs`).
+- **Noise-floor rests** (`transcribeChordsV2`): a beat is also a rest when ≥ 12 dB under the
+  loud passages AND its chroma is flat (normalised entropy ≥ 0.97 — noise 0.99–1.00, real chords
+  0.68–0.83). Fixed hiss-in-rests decoding as `Em7` (a 54%-rest pad: 98% clean → 43% noisy).
+  Held-out +0.6 majmin / +0.9 sevenths. Now: **root 76.1 · majmin 77.0 · sevenths 70.9**.
+- **Measured and NOT shipped — do not re-derive:** a transposition-invariant chord bigram
+  LM trained on the repo's GP corpus as the HMM jump weight. Dev "+1.4 majmin" was leakage
+  (trained on the dev songs); trained clean it was neutral on dev, **−1.9 root held-out**.
+- **`chartsFromStems`** (engine): ONE beat grid tracked on the drum stem (fallback: the harmonic
+  stems) shared by every chart + the same ♩= → bars align across instruments. Band chart from
+  the harmonic stems; per-stem chord charts; bass + vocal YIN note lines; drums via
+  **semi-adaptive NMF** (`transcribeDrums`: kick/snare/hat templates — a per-band detector
+  fails physically, every drum reaches every band) → `drumPattern` (16th grid) → `drumHitsToMidi`
+  (GM ch.10). `stemRoleFromName` maps Moises/Demucs/LALAL/Spleeter names. `encodeWav16` for stem
+  downloads. **Measured** (`bench/stems.mjs`): mix decoded directly 54/58 root/majmin → perfect
+  stems 76/76 → −12 dB-leaky stems 65/68: separation is the biggest lever on a full mix.
+  **Bass-stem fusion is opt-in** (`bassFusion:true`): ±1 with perfect stems, −2…−3 leaky.
+  Drums (rendered kit, full rate): kick F 98 · snare 97 · hat 99 — same synthetic kit for tuning
+  and scoring, so optimistic; ghost notes < 0.4 of the local peak are dropped. **Transcribe drums
+  from the FULL-rate stem** (`opts.fullRate`) — hats live above the 16 kHz analysis Nyquist.
+- **Separator** (`stem-model.js` → `stem-worker.js` → `stem-model-core.js`, `vendor/`):
+  `window.TTP_STEM_MODEL(L, R, sr, {onProgress})` → `{ stems:{vocals,drums,bass,other} }` at the
+  input rate. SCNet (MIT weights, 13 MB int8, pinned HF revision + **SHA-256 checked** by the
+  vendored MIT `@audio/neural-separate@0.7.0` bundle, then Cache-API cached); ONNX Runtime Web
+  1.30.0 pinned on jsDelivr; WebGPU else single-thread WASM; module Worker (main-thread fallback);
+  60 s blocks with 1.5 s cross-faded context (bounded memory on phones). htdemucs is research-
+  only → never shipped. **Only 4 stems** — no openly-licensed model splits guitar from keys;
+  Moises stems can be imported for that (`📂 Import stems`, no `accept` filter). "Matches
+  Moises" cannot be claimed (proprietary); SCNet is htdemucs-class on MUSDB18.
+  The vendor bundle is esbuild output of the npm packages with ORT externalised to jsDelivr —
+  rebuild the same way, don't hand-edit it.
+- **Live capture** (`LiveCapture`): `🖥 Capture a tab` (getDisplayMedia, desktop Chrome/Edge,
+  "Share tab audio") + `🎙 Record` (mic), raw PCM (ScriptProcessor — the one raw tap iOS
+  still has), 15 min cap, silent-take = DRM message, → the SAME `loadBuffer` path as an upload.
+  **Deliberately no YouTube/Spotify link downloader**: Spotify is DRM, YouTube's terms bar
+  stream downloading, and a zero-server page can't fetch either. Don't add one.
+- **Verified:** `npm test` (engine + contract guards) and a headless-Chromium end-to-end run of
+  the real app with a stub separator (worker, progress, tabs, groove grid, MIDI, WAV, mixer,
+  stem import roles, batch commit, Auto persistence, fake-mic capture) — 17/17. The real SCNet
+  run is the device check that remains (HF is unreachable from the dev sandbox).
+
 ### Key detection v2 — harmonic FUNCTION weights, not scale membership (2026-09-10)
 
 **The reported defect.** An audio-decoded chart of Marshall Tucker's *Can't You See*
@@ -2384,6 +2436,14 @@ accordingly.
   `Bb/C`, and `D7/C` = the oracle's name), short-gap carry vs long rest, posterior
   normalisation, the v2 default + `engine:"v1"` routing, and the UI glue (resampler, review
   strip, uncertain rendering). Accuracy itself is measured by `tests/bench` (dev/test split).
+- **v2.1 batch / stems / capture**: `npm test` pins the noise-floor rest gate (hiss in a rest
+  is not a chord; `flatEntropy:1` lets it through), `commitChordChoices` / `autoResolveChords` /
+  `reopenAutoChords` semantics (no mutation, candidates only, user commits survive Auto off),
+  `stemRoleFromName`, NMF drum F > 0.85 per drum on a rendered kit + the groove grid + GM MIDI,
+  `chartsFromStems` end-to-end (one chart per instrument, drum-tracked shared grid, band C → G,
+  bass roots, vocal melody), `encodeWav16`, and the separator/capture contracts (pins, SHA-256,
+  SCNet-not-htdemucs, worker + fallback, blocks, deploy list, no `accept`, raw capture, no
+  stream-ripping code).
 - **Key model v2 + manual override**: `npm test` asserts the reported defect is fixed
   (`D · C · G` reads **D major**, and E minor — whose tonic never sounds — loses by >20%),
   the same shape a step round the circle (`G · F · C` → G), that a genuine minor tune and a

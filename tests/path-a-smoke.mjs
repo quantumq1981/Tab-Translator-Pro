@@ -1297,6 +1297,105 @@ let synhSummary = "";
     const sc = eng.audioEventsToScore([{ symbol: "C", midis: [48, 52, 55], startSec: 0, durSec: 2, ambiguous: true }, { symbol: "G", midis: [43, 47, 50], startSec: 2, durSec: 2 }], { bpm: 120 });
     expect(sc.bars[0].events[0].uncertain === true && !sc.bars[1].events[0].uncertain, "audioEventsToScore carries the uncertain flag onto chart events");
   }
+  // noise-floor rests: a pad that rests between chords, under steady hiss, must not
+  // turn the hiss into a chord (measured: a 54%-rest organ part read 98% clean, 43% noisy)
+  {
+    const sig = chordSig(12, [[0, 3, [48, 52, 55, 60]], [8, 11, [41, 45, 48, 53]]]);
+    let st = 7; const rnd = () => ((st = (st * 1103515245 + 12345) >>> 0) / 4294967296) * 2 - 1;
+    let lp = 0; for (let i = 0; i < sig.length; i++) { lp += 0.05 * (rnd() - lp); sig[i] += 0.02 * rnd() + 0.06 * lp; }
+    const ev = eng.transcribeChordsV2(sig, VSR, { beats: beatsOf(12) }).events;
+    const inRest = ev.filter((e) => e.startSec < 7.0 && e.startSec + e.durSec > 4.0);
+    expect(majority(ev, 0.5, 2.5) === "C" && majority(ev, 8.5, 10.5) === "F", `the chords either side of the rest still decode (got ${syms(ev)})`);
+    expect(inRest.length === 0, `hiss in a rest is not a chord (got ${inRest.map((e) => `${e.symbol}@${e.startSec}`)})`);
+    const off = eng.transcribeChordsV2(sig, VSR, { beats: beatsOf(12), flatEntropy: 1 }).events.filter((e) => e.startSec < 7.0 && e.startSec + e.durSec > 4.0);
+    expect(off.length > 0, "…because of the flat-chroma rest test (flatEntropy:1 lets the hiss through as a chord)");
+  }
+
+  // batch review: commit choices, auto-resolve, reopen (pure; the UI's ChordReview drives these)
+  {
+    const evs = [
+      { symbol: "C", midis: [48, 52, 55], prob: 0.3, ambiguous: true, alternatives: [{ symbol: "Am7/C", prob: 0.25, midis: [36, 57, 60, 64, 67] }, { symbol: "C6", prob: 0.1, midis: [48, 52, 55, 57] }] },
+      { symbol: "G", midis: [43, 47, 50], prob: 0.9, ambiguous: false, alternatives: [] },
+      { symbol: "F", midis: [41, 45, 48], prob: 0.35, ambiguous: true, alternatives: [{ symbol: "Dm7/F", prob: 0.3, midis: [29, 50, 53, 57, 60] }] },
+    ];
+    const c = eng.commitChordChoices(evs, [{ index: 0, symbol: "Am7/C" }, { index: 2, symbol: "F" }]);
+    expect(c[0].symbol === "Am7/C" && c[0].midis[0] === 36 && !c[0].ambiguous && c[0].reviewed, "commit swaps in the chosen alternative WITH its voicing and clears the flag");
+    expect(c[0].alternatives[0].symbol === "C", "the replaced label stays one tap away as an alternative");
+    expect(c[2].symbol === "F" && !c[2].ambiguous && c[2].reviewed, "committing the detected label confirms it");
+    expect(evs[0].symbol === "C" && evs[0].ambiguous, "commitChordChoices never mutates its input");
+    expect(eng.commitChordChoices(evs, [{ index: 0, symbol: "Ebmaj7" }])[0].symbol === "C", "a symbol that is not one of the event's candidates is ignored");
+    const a = eng.autoResolveChords(evs);
+    expect(a.filter((e) => e.ambiguous).length === 0 && a[0].autoResolved && a[0].symbol === "C" && !a[1].autoResolved, "Auto takes the decoder's best match for every uncertain chord, leaving confident ones alone");
+    const r = eng.reopenAutoChords(eng.commitChordChoices(a, [{ index: 2, symbol: "Dm7/F" }]));
+    expect(r[0].ambiguous && !r[0].autoResolved && !r[2].ambiguous && r[2].symbol === "Dm7/F", "switching Auto off re-queues auto-picks but keeps what the user committed");
+    const sc = eng.audioEventsToScore(a.map((e, i) => ({ ...e, startSec: 2 * i, durSec: 2 })), { bpm: 120 });
+    expect(sc.bars.every((b) => b.events.every((e) => !e.uncertain)), "auto-resolved chords are not drawn as uncertain");
+  }
+
+  // ---- per-instrument charts from STEMS ----
+  {
+    const R = (() => { let st = 11; return () => ((st = (st * 1103515245 + 12345) >>> 0) / 4294967296) * 2 - 1; })();
+    const roles = { "Song - Vocals.wav": "vocals", "drums.wav": "drums", "bass.mp3": "bass", "Song - Guitar.wav": "guitar", "piano.wav": "piano",
+      "other.wav": "other", "song_instrumental.mp3": "other", "accompaniment.wav": "other", "Backing Vocals.wav": "vocals", "bass drum.wav": "drums", "bassoon.wav": null };
+    for (const [n, r] of Object.entries(roles)) expect(eng.stemRoleFromName(n) === r, `stemRoleFromName(${n}) → ${r} (got ${eng.stemRoleFromName(n)})`);
+    // a rendered kit at full rate, known hits: kick on 1&3, snare on 2&4, hats on 8ths
+    const DSR = 44100, bpm = 100, spb = 60 / bpm, len = DSR * 8, kit = new Float32Array(len), truth = [];
+    for (let b = 0; b * spb * DSR < len; b++) {
+      const at = Math.floor(b * spb * DSR);
+      if (b % 2 === 0) { truth.push({ t: b * spb, type: "kick" }); for (let i = 0; i < 0.3 * DSR && at + i < len; i++) { const t = i / DSR; kit[at + i] += 0.9 * Math.sin(2 * Math.PI * (50 + 70 * Math.exp(-t * 30)) * t) * Math.exp(-t * 9); } }
+      else { truth.push({ t: b * spb, type: "snare" }); for (let i = 0; i < 0.18 * DSR && at + i < len; i++) { const t = i / DSR; kit[at + i] += (0.5 * R() + 0.3 * Math.sin(2 * Math.PI * 185 * t)) * Math.exp(-t * 22); } }
+      for (const off of [0, 0.5]) { const tt = (b + off) * spb, h = Math.floor(tt * DSR); if (h >= len) continue; truth.push({ t: tt, type: "hat" }); let hp = 0, pv = 0; for (let i = 0; i < 0.05 * DSR && h + i < len; i++) { const w = R(); hp = 0.85 * (hp + w - pv); pv = w; kit[h + i] += 0.25 * hp * Math.exp(-i / (DSR * 0.012)); } }
+    }
+    const hits = eng.transcribeDrums(kit, DSR);
+    for (const type of ["kick", "snare", "hat"]) {
+      const g = truth.filter((h) => h.type === type && h.t < 7.8), e = hits.filter((h) => h.type === type);
+      const used = new Set(); let tp = 0;
+      for (const h of g) { const j = e.findIndex((x, k) => !used.has(k) && Math.abs(x.t - h.t) < 0.05); if (j >= 0) { used.add(j); tp++; } }
+      const P = e.length ? tp / e.length : 0, Rc = g.length ? tp / g.length : 0, F = (2 * P * Rc) / (P + Rc || 1);
+      expect(F > 0.85, `drum transcription finds the ${type} (F ${F.toFixed(2)}, P ${P.toFixed(2)} R ${Rc.toFixed(2)})`);
+    }
+    const pat = eng.drumPattern(hits, { bpm, beatsPerBar: 4 });
+    // bar 2 (a hit at sample 0 has no "rise" before it to detect — a fixture edge, not a song's)
+    const b2 = pat.bars[1];
+    expect(pat.bars.length >= 3 && b2.kick === "x.......x......." && b2.snare === "....x.......x..." && b2.hat === "x.x.x.x.x.x.x.x.",
+      `the groove grid reads kick 1&3, snare 2&4, eighth hats (bar 2: K ${b2.kick} S ${b2.snare} H ${b2.hat})`);
+    const mid = eng.drumHitsToMidi(hits, { bpm });
+    let ons = 0; for (let i = 0; i + 2 < mid.length; i++) if (mid[i] === 0x99 && [36, 38, 42].includes(mid[i + 1]) && mid[i + 2] > 0) ons++;
+    expect(String.fromCharCode(...mid.slice(0, 4)) === "MThd" && ons === hits.length, `drum MIDI: one GM note-on per hit on channel 10 (${ons}/${hits.length})`);
+
+    // chartsFromStems: other = C→G block chords, bass = C2/G2, drums, vocal line — one shared grid
+    const n = VSR * 8, other = chordSig(8, [[0, 4, [48, 55, 60, 64, 67]], [4, 8, [43, 50, 55, 59, 62]]]);
+    const bass = new Float32Array(n); tone(bass, hz(36), 0, 4, 0.3); tone(bass, hz(43), 4, 8, 0.3);
+    const vocals = new Float32Array(n); [[0, 1, 64], [1, 2, 67], [2, 4, 72], [4, 6, 71], [6, 8, 67]].forEach(([a, b, m]) => tone(vocals, hz(m), a, b, 0.2, 4));
+    const drums16 = eng.resampleTo(kit, DSR, VSR);
+    const res = eng.chartsFromStems({ other, bass, drums: drums16, vocals }, VSR, { fullRate: { drums: kit, sampleRate: DSR } });
+    const byRole = Object.fromEntries(res.charts.map((c) => [c.role, c]));
+    expect(["band", "bass", "vocals", "drums"].every((r) => byRole[r]), `one chart per instrument (got ${res.charts.map((c) => c.role)})`);
+    expect(Math.abs(res.bpm - 100) < 5, `the shared grid is tracked on the drum stem (~100 bpm, got ${res.bpm})`);
+    const band = byRole.band.events;
+    expect(majority(band, 0.5, 3.5) === "C" && majority(band, 4.5, 7.5) === "G", `band chart C → G (got ${syms(band)})`);
+    const onShared = (t) => t < 0.05 || res.beats.some((b, i) => i + 1 < res.beats.length && [0, 0.5].some((f) => Math.abs(b + f * (res.beats[i + 1] - b) - t) < 1e-3));
+    expect(band.every((e) => onShared(e.startSec)), "every band-chart change sits on the SHARED (drum-tracked) grid");
+    const bl = byRole.bass.notes.map((x) => x.midi % 12);
+    expect(bl.includes(0) && bl.includes(7) && byRole.bass.notes.every((x) => x.midi < 60), `bass chart reads the C and G roots in the bass register (got ${byRole.bass.notes.map((x) => x.midi)})`);
+    const vm = byRole.vocals.notes.map((x) => x.midi);
+    expect([64, 67, 72, 71].every((m) => vm.includes(m)), `vocal chart reads the melody E G C B G (got ${vm})`);
+    expect(byRole.drums.hits.length >= 20, "drum chart carries the hits");
+    const noDrum = eng.chartsFromStems({ other }, VSR);
+    expect(noDrum.charts.length === 1 && noDrum.charts[0].role === "band", "a single harmonic stem yields just the band chart (no duplicate)");
+    expect(eng.chartsFromStems({}, VSR).charts.length === 0, "no stems → no charts, no crash");
+  }
+
+  // WAV encoder for stem downloads
+  {
+    const w = eng.encodeWav16([Float32Array.from([0, 0.5, -1, 1]), Float32Array.from([0, -0.5, 1, 2])], 44100);
+    const v = new DataView(w.buffer);
+    expect(String.fromCharCode(...w.slice(0, 4)) === "RIFF" && String.fromCharCode(...w.slice(8, 12)) === "WAVE" && v.getUint16(22, true) === 2 && v.getUint32(24, true) === 44100 && v.getUint16(34, true) === 16,
+      "encodeWav16 writes a 16-bit stereo RIFF/WAVE header");
+    expect(v.getUint32(40, true) === 16 && w.length === 60 && v.getInt16(44 + 2 * 2, true) === 16384 && v.getInt16(44 + 4 * 2, true) === -32768 && v.getInt16(44 + 7 * 2, true) === 32767,
+      "samples are interleaved, scaled to 16 bits and clipped at ±1");
+  }
+
   synhSummary = `SynHarmonics v2: C G Am F ✓ · C/E vs Em ✓ · F#m/G + Bb/C ✓ · +35¢ read as ${tuneSharp.toFixed(0)}¢ · Bb 3rd-harmonic F suppressed · 15 kHz alias −40 dB+`;
 }
 
@@ -2467,8 +2566,43 @@ expect(/resampleOffThread/.test(uiSrc) && /catch \(_\) \{ return resampleTo\(sam
   "the decode resamples with the anti-aliased resampleTo (off-thread, main-thread fallback)");
 expect(!/const dsChan = \(d\) =>/.test(uiSrc), "the box-average decimator (aliasing) is gone from the decode path");
 expect(/function ChordReview\(/.test(uiSrc) && /<ChordReview\b/.test(uiSrc), "the Audio panel ships the uncertain-chord review strip (v2 §7 overlay)");
+expect(/Select all/.test(uiSrc) && /Commit selected/.test(uiSrc) && /Commit all/.test(uiSrc), "the review strip has batch controls: Select all, Commit selected, Commit all");
+expect(/commitChordChoices\(evs, picks\)/.test(uiSrc) && /autoResolveChords/.test(uiSrc) && /reopenAutoChords/.test(uiSrc), "batch commit + Auto go through the pure engine helpers (no review logic duplicated in the UI)");
+expect(/localStorage\.getItem\("ttp:autoPick"\)/.test(uiSrc) && /try \{ localStorage\.setItem\("ttp:autoPick"/.test(uiSrc), "the Auto preference is remembered per device, inside try/catch");
 expect(/e\.uncertain && !edited/.test(uiSrc), "the lead sheet de-emphasises uncertain chords (confidence-graded rendering)");
 expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the chord run no longer sends v1-only sliding-window knobs to the v2 decoder");
+
+/* Stems + live capture (browser glue). The separator itself is device-only (it downloads
+ * ONNX Runtime + 13 MB of weights); guard the contracts that boot and correctness rest on. */
+{
+  const rd = (f) => fs.readFileSync(path.join(repo, f), "utf8");
+  const sm = rd("stem-model.js"), core = rd("stem-model-core.js"), wk = rd("stem-worker.js"), vend = rd("vendor/neural-separate.mjs");
+  const notice = rd("vendor/NOTICE-neural-separate.txt"), html = rd("index.html"), pages = rd(".github/workflows/pages.yml");
+  expect(/window\.TTP_STEM_MODEL = separateStems/.test(sm) && /try \{/.test(sm), "stem-model.js publishes window.TTP_STEM_MODEL inside try/catch (never wedges boot)");
+  expect(!/^import /m.test(sm) && /await import\(/.test(sm) && /await import\(|import\(\/\*/.test(core), "nothing is imported at boot — the library loads on the first split");
+  expect(/new Worker\(WORKER_URL, \{ type: "module" \}\)/.test(sm) && /onMainThread/.test(sm), "separation runs in a module Worker with a main-thread fallback");
+  expect(/from "\.\/stem-model-core\.js"/.test(wk) && /separateInBlocks/.test(wk), "the worker runs the shared core");
+  expect(/onnxruntime-web@1\.30\.0\/dist\//.test(core) && /onnxruntime-web@1\.30\.0\/dist\/ort\.webgpu\.min\.mjs/.test(vend), "ONNX Runtime Web is pinned (1.30.0) in both the core and the bundle");
+  expect(/scnet: \{ file: "scnet\.int8\.onnx", repo: "audiojs\/scnet", sha256: "98228931494151762a1c4ab1ec7899a894b1f81fd4a509921a9d2f9bacc50845"/.test(vend) && /scnet: "e71bcdb42bce1d62b7fae25ba90fcbcf90f73f46"/.test(vend),
+    "the SCNet weights are pinned to a revision AND a SHA-256 the library checks before use");
+  expect(/STEM_MODEL = "scnet"/.test(core) && !/htdemucs/.test(core), "the shipped preset is SCNet (MIT weights) — never the research-only htdemucs");
+  expect(/blockSec/.test(core) && /padSec/.test(core), "songs are separated in padded, cross-faded blocks (bounded memory on phones)");
+  expect(/MIT/.test(notice) && /SCNet/.test(notice) && /onnxruntime-web/.test(notice), "vendor NOTICE carries the MIT licences of the bundle, the weights and ORT");
+  expect(/<script type="module" src="\.\/stem-model\.js"><\/script>/.test(html), "index.html loads stem-model.js");
+  expect(/cp stem-model\.js stem-model-core\.js stem-worker\.js _site\//.test(pages) && /cp vendor\/neural-separate\.mjs vendor\/NOTICE-neural-separate\.txt _site\/vendor\//.test(pages), "Pages ships the separator files");
+  const sp = uiSrc.slice(uiSrc.indexOf("function StemsPanel("), uiSrc.indexOf("function ChordReview("));
+  expect(/<StemsPanel\b/.test(uiSrc) && /chartsFromStemsOffThread/.test(sp) && /catch \(_\) \{ return chartsFromStems\(stems, sr, opts\); \}/.test(uiSrc), "the Stems panel charts off-thread with a main-thread fallback");
+  expect(/<input type="file" multiple onChange=\{importStems\}/.test(sp) && !/<input type="file" multiple[^>]*accept=/.test(sp), "stem import takes several files and has NO accept filter (iOS UTI lesson)");
+  expect(/stemRoleFromName\(f\.name\)/.test(sp) && /encodeWav16\(/.test(sp) && /drumHitsToMidi\(/.test(sp), "roles come from file names; every stem downloads as WAV; drums as MIDI");
+  expect(/fullRate: full\.drums/.test(sp), "drums are transcribed from the FULL-rate stem (hats live above the analysis Nyquist)");
+  const lc = uiSrc.slice(uiSrc.indexOf("function LiveCapture("), uiSrc.indexOf("function StemsPanel("));
+  expect(/<LiveCapture\b/.test(uiSrc) && /md\.getDisplayMedia/.test(lc) && /md\.getUserMedia/.test(lc), "live capture offers tab audio (getDisplayMedia) and the microphone");
+  expect(/const canTab = !!\(md && md\.getDisplayMedia\)/.test(lc) && /if \(!canTab && !canMic\) return null;/.test(lc), "capture is feature-detected (hidden where the browser can't do it)");
+  expect(/echoCancellation: false, noiseSuppression: false, autoGainControl: false/.test(lc), "capture asks for RAW audio (no voice-call processing on music)");
+  expect(/onCaptured\(buf,/.test(lc) && /const onCaptured = async \(audioBuf, label\)/.test(uiSrc) && /await loadBuffer\(audioBuf\)/.test(uiSrc), "a capture enters the same pipeline as an uploaded file");
+  expect(/DRM-protected/.test(lc) && /MAX_SEC/.test(lc), "a silent (DRM) take is explained, and capture stops itself at a limit");
+  expect(!/youtube\.com\/watch|ytdl|yt-dlp|googlevideo/i.test(uiSrc + sm + core), "no stream-ripping code: links are not downloaded, playback is captured");
+}
 
 if (fails.length) {
   console.error("\nFAIL:\n  " + fails.join("\n  "));
