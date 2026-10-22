@@ -65,6 +65,10 @@ jobs:
           cp stem-model.js stem-model-core.js stem-worker.js _site/
           mkdir -p _site/vendor
           cp vendor/neural-separate.mjs vendor/NOTICE-neural-separate.txt _site/vendor/
+          # Low-memory (phone) SCNet: same network, 2.8 s window — served same-origin, SHA-256 pinned
+          # in stem-model-core.js (scripts/scnet_reframe.py rebuilds it from the pinned upstream file).
+          mkdir -p _site/models/scnet-compact
+          cp models/scnet-compact/scnet-f120.int8.onnx models/scnet-compact/NOTICE _site/models/scnet-compact/
 
       # enablement: true turns Pages on (source = GitHub Actions) using the
       # workflow's `pages: write` permission, so no manual Settings toggle is

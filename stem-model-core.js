@@ -17,11 +17,29 @@
  * MEMORY: the library holds full-length arrays, so a whole song at once can exceed
  * an iPhone's budget. The song is processed in `blockSec` blocks (default 60 s)
  * with `padSec` (1.5 s) of context either side, cross-faded at the seams.
+ *
+ * PHONES (`compact: true`): the upstream graph takes a FIXED 11 s window and one run
+ * needs ~1.3 GB of activations (measured: native ORT 1.32 GB, WASM page +1.8–2.0 GB),
+ * so iOS kills the tab a few % into the first split. COMPACT_MODEL is the same network
+ * re-instantiated for a 2.8 s window (scripts/scnet_reframe.py: only the fixed time-axis
+ * DFT matrices + shape constants change, every learned weight is untouched), served
+ * same-origin and SHA-256-pinned here. One ORT session is reused across blocks, graph
+ * optimisation is off (its weight pre-packing alone costs ~200 MB), blocks are 30 s.
+ * Measured on the 100 s bench mix (CLAUDE.md v2.1 → "Phones"): ~2 dB less SDR per
+ * stem for well under half the memory.
  * ========================================================================== */
 const SEPARATE_URL = new URL("./vendor/neural-separate.mjs", import.meta.url).href;
 export const ORT_WASM_PATHS = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/";
 export const STEM_MODEL = "scnet";
 export const STEM_NAMES = ["vocals", "drums", "bass", "other"];
+export const COMPACT_MODEL = {
+  url: new URL("./models/scnet-compact/scnet-f120.int8.onnx", import.meta.url).href,
+  sha256: "3a926ef9710754f8bc04b3ded790ac6a0ac10465ca06a50e367382deed53d180",
+  frames: 120,
+};
+const HOP = 1024;                                              // SCNet's STFT hop (n 4096)
+export const COMPACT_SEGMENT = (COMPACT_MODEL.frames - 1) * HOP; // samples per model run (≈ 2.76 s at 44.1 kHz)
+const ORT_MODULE = { wasm: "ort.wasm.min.mjs", webgpu: "ort.webgpu.min.mjs" };
 
 let _lib = null;
 function lib() {
@@ -65,43 +83,110 @@ export async function pickDevice(pref) {
   return "wasm";
 }
 
+export async function sha256Hex(bytes) {
+  const d = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(d), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/* The compact weights: Cache API first (offline after the first split), else a same-origin
+ * fetch. Either way the bytes must match the pinned SHA-256 — a partial download or a stale
+ * file is refused (and evicted) instead of silently separating with the wrong network. */
+export async function compactModelBytes(model = COMPACT_MODEL, scope = globalThis) {
+  let cache = null;
+  try { cache = scope.caches ? await scope.caches.open("ttp-models") : null; } catch (_) { cache = null; }
+  const key = `${model.url}#${model.sha256}`;
+  if (cache) {
+    try {
+      const hit = await cache.match(key);
+      if (hit) {
+        const b = new Uint8Array(await hit.arrayBuffer());
+        if (await sha256Hex(b) === model.sha256) return b;
+        await cache.delete(key);
+      }
+    } catch (_) { /* fall through to the network */ }
+  }
+  const res = await scope.fetch(model.url);
+  if (!res.ok) throw new Error(`could not download the low-memory stem model (HTTP ${res.status})`);
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  const got = await sha256Hex(bytes);
+  if (got !== model.sha256) throw new Error(`the low-memory stem model failed its integrity check (SHA-256 ${got.slice(0, 12)}…, expected ${model.sha256.slice(0, 12)}…) — reload and try again`);
+  if (cache) { try { await cache.put(key, new Response(bytes)); } catch (_) { /* quota: fine, just not cached */ } }
+  return bytes;
+}
+
+/* One ONNX Runtime session for the whole song, in the shape the library's `session` hook
+ * expects ({ inputs, outputs, run(feeds), free() }). `free()` is a no-op so the library's
+ * per-block release doesn't rebuild it 8 times; `release()` is ours, called once at the end. */
+export async function compactSession(device, bytes, ortImport = (u) => import(/* @vite-ignore */ u)) {
+  const mod = await ortImport(ORT_WASM_PATHS + (ORT_MODULE[device] || ORT_MODULE.wasm));
+  const ort = mod.default || mod;
+  if (ort.env && ort.env.wasm) { ort.env.wasm.wasmPaths = ORT_WASM_PATHS; ort.env.wasm.numThreads = 1; }
+  const s = await ort.InferenceSession.create(bytes, {
+    executionProviders: [device === "webgpu" ? "webgpu" : "wasm"],
+    enableCpuMemArena: false, enableMemPattern: false,
+    graphOptimizationLevel: "disabled",    // the optimiser's weight pre-packing costs ~200 MB and buys no speed here
+  });
+  const inName = s.inputNames[0], outName = s.outputNames[0];
+  return {
+    inputs: [{ name: inName, dims: [1, 4, 2049, COMPACT_MODEL.frames] }],
+    outputs: [{ name: outName }],
+    async run(feeds) {
+      const ortFeeds = {};
+      for (const k in feeds) { const t = feeds[k]; ortFeeds[k] = new ort.Tensor(t.type || "float32", t.data, t.dims); }
+      const r = await s.run(ortFeeds), o = r[outName];
+      return { [outName]: { data: o.data, dims: Array.from(o.dims), type: o.type } };
+    },
+    free() { /* reused across blocks; see release() */ },
+    release() { try { const p = s.release && s.release(); if (p && p.catch) p.catch(() => {}); } catch (_) { /* already gone */ } },
+  };
+}
+
 export async function separateInBlocks(left, right, sampleRate, opts = {}) {
   const separate = resolveSeparate(await lib());
   await ensureCacheUsable();
   const device = await pickDevice(opts.device);
   const n = Math.min(left.length, right.length);
-  const block = Math.max(10, opts.blockSec || 60) * sampleRate | 0;
+  const compact = !!opts.compact;
+  // compact: our own pinned model + one reused session (opts.session stays the test seam)
+  let own = null;
+  const session = opts.session || (compact ? async () => own || (own = await compactSession(device, await compactModelBytes())) : undefined);
+  const block = Math.max(10, opts.blockSec || (compact ? 30 : 60)) * sampleRate | 0;
   const pad = Math.round((opts.padSec != null ? opts.padSec : 1.5) * sampleRate);
   const starts = [];
   for (let s = 0; s < n; s += block) starts.push(s);
   const out = Object.fromEntries(STEM_NAMES.map((k) => [k, [new Float32Array(n), new Float32Array(n)]]));
   const weight = new Float32Array(n);
-  for (let bi = 0; bi < starts.length; bi++) {
-    const a = Math.max(0, starts[bi] - pad), b = Math.min(n, starts[bi] + block + pad);
-    const res = await separate([left.subarray(a, b), right.subarray(a, b)], {
-      sampleRate, model: STEM_MODEL, device, wasmPaths: ORT_WASM_PATHS,   // single-threaded WASM without COOP/COEP (ORT falls back itself)
-      step: opts.step != null ? opts.step : 0.5,                 // 0.5: half the compute of 0.25 for ~0.1 dB
-      session: opts.session,                                     // test seam: the library's own session hook (never set by the app)
-      // The library calls progress({ chunk: i + 1 }) BEFORE running chunk i, so `chunk` counts
-      // chunks STARTED. Report chunks COMPLETED, or every estimate runs one chunk (over a minute
-      // on single-thread WASM) ahead of the work actually done.
-      progress: opts.onProgress ? (p) => opts.onProgress(bi + (p.chunk - 1) / p.totalChunks, starts.length) : undefined,
-    });
-    // linear cross-fade over the padded overlap so block seams are inaudible
-    for (let i = a; i < b; i++) {
-      const fadeIn = starts[bi] > 0 ? Math.min(1, (i - a) / Math.max(1, 2 * pad)) : 1;
-      const fadeOut = b < n ? Math.min(1, (b - i) / Math.max(1, 2 * pad)) : 1;
-      const w = Math.min(fadeIn, fadeOut);
-      weight[i] += w;
-      for (const k of STEM_NAMES) {
-        const st = res.stems[k];
-        if (!st) continue;
-        out[k][0][i] += w * (st[0][i - a] || 0);
-        out[k][1][i] += w * ((st[1] || st[0])[i - a] || 0);
+  try {
+    for (let bi = 0; bi < starts.length; bi++) {
+      const a = Math.max(0, starts[bi] - pad), b = Math.min(n, starts[bi] + block + pad);
+      const res = await separate([left.subarray(a, b), right.subarray(a, b)], {
+        sampleRate, model: STEM_MODEL, device, wasmPaths: ORT_WASM_PATHS,   // single-threaded WASM without COOP/COEP (ORT falls back itself)
+        step: opts.step != null ? opts.step : 0.5,                 // 0.5: half the compute of 0.25 for ~0.1 dB
+        session,                                                   // compact model, or the test seam (the library's own session hook)
+        ...(compact ? { segment: COMPACT_SEGMENT } : {}),          // the library's SCNet preset says 11 s; the compact graph takes 2.76 s
+        // The library calls progress({ chunk: i + 1 }) BEFORE running chunk i, so `chunk` counts
+        // chunks STARTED. Report chunks COMPLETED, or every estimate runs one chunk (over a minute
+        // on single-thread WASM) ahead of the work actually done.
+        progress: opts.onProgress ? (p) => opts.onProgress(bi + (p.chunk - 1) / p.totalChunks, starts.length) : undefined,
+      });
+      // linear cross-fade over the padded overlap so block seams are inaudible
+      for (let i = a; i < b; i++) {
+        const fadeIn = starts[bi] > 0 ? Math.min(1, (i - a) / Math.max(1, 2 * pad)) : 1;
+        const fadeOut = b < n ? Math.min(1, (b - i) / Math.max(1, 2 * pad)) : 1;
+        const w = Math.min(fadeIn, fadeOut);
+        weight[i] += w;
+        for (const k of STEM_NAMES) {
+          const st = res.stems[k];
+          if (!st) continue;
+          out[k][0][i] += w * (st[0][i - a] || 0);
+          out[k][1][i] += w * ((st[1] || st[0])[i - a] || 0);
+        }
       }
+      if (opts.onProgress) opts.onProgress(bi + 1, starts.length);
     }
-    if (opts.onProgress) opts.onProgress(bi + 1, starts.length);
+  } finally {
+    if (own) own.release();
   }
   for (let i = 0; i < n; i++) if (weight[i] > 0 && weight[i] !== 1) for (const k of STEM_NAMES) { out[k][0][i] /= weight[i]; out[k][1][i] /= weight[i]; }
-  return { sampleRate, stems: out, device };
+  return { sampleRate, stems: out, device, compact };
 }

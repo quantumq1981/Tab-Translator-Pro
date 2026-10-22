@@ -126,6 +126,8 @@ async function driveApp() {
   ctx.on("request", (q) => { if (/jsdelivr|huggingface|hf\.co/.test(q.url())) net.push({ url: q.url(), t: Date.now() }); });
   ctx.on("requestfailed", (q) => { if (/jsdelivr|huggingface|hf\.co/.test(q.url())) console.error("REQUEST FAILED", q.url().slice(0, 120), q.failure() && q.failure().errorText); });
 
+  // --compact: start with the app's Low-memory toggle on (what an iPhone gets by default)
+  if (arg("compact", null) !== null) await ctx.addInitScript(() => { try { localStorage.setItem("ttp:stems:compact", "1"); } catch (_) {} });
   // Record the real separator's call without replacing it: trap the global it publishes.
   await ctx.addInitScript(() => {
     let real = null;
@@ -136,7 +138,7 @@ async function driveApp() {
         const o = await real(L, R, sr, { ...opts, onProgress: (d, t) => { window.__stemProgress.push([performance.now() - t0, d, t]); if (opts && opts.onProgress) opts.onProgress(d, t); } });
         const ms = performance.now() - t0;
         for (const [k, chs] of Object.entries(o.stems)) for (let c = 0; c < chs.length; c++) await fetch(`/__e2e/stem/${k}_${c}`, { method: "POST", body: chs[c] });
-        await fetch("/__e2e/meta", { method: "POST", body: JSON.stringify({ ms, device: o.device, sampleRate: o.sampleRate, progress: window.__stemProgress, keys: Object.keys(o.stems) }) });
+        await fetch("/__e2e/meta", { method: "POST", body: JSON.stringify({ ms, device: o.device, compact: !!o.compact, sampleRate: o.sampleRate, progress: window.__stemProgress, keys: Object.keys(o.stems) }) });
         return o;
       }); },
       set(v) { real = v; },
@@ -240,7 +242,7 @@ const avg = (name, field) => { const rows = perSong.map((p) => p[name] && p[name
 const chartSummary = Object.fromEntries(["separated", "perfectStems", "mixOnly"].map((n) => [n, { band: avg(n, "band"), drums: avg(n, "drums") }]));
 const result = {
   ok: true, songs: segs.map((s) => `${s.file} @${s.bpm}`), audioSec: +durSec.toFixed(1),
-  device: meta.device, separatorMs: Math.round(meta.ms), wallMs,
+  device: meta.device, compact: !!meta.compact, separatorMs: Math.round(meta.ms), wallMs,
   secPerAudioMin: +((meta.ms / 1000) / (durSec / 60)).toFixed(1),
   realtimeFactor: +((meta.ms / 1000) / durSec).toFixed(2),
   memory: { baselineMB: Math.round(memBase / 2 ** 20), peakTotalMB: Math.round(memPeak / 2 ** 20), peakIncreaseMB: Math.round((memPeak - memBase) / 2 ** 20), peakSingleProcessMB: Math.round(memPeakProc / 2 ** 20) },

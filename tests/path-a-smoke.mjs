@@ -2675,7 +2675,91 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
     expect(worst < 1e-4, `each stem = mask × input through STFT/ISTFT and our block seams (worst rel. error ${worst.toExponential(1)})`);
     expect(worstSum < 1e-4, `the stems sum back to the mix — the 1.5 s cross-fades are seamless (rel. error ${worstSum.toExponential(1)})`);
   }
+
+  // ── Phones: the compact model (2.8 s window). The full graph's single run needs ~1.3 GB, so iOS
+  // killed the tab ~5% into the first split. Same library, same mask fake, 120-frame contract.
+  const FR = core.COMPACT_MODEL.frames;
+  expect(FR === 120 && core.COMPACT_SEGMENT === 119 * 1024, `compact model: 120 frames, segment (F-1)·hop = 121856 samples (got ${FR}, ${core.COMPACT_SEGMENT})`);
+  const compactFile = path.join(repo, "models", "scnet-compact", "scnet-f120.int8.onnx");
+  const compactBytes = fs.existsSync(compactFile) ? new Uint8Array(fs.readFileSync(compactFile)) : null;
+  expect(!!compactBytes && await core.sha256Hex(compactBytes) === core.COMPACT_MODEL.sha256, "the committed compact model matches the SHA-256 the core pins");
+  expect(fs.existsSync(path.join(repo, "models", "scnet-compact", "NOTICE")) && /MIT/.test(fs.readFileSync(path.join(repo, "models", "scnet-compact", "NOTICE"), "utf8")) && /starrytong/.test(fs.readFileSync(path.join(repo, "models", "scnet-compact", "NOTICE"), "utf8")), "the compact model ships with its MIT notice + attribution");
+  let cRuns = 0, cBad = "";
+  const cSession = async () => ({
+    inputs: [{ name: "mix_spec", dims: [1, 4, 2049, FR] }], outputs: [{ name: "stems_spec" }],
+    async run(feeds) {
+      cRuns++;
+      const f = feeds.mix_spec;
+      if (!f || JSON.stringify(f.dims) !== `[1,4,2049,${FR}]` || f.data.length !== 4 * 2049 * FR) cBad = JSON.stringify(f && f.dims);
+      const x = f.data, len = x.length, o = new Float32Array(SRC.length * len);
+      for (let s = 0; s < SRC.length; s++) for (let i = 0; i < len; i++) o[s * len + i] = x[i] * W[SRC[s]];
+      return { stems_spec: { data: o, dims: [1, 16, 2049, FR], type: "float32" } };
+    },
+    free() {},
+  });
+  let cres = null, cerr = "", cProg = [];
+  try { cres = await core.separateInBlocks(L, R, sr, { session: cSession, compact: true, onProgress: (d, t) => cProg.push([d, t]) }); }
+  catch (e) { cerr = String(e && e.stack || e); }
+  expect(cres && !cerr && cres.compact === true, "compact separation runs through the real library" + (cerr ? " — " + cerr.split("\n")[0] : ""));
+  if (cres) {
+    expect(!cBad, "compact: the library feeds the 120-frame contract mix_spec [1,4,2049,120] (the SCNet preset's 11 s segment is overridden)" + (cBad ? " — got " + cBad : ""));
+    expect(cRuns >= 8, `compact: many short model runs instead of a few long ones (${cRuns})`);
+    expect(cProg.length && cProg[cProg.length - 1][1] === 1, `compact: 30 s blocks by default (21 s → 1 block, got ${cProg.length && cProg[cProg.length - 1][1]})`);
+    let worstC = 0;
+    for (const k of SRC) for (let c = 0; c < 2; c++) { const inp = c ? R : L, st = cres.stems[k][c]; let e = 0, p = 0; for (let i = sr; i < n - sr; i++) { const d = st[i] - W[k] * inp[i]; e += d * d; p += (W[k] * inp[i]) ** 2; } worstC = Math.max(worstC, Math.sqrt(e / p)); }
+    expect(worstC < 1e-4, `compact: stems still = mask × input through the shorter STFT windows (worst rel. error ${worstC.toExponential(1)})`);
+  }
+  // integrity + cache: the bytes must match the pin, from the network or the Cache API
+  if (compactBytes) {
+    const store = new Map(); let fetches = 0;
+    const scope = {
+      caches: { open: async () => ({ match: async (k) => store.has(k) ? new Response(store.get(k)) : undefined, put: async (k, r) => { store.set(k, new Uint8Array(await r.arrayBuffer())); }, delete: async (k) => store.delete(k) }) },
+      fetch: async () => (fetches++, new Response(compactBytes)),
+    };
+    const b1 = await core.compactModelBytes(core.COMPACT_MODEL, scope), b2 = await core.compactModelBytes(core.COMPACT_MODEL, scope);
+    expect(b1.length === compactBytes.length && b2.length === compactBytes.length && fetches === 1, `compact weights: downloaded once, then served from the cache (${fetches} fetches)`);
+    const key = [...store.keys()][0]; store.set(key, compactBytes.slice(0, 1000));
+    await core.compactModelBytes(core.COMPACT_MODEL, scope);
+    expect(fetches === 2 && store.get(key).length === compactBytes.length, "a corrupt cached copy is evicted and re-downloaded");
+    let bad = ""; try { await core.compactModelBytes(core.COMPACT_MODEL, { fetch: async () => new Response(compactBytes.slice(0, 5000)) }); } catch (e) { bad = e.message; }
+    expect(/integrity check/.test(bad), "a partial / altered download is refused with a readable message");
+  }
+  // one ORT session for the whole song, created lean
+  {
+    let created = null, released = 0;
+    const fakeOrt = { env: { wasm: {} }, Tensor: function (type, data, dims) { this.type = type; this.data = data; this.dims = dims; },
+      InferenceSession: { create: async (bytes, so) => (created = so, { inputNames: ["mix_spec"], outputNames: ["stems_spec"], run: async (f) => ({ stems_spec: { data: f.mix_spec.data, dims: f.mix_spec.dims, type: "float32" } }), release: async () => { released++; } }) } };
+    let imported = "";
+    const sess = await core.compactSession("wasm", new Uint8Array(4), async (u) => (imported = u, fakeOrt));
+    expect(/onnxruntime-web@1\.30\.0\/dist\/ort\.wasm\.min\.mjs$/.test(imported) && fakeOrt.env.wasm.numThreads === 1 && /onnxruntime-web@1\.30\.0/.test(fakeOrt.env.wasm.wasmPaths), "compact session: pinned ORT 1.30.0 WASM build, single thread");
+    expect(created && created.graphOptimizationLevel === "disabled" && created.enableCpuMemArena === false && created.enableMemPattern === false && JSON.stringify(created.executionProviders) === '["wasm"]', "compact session: graph optimisation off (its weight pre-packing alone costs ~200 MB), no arena, no memory pattern");
+    sess.free(); sess.free();
+    expect(released === 0, "the library's per-block free() does not tear the reused session down");
+    sess.release();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(released === 1, "release() frees it once, at the end");
+    const r = await sess.run({ mix_spec: { data: new Float32Array(6), dims: [1, 4, 2049, FR], type: "float32" } });
+    expect(r.stems_spec && r.stems_spec.data.length === 6 && Array.isArray(r.stems_spec.dims), "the session speaks the library's { name: { data, dims } } shape");
+  }
+  // phones get it by default: iPhone / iPad (incl. iPadOS's Mac user agent with touch)
+  {
+    const sm = await import(path.join(repo, "stem-model.js") + "?t=" + Date.now());
+    const A = sm.isAppleMobile;
+    expect(A({ userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)", platform: "iPhone", maxTouchPoints: 5 }), "iPhone → low-memory by default");
+    expect(A({ userAgent: "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)", platform: "iPad", maxTouchPoints: 5 }), "iPad → low-memory by default");
+    expect(A({ userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", platform: "MacIntel", maxTouchPoints: 5 }), "iPadOS desktop-class UA (Mac + touch) → low-memory by default");
+    expect(!A({ userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", platform: "MacIntel", maxTouchPoints: 0 }) && !A({ userAgent: "Mozilla/5.0 (X11; Linux x86_64)", platform: "Linux x86_64", maxTouchPoints: 0 }) && !A(null), "a Mac / Linux desktop keeps the full model");
+    const smSrc = fs.readFileSync(path.join(repo, "stem-model.js"), "utf8");
+    expect(/compact: opts\.compact != null \? !!opts\.compact : isAppleMobile\(\)/.test(smSrc) && /compact: opts\.compact \}/.test(smSrc), "stem-model.js defaults compact from the device and forwards it to the worker");
+    expect(/TTP_STEM_COMPACT_DEFAULT = isAppleMobile\(\)/.test(smSrc), "the page learns the device default (for the UI toggle)");
+  }
   const ui = fs.readFileSync(path.join(repo, "TabDecoderPro.tsx"), "utf8");
+  expect(/TTP_STEM_MODEL\(L, R, src\.sampleRate, \{ compact,/.test(ui), "the UI passes Low-memory mode to the separator");
+  expect(/localStorage\.setItem\("ttp:stems:inflight"/.test(ui) && (ui.match(/localStorage\.removeItem\("ttp:stems:inflight"\)/g) || []).length >= 3, "a split marks itself in flight and clears the mark on success and failure");
+  expect(/ran out of memory and reloaded the page\. Low-memory mode is now on/.test(ui) && /if \(!last\.compact\) \{\s*setCompact\(true\)/.test(ui), "after iOS kills the tab mid-split, the next load says so and turns Low-memory mode on");
+  expect(/📱 Low-memory \{compact \? "on" : "off"\}/.test(ui) && /"ttp:stems:compact"/.test(ui), "the Low-memory toggle is visible and remembered per device");
+  const pagesSrc = fs.readFileSync(path.join(repo, ".github", "workflows", "pages.yml"), "utf8");
+  expect(/cp models\/scnet-compact\/scnet-f120\.int8\.onnx models\/scnet-compact\/NOTICE _site\/models\/scnet-compact\//.test(pagesSrc), "Pages ships the compact model + its notice");
   expect(/const hint = \/memory\|allocat\|RangeError/.test(ui), "the separation error only blames memory when the error is about memory");
   expect(/progressEta\(prog, Date\.now\(\)\)/.test(ui) && /tAt: Date\.now\(\)/.test(ui), "the stems countdown uses progressEta with each event's timestamp");
   expect(/setInterval\(\(\) => setTick/.test(ui), "the countdown re-renders between progress events");

@@ -2803,6 +2803,27 @@ function StemsPanel({ C, useSharp, getSource, sourceName, fmt }) {
   const [busy, setBusy] = useState(""), [prog, setProg] = useState(null), [err, setErr] = useState("");
   const [res, setRes] = useState(null);                 // chartsFromStems result
   const [tab, setTab] = useState("band");
+  // Low-memory mode: the compact SCNet (2.8 s window). One full-size run needs ~1.3 GB, which iOS
+  // won't give a Safari tab — it kills and reloads the page a few % in. Default ON on iPhone/iPad
+  // (stem-model.js decides), remembered per device once the user flips it.
+  const [compact, setCompactState] = useState(() => {
+    try { const v = localStorage.getItem("ttp:stems:compact"); if (v === "1" || v === "0") return v === "1"; } catch (_) {}
+    return typeof window !== "undefined" && !!window.TTP_STEM_COMPACT_DEFAULT;
+  });
+  const setCompact = (v) => { setCompactState(v); try { localStorage.setItem("ttp:stems:compact", v ? "1" : "0"); } catch (_) {} };
+  // A split the browser killed leaves this flag behind: say what happened instead of a silent reload.
+  const [recovered, setRecovered] = useState("");
+  useEffect(() => {
+    let last = null;
+    try { last = JSON.parse(localStorage.getItem("ttp:stems:inflight") || "null"); localStorage.removeItem("ttp:stems:inflight"); } catch (_) {}
+    if (!last || !(Date.now() - last.t < 6 * 3600e3)) return;
+    if (!last.compact) {
+      setCompact(true);
+      setRecovered("The last split didn't finish — the browser ran out of memory and reloaded the page. Low-memory mode is now on; try the split again.");
+    } else {
+      setRecovered(`The last split didn't finish, even in low-memory mode — the browser reloaded the page${last.sec ? ` (${Math.round(last.sec / 60)} min of audio)` : ""}. Try a shorter clip, close other tabs, or import stems from Moises/Demucs.`);
+    }
+  }, []);
   const [bpm, setBpm] = useState(120), [bpb, setBpb] = useState(4);
   const [ovr, setOvr] = useState({});                    // role → chord overrides
   const [mute, setMute] = useState(() => new Set()), [solo, setSolo] = useState(() => new Set());
@@ -2847,20 +2868,23 @@ function StemsPanel({ C, useSharp, getSource, sourceName, fmt }) {
     const src = getSource && getSource();
     if (!src) { setErr("Upload a song above first."); return; }
     if (typeof window === "undefined" || typeof window.TTP_STEM_MODEL !== "function") { setErr("The stem separator isn't loaded (it needs a connection the first time) — reload the page and try again."); return; }
-    stop(); setErr(""); setRes(null); setBusy("Separating stems (first time: ~13 MB model download)…"); setProg({ done: 0, total: 1, t0: Date.now() });
+    stop(); setErr(""); setRecovered(""); setRes(null); setBusy(`Separating stems${compact ? " (low-memory)" : ""} (first time: ~${compact ? 11 : 13} MB model download)…`); setProg({ done: 0, total: 1, t0: Date.now() });
+    try { localStorage.setItem("ttp:stems:inflight", JSON.stringify({ t: Date.now(), compact, sec: src.duration })); } catch (_) {}
     try {
       const L = src.getChannelData(0), R = src.numberOfChannels > 1 ? src.getChannelData(1) : L;
-      const out = await window.TTP_STEM_MODEL(L, R, src.sampleRate, { onProgress: (done, total) => setProg((p) => ({ ...(p || { t0: Date.now() }), done, total, tAt: Date.now() })) });
+      const out = await window.TTP_STEM_MODEL(L, R, src.sampleRate, { compact, onProgress: (done, total) => setProg((p) => ({ ...(p || { t0: Date.now() }), done, total, tAt: Date.now() })) });
+      try { localStorage.removeItem("ttp:stems:inflight"); } catch (_) {}
       const list = ["vocals", "drums", "bass", "other"].filter((k) => out.stems[k]).map((k) => ({ role: k, name: STEM_ROLE_NAMES[k], L: out.stems[k][0], R: out.stems[k][1] }));
-      const t = { sampleRate: out.sampleRate || src.sampleRate, list, device: out.device };
+      const t = { sampleRate: out.sampleRate || src.sampleRate, list, device: out.device, compact: !!out.compact };
       setTracks(t); await analyse(t);
     } catch (e) {
+      try { localStorage.removeItem("ttp:stems:inflight"); } catch (_) {}
       const msg = String((e && e.message) || e);
       // Only blame memory when the error actually looks like memory — otherwise the hint sends the user chasing the wrong cause.
       const hint = /memory|allocat|RangeError|out of bounds|OOM/i.test(msg + (e && e.name))
-        ? " Long songs need a lot of memory on a phone — try a shorter clip, or import stems from Moises/Demucs."
-        : /fetch|network|Load failed|NetworkError|huggingface|jsdelivr/i.test(msg)
-          ? " The first split downloads the model (~13 MB) — check the connection and try again."
+        ? (compact ? " Long songs need a lot of memory on a phone — try a shorter clip, or import stems from Moises/Demucs." : " Turn on 📱 Low-memory mode and try again, or import stems from Moises/Demucs.")
+        : /fetch|network|Load failed|NetworkError|huggingface|jsdelivr|HTTP/i.test(msg)
+          ? ` The first split downloads the model (~${compact ? 11 : 13} MB) — check the connection and try again.`
           : " You can import stems from Moises/Demucs instead.";
       setErr("Stem separation failed: " + msg + "." + hint); setBusy(""); setProg(null);
     }
@@ -2941,9 +2965,11 @@ function StemsPanel({ C, useSharp, getSource, sourceName, fmt }) {
         <label style={{ ...chip(C), padding: "5px 12px", cursor: "pointer" }}>📂 Import stems
           <input type="file" multiple onChange={importStems} style={{ display: "none" }} />
         </label>
+        <button onClick={() => setCompact(!compact)} disabled={!!busy} title="A smaller version of the same separator that fits a phone's memory — about 2 dB less separation per stem" style={{ ...chip(C), padding: "5px 12px", color: compact ? C.green || C.cyan : C.dim, borderColor: compact ? C.green || C.cyan : C.border }}>📱 Low-memory {compact ? "on" : "off"}</button>
         {busy && <span style={{ fontSize: 11, color: C.cyan }}>{busy}{prog && prog.total ? ` ${Math.round((100 * prog.done) / prog.total)}%` : ""}{prog && prog.total ? (() => { const eta = progressEta(prog, Date.now()); return eta == null ? " · estimating time left…" : eta < 60 ? " · under a minute left" : ` · ~${Math.round(eta / 60)} min left`; })() : ""}</span>}
       </div>
       {err && <div style={{ fontSize: 11, color: C.red || C.amber, marginBottom: 8 }}>{err}</div>}
+      {recovered && !busy && <div style={{ fontSize: 11, color: C.amber, marginBottom: 8 }}>{recovered}</div>}
 
       {tracks && (
         <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
@@ -2964,7 +2990,7 @@ function StemsPanel({ C, useSharp, getSource, sourceName, fmt }) {
             <button onClick={play} style={{ ...chip(C), padding: "4px 12px", color: playing ? C.green : C.amber }}>{playing ? "■ Stop" : "▶ Play stems"}</button>
             <span style={{ color: C.dim }}>{fmt(pos)} · S = solo · M = mute (live)</span>
             {tracks.imported && <button onClick={() => analyse(tracks)} disabled={!!busy} style={{ ...chip(C), padding: "4px 12px", color: C.green }}>♫ Chart these stems</button>}
-            {tracks.device && <span style={{ color: C.dim }}>separated on {tracks.device === "webgpu" ? "GPU" : "CPU"}</span>}
+            {tracks.device && <span style={{ color: C.dim }}>separated on {tracks.device === "webgpu" ? "GPU" : "CPU"}{tracks.compact ? " · low-memory model" : ""}</span>}
           </div>
         </div>
       )}
