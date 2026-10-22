@@ -171,7 +171,7 @@ export async function compactSession(device, bytes, ortImport = (u) => import(/*
 
 /* Low-memory mode always runs on WASM. Its session turns ORT's graph optimiser off (the optimiser's
  * weight pre-packing costs ~200 MB), and ORT's WebGPU EP cannot run an unoptimised graph: on an
- * iPhone (iOS 26 Safari has WebGPU) session creation failed with "allocation_planner.cc:237 Could
+ * iPad (iOS/iPadOS 26 Safari has WebGPU) session creation failed with "allocation_planner.cc:237 Could
  * not find OrtValue with name '_sw'" (reported on-device), and on a software WebGPU adapter the
  * same session fails at run time on an f16 Cast. WASM with the same options is the measured path. */
 export function deviceFor(compact, picked) { return compact ? "wasm" : picked; }
