@@ -99,7 +99,8 @@ await new Promise((r) => server.listen(0, "127.0.0.1", r));
 const ORIGIN = `http://127.0.0.1:${server.address().port}`;
 
 // peak memory: summed PSS of all Chromium processes, sampled every 250 ms
-const chromePids = () => fs.readdirSync("/proc").filter((p) => /^\d+$/.test(p)).filter((p) => { try { return /chrom/i.test(fs.readFileSync(`/proc/${p}/comm`, "utf8")); } catch (_) { return false; } });
+// match by executable path, not process name: the headless shell's comm is "headless_shell"
+const chromePids = () => fs.readdirSync("/proc").filter((p) => /^\d+$/.test(p)).filter((p) => { try { return /chrom|headless_shell/i.test(fs.readFileSync(`/proc/${p}/cmdline`, "utf8").split("\0")[0]); } catch (_) { return false; } });
 const pss = (p) => { try { const m = /Pss:\s+(\d+)/.exec(fs.readFileSync(`/proc/${p}/smaps_rollup`, "utf8")); return m ? +m[1] * 1024 : 0; } catch (_) { return 0; } };
 let memPeak = 0, memPeakProc = 0, memBase = 0;
 const sampleMem = () => { const v = chromePids().map(pss); const s = v.reduce((a, b) => a + b, 0); memPeak = Math.max(memPeak, s); memPeakProc = Math.max(memPeakProc, ...v, 0); return s; };
@@ -184,6 +185,8 @@ const frameSdr = (s, e) => {                         // museval-style: median ov
 const energy = (x) => { let a = 0; for (const ch of x) for (const v of ch) a += v * v; return a; };
 const SDR = {};
 for (const k of ["drums", "bass", "other"]) SDR[k] = { sdr: +sdr(ref[k], est[k]).toFixed(2), medianFrameSdr: +frameSdr(ref[k], est[k]).toFixed(2) };
+for (const k of ["drums", "bass", "other", "vocals"]) { SDR[k] = { ...(SDR[k] || {}), energyDbRelMix: +(10 * Math.log10((energy(est[k]) || 1e-12) / energy(mixLR))).toFixed(1) }; fs.writeFileSync(path.join(OUT, `sep-${k}.wav`), eng.encodeWav16(est[k], SR)); }
+for (const k of ["drums", "bass", "other"]) { SDR[k].refEnergyDbRelMix = +(10 * Math.log10(energy(ref[k]) / energy(mixLR))).toFixed(1); fs.writeFileSync(path.join(OUT, `ref-${k}.wav`), eng.encodeWav16(ref[k], SR)); }
 SDR.vocalsLeakDb = +(10 * Math.log10(energy(est.vocals) / energy(mixLR))).toFixed(1);   // no vocals in the mix: anything here is leakage
 let resid = 0; for (let c = 0; c < 2; c++) for (let i = 0; i < N; i++) { const d = mixLR[c][i] - est.vocals[c][i] - est.drums[c][i] - est.bass[c][i] - est.other[c][i]; resid += d * d; }
 SDR.sumToMixDb = +(10 * Math.log10(resid / energy(mixLR))).toFixed(1);
