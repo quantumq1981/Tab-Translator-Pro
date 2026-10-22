@@ -1,0 +1,36 @@
+scnet-f120.int8.onnx — SCNet (Sparse Compression Network) music source separation, re-instantiated
+for a 120-frame (~2.8 s at 44.1 kHz, n_fft 4096, hop 1024) input window so one inference fits a
+phone browser's memory. Every learned weight is unchanged from the upstream ONNX; only the
+fixed time-axis DFT matrices and the shape constants were regenerated for the shorter window
+(scripts/scnet_reframe.py, deterministic).
+
+Upstream ONNX:  https://huggingface.co/audiojs/scnet (revision e71bcdb42bce1d62b7fae25ba90fcbcf90f73f46,
+                scnet.int8.onnx, SHA-256 98228931494151762a1c4ab1ec7899a894b1f81fd4a509921a9d2f9bacc50845)
+Original model: SCNet (Tong, Zhu, Chen, Kang, Jiang, Li, Wu, Meng, ICASSP 2024, arXiv:2401.13276),
+                https://github.com/starrytong/SCNet. Checkpoint as distributed by
+                ZFTurbo/Music-Source-Separation-Training (Roman Solovyev); ONNX export and int8
+                compaction by audiojs. Trained on MUSDB18-HQ (Rafii et al., 2019).
+License:        MIT. The weights' author confirmed (starrytong/SCNet#35, 2026-07-17) that the
+                pretrained weights are MIT and that format-converted versions may be redistributed
+                with attribution.
+
+This file:      SHA-256 3a926ef9710754f8bc04b3ded790ac6a0ac10465ca06a50e367382deed53d180
+
+MIT License
+
+Copyright (c) 2024 starrytong
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+associated documentation files (the "Software"), to deal in the Software without restriction,
+including without limitation the rights to use, copy, modify, merge, publish, distribute,
+sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or
+substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES
+OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

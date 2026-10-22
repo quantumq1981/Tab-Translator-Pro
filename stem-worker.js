@@ -6,7 +6,7 @@
  * single-threaded — a 4-minute song is minutes of compute that would freeze the
  * page on the main thread. WebGPU (when the device has it) is used from here too.
  *
- * Message in : { id, left, right, sampleRate, opts:{ device, step, blockSec } }
+ * Message in : { id, left, right, sampleRate, opts:{ device, step, blockSec, compact } }
  * Messages out: { id, type:"progress", done, total } … then
  *               { id, type:"result", sampleRate, stems:{ vocals:[L,R], drums, bass, other } }
  *               or { id, type:"error", message }
@@ -22,7 +22,7 @@ self.onmessage = async (ev) => {
     });
     const transfer = [];
     for (const k of Object.keys(res.stems)) for (const ch of res.stems[k]) transfer.push(ch.buffer);
-    self.postMessage({ id, type: "result", sampleRate: res.sampleRate, stems: res.stems, device: res.device }, transfer);
+    self.postMessage({ id, type: "result", sampleRate: res.sampleRate, stems: res.stems, device: res.device, compact: res.compact }, transfer);
   } catch (err) {
     self.postMessage({ id, type: "error", message: String((err && err.message) || err) });
   }

@@ -6,7 +6,9 @@
  * weights (13 MB, Hugging Face, pinned + SHA-256-checked, then cached).
  *
  * Contract:
- *   window.TTP_STEM_MODEL(left, right, sampleRate, { onProgress(done,total), device, blockSec, step })
+ *   window.TTP_STEM_MODEL(left, right, sampleRate, { onProgress(done,total), device, blockSec, step, compact })
+ *   window.TTP_STEM_COMPACT_DEFAULT — true on iPhone/iPad: one full-size SCNet run needs ~1.3 GB, more
+ *     than iOS gives a Safari tab, so phones use the compact (2.8 s-window) model unless told otherwise
  *     → Promise<{ sampleRate, device, stems: { vocals:[L,R], drums:[L,R], bass:[L,R], other:[L,R] } }>
  *   (stems at the INPUT rate, sample-aligned with the input — the per-instrument charts
  *    rely on that alignment for their shared beat grid)
@@ -34,7 +36,7 @@ function getWorker() {
       if (!p) return;
       if (m.type === "progress") { if (p.onProgress) p.onProgress(m.done, m.total); return; }
       _pending.delete(m.id);
-      if (m.type === "result") p.resolve({ sampleRate: m.sampleRate, stems: m.stems, device: m.device });
+      if (m.type === "result") p.resolve({ sampleRate: m.sampleRate, stems: m.stems, device: m.device, compact: m.compact });
       else p.reject(new Error(m.message || "stem separation failed"));
     };
     w.onerror = (e) => {
@@ -53,8 +55,16 @@ async function onMainThread(left, right, sampleRate, opts) {
   return core.separateInBlocks(left, right, sampleRate, opts);
 }
 
+/* iPhone / iPod / iPad — including iPadOS, which reports a Mac user agent but has touch. */
+export function isAppleMobile(nav = typeof navigator !== "undefined" ? navigator : null) {
+  if (!nav) return false;
+  const ua = String(nav.userAgent || ""), plat = String(nav.platform || "");
+  return /iPhone|iPad|iPod/.test(ua) || (/Mac/.test(plat || ua) && (nav.maxTouchPoints || 0) > 1);
+}
+
 async function separateStems(left, right, sampleRate, opts = {}) {
   if (!left || !left.length) throw new Error("no audio to separate");
+  opts = { ...opts, compact: opts.compact != null ? !!opts.compact : isAppleMobile() };
   const L = Float32Array.from(left), R = Float32Array.from(right || left);   // copies: we transfer them
   const w = getWorker();
   if (!w) return onMainThread(L, R, sampleRate, opts);
@@ -62,7 +72,7 @@ async function separateStems(left, right, sampleRate, opts = {}) {
     return await new Promise((resolve, reject) => {
       const id = ++_seq;
       _pending.set(id, { resolve, reject, onProgress: opts.onProgress });
-      w.postMessage({ id, left: L, right: R, sampleRate, opts: { device: opts.device, blockSec: opts.blockSec, step: opts.step } }, [L.buffer, R.buffer]);
+      w.postMessage({ id, left: L, right: R, sampleRate, opts: { device: opts.device, blockSec: opts.blockSec, step: opts.step, compact: opts.compact } }, [L.buffer, R.buffer]);
     });
   } catch (err) {
     // a Worker that cannot load modules / WebGPU in workers missing: one main-thread retry
@@ -72,5 +82,5 @@ async function separateStems(left, right, sampleRate, opts = {}) {
 }
 
 try {
-  if (typeof window !== "undefined") window.TTP_STEM_MODEL = separateStems;
+  if (typeof window !== "undefined") { window.TTP_STEM_MODEL = separateStems; window.TTP_STEM_COMPACT_DEFAULT = isAppleMobile(); }
 } catch (_) { /* never wedge boot */ }
