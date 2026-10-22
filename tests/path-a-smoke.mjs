@@ -2630,14 +2630,19 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   expect(scope.caches === undefined, "an unusable Cache API (private browsing) is hidden so the library downloads instead of failing");
 
   const W = { drums: 0.1, bass: 0.2, other: 0.3, vocals: 0.4 }, SRC = ["drums", "bass", "other", "vocals"];
-  let runs = 0, specs = [];
+  // I/O contract from the model card (hf://models/audiojs/scnet README, "Graph"): input `mix_spec`
+  // [1, 4, 2049, 476] = L re, L im, R re, R im; output `stems_spec` [1, 16, 2049, 476] = each source
+  // (drums, bass, other, vocals) × channel × re/im. The fake honours exactly that layout.
+  let runs = 0, specs = [], badFeed = "";
   const session = async (spec) => (specs.push(spec), {
-    inputs: [{ name: "mix_spec", dims: [1, 4, 2049, 476] }], outputs: [{ name: "out" }],
+    inputs: [{ name: "mix_spec", dims: [1, 4, 2049, 476] }], outputs: [{ name: "stems_spec", dims: [1, 16, 2049, 476] }],
     async run(feeds) {
       runs++;
-      const x = feeds.mix_spec.data, len = x.length, out = new Float32Array(SRC.length * len);
+      const f = feeds.mix_spec;
+      if (!f || f.type !== "float32" || JSON.stringify(f.dims) !== "[1,4,2049,476]" || f.data.length !== 4 * 2049 * 476) badFeed = JSON.stringify(f && { type: f.type, dims: f.dims, len: f.data && f.data.length });
+      const x = f.data, len = x.length, out = new Float32Array(SRC.length * len);
       for (let s = 0; s < SRC.length; s++) for (let i = 0; i < len; i++) out[s * len + i] = x[i] * W[SRC[s]];
-      return { out: { data: out } };
+      return { stems_spec: { data: out, dims: [1, 16, 2049, 476], type: "float32" } };
     },
     free() {},
   });
@@ -2653,6 +2658,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   if (res) {
     expect(SRC.every((k) => res.stems[k] && res.stems[k].length === 2 && res.stems[k][0].length === n && res.stems[k][1].length === n), "4 stereo stems, sample-aligned with the input (the shared beat grid depends on it)");
     expect(specs.length >= 3 && specs.every((s) => /huggingface\.co\/audiojs\/scnet\/resolve\/e71bcdb42bce1d62b7fae25ba90fcbcf90f73f46\/scnet\.int8\.onnx$/.test(s)), "the library asks for the pinned SCNet weights, once per 60 s block (3 blocks here)");
+    expect(!badFeed, "the library feeds SCNet's real input contract: float32 mix_spec [1,4,2049,476]" + (badFeed ? " — got " + badFeed : ""));
     expect(runs >= 3 && prog.length && prog[prog.length - 1][0] === prog[prog.length - 1][1], "progress reports per model run and ends at done === total");
     let worst = 0, worstSum = 0;
     for (const k of SRC) for (let c = 0; c < 2; c++) {
