@@ -2093,7 +2093,11 @@ separator and capture are browser glue (device check remains for the real model)
     the ONNX session faked (the library's `session` hook; a fixed spectral mask, so stems must
     equal mask × input and sum back to the mix — measured ~4e-8, which also proves the 60 s
     block cross-fade). Note the bundle reads `process.release.name` once at load, so the test
-    spoofs it before the first import. A headless-Chromium run of the real Worker with the real
+    spoofs it before the first import. The fake mirrors the model card's real I/O (`mix_spec`
+    [1,4,2049,476] in → `stems_spec` [1,16,2049,476] out, drums/bass/other/vocals × ch × re/im —
+    read via the Hugging Face connector, which also confirmed the 12,900,277-byte file and its
+    SHA-256 match the pin; the connector can't deliver binaries, so the weights themselves still
+    need `huggingface.co` + `cdn.jsdelivr.net` allowed in the environment's network). A headless-Chromium run of the real Worker with the real
     bundle now reaches the pinned Hugging Face download. **Lesson: never stub the module whose
     binding you're testing** — fake below it (the session), not at it.
 - **Live capture** (`LiveCapture`): `🖥 Capture a tab` (getDisplayMedia, desktop Chrome/Edge,
