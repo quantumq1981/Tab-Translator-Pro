@@ -2651,7 +2651,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   for (let i = 0; i < n; i++) { const t = i / sr; L[i] = 0.3 * Math.sin(2 * Math.PI * 220 * t) + 0.1 * Math.sin(2 * Math.PI * 1234 * t); R[i] = 0.25 * Math.sin(2 * Math.PI * 330 * t + 1); }
   const prog = [];
   let res = null, err = "";
-  try { res = await core.separateInBlocks(L, R, sr, { session, blockSec: 10, onProgress: (d, t) => prog.push([d, t]) }); }
+  try { res = await core.separateInBlocks(L, R, sr, { session, blockSec: 10, onProgress: (d, t) => prog.push([d, t, runs]) }); }
   catch (e) { err = String(e && e.stack || e); }
   finally { if (relDesc) Object.defineProperty(process, "release", relDesc); }
   expect(res && !err, "separateInBlocks runs the real vendored library end to end" + (err ? " — " + err.split("\n")[0] : ""));
@@ -2660,6 +2660,11 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
     expect(specs.length >= 3 && specs.every((s) => /huggingface\.co\/audiojs\/scnet\/resolve\/e71bcdb42bce1d62b7fae25ba90fcbcf90f73f46\/scnet\.int8\.onnx$/.test(s)), "the library asks for the pinned SCNet weights, once per 60 s block (3 blocks here)");
     expect(!badFeed, "the library feeds SCNet's real input contract: float32 mix_spec [1,4,2049,476]" + (badFeed ? " — got " + badFeed : ""));
     expect(runs >= 3 && prog.length && prog[prog.length - 1][0] === prog[prog.length - 1][1], "progress reports per model run and ends at done === total");
+    // The library fires progress BEFORE each chunk runs; the core must report chunks COMPLETED.
+    // The first real run reported 8% before any audio was processed, and the ETA extrapolated from it.
+    expect(prog[0][0] === 0 && prog[0][2] === 0, `the first progress event says nothing is done yet (got ${prog[0][0]} after ${prog[0][2]} model runs)`);
+    expect(prog.every((e, i) => i === 0 || e[0] >= prog[i - 1][0]), "progress never goes backwards");
+    expect(prog.every((e) => e[0] <= (e[2] / runs) * e[1] + 0.5), "progress never runs ahead of the model runs actually finished");
     let worst = 0, worstSum = 0;
     for (const k of SRC) for (let c = 0; c < 2; c++) {
       const inp = c ? R : L, st = res.stems[k][c]; let e = 0, p = 0;
@@ -2672,6 +2677,19 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   }
   const ui = fs.readFileSync(path.join(repo, "TabDecoderPro.tsx"), "utf8");
   expect(/const hint = \/memory\|allocat\|RangeError/.test(ui), "the separation error only blames memory when the error is about memory");
+  expect(/progressEta\(prog, Date\.now\(\)\)/.test(ui) && /tAt: Date\.now\(\)/.test(ui), "the stems countdown uses progressEta with each event's timestamp");
+  expect(/setInterval\(\(\) => setTick/.test(ui), "the countdown re-renders between progress events");
+  expect(/Charting every instrument…"\); setErr\(""\); setRes\(null\); setProg\(null\)/.test(ui), "the separator's countdown is cleared when charting starts");
+}
+{
+  // progressEta: rate measured up to the last event, then counted down by the clock
+  const E = eng.progressEta;
+  expect(E(null, 0) === null && E({ done: 0, total: 4, t0: 0, tAt: 5000 }, 5000) === null, "no estimate until a unit has finished");
+  expect(E({ done: 1, total: 4, t0: 0, tAt: 10000 }, 10000) === 30, "1 of 4 done in 10 s → 30 s left");
+  expect(E({ done: 1, total: 4, t0: 0, tAt: 10000 }, 15000) === 25, "and it counts down between events (25 s left 5 s later)");
+  expect(E({ done: 1, total: 4, t0: 0, tAt: 10000 }, 99000) === 0, "never negative when a chunk runs long");
+  expect(E({ done: 5, total: 4, t0: 0, tAt: 10000 }, 10000) === 0 && E({ done: 4, total: 4, t0: 0, tAt: 1000 }, 1000) === 0, "done ≥ total → 0");
+  expect(E({ done: 1, total: 2, t0: 1000, tAt: 1000 }, 1000) === null, "no elapsed time → no rate → null");
 }
 
 if (fails.length) {

@@ -235,6 +235,7 @@ import {
   drumPattern,
   drumHitsToMidi,
   encodeWav16,
+  progressEta,
   _cosDist,
   _dtw,
   scoreChromaSequence,
@@ -2806,7 +2807,10 @@ function StemsPanel({ C, useSharp, getSource, sourceName, fmt }) {
   const [ovr, setOvr] = useState({});                    // role → chord overrides
   const [mute, setMute] = useState(() => new Set()), [solo, setSolo] = useState(() => new Set());
   const [playing, setPlaying] = useState(false), [pos, setPos] = useState(0);
+  const [, setTick] = useState(0);
   const mix = useRef({});
+  // one SCNet chunk is over a minute on WASM: re-render each second so the countdown moves between progress events
+  useEffect(() => { if (!prog) return undefined; const id = setInterval(() => setTick((x) => x + 1), 1000); return () => clearInterval(id); }, [!!prog]);
   const ROLES = ["vocals", "drums", "bass", "guitar", "piano", "other"];
 
   const stop = () => {
@@ -2821,7 +2825,7 @@ function StemsPanel({ C, useSharp, getSource, sourceName, fmt }) {
   useEffect(() => { const m = mix.current; (m.gains || []).forEach(([role, g]) => { g.gain.value = audible(role) ? 1 : 0; }); }, [mute, solo]);
 
   const analyse = async (t) => {
-    setBusy("Charting every instrument…"); setErr(""); setRes(null);
+    setBusy("Charting every instrument…"); setErr(""); setRes(null); setProg(null);   // the separator's countdown no longer applies
     try {
       const sr = t.sampleRate, factor = Math.max(1, Math.floor(sr / 16000)), asr = sr / factor;
       const byRole = {}, full = {};
@@ -2846,7 +2850,7 @@ function StemsPanel({ C, useSharp, getSource, sourceName, fmt }) {
     stop(); setErr(""); setRes(null); setBusy("Separating stems (first time: ~13 MB model download)…"); setProg({ done: 0, total: 1, t0: Date.now() });
     try {
       const L = src.getChannelData(0), R = src.numberOfChannels > 1 ? src.getChannelData(1) : L;
-      const out = await window.TTP_STEM_MODEL(L, R, src.sampleRate, { onProgress: (done, total) => setProg((p) => ({ ...(p || { t0: Date.now() }), done, total })) });
+      const out = await window.TTP_STEM_MODEL(L, R, src.sampleRate, { onProgress: (done, total) => setProg((p) => ({ ...(p || { t0: Date.now() }), done, total, tAt: Date.now() })) });
       const list = ["vocals", "drums", "bass", "other"].filter((k) => out.stems[k]).map((k) => ({ role: k, name: STEM_ROLE_NAMES[k], L: out.stems[k][0], R: out.stems[k][1] }));
       const t = { sampleRate: out.sampleRate || src.sampleRate, list, device: out.device };
       setTracks(t); await analyse(t);
@@ -2937,7 +2941,7 @@ function StemsPanel({ C, useSharp, getSource, sourceName, fmt }) {
         <label style={{ ...chip(C), padding: "5px 12px", cursor: "pointer" }}>📂 Import stems
           <input type="file" multiple onChange={importStems} style={{ display: "none" }} />
         </label>
-        {busy && <span style={{ fontSize: 11, color: C.cyan }}>{busy}{prog && prog.total ? ` ${Math.round((100 * prog.done) / prog.total)}%` : ""}{prog && prog.done > 0.05 && prog.total ? ` · ~${Math.max(1, Math.round(((Date.now() - prog.t0) / 1000) * (prog.total / prog.done - 1) / 60))} min left` : ""}</span>}
+        {busy && <span style={{ fontSize: 11, color: C.cyan }}>{busy}{prog && prog.total ? ` ${Math.round((100 * prog.done) / prog.total)}%` : ""}{prog && prog.total ? (() => { const eta = progressEta(prog, Date.now()); return eta == null ? " · estimating time left…" : eta < 60 ? " · under a minute left" : ` · ~${Math.round(eta / 60)} min left`; })() : ""}</span>}
       </div>
       {err && <div style={{ fontSize: 11, color: C.red || C.amber, marginBottom: 8 }}>{err}</div>}
 

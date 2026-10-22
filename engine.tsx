@@ -5182,6 +5182,21 @@ function drumHitsToMidi(hits, opts = {}) {
   return Uint8Array.from([0x4d, 0x54, 0x68, 0x64, 0, 0, 0, 6, 0, 0, 0, 1, (PPQ >> 8) & 255, PPQ & 255, 0x4d, 0x54, 0x72, 0x6b, ...u32(body.length), ...body]);
 }
 
+/* Time left on a long job from its progress, for a countdown that stays honest between
+ * progress events. prog = { done, total, t0, tAt }: `done` of `total` units COMPLETED as of
+ * `tAt` (ms, same clock as `now`), work started at `t0`. The rate is measured up to the last
+ * event and the time since it is subtracted, so the display counts down every tick instead
+ * of freezing until the next event (a single SCNet chunk is over a minute on WASM).
+ * Returns seconds ≥ 0, or null until a unit has finished (no rate to extrapolate). Pure. */
+function progressEta(prog, now) {
+  if (!prog || !(prog.total > 0) || !(prog.done > 0) || prog.t0 == null) return null;
+  const tAt = prog.tAt != null ? prog.tAt : now;
+  if (!(tAt > prog.t0)) return null;
+  const done = Math.min(prog.done, prog.total);
+  const remaining = ((tAt - prog.t0) / done) * (prog.total - done) - (now - tAt);
+  return Math.max(0, remaining / 1000);
+}
+
 /* PCM → a 16-bit PCM WAV file (RIFF), for downloading separated stems. Channels are
  * Float32Arrays at `sampleRate`, clipped to ±1. Pure. */
 function encodeWav16(channels, sampleRate) {
@@ -6581,6 +6596,7 @@ export {
   drumHitsToMidi,
   chartsFromStems,
   encodeWav16,
+  progressEta,
   _nnlsGram,
   _bandFeatures,
   _cosSim,
