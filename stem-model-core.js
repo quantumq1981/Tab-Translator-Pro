@@ -29,6 +29,31 @@ function lib() {
   return _lib;
 }
 
+/* The bundle's API is the NAMED export `separate` (`export { REVISIONS, models, separate }`
+ * — there is no default export). Reading `default` gave `undefined`, which Safari reported as
+ * "undefined is not a function (near '...separate...')" on the first real split. Resolve it
+ * here, in one place, and fail with a readable message if a rebuilt bundle ever changes shape. */
+export function resolveSeparate(mod) {
+  const fn = mod && (typeof mod.separate === "function" ? mod.separate : mod.default);
+  if (typeof fn !== "function") throw new Error("the stem separator library loaded but has no separate() function (vendor bundle out of date?)");
+  return fn;
+}
+
+/* The library caches the weights with `await caches.open(...)` and has no fallback when that
+ * rejects — which some private-browsing modes do. Probe it once; if it is unusable, hide the
+ * Cache API from the library so it simply downloads (no cache) instead of failing outright. */
+let _cacheChecked = false;
+export async function ensureCacheUsable(scope = globalThis) {
+  if (_cacheChecked) return;
+  _cacheChecked = true;
+  try {
+    if (typeof scope.caches === "undefined") return;
+    await scope.caches.open("audio-neural");
+  } catch (_) {
+    try { Object.defineProperty(scope, "caches", { value: undefined, configurable: true, writable: true }); } catch (_) { /* nothing else to do */ }
+  }
+}
+
 export async function pickDevice(pref) {
   if (pref === "wasm" || pref === "webgpu") return pref;
   try {
@@ -41,7 +66,8 @@ export async function pickDevice(pref) {
 }
 
 export async function separateInBlocks(left, right, sampleRate, opts = {}) {
-  const { default: separate } = await lib();
+  const separate = resolveSeparate(await lib());
+  await ensureCacheUsable();
   const device = await pickDevice(opts.device);
   const n = Math.min(left.length, right.length);
   const block = Math.max(10, opts.blockSec || 60) * sampleRate | 0;
@@ -55,6 +81,7 @@ export async function separateInBlocks(left, right, sampleRate, opts = {}) {
     const res = await separate([left.subarray(a, b), right.subarray(a, b)], {
       sampleRate, model: STEM_MODEL, device, wasmPaths: ORT_WASM_PATHS,   // single-threaded WASM without COOP/COEP (ORT falls back itself)
       step: opts.step != null ? opts.step : 0.5,                 // 0.5: half the compute of 0.25 for ~0.1 dB
+      session: opts.session,                                     // test seam: the library's own session hook (never set by the app)
       progress: opts.onProgress ? (p) => opts.onProgress(bi + p.chunk / p.totalChunks, starts.length) : undefined,
     });
     // linear cross-fade over the padded overlap so block seams are inaudible

@@ -2604,6 +2604,70 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   expect(!/youtube\.com\/watch|ytdl|yt-dlp|googlevideo/i.test(uiSrc + sm + core), "no stream-ripping code: links are not downloaded, playback is captured");
 }
 
+/* The separator core run against the REAL vendored library (2026-10-22 regression).
+ * The first device run failed with "undefined is not a function (near '...separate...')":
+ * the core destructured a `default` export the bundle doesn't have. The browser e2e had
+ * stubbed TTP_STEM_MODEL, so the core↔library seam had never executed. This drives
+ * separateInBlocks → the real neural-separate pipeline (option names, input normalisation,
+ * SCNet's complex-STFT segmenting, ISTFT, our 60 s block cross-fade) with ONLY the ONNX
+ * session faked — through the library's own `session` hook — and the network never touched.
+ * The fake model is a fixed spectral mask (drums .1 · bass .2 · other .3 · vocals .4), so the
+ * exact answer is known: each stem = its weight × the input, and the stems sum to the input. */
+{
+  // The bundle reads `process.release.name` ONCE, when first loaded, to pick its Node or browser
+  // path — so the spoof must be in place before anything imports it (and is restored below).
+  const relDesc = Object.getOwnPropertyDescriptor(process, "release");
+  Object.defineProperty(process, "release", { value: { name: "browser-test" }, configurable: true });   // browser path (hosted weights) — the session hook means nothing is fetched
+  const core = await import(path.join(repo, "stem-model-core.js") + "?t=" + Date.now());
+  expect(core.resolveSeparate({ separate: () => 1 })() === 1 && core.resolveSeparate({ default: () => 2 })() === 2, "resolveSeparate takes the named export (and a default one if a rebuild switches)");
+  let threw = ""; try { core.resolveSeparate({ REVISIONS: {} }); } catch (e) { threw = e.message; }
+  expect(/no separate\(\) function/.test(threw), "a bundle without separate() fails with a readable message, not 'undefined is not a function'");
+  const vend = await import(path.join(repo, "vendor/neural-separate.mjs"));
+  expect(typeof vend.separate === "function" && core.resolveSeparate(vend) === vend.separate, "the vendored bundle's separate() is what the core resolves");
+
+  const scope = { caches: { open: () => Promise.reject(new Error("SecurityError: private mode")) } };
+  await core.ensureCacheUsable(scope);
+  expect(scope.caches === undefined, "an unusable Cache API (private browsing) is hidden so the library downloads instead of failing");
+
+  const W = { drums: 0.1, bass: 0.2, other: 0.3, vocals: 0.4 }, SRC = ["drums", "bass", "other", "vocals"];
+  let runs = 0, specs = [];
+  const session = async (spec) => (specs.push(spec), {
+    inputs: [{ name: "mix_spec", dims: [1, 4, 2049, 476] }], outputs: [{ name: "out" }],
+    async run(feeds) {
+      runs++;
+      const x = feeds.mix_spec.data, len = x.length, out = new Float32Array(SRC.length * len);
+      for (let s = 0; s < SRC.length; s++) for (let i = 0; i < len; i++) out[s * len + i] = x[i] * W[SRC[s]];
+      return { out: { data: out } };
+    },
+    free() {},
+  });
+  const sr = 44100, n = Math.round(sr * 21);
+  const L = new Float32Array(n), R = new Float32Array(n);
+  for (let i = 0; i < n; i++) { const t = i / sr; L[i] = 0.3 * Math.sin(2 * Math.PI * 220 * t) + 0.1 * Math.sin(2 * Math.PI * 1234 * t); R[i] = 0.25 * Math.sin(2 * Math.PI * 330 * t + 1); }
+  const prog = [];
+  let res = null, err = "";
+  try { res = await core.separateInBlocks(L, R, sr, { session, blockSec: 10, onProgress: (d, t) => prog.push([d, t]) }); }
+  catch (e) { err = String(e && e.stack || e); }
+  finally { if (relDesc) Object.defineProperty(process, "release", relDesc); }
+  expect(res && !err, "separateInBlocks runs the real vendored library end to end" + (err ? " — " + err.split("\n")[0] : ""));
+  if (res) {
+    expect(SRC.every((k) => res.stems[k] && res.stems[k].length === 2 && res.stems[k][0].length === n && res.stems[k][1].length === n), "4 stereo stems, sample-aligned with the input (the shared beat grid depends on it)");
+    expect(specs.length >= 3 && specs.every((s) => /huggingface\.co\/audiojs\/scnet\/resolve\/e71bcdb42bce1d62b7fae25ba90fcbcf90f73f46\/scnet\.int8\.onnx$/.test(s)), "the library asks for the pinned SCNet weights, once per 60 s block (3 blocks here)");
+    expect(runs >= 3 && prog.length && prog[prog.length - 1][0] === prog[prog.length - 1][1], "progress reports per model run and ends at done === total");
+    let worst = 0, worstSum = 0;
+    for (const k of SRC) for (let c = 0; c < 2; c++) {
+      const inp = c ? R : L, st = res.stems[k][c]; let e = 0, p = 0;
+      for (let i = sr; i < n - sr; i++) { const d = st[i] - W[k] * inp[i]; e += d * d; p += (W[k] * inp[i]) ** 2; }
+      worst = Math.max(worst, Math.sqrt(e / p));
+    }
+    for (let c = 0; c < 2; c++) { const inp = c ? R : L; let e = 0, p = 0; for (let i = 0; i < n; i++) { let s = 0; for (const k of SRC) s += res.stems[k][c][i]; e += (s - inp[i]) ** 2; p += inp[i] ** 2; } worstSum = Math.max(worstSum, Math.sqrt(e / p)); }
+    expect(worst < 1e-4, `each stem = mask × input through STFT/ISTFT and our block seams (worst rel. error ${worst.toExponential(1)})`);
+    expect(worstSum < 1e-4, `the stems sum back to the mix — the 1.5 s cross-fades are seamless (rel. error ${worstSum.toExponential(1)})`);
+  }
+  const ui = fs.readFileSync(path.join(repo, "TabDecoderPro.tsx"), "utf8");
+  expect(/const hint = \/memory\|allocat\|RangeError/.test(ui), "the separation error only blames memory when the error is about memory");
+}
+
 if (fails.length) {
   console.error("\nFAIL:\n  " + fails.join("\n  "));
   console.error("\nRe-run with --log-tokens to dump the raw extractTokens() stream and diff against the reference.");

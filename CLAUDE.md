@@ -2082,6 +2082,20 @@ separator and capture are browser glue (device check remains for the real model)
   Moises" cannot be claimed (proprietary); SCNet is htdemucs-class on MUSDB18.
   The vendor bundle is esbuild output of the npm packages with ORT externalised to jsDelivr —
   rebuild the same way, don't hand-edit it.
+  - **First device run failed — fixed 2026-10-22.** iPad Safari: *"undefined is not a function
+    (near '...separate...')"*. The core destructured `{ default: separate }`, but the bundle's
+    API is the **named** export (`export { REVISIONS, models, separate }`). It shipped because
+    the browser e2e stubbed the bundle with a *default* export — the stub agreed with the bug.
+    Now `resolveSeparate(mod)` binds the named export (readable error if a rebuild changes
+    shape), `ensureCacheUsable()` hides a Cache API whose `open()` rejects (some private modes —
+    the library awaits it with no fallback), and the UI only blames memory for memory errors.
+    **Guard:** `npm test` drives `separateInBlocks` through the REAL vendored library with only
+    the ONNX session faked (the library's `session` hook; a fixed spectral mask, so stems must
+    equal mask × input and sum back to the mix — measured ~4e-8, which also proves the 60 s
+    block cross-fade). Note the bundle reads `process.release.name` once at load, so the test
+    spoofs it before the first import. A headless-Chromium run of the real Worker with the real
+    bundle now reaches the pinned Hugging Face download. **Lesson: never stub the module whose
+    binding you're testing** — fake below it (the session), not at it.
 - **Live capture** (`LiveCapture`): `🖥 Capture a tab` (getDisplayMedia, desktop Chrome/Edge,
   "Share tab audio") + `🎙 Record` (mic), raw PCM (ScriptProcessor — the one raw tap iOS
   still has), 15 min cap, silent-take = DRM message, → the SAME `loadBuffer` path as an upload.
@@ -2443,7 +2457,9 @@ accordingly.
   `chartsFromStems` end-to-end (one chart per instrument, drum-tracked shared grid, band C → G,
   bass roots, vocal melody), `encodeWav16`, and the separator/capture contracts (pins, SHA-256,
   SCNet-not-htdemucs, worker + fallback, blocks, deploy list, no `accept`, raw capture, no
-  stream-ripping code).
+  stream-ripping code). Plus the separator core run end-to-end through the REAL vendored
+  library with a fake session (named-export binding, private-mode cache guard, 3 blocks,
+  stems = mask × input, stems sum to the mix).
 - **Key model v2 + manual override**: `npm test` asserts the reported defect is fixed
   (`D · C · G` reads **D major**, and E minor — whose tonic never sounds — loses by >20%),
   the same shape a step round the circle (`G · F · C` → G), that a genuine minor tune and a

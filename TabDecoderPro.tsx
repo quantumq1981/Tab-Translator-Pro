@@ -2850,7 +2850,16 @@ function StemsPanel({ C, useSharp, getSource, sourceName, fmt }) {
       const list = ["vocals", "drums", "bass", "other"].filter((k) => out.stems[k]).map((k) => ({ role: k, name: STEM_ROLE_NAMES[k], L: out.stems[k][0], R: out.stems[k][1] }));
       const t = { sampleRate: out.sampleRate || src.sampleRate, list, device: out.device };
       setTracks(t); await analyse(t);
-    } catch (e) { setErr("Stem separation failed: " + ((e && e.message) || e) + ". Long songs need a lot of memory on a phone — try a shorter clip, or import stems from Moises/Demucs."); setBusy(""); setProg(null); }
+    } catch (e) {
+      const msg = String((e && e.message) || e);
+      // Only blame memory when the error actually looks like memory — otherwise the hint sends the user chasing the wrong cause.
+      const hint = /memory|allocat|RangeError|out of bounds|OOM/i.test(msg + (e && e.name))
+        ? " Long songs need a lot of memory on a phone — try a shorter clip, or import stems from Moises/Demucs."
+        : /fetch|network|Load failed|NetworkError|huggingface|jsdelivr/i.test(msg)
+          ? " The first split downloads the model (~13 MB) — check the connection and try again."
+          : " You can import stems from Moises/Demucs instead.";
+      setErr("Stem separation failed: " + msg + "." + hint); setBusy(""); setProg(null);
+    }
   };
 
   const importStems = async (e) => {
