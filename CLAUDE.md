@@ -2112,9 +2112,9 @@ separator and capture are browser glue (device check remains for the real model)
     - **Memory: peak +1.96 GB** over the page baseline (2.13 GB in one process) for 100 s; a 16 s
       clip already peaks at +1.5 GB. It's the model's working set for its fixed 11 s window
       (`mix_spec` frames = 476), not clip length, and the library already disables ORT's memory
-      arena + memory pattern — there is no cheap lever. **Expect iPhone Safari (tab limit
-      ~1–1.5 GB) to be killed mid-split**; iPad/desktop OK. Moises/Demucs stem import is the
-      phone route. This is the device check that remains.
+      arena + memory pattern — there is no cheap lever *at this window size*. **The owner's iPhone
+      was killed ~5% into the first split** (the page reloads) — fixed by the low-memory model
+      below.
     - **SDR** (global / median 1 s frame): drums **16.7 / 20.2 dB**, bass **22.5 / 24.7**, other
       **15.2 / 15.4**; the empty vocals stem holds −51 dB of the mix; stems sum back to the mix
       within −21 dB. Synthetic, clean, unmastered stems — out of MUSDB's distribution in the easy
@@ -2141,6 +2141,44 @@ separator and capture are browser glue (device check remains for the real model)
       under "other" (bass SDR 0.4 dB) and even the perfect stem transcribed badly. `lib.mjs` now
       has a fundamental-dominant `bassNote` voice. A bench bass must have a bass's spectrum.
     - Re-score saved stems without the 10-min browser run: `--reuse <run dir>` (+ `--chart-opts`).
+  - **Phones — low-memory SCNet (2026-10-22, #109/#110).** Report: on iPhone the split reaches ~5%
+    ("~8 min left") and the page reloads = iOS killing the tab. Native stem apps work because they
+    run a phone-sized model on the Neural Engine; a web page can't, so OUR run had to fit.
+    - **Root cause, measured:** one run of the shipped graph needs ~1.3 GB of activations (native
+      ORT 1.32 GB peak) because its input is a FIXED 11 s window `[1,4,2049,476]`.
+    - **The fix is the same network at a 2.8 s window.** The graph's time-axis block is an
+      orthonormal rfft/irfft written as MatMuls with FIXED DFT matrices (`_7d/_7e` fwd, `_71/_73`
+      inv) plus 22 shape constants baking in 476 frames / 239 bins. `scripts/scnet_reframe.py`
+      checks the four matrices reproduce from the formula (< 4e-9), regenerates them for F=120,
+      patches the shapes; **every learned weight is untouched**. Deterministic, pinned by SHA-256
+      (`3a926ef9…d180`), 11.2 MB, `models/scnet-compact/` + NOTICE (MIT; the weights' author
+      allows redistributing converted versions with attribution — starrytong/SCNet#35).
+      Don't "just make the time axis dynamic": the Reshape/LSTM-state shapes and the DFT matrices
+      all hard-code it — a dim_param edit fails at the first Reshape.
+    - **Window sweep** (real library + onnxruntime-web 1.30.0 WASM, 1 thread, first 20 s of the bench
+      mix; drums/bass/other SDR, peak RSS): 11 s 13.6/19.4/13.5 dB 1799 MB · 5.5 s 13.0/16.7/12.7
+      1244 MB · **2.8 s 11.7/16.6/12.0 922 MB** · 1.4 s 10.6/14.3/11.4 674 MB. step 0.25 recovers ~1 dB
+      at 2× compute — not taken. Graph optimisation OFF saves ~200 MB (its weight pre-packing) and is
+      not slower here.
+    - **Core (`compact: true`):** loads the model same-origin, SHA-256-checked, Cache-API-cached
+      (`compactModelBytes` — a corrupt cached copy is evicted); ONE ORT session reused across blocks
+      (`compactSession`; the library's per-block `free()` is a no-op, `release()` once at the end);
+      no arena / mem-pattern / graph-opt; 30 s blocks; passes `segment = (F−1)·hop` because the
+      library's SCNet preset otherwise forces 11 s. On by default on iPhone/iPad (`isAppleMobile`,
+      incl. iPadOS's Mac UA + touch); UI **📱 Low-memory** toggle, remembered per device.
+    - **The stem worker is ended after each split** — a WASM heap never shrinks, and the page sat
+      ~650 MB higher through charting with it alive.
+    - **Crash rail:** a split marks itself in flight (`ttp:stems:inflight`); if iOS kills the tab, the
+      next load says so and switches Low-memory on (or, if it was already on, suggests a shorter clip /
+      Moises stems). A long song still decoding now says "still loading", not "Upload a song first".
+    - **Real app, headless Chromium, low-memory** (peak increase over the page; full model in brackets):
+      16 s **+652 MB** (+1525) · 100 s **+1107 MB** (+1962) · 220 s **+1002 MB** after the worker fix,
+      1392 MB largest process. SDR at 220 s drums 16.0 · bass 19.4 · other 16.2 dB; band chart majmin
+      **70.4** vs perfect stems 75.2 vs mix 63.0 — chart quality matches the full model (100 s: 59.4 vs
+      58.7). Speed 5.2× real time (full: 6.0×). What's left is mostly full-length arrays (four stereo
+      stems ≈ 1.4 MB per second of song) and the page's own copy of the decoded song.
+    - **Device check that remains:** a real iPhone. If a long song still dies there, the next levers
+      are Int16 stem storage (halves the stems) and WebGPU (ORT's WebGPU EP; iOS 26 Safari has WebGPU).
 - **Live capture** (`LiveCapture`): `🖥 Capture a tab` (getDisplayMedia, desktop Chrome/Edge,
   "Share tab audio") + `🎙 Record` (mic), raw PCM (ScriptProcessor — the one raw tap iOS
   still has), 15 min cap, silent-take = DRM message, → the SAME `loadBuffer` path as an upload.
@@ -2505,7 +2543,10 @@ accordingly.
   stream-ripping code). Plus the separator core run end-to-end through the REAL vendored
   library with a fake session (named-export binding, private-mode cache guard, 3 blocks,
   stems = mask × input, stems sum to the mix), progress that reports work COMPLETED (first event
-  0 done after 0 runs, monotone) and `progressEta`. Real-model numbers: `tests/bench/scnet-e2e.mjs`.
+  0 done after 0 runs, monotone) and `progressEta`. Low-memory mode: the 120-frame contract through
+  the real library, the pinned SHA-256 of the committed model, cache/eviction/refusal, lean session
+  options, device detection, worker teardown, the crash rail and the deploy list. Real-model
+  numbers: `tests/bench/scnet-e2e.mjs` (`--compact 1` for the phone path).
 - **Key model v2 + manual override**: `npm test` asserts the reported defect is fixed
   (`D · C · G` reads **D major**, and E minor — whose tonic never sounds — loses by >20%),
   the same shape a step round the circle (`G · F · C` → G), that a genuine minor tune and a
