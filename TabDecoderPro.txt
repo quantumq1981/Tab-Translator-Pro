@@ -2883,7 +2883,9 @@ function StemsPanel({ C, useSharp, getSource, sourceName, fmt, loading }) {
       const msg = String((e && e.message) || e);
       // Only blame memory when the error actually looks like memory — otherwise the hint sends the user chasing the wrong cause.
       const hint = /memory|allocat|RangeError|out of bounds|OOM/i.test(msg + (e && e.name))
-        ? (compact ? " Long songs need a lot of memory on a phone — try a shorter clip, or import stems from Moises/Demucs." : " Turn on 📱 Low-memory mode and try again, or import stems from Moises/Demucs.")
+        ? (!compact ? " Turn on 📱 Low-memory mode and try again, or import stems from Moises/Demucs."
+          : /backend|wasm/i.test(msg) ? " The browser couldn't set aside memory for the separator. Reload the page, load the song and split it straight away (before Isolate vocals, A/B clarity or other analyses), and close other tabs — or import stems from Moises/Demucs."
+          : " Long songs need a lot of memory on a phone — try a shorter clip, or import stems from Moises/Demucs.")
         : /fetch|network|Load failed|NetworkError|huggingface|jsdelivr|HTTP/i.test(msg)
           ? ` The first split downloads the model (~${compact ? 11 : 13} MB) — check the connection and try again.`
           : " You can import stems from Moises/Demucs instead.";

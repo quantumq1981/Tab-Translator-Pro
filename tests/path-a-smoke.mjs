@@ -2724,6 +2724,32 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
     let bad = ""; try { await core.compactModelBytes(core.COMPACT_MODEL, { fetch: async () => new Response(compactBytes.slice(0, 5000)) }); } catch (e) { bad = e.message; }
     expect(/integrity check/.test(bad), "a partial / altered download is refused with a readable message");
   }
+  // iOS: ORT's shared 4 GiB WASM memory can't be reserved on a busy iPhone ("no available backend
+  // found. ERR: [wasm] RangeError: Out of memory", reported on-device). Cap it, step down if refused.
+  {
+    const made = [];
+    let refuseAbove = 16384;
+    function FakeMemory(d) { if (d.shared && d.maximum > refuseAbove) throw new RangeError("Out of memory"); made.push(d); this.d = d; }
+    const scope = { WebAssembly: { Memory: FakeMemory } };
+    expect(core.capWasmMemory(scope) === true && core.capWasmMemory(scope) === false, "capWasmMemory installs once (idempotent)");
+    const M = scope.WebAssembly.Memory;
+    const big = new M({ initial: 256, maximum: 65536, shared: true });
+    expect(big.d.maximum === 16384, `ORT's 4 GiB shared maximum is capped to 1 GiB (got ${big.d.maximum} pages)`);
+    refuseAbove = 8192;
+    const stepped = new M({ initial: 256, maximum: 65536, shared: true });
+    expect(stepped.d.maximum === 8192, `when 1 GiB and 768 MiB are refused it steps down to 512 MiB (got ${stepped.d.maximum})`);
+    refuseAbove = 1000;
+    let threw = ""; try { new M({ initial: 256, maximum: 65536, shared: true }); } catch (e) { threw = e.name + ": " + e.message; }
+    expect(/RangeError: Out of memory/.test(threw), "below the 512 MiB floor the original RangeError surfaces (no silent tiny heap)");
+    refuseAbove = 1e9;
+    expect(new M({ initial: 0, maximum: 0, shared: true }).d.maximum === 0 && new M({ initial: 16, maximum: 65536 }).d.maximum === 65536 && new M({ initial: 16, maximum: 4096, shared: true }).d.maximum === 4096, "other memories pass through untouched (ORT's SAB probe, non-shared, already-small)");
+    const realScope = { WebAssembly: { Memory: WebAssembly.Memory } };
+    core.capWasmMemory(realScope);
+    const real = new realScope.WebAssembly.Memory({ initial: 1, maximum: 65536, shared: true });
+    expect(real instanceof WebAssembly.Memory && real.buffer.byteLength === 65536, "with the real WebAssembly.Memory the capped constructor still returns a genuine WebAssembly.Memory");
+    const coreSrc = fs.readFileSync(path.join(repo, "stem-model-core.js"), "utf8");
+    expect(/if \(compact\) capWasmMemory\(\);/.test(coreSrc) && coreSrc.indexOf("if (compact) capWasmMemory();") < coreSrc.indexOf("compactSession(device, await compactModelBytes())"), "low-memory mode caps the WASM reservation before ORT is imported");
+  }
   // one ORT session for the whole song, created lean
   {
     let created = null, released = 0;

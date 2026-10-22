@@ -2177,6 +2177,19 @@ separator and capture are browser glue (device check remains for the real model)
       **70.4** vs perfect stems 75.2 vs mix 63.0 — chart quality matches the full model (100 s: 59.4 vs
       58.7). Speed 5.2× real time (full: 6.0×). What's left is mostly full-length arrays (four stereo
       stems ≈ 1.4 MB per second of song) and the page's own copy of the decoded song.
+    - **First iPhone run of low-memory mode failed at startup (fixed, #111):** "no available backend
+      found. ERR: [wasm] RangeError: Out of memory", ~10 s in, before the model ran. ORT 1.30 ships ONE
+      WASM build and it creates `new WebAssembly.Memory({ initial: 256, maximum: 65536, shared: true })`
+      — a SHARED memory can't move, so Safari must reserve the whole **4 GiB** maximum of address space
+      up front; on an iPhone whose page already holds a decoded song + its analyses (vocal isolation,
+      A/B clarity, sections were all run in the report) that reservation fails. The model needs far
+      less: measured in onnxruntime-web, the compact graph runs with the maximum capped at 1 GiB, 768,
+      512 and **384 MiB** and fails at 256 MiB. `capWasmMemory()` (core, low-memory mode only, installed
+      before ORT is imported) caps shared memories that ask for > 1 GiB and steps down 1 GiB → 768 →
+      512 MiB if refused; below that the original RangeError surfaces. Everything else passes through.
+      Verified: real app + real worker + real ORT under the cap → stems identical to the uncapped run
+      (SDR to the hundredth). The OOM hint now says to reload and split straight after loading the song.
+      **Don't remove the cap because it "works on desktop"** — desktop never has trouble reserving 4 GiB.
     - **Device check that remains:** a real iPhone. If a long song still dies there, the next levers
       are Int16 stem storage (halves the stems) and WebGPU (ORT's WebGPU EP; iOS 26 Safari has WebGPU).
 - **Live capture** (`LiveCapture`): `🖥 Capture a tab` (getDisplayMedia, desktop Chrome/Edge,
@@ -2545,7 +2558,8 @@ accordingly.
   stems = mask × input, stems sum to the mix), progress that reports work COMPLETED (first event
   0 done after 0 runs, monotone) and `progressEta`. Low-memory mode: the 120-frame contract through
   the real library, the pinned SHA-256 of the committed model, cache/eviction/refusal, lean session
-  options, device detection, worker teardown, the crash rail and the deploy list. Real-model
+  options, device detection, worker teardown, the WASM-reservation cap (ladder + pass-through +
+  genuine Memory objects), the crash rail and the deploy list. Real-model
   numbers: `tests/bench/scnet-e2e.mjs` (`--compact 1` for the phone path).
 - **Key model v2 + manual override**: `npm test` asserts the reported defect is fixed
   (`D · C · G` reads **D major**, and E minor — whose tonic never sounds — loses by >20%),

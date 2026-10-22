@@ -83,6 +83,34 @@ export async function pickDevice(pref) {
   return "wasm";
 }
 
+/* iOS: ORT 1.30's only WASM build creates `new WebAssembly.Memory({ initial: 256, maximum: 65536,
+ * shared: true })` — a SHARED memory can't move, so Safari must reserve its whole 4 GiB maximum of
+ * address space up front. On an iPhone whose page already holds a decoded song and its analyses,
+ * that reservation fails before the model has done anything: "no available backend found. ERR:
+ * [wasm] RangeError: Out of memory" (reported on-device, ~10 s into a low-memory split).
+ * The compact model's heap needs < 384 MiB (measured: runs at 384 MiB, fails at 256 MiB), so cap
+ * such requests at 1 GiB and step down to 768 / 512 MiB if even that is refused. Only shared
+ * memories asking for more than the first rung are touched; everything else passes through. */
+export const WASM_MAX_LADDER_PAGES = [16384, 12288, 8192];   // 1 GiB · 768 MiB · 512 MiB (64 KiB pages)
+export function capWasmMemory(scope = globalThis, ladder = WASM_MAX_LADDER_PAGES) {
+  const WA = scope && scope.WebAssembly;
+  if (!WA || typeof WA.Memory !== "function" || WA.Memory.__ttpCapped) return false;
+  const Orig = WA.Memory;
+  function Memory(desc) {
+    if (!desc || !desc.shared || !(desc.maximum > ladder[0])) return new Orig(desc);
+    let last = null;
+    for (const max of ladder) {
+      if (max < (desc.initial || 0)) continue;
+      try { return new Orig({ ...desc, maximum: max }); } catch (e) { last = e; }
+    }
+    throw last || new RangeError("Out of memory");
+  }
+  Memory.prototype = Orig.prototype;          // instanceof WebAssembly.Memory still holds
+  Memory.__ttpCapped = true; Memory.__orig = Orig;
+  try { WA.Memory = Memory; } catch (_) { return false; }
+  return true;
+}
+
 export async function sha256Hex(bytes) {
   const d = await globalThis.crypto.subtle.digest("SHA-256", bytes);
   return Array.from(new Uint8Array(d), (b) => b.toString(16).padStart(2, "0")).join("");
@@ -147,6 +175,7 @@ export async function separateInBlocks(left, right, sampleRate, opts = {}) {
   const device = await pickDevice(opts.device);
   const n = Math.min(left.length, right.length);
   const compact = !!opts.compact;
+  if (compact) capWasmMemory();                // before ORT is imported (see capWasmMemory)
   // compact: our own pinned model + one reused session (opts.session stays the test seam)
   let own = null;
   const session = opts.session || (compact ? async () => own || (own = await compactSession(device, await compactModelBytes())) : undefined);
