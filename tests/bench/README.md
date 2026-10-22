@@ -41,3 +41,30 @@ node bench/ambig.mjs test   # where the right answer sits for uncertain chords (
 Synthetic timbres are cleaner than real recordings (no amp distortion, no fret noise, no real
 room), so absolute numbers are optimistic; the **deltas** between pipelines are the read. The
 repo's real stems are vocal (no harmonic ground truth) — they are used for sanity/run-time only.
+
+## `scnet-e2e.mjs` — the real separator in the real app
+
+Runs the actual app in headless Chromium with the real vendor bundle, stem worker and SCNet
+weights (no stubs), on a mix summed from known rendered stems. It reports separator wall time,
+peak memory (summed PSS of all Chromium processes), SDR for each stem, and chart accuracy from the
+separated stems vs perfect stems vs the mix decoded directly.
+
+Needs network access to `huggingface.co` **and `us.aws.cdn.hf.co`** (the weights redirect to
+HF's Xet CDN) plus `cdn.jsdelivr.net` (ONNX Runtime Web). The boot CDNs (esm.sh React, unpkg
+Babel) are served locally from `--deps`:
+
+```sh
+D=$(mktemp -d) && cd $D && npm init -y >/dev/null && npm i react@18.3.1 react-dom@18.3.1 @babel/standalone@7.25.6 esbuild
+cat > all-entry.js <<'JS'
+import * as R0 from "react"; import * as C0 from "react-dom/client";
+const R = R0.default || R0, C = C0.default || C0;
+export const React = R; export const createRoot = C.createRoot, hydrateRoot = C.hydrateRoot;
+export const { Children, Component, Fragment, Profiler, PureComponent, StrictMode, Suspense, cloneElement, createContext, createElement, createRef, forwardRef, isValidElement, lazy, memo, startTransition, useCallback, useContext, useDebugValue, useDeferredValue, useEffect, useId, useImperativeHandle, useInsertionEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore, useTransition, version } = R;
+JS
+npx esbuild all-entry.js --bundle --format=esm --minify --define:process.env.NODE_ENV='"production"' --outfile=out/all.mjs
+cp node_modules/@babel/standalone/babel.min.js out/
+cd -  # back to tests/
+node bench/scnet-e2e.mjs --deps $D/out --tracks 3 --sec 40 --playwright /opt/node-tools/node_modules/playwright
+```
+
+React and react-dom are bundled into one module so the page gets a single React instance.
