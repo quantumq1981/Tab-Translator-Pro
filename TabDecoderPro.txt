@@ -226,6 +226,15 @@ import {
   analyzeAudioChords,
   resampleTo,
   audioEventsToScore,
+  commitChordChoices,
+  autoResolveChords,
+  reopenAutoChords,
+  stemRoleFromName,
+  STEM_ROLE_NAMES,
+  chartsFromStems,
+  drumPattern,
+  drumHitsToMidi,
+  encodeWav16,
   _cosDist,
   _dtw,
   scoreChromaSequence,
@@ -426,6 +435,11 @@ async function analyzeChordsOffThread(samples, sr, opts = {}) {
 async function resampleOffThread(samples, srIn, srOut) {
   try { return await _engineRPC("resampleTo", [samples, srIn, srOut]); }
   catch (_) { return resampleTo(samples, srIn, srOut); }
+}
+/* Stems → per-instrument charts off-thread (several decodes + YIN + drum NMF), main-thread fallback. */
+async function chartsFromStemsOffThread(stems, sr, opts = {}) {
+  try { return await _engineRPC("chartsFromStems", [stems, sr, opts]); }
+  catch (_) { return chartsFromStems(stems, sr, opts); }
 }
 /* DTW audio↔score alignment off-thread (heavy: FFTs + DP), main-thread fallback. */
 async function alignPcmToScoreOffThread(samples, sr, score, opts = {}) {
@@ -2125,6 +2139,9 @@ function AudioImport({ C, useSharp }) {
   const [secSens, setSecSens] = useState("balanced");// how finely to cut the song
   const [bpb, setBpb] = useState(4);                 // beats per bar
   const [simple, setSimple] = useState(false);       // triad/7th bias (no 9th/extension over-labels) — good for vocal harmony
+  // ⚡ Auto: uncertain chords take the decoder's best match with nothing left pending (per device)
+  const [autoPick, setAutoPick] = useState(() => { try { return localStorage.getItem("ttp:autoPick") === "1"; } catch (_) { return false; } });
+  const autoPickRef = useRef(autoPick);
   const [overrides, setOverrides] = useState({});
   const [dur, setDur] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -2157,7 +2174,7 @@ function AudioImport({ C, useSharp }) {
           // audio instead of dialled in by hand. Measured against a time-aligned .gp4:
           // root accuracy 25.8% -> 38.7%, coverage 61% -> 100%.
           const r = (await analyzeChordsOffThread(ds, sr, opts)) || {};
-          setRaw(r.events || []);
+          setRaw(autoPickRef.current ? autoResolveChords(r.events || []) : (r.events || []));
           if (r.bpm) setBpm(Math.round(r.bpm));
           setBeatInfo(r.bpm || r.tuning != null ? { bpm: r.bpm || 0, method: r.method, tuning: r.tuning, key: r.key } : null);
           // cache the beat grid: the structure pass reuses it instead of tracking twice
@@ -2169,9 +2186,10 @@ function AudioImport({ C, useSharp }) {
     }, 30);
   };
 
+  const resetFor = (label) => { setErr(""); setName(label); setBusy(true); setRaw([]); setOverrides({}); setAb(null); setMlScore(null); setMlNotes(null); setVoiceIdx(0); setSections([]); ref.current.mlRaw = null; stopPlay(); };
   const onFile = async (e) => {
     const f = e.target.files && e.target.files[0]; if (!f) return;
-    setErr(""); setName(f.name); setBusy(true); setRaw([]); setOverrides({}); setAb(null); setMlScore(null); setMlNotes(null); setVoiceIdx(0); setSections([]); ref.current.mlRaw = null; stopPlay();
+    resetFor(f.name);
     try {
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) { setErr("Web Audio isn't available in this browser."); setBusy(false); return; }
@@ -2179,21 +2197,29 @@ function AudioImport({ C, useSharp }) {
       const dctx = new AC();
       const audioBuf = await new Promise((res, rej) => { const p = dctx.decodeAudioData(ab, res, rej); if (p && p.then) p.then(res, rej); });
       try { dctx.close(); } catch (_) {}
-      const chs = audioBuf.numberOfChannels;
-      const factor = Math.max(1, Math.floor(audioBuf.sampleRate / TARGET));
-      const sr = audioBuf.sampleRate / factor;
-      // Downsample each channel to ~16k (plenty for chroma) so the STFT isolation + the
-      // analysis both stay light. Keep L/R so we can center-extract on demand. A real
-      // anti-aliasing low-pass (resampleTo), not a box average — see resampleOffThread.
-      const l = audioBuf.getChannelData(0);
-      const L16 = await resampleOffThread(l, audioBuf.sampleRate, sr);
-      const R16 = chs >= 2 ? await resampleOffThread(audioBuf.getChannelData(1), audioBuf.sampleRate, sr) : L16;
-      const mono = new Float32Array(L16.length);
-      for (let i = 0; i < L16.length; i++) mono[i] = (L16[i] + R16[i]) / 2;
-      ref.current = { audioBuf, L16, R16, mono, sr, stereo: chs >= 2 };
-      setDur(audioBuf.duration);
-      prepare(isolate, kind);
+      await loadBuffer(audioBuf);
     } catch (_) { setErr("Couldn't decode audio from that file — try an audio file, or a video that has an audio track."); setBusy(false); }
+  };
+  /* Live capture → the SAME pipeline as an uploaded file (see LiveCapture). */
+  const onCaptured = async (audioBuf, label) => {
+    resetFor(label);
+    try { await loadBuffer(audioBuf); } catch (_) { setErr("Couldn't analyse that recording."); setBusy(false); }
+  };
+  const loadBuffer = async (audioBuf) => {
+    const chs = audioBuf.numberOfChannels;
+    const factor = Math.max(1, Math.floor(audioBuf.sampleRate / TARGET));
+    const sr = audioBuf.sampleRate / factor;
+    // Downsample each channel to ~16k (plenty for chroma) so the STFT isolation + the
+    // analysis both stay light. Keep L/R so we can center-extract on demand. A real
+    // anti-aliasing low-pass (resampleTo), not a box average — see resampleOffThread.
+    const l = audioBuf.getChannelData(0);
+    const L16 = await resampleOffThread(l, audioBuf.sampleRate, sr);
+    const R16 = chs >= 2 ? await resampleOffThread(audioBuf.getChannelData(1), audioBuf.sampleRate, sr) : L16;
+    const mono = new Float32Array(L16.length);
+    for (let i = 0; i < L16.length; i++) mono[i] = (L16[i] + R16[i]) / 2;
+    ref.current = { audioBuf, L16, R16, mono, sr, stereo: chs >= 2 };
+    setDur(audioBuf.duration);
+    prepare(isolate, kind);
   };
 
   // Build the analysis buffer (center-extracted vocals when isolate is on + the file is
@@ -2208,10 +2234,16 @@ function AudioImport({ C, useSharp }) {
     run(s.cur, s.sr, k);
   };
   const switchKind = (k) => { setKind(k); setOverrides({}); const s = ref.current; if (s.cur) run(s.cur, s.sr, k); };
-  // Review: adopt one of the decoder's ranked alternatives for an uncertain chord. It edits
-  // the SOURCE event, so the chart re-quantises and every export carries the choice.
-  const pickAlternative = (i, alt) => setRaw((evs) => evs.map((e, j) => (j === i ? { ...e, symbol: alt.symbol, midis: alt.midis || e.midis, ambiguous: false, reviewed: true } : e)));
-  const confirmChord = (i) => setRaw((evs) => evs.map((e, j) => (j === i ? { ...e, ambiguous: false, reviewed: true } : e)));
+  // Review: batch-commit choices on the SOURCE events (pure engine commitChordChoices), so
+  // the chart re-quantises and every export carries them. ⚡ Auto resolves every uncertain
+  // chord with the decoder's best match (autoResolveChords); off puts them back in review.
+  const commitChoices = (picks) => setRaw((evs) => commitChordChoices(evs, picks));
+  const toggleAuto = () => setAutoPick((v) => {
+    const n = !v; autoPickRef.current = n;
+    try { localStorage.setItem("ttp:autoPick", n ? "1" : "0"); } catch (_) {}
+    setRaw((evs) => (n ? autoResolveChords(evs) : reopenAutoChords(evs)));
+    return n;
+  });
   // Re-analyse when the Simple (no-extensions) toggle flips — `run` reads the fresh `simple`.
   const simpleRef = useRef(simple);
   useEffect(() => { if (simpleRef.current !== simple) { simpleRef.current = simple; const s = ref.current; if (s.cur) run(s.cur, s.sr, kind); } }, [simple]);
@@ -2419,6 +2451,7 @@ function AudioImport({ C, useSharp }) {
       <SectionLabel C={C}>AUDIO → CHART · isolated-stem recognition (experimental)</SectionLabel>
       <div style={{ fontSize: 12, color: C.dim, lineHeight: 1.6, marginBottom: 12 }}>
         Upload a <b>clean, isolated instrument stem</b> (one guitar / piano / bass) — an <b>audio file</b> (MP3/M4A/WAV) <b>or a video</b> (MP4/MOV; the audio track is extracted). Decoded + analysed entirely on your device; nothing is uploaded. Chordal stems → a chord chart (export / send to Pro); a single-note stem (bass/lead) → notes. For a <b>full stereo mix</b>, tap <b>🎤 Isolate vocals</b> to center-extract the vocal (where lead + backing harmony usually sit) before charting — the zero-download karaoke trick.
+        <br />No file? <b>🖥 Capture a tab</b> records a song playing in another browser tab (desktop Chrome/Edge — tick “Share tab audio”), or <b>🎙 Record</b> from the mic. Have a <b>full mix</b>? <b>✂ Split this mix into stems</b> below charts every instrument.
         <br /><span style={{ color: C.dim }}>Already have real stems? A <b>ListenHub / Mureka</b> <code>listenhub music stem --audio song.mp3</code> split (per-instrument stems) drops straight in here — that separated stem is the cleanest possible input. <b>⚖ A/B clarity</b> tells you whether the separation actually helped before you commit to charting it.</span>
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 14 }}>
@@ -2429,6 +2462,7 @@ function AudioImport({ C, useSharp }) {
               validates the file instead — same lesson as the Guitar Pro upload. */}
           <input type="file" onChange={onFile} style={{ display: "none" }} />
         </label>
+        <LiveCapture C={C} onCaptured={onCaptured} disabled={busy} />
         <span style={{ display: "inline-flex", gap: 4 }}>
           {[["chords", "Chords (guitar/piano)"], ["notes", "Notes (bass/lead)"]].map(([k, lbl]) => (
             <button key={k} onClick={() => switchKind(k)} disabled={busy} style={{ ...chip(C), padding: "5px 10px", borderColor: kind === k ? C.cyan : C.border, color: kind === k ? C.cyan : C.dim }}>{lbl}</button>
@@ -2597,6 +2631,9 @@ function AudioImport({ C, useSharp }) {
         </div>
       )}
 
+      {/* STEMS → split a full mix (or import stems) → a chart per instrument */}
+      <StemsPanel C={C} useSharp={useSharp} getSource={() => ref.current.audioBuf || null} sourceName={name} fmt={fmt} />
+
       {/* SONG STRUCTURE → detected + editable, applied to the chart below */}
       {!!raw.length && !!ref.current.cur && (
         <SectionEditor C={C} sections={sections} names={SECTION_NAMES} barOf={barOf} pos={pos} dur={dur}
@@ -2624,7 +2661,7 @@ function AudioImport({ C, useSharp }) {
               {beatInfo && beatInfo.tuning != null && Math.abs(beatInfo.tuning) >= 5 && <> · tuning <b style={{ color: C.amber }}>{beatInfo.tuning > 0 ? "+" : ""}{Math.round(beatInfo.tuning)}¢</b> (compensated)</>}
             </span>
           </div>
-          <ChordReview events={raw} C={C} fmt={fmt} onSeek={(t) => play(t)} onPick={pickAlternative} onConfirm={confirmChord} />
+          <ChordReview events={raw} C={C} fmt={fmt} onSeek={(t) => play(t)} onCommit={commitChoices} auto={autoPick} onAuto={toggleAuto} />
           <ChartPanel score={audioScore} title={name || "Audio stem"} meta={`${audioScore.bars.length} bars · ♩=${bpm} · from audio`} C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey="" onPick={() => {}} />
           <div style={{ fontSize: 11, color: C.dim, marginTop: 10, lineHeight: 1.6 }}>
             Decoded with <b>SynHarmonics v2</b> (note-level NNLS transcription, tuning compensation, inversions + slash chords, calibrated confidence). Faded chords with a <b style={{ color: C.amber }}>?</b> are the uncertain ones — fix them from the review list or <b>✎ Edit</b>, set <b>♩=</b> so bars align, then <b>CSMPN</b> / <b>→ Chord Sheet Maker Pro</b> to send it on. Dense voicings / heavy bleed still mislabel.
@@ -2655,51 +2692,382 @@ function AudioImport({ C, useSharp }) {
   );
 }
 
-/* ChordReview — SynHarmonics v2 §7 "primary tier + on-demand overlay". The chart shows ONE
- * label per chord (de-emphasised when the decoder is unsure); this strip is the overlay:
- * only the chords whose calibrated posterior is low (`ambiguous`, prob < 0.4 — on the
- * benchmark those are right less than half the time), each with ▶ seek-to-listen and the
- * decoder's ranked alternatives as one-tap fixes. Pure presentational: events in,
- * callbacks out. Renders nothing when every chord is confident. */
-function ChordReview({ events, C, fmt, onSeek, onPick, onConfirm }) {
-  const [open, setOpen] = useState(false);
-  const flagged = (events || []).map((e, i) => ({ e, i })).filter(({ e }) => e && e.ambiguous && e.alternatives);
-  const confident = (events || []).filter((e) => e && typeof e.prob === "number");
-  if (!flagged.length) {
-    return confident.length ? <div style={{ fontSize: 11, color: C.dim, marginBottom: 8 }}>✓ All {confident.length} chords decoded with confidence — none flagged for review.</div> : null;
-  }
-  const shown = open ? flagged : flagged.slice(0, 6);
-  const pct = (p) => `${Math.round(100 * p)}%`;
+/* LiveCapture — record what the browser is PLAYING (a tab, e.g. a song in a YouTube or
+ * streaming tab, via getDisplayMedia with "Share tab audio") or the MICROPHONE, then hand
+ * the take to the same analysis as an uploaded file. This is the honest alternative to a
+ * "paste a YouTube/Spotify link" downloader: those streams are DRM-protected or barred
+ * from download by the service's terms, and a zero-server page cannot fetch them anyway.
+ * Capturing playback is what the user's own device is already doing.
+ *
+ * Raw PCM (no codec) at the context's rate — lossless relative to what plays. Nothing is
+ * saved or uploaded; the take lives in memory. Tab capture is desktop Chrome/Edge (Safari
+ * and iOS do not share tab audio); the mic works everywhere. Stops itself at 15 min.
+ * DRM-protected playback may capture as silence — the panel says so if the take is silent. */
+function LiveCapture({ C, onCaptured, disabled }) {
+  const [rec, setRec] = useState(null);                  // { kind, t0 } while recording
+  const [elapsed, setElapsed] = useState(0), [msg, setMsg] = useState("");
+  const st = useRef({});
+  const md = typeof navigator !== "undefined" ? navigator.mediaDevices : null;
+  const canTab = !!(md && md.getDisplayMedia) && !(typeof navigator !== "undefined" && /iPad|iPhone|iPod/.test(navigator.userAgent || ""));
+  const canMic = !!(md && md.getUserMedia);
+  const MAX_SEC = 15 * 60;
+
+  const cleanup = () => {
+    const s = st.current;
+    if (s.timer) clearInterval(s.timer);
+    try { s.node && s.node.disconnect(); } catch (_) {}
+    try { s.src && s.src.disconnect(); } catch (_) {}
+    (s.stream ? s.stream.getTracks() : []).forEach((t) => { try { t.stop(); } catch (_) {} });
+    st.current = { chunks: s.chunks, ctx: s.ctx, rate: s.rate, kind: s.kind };
+  };
+  useEffect(() => () => { cleanup(); try { st.current.ctx && st.current.ctx.close(); } catch (_) {} }, []);
+
+  const start = async (kind) => {
+    setMsg("");
+    const raw = { echoCancellation: false, noiseSuppression: false, autoGainControl: false };
+    let stream;
+    try {
+      stream = kind === "tab"
+        ? await md.getDisplayMedia({ video: true, audio: raw, systemAudio: "include", selfBrowserSurface: "exclude", preferCurrentTab: false })
+        : await md.getUserMedia({ audio: raw });
+    } catch (_) { setMsg(kind === "tab" ? "Tab capture was cancelled or isn't allowed." : "Microphone access was denied."); return; }
+    stream.getVideoTracks().forEach((t) => t.stop());     // tab capture needs video to start; we only keep audio
+    if (!stream.getAudioTracks().length) { stream.getTracks().forEach((t) => t.stop()); setMsg("No audio in that share — pick a TAB and tick “Share tab audio”."); return; }
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext, ctx = new AC();
+      const src = ctx.createMediaStreamSource(stream);
+      const chunks = [[], []];
+      // ScriptProcessor: deprecated, but the one raw-PCM tap every browser (incl. iOS Safari) still has
+      const node = ctx.createScriptProcessor(4096, 2, 2);
+      node.onaudioprocess = (ev) => {
+        const b = ev.inputBuffer;
+        chunks[0].push(Float32Array.from(b.getChannelData(0)));
+        chunks[1].push(Float32Array.from(b.numberOfChannels > 1 ? b.getChannelData(1) : b.getChannelData(0)));
+      };
+      const mute = ctx.createGain(); mute.gain.value = 0;  // keep the node pulling without echoing the tab back
+      src.connect(node); node.connect(mute); mute.connect(ctx.destination);
+      stream.getAudioTracks()[0].onended = () => stop();   // "Stop sharing" in the browser bar
+      const t0 = Date.now();
+      st.current = { stream, ctx, src, node, chunks, rate: ctx.sampleRate, kind, timer: setInterval(() => { const e = (Date.now() - t0) / 1000; setElapsed(e); if (e >= MAX_SEC) stop(); }, 250) };
+      setElapsed(0); setRec({ kind, t0 });
+    } catch (_) { stream.getTracks().forEach((t) => t.stop()); setMsg("Couldn't start recording in this browser."); }
+  };
+
+  const stop = () => {
+    const s = st.current; if (!s.chunks) { setRec(null); return; }
+    cleanup();
+    const { chunks, rate, ctx, kind } = st.current;
+    const n = chunks[0].reduce((a, c) => a + c.length, 0);
+    setRec(null);
+    if (n < rate * 2) { setMsg("That take was under 2 seconds — nothing to analyse."); try { ctx.close(); } catch (_) {} return; }
+    const buf = ctx.createBuffer(2, n, rate);
+    for (let ch = 0; ch < 2; ch++) { const out = new Float32Array(n); let o = 0; for (const c of chunks[ch]) { out.set(c, o); o += c.length; } buf.copyToChannel(out, ch); }
+    let peak = 0; const d0 = buf.getChannelData(0); for (let i = 0; i < n; i += 64) peak = Math.max(peak, Math.abs(d0[i]));
+    try { ctx.close(); } catch (_) {}
+    st.current = {};
+    if (peak < 1e-4) { setMsg("The take is silent — the tab's audio may be DRM-protected (it can't be captured), or the wrong tab was shared."); return; }
+    onCaptured(buf, kind === "tab" ? "Captured tab audio" : "Microphone recording");
+  };
+  const mmss = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+
+  if (!canTab && !canMic) return null;
   return (
-    <div style={{ border: `1px dashed ${C.amber}66`, borderRadius: 8, padding: "8px 10px", marginBottom: 10, background: `${C.amber}0d` }}>
-      <div style={{ fontSize: 11, color: C.amber, marginBottom: 6 }}>
-        ⚠ <b>{flagged.length}</b> of {confident.length || events.length} chords are uncertain — listen, then keep the label or tap an alternative.
+    <span style={{ display: "inline-flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+      {rec ? (
+        <button onClick={stop} style={{ ...chip(C), padding: "5px 12px", color: C.red || C.amber, borderColor: C.red || C.amber }}>■ Stop &amp; analyse · {mmss(elapsed)}</button>
+      ) : (
+        <>
+          {canTab && <button onClick={() => start("tab")} disabled={disabled} title="Play the song in another browser tab (YouTube, a streaming site…), share that tab with “Share tab audio” ticked, then stop to analyse. Desktop Chrome/Edge." style={{ ...chip(C), padding: "5px 10px" }}>🖥 Capture a tab</button>}
+          {canMic && <button onClick={() => start("mic")} disabled={disabled} title="Record from the microphone (e.g. the song playing on a speaker), then stop to analyse." style={{ ...chip(C), padding: "5px 10px" }}>🎙 Record</button>}
+        </>
+      )}
+      {msg && <span style={{ fontSize: 11, color: C.amber }}>{msg}</span>}
+    </span>
+  );
+}
+
+/* StemsPanel — full mix → stems → one chart per instrument (the Moises-style workflow,
+ * on-device). Two sources:
+ *   ✂ Split this mix   window.TTP_STEM_MODEL (stem-model.js: SCNet, MIT weights, lazy
+ *                      13 MB download, in a Worker) → vocals · drums · bass · other
+ *   📂 Import stems     stems you already have (Moises / Demucs / LALAL exports — Moises
+ *                      can also give guitar + piano separately); roles from file names,
+ *                      fixable per file
+ * Then the pure engine `chartsFromStems` decodes every stem on ONE shared beat grid (the
+ * drum stem's pulse), so bar n is the same moment in every chart; all charts quantise with
+ * the same ♩= here, so they stay in sync when you nudge it. A mixer solos / mutes stems
+ * (sample-aligned, one clock) and every stem downloads as WAV. Browser glue only. */
+function StemsPanel({ C, useSharp, getSource, sourceName, fmt }) {
+  const [tracks, setTracks] = useState(null);           // { sampleRate, list:[{ role, name, L, R }] } at FULL rate
+  const [busy, setBusy] = useState(""), [prog, setProg] = useState(null), [err, setErr] = useState("");
+  const [res, setRes] = useState(null);                 // chartsFromStems result
+  const [tab, setTab] = useState("band");
+  const [bpm, setBpm] = useState(120), [bpb, setBpb] = useState(4);
+  const [ovr, setOvr] = useState({});                    // role → chord overrides
+  const [mute, setMute] = useState(() => new Set()), [solo, setSolo] = useState(() => new Set());
+  const [playing, setPlaying] = useState(false), [pos, setPos] = useState(0);
+  const mix = useRef({});
+  const ROLES = ["vocals", "drums", "bass", "guitar", "piano", "other"];
+
+  const stop = () => {
+    const m = mix.current;
+    if (m.raf) cancelAnimationFrame(m.raf);
+    (m.srcs || []).forEach((x) => { try { x.stop(); } catch (_) {} });
+    if (m.ctx) { try { m.ctx.close(); } catch (_) {} }
+    mix.current = {}; setPlaying(false);
+  };
+  useEffect(() => () => stop(), []);
+  const audible = (role, mu = mute, so = solo) => (so.size ? so.has(role) : !mu.has(role));
+  useEffect(() => { const m = mix.current; (m.gains || []).forEach(([role, g]) => { g.gain.value = audible(role) ? 1 : 0; }); }, [mute, solo]);
+
+  const analyse = async (t) => {
+    setBusy("Charting every instrument…"); setErr(""); setRes(null);
+    try {
+      const sr = t.sampleRate, factor = Math.max(1, Math.floor(sr / 16000)), asr = sr / factor;
+      const byRole = {}, full = {};
+      for (const tr of t.list) {
+        const mono = new Float32Array(tr.L.length);
+        for (let i = 0; i < mono.length; i++) mono[i] = 0.5 * (tr.L[i] + (tr.R ? tr.R[i] : tr.L[i]));
+        full[tr.role] = full[tr.role] ? Float32Array.from(full[tr.role], (v, i) => v + (mono[i] || 0)) : mono;
+      }
+      for (const role of Object.keys(full)) byRole[role] = await resampleOffThread(full[role], sr, asr);
+      const r = await chartsFromStemsOffThread(byRole, asr, { useSharp, fullRate: full.drums ? { drums: full.drums, sampleRate: sr } : undefined });
+      setRes(r); setOvr({});
+      if (r.bpm) setBpm(Math.round(r.bpm));
+      setTab(r.charts.length ? r.charts[0].role : "band");
+    } catch (e) { setErr("Charting the stems failed: " + ((e && e.message) || e)); }
+    setBusy(""); setProg(null);
+  };
+
+  const split = async () => {
+    const src = getSource && getSource();
+    if (!src) { setErr("Upload a song above first."); return; }
+    if (typeof window === "undefined" || typeof window.TTP_STEM_MODEL !== "function") { setErr("The stem separator isn't loaded (it needs a connection the first time) — reload the page and try again."); return; }
+    stop(); setErr(""); setRes(null); setBusy("Separating stems (first time: ~13 MB model download)…"); setProg({ done: 0, total: 1, t0: Date.now() });
+    try {
+      const L = src.getChannelData(0), R = src.numberOfChannels > 1 ? src.getChannelData(1) : L;
+      const out = await window.TTP_STEM_MODEL(L, R, src.sampleRate, { onProgress: (done, total) => setProg((p) => ({ ...(p || { t0: Date.now() }), done, total })) });
+      const list = ["vocals", "drums", "bass", "other"].filter((k) => out.stems[k]).map((k) => ({ role: k, name: STEM_ROLE_NAMES[k], L: out.stems[k][0], R: out.stems[k][1] }));
+      const t = { sampleRate: out.sampleRate || src.sampleRate, list, device: out.device };
+      setTracks(t); await analyse(t);
+    } catch (e) { setErr("Stem separation failed: " + ((e && e.message) || e) + ". Long songs need a lot of memory on a phone — try a shorter clip, or import stems from Moises/Demucs."); setBusy(""); setProg(null); }
+  };
+
+  const importStems = async (e) => {
+    const files = Array.from((e.target && e.target.files) || []); if (!files.length) return;
+    stop(); setErr(""); setRes(null); setBusy("Decoding stems…");
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext; const ctx = new AC();
+      const decoded = [];
+      for (const f of files) {
+        const ab = await f.arrayBuffer();
+        const buf = await new Promise((res2, rej) => { const p = ctx.decodeAudioData(ab, res2, rej); if (p && p.then) p.then(res2, rej); });
+        decoded.push({ f, buf });
+      }
+      try { ctx.close(); } catch (_) {}
+      const sr = decoded[0].buf.sampleRate;
+      const list = [];
+      for (const { f, buf } of decoded) {
+        let L = buf.getChannelData(0), R = buf.numberOfChannels > 1 ? buf.getChannelData(1) : L;
+        if (buf.sampleRate !== sr) { L = await resampleOffThread(L, buf.sampleRate, sr); R = R === buf.getChannelData(0) ? L : await resampleOffThread(R, buf.sampleRate, sr); }
+        list.push({ role: stemRoleFromName(f.name) || "other", name: f.name, L, R });
+      }
+      setTracks({ sampleRate: sr, list, imported: true });
+      setBusy("");
+    } catch (_) { setErr("Couldn't decode one of those files as audio."); setBusy(""); }
+    if (e.target) e.target.value = "";
+  };
+
+  const play = () => {
+    if (playing) { stop(); return; }
+    if (!tracks) return;
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext, ctx = new AC();
+      const t0 = ctx.currentTime + 0.08, srcs = [], gains = [];
+      for (const tr of tracks.list) {
+        const b = ctx.createBuffer(2, tr.L.length, tracks.sampleRate);
+        b.copyToChannel(tr.L, 0); b.copyToChannel(tr.R || tr.L, 1);
+        const src = ctx.createBufferSource(), g = ctx.createGain();
+        src.buffer = b; g.gain.value = audible(tr.role) ? 1 : 0; src.connect(g); g.connect(ctx.destination); src.start(t0);
+        srcs.push(src); gains.push([tr.role, g]);
+      }
+      mix.current = { ctx, srcs, gains, t0 };
+      const len = Math.max(...tracks.list.map((x) => x.L.length)) / tracks.sampleRate;
+      const loop = () => { const t = ctx.currentTime - t0; setPos(Math.max(0, t)); if (t < len) mix.current.raf = requestAnimationFrame(loop); else stop(); };
+      mix.current.raf = requestAnimationFrame(loop); setPlaying(true);
+    } catch (_) { setErr("Playback failed."); stop(); }
+  };
+  const saveBytes = (bytes, filename, mime) => {
+    try {
+      const url = URL.createObjectURL(new Blob([bytes], { type: mime })), a = document.createElement("a");
+      a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+    } catch (_) { setErr("Download failed."); }
+  };
+  const base = (sourceName || "song").replace(/\.[^.]+$/, "").replace(/[^\w.-]+/g, "_") || "song";
+  const toggleSet = (set, setter, role) => setter((x) => { const n = new Set(x); n.has(role) ? n.delete(role) : n.add(role); return n; });
+
+  const chart = res && (res.charts.find((c) => c.role === tab) || res.charts[0]);
+  const chartScore = useMemo(() => {
+    if (!chart) return null;
+    if (chart.kind === "chords") return audioEventsToScore(chart.events, { bpm, beatsPerBar: bpb, useSharp });
+    // a monophonic line: every note its own event (no 0.12 s onset grouping into "chords")
+    if (chart.kind === "notes") return chart.notes.length ? polyNotesToScore(chart.notes.map((n) => ({ midi: n.midi, startSec: n.startSec, durSec: n.durSec })), { bpm, beatsPerBar: bpb, useSharp, onsetGrid: 0.005 }) : null;
+    return null;
+  }, [chart, bpm, bpb, useSharp]);
+  const groove = useMemo(() => (chart && chart.kind === "drums" ? drumPattern(chart.hits, { bpm, beatsPerBar: bpb }) : null), [chart, bpm, bpb]);
+
+  return (
+    <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 12, marginBottom: 14 }}>
+      <div style={{ fontSize: 11, color: C.dim, letterSpacing: 2, marginBottom: 6 }}>STEMS → PER-INSTRUMENT CHARTS</div>
+      <div style={{ fontSize: 11, color: C.dim, lineHeight: 1.6, marginBottom: 8 }}>
+        Split a <b>full mix</b> into vocals · drums · bass · other (guitar/keys) on your device, or import stems you already have (Moises can export guitar and piano separately). Every chart shares one beat grid, so bars line up across instruments.
       </div>
-      <div style={{ display: "grid", gap: 6 }}>
-        {shown.map(({ e, i }) => (
-          <div key={i} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, fontSize: 12 }}>
-            <button onClick={() => onSeek(e.startSec)} title="play from here" style={{ ...chip(C), padding: "2px 8px" }}>▶ {fmt(e.startSec)}</button>
-            <button onClick={() => onConfirm(i)} title={`keep ${e.symbol}`}
-              style={{ ...chip(C), padding: "2px 8px", color: C.cyan, fontFamily: "'Space Mono', monospace", fontWeight: 700 }}>
-              {e.symbol} <span style={{ fontWeight: 400, color: C.dim }}>{pct(e.prob)}</span>
-            </button>
-            <span style={{ color: C.dim }}>or</span>
-            {e.alternatives.map((a) => (
-              <button key={a.symbol} onClick={() => onPick(i, a)} title={`use ${a.symbol}`}
-                style={{ ...chip(C), padding: "2px 8px", fontFamily: "'Space Mono', monospace" }}>
-                {a.symbol} <span style={{ color: C.dim }}>{pct(a.prob)}</span>
-              </button>
-            ))}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 8 }}>
+        <button onClick={split} disabled={!!busy} style={{ ...chip(C), padding: "5px 12px", color: C.amber, borderColor: C.amber }}>✂ Split this mix into stems</button>
+        <label style={{ ...chip(C), padding: "5px 12px", cursor: "pointer" }}>📂 Import stems
+          <input type="file" multiple onChange={importStems} style={{ display: "none" }} />
+        </label>
+        {busy && <span style={{ fontSize: 11, color: C.cyan }}>{busy}{prog && prog.total ? ` ${Math.round((100 * prog.done) / prog.total)}%` : ""}{prog && prog.done > 0.05 && prog.total ? ` · ~${Math.max(1, Math.round(((Date.now() - prog.t0) / 1000) * (prog.total / prog.done - 1) / 60))} min left` : ""}</span>}
+      </div>
+      {err && <div style={{ fontSize: 11, color: C.red || C.amber, marginBottom: 8 }}>{err}</div>}
+
+      {tracks && (
+        <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
+          {tracks.list.map((tr, i) => (
+            <div key={i} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, fontSize: 12 }}>
+              <span style={{ minWidth: 120, color: C.cyan }}>{tr.name}</span>
+              {tracks.imported ? (
+                <select value={tr.role} onChange={(ev) => setTracks((t) => ({ ...t, list: t.list.map((x, j) => (j === i ? { ...x, role: ev.target.value } : x)) }))} style={{ ...chip(C), padding: "2px 6px", background: C.raised }}>
+                  {ROLES.map((r) => <option key={r} value={r}>{STEM_ROLE_NAMES[r]}</option>)}
+                </select>
+              ) : null}
+              <button onClick={() => toggleSet(solo, setSolo, tr.role)} style={{ ...chip(C), padding: "2px 8px", color: solo.has(tr.role) ? C.amber : C.dim }}>S</button>
+              <button onClick={() => toggleSet(mute, setMute, tr.role)} style={{ ...chip(C), padding: "2px 8px", color: mute.has(tr.role) ? C.red || C.amber : C.dim }}>M</button>
+              <button onClick={() => saveBytes(encodeWav16([tr.L, tr.R || tr.L], tracks.sampleRate), `${base}-${tr.role}.wav`, "audio/wav")} style={{ ...chip(C), padding: "2px 8px" }}>⬇ WAV</button>
+            </div>
+          ))}
+          <div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 11 }}>
+            <button onClick={play} style={{ ...chip(C), padding: "4px 12px", color: playing ? C.green : C.amber }}>{playing ? "■ Stop" : "▶ Play stems"}</button>
+            <span style={{ color: C.dim }}>{fmt(pos)} · S = solo · M = mute (live)</span>
+            {tracks.imported && <button onClick={() => analyse(tracks)} disabled={!!busy} style={{ ...chip(C), padding: "4px 12px", color: C.green }}>♫ Chart these stems</button>}
+            {tracks.device && <span style={{ color: C.dim }}>separated on {tracks.device === "webgpu" ? "GPU" : "CPU"}</span>}
           </div>
-        ))}
-      </div>
-      {flagged.length > shown.length || open ? (
-        <button onClick={() => setOpen((v) => !v)} style={{ ...chip(C), padding: "2px 10px", marginTop: 6 }}>{open ? "show fewer" : `show all ${flagged.length}`}</button>
-      ) : null}
+        </div>
+      )}
+
+      {res && (
+        <>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginBottom: 8 }}>
+            {res.charts.map((c) => (
+              <button key={c.role} onClick={() => setTab(c.role)} style={{ ...chip(C), padding: "4px 10px", borderColor: tab === c.role ? C.cyan : C.border, color: tab === c.role ? C.cyan : C.dim }}>{c.name}</button>
+            ))}
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11 }}>
+              <button onClick={() => setBpm((b) => Math.max(40, b - 1))} style={{ ...chip(C), padding: "2px 8px" }}>−</button>
+              <span style={{ color: C.amber }}>♩={bpm}</span>
+              <button onClick={() => setBpm((b) => Math.min(240, b + 1))} style={{ ...chip(C), padding: "2px 8px" }}>+</button>
+              <select value={bpb} onChange={(ev) => setBpb(+ev.target.value)} style={{ ...chip(C), padding: "2px 6px", background: C.raised }}><option value={4}>4/4</option><option value={3}>3/4</option></select>
+              <span style={{ color: C.dim }}>shared by every chart</span>
+            </span>
+          </div>
+          {!res.charts.length && <div style={{ fontSize: 11, color: C.dim }}>No instrument produced a chart.</div>}
+          {chart && chart.kind === "notes" && (
+            chart.notes.length ? <StaffView events={chart.notes.map((n) => ({ label: n.note, midi: n.midi, startSec: n.startSec, durSec: n.durSec }))} activeIdx={-1} C={C} useSharp={useSharp} />
+              : <div style={{ fontSize: 11, color: C.dim }}>No clear notes in this stem.</div>
+          )}
+          {chartScore && (
+            <ChartPanel score={chartScore} title={`${base} — ${chart.name}`} meta={`${chartScore.bars.length} bars · ♩=${bpm} · ${chart.name}${res.key && chart.role === "band" ? "" : ""}`}
+              C={C} useSharp={useSharp} overrides={ovr[chart.role] || {}} setOverrides={(f) => setOvr((o) => ({ ...o, [chart.role]: typeof f === "function" ? f(o[chart.role] || {}) : f }))} selKey="" onPick={() => {}} />
+          )}
+          {groove && (
+            <div>
+              <div className="tdp-scroll" style={{ display: "grid", gap: 8, maxHeight: 360, overflow: "auto", fontFamily: "'Space Mono', monospace", fontSize: 11 }}>
+                {groove.bars.map((b) => (
+                  <div key={b.number} style={{ display: "grid", gridTemplateColumns: "28px 1fr", gap: 2 }}>
+                    <span style={{ color: C.dim, gridRow: "span 3" }}>{b.number}</span>
+                    {[["H", b.hat], ["S", b.snare], ["K", b.kick]].map(([lab, row]) => (
+                      <span key={lab} style={{ letterSpacing: 2, color: lab === "K" ? C.amber : lab === "S" ? C.cyan : C.dim }}>{lab} {row.replace(/(.{4})/g, "$1 ").trim()}</span>
+                    ))}
+                  </div>
+                ))}
+              </div>
+              <button onClick={() => saveBytes(drumHitsToMidi(chart.hits, { bpm }), `${base}-drums.mid`, "audio/midi")} style={{ ...chip(C), padding: "4px 12px", marginTop: 8 }}>⬇ Drums MIDI</button>
+              <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>H = hi-hat/cymbals · S = snare · K = kick, sixteenths per beat. Soft ghost notes are left out.</div>
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }
 
+/* ChordReview — SynHarmonics v2 §7 "primary tier + on-demand overlay", with BATCH review.
+ * The chart shows ONE label per chord (de-emphasised when the decoder is unsure); this strip
+ * lists only the uncertain chords (`ambiguous`: calibrated prob < 0.4 — on the benchmark those
+ * are right less than half the time), each with ▶ seek-to-listen and its candidates (the
+ * detected label + the decoder's ranked alternatives) as a radio choice. Batch controls:
+ * Select all / Clear, Commit selected, Commit all — a commit applies each row's chosen
+ * candidate via the pure engine `commitChordChoices`. ⚡ Auto commits the decoder's own best
+ * choice for every uncertain chord automatically (`autoResolveChords`); those rows stay
+ * listed as "auto" so the choice can still be audited or changed. Pure presentational. */
+function ChordReview({ events, C, fmt, onSeek, onCommit, auto, onAuto }) {
+  const [open, setOpen] = useState(false);
+  const [sel, setSel] = useState(() => new Set());
+  const [choice, setChoice] = useState({});                 // row index → chosen candidate symbol
+  useEffect(() => { setSel(new Set()); setChoice({}); }, [events]);
+  const rows = (events || []).map((e, i) => ({ e, i })).filter(({ e }) => e && (e.ambiguous || e.autoResolved) && Array.isArray(e.alternatives));
+  const scored = (events || []).filter((e) => e && typeof e.prob === "number").length;
+  const pct = (p) => `${Math.round(100 * (p || 0))}%`;
+  const autoBtn = onAuto ? (
+    <button onClick={onAuto} title="Auto: every uncertain chord takes the decoder's best match automatically (still listed here, so you can change it)"
+      style={{ ...chip(C), padding: "2px 10px", borderColor: auto ? C.green : C.border, color: auto ? C.green : C.dim }}>{auto ? "⚡ Auto ✓" : "⚡ Auto"}</button>
+  ) : null;
+  if (!rows.length) {
+    return scored ? <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: C.dim, marginBottom: 8 }}>{autoBtn}<span>✓ All {scored} chords decoded with confidence — none to review.</span></div> : null;
+  }
+  const pending = rows.filter(({ e }) => e.ambiguous).length, autoN = rows.length - pending;
+  const shown = open ? rows : rows.slice(0, 6);
+  const allSel = rows.every(({ i }) => sel.has(i));
+  const toggle = (i) => setSel((s0) => { const n = new Set(s0); n.has(i) ? n.delete(i) : n.add(i); return n; });
+  const pick = (i, sym) => { setChoice((c) => ({ ...c, [i]: sym })); setSel((s0) => new Set(s0).add(i)); };
+  const commit = (idx) => onCommit(idx.map((i) => ({ index: i, symbol: choice[i] != null ? choice[i] : events[i].symbol })));
+  return (
+    <div style={{ border: `1px dashed ${(pending ? C.amber : C.green)}66`, borderRadius: 8, padding: "8px 10px", marginBottom: 10, background: `${pending ? C.amber : C.green}0d` }}>
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, fontSize: 11, marginBottom: 6 }}>
+        {autoBtn}
+        <span style={{ color: pending ? C.amber : C.green }}>
+          {pending ? <>⚠ <b>{pending}</b> of {scored || events.length} chords uncertain — listen, choose, commit.</> : null}
+          {autoN ? <>{pending ? " · " : ""}⚡ <b>{autoN}</b> auto-resolved with the best match — change any below.</> : null}
+        </span>
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+        <button onClick={() => setSel(allSel ? new Set() : new Set(rows.map(({ i }) => i)))} style={{ ...chip(C), padding: "2px 10px" }}>{allSel ? "☐ Clear" : "☑ Select all"}</button>
+        <button onClick={() => commit([...sel])} disabled={!sel.size} style={{ ...chip(C), padding: "2px 10px", color: sel.size ? C.cyan : C.dim, opacity: sel.size ? 1 : 0.6 }}>✓ Commit selected ({sel.size})</button>
+        <button onClick={() => commit(rows.map(({ i }) => i))} style={{ ...chip(C), padding: "2px 10px", color: C.green }}>✓✓ Commit all ({rows.length})</button>
+      </div>
+      <div style={{ display: "grid", gap: 6 }}>
+        {shown.map(({ e, i }) => {
+          const cur = choice[i] != null ? choice[i] : e.symbol;
+          const cands = [{ symbol: e.symbol, prob: e.prob }, ...e.alternatives];
+          return (
+            <div key={i} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, fontSize: 12 }}>
+              <input type="checkbox" checked={sel.has(i)} onChange={() => toggle(i)} aria-label={`select chord at ${fmt(e.startSec)}`} />
+              <button onClick={() => onSeek(e.startSec)} title="play from here" style={{ ...chip(C), padding: "2px 8px" }}>▶ {fmt(e.startSec)}</button>
+              {e.autoResolved ? <span style={{ fontSize: 9, color: C.green }}>auto</span> : null}
+              {cands.map((a) => (
+                <button key={a.symbol} onClick={() => pick(i, a.symbol)} title={a.symbol === e.symbol ? `keep ${a.symbol}` : `use ${a.symbol}`}
+                  style={{ ...chip(C), padding: "2px 8px", fontFamily: "'Space Mono', monospace", fontWeight: a.symbol === cur ? 700 : 400, color: a.symbol === cur ? C.cyan : C.dim, borderColor: a.symbol === cur ? C.cyan : C.border }}>
+                  {a.symbol} <span style={{ fontWeight: 400, color: C.dim }}>{pct(a.prob)}</span>
+                </button>
+              ))}
+            </div>
+          );
+        })}
+      </div>
+      {rows.length > 6 ? <button onClick={() => setOpen((v) => !v)} style={{ ...chip(C), padding: "2px 10px", marginTop: 6 }}>{open ? "show fewer" : `show all ${rows.length}`}</button> : null}
+    </div>
+  );
+}
 /* ---- SECTION EDITOR — the song's structure, correctable in seconds ---------
  * Pure presentational: rows in, callbacks out. Each row is a section — tap the ▶ to
  * hear where it starts (the whole point: verify a boundary without scrubbing), type

@@ -178,3 +178,98 @@ Under +40¢ detune, v1 majmin falls to 42.1 while v2 holds 79.8.
   events flagged on the repo's three vocal stems). It is not a vocal-harmony transcriber; that remains the basic-pitch "Voices
   (ML)" path.
 - Heavy bleed is the hardest condition (majmin 73.0 on held-out). Cleaner stems help most.
+
+---
+
+## 8. v2.1: batch review, Auto, stems, live capture (2026-10-22)
+
+### Batch review + ⚡ Auto
+- **`ChordReview`** now gives each uncertain chord a checkbox and a radio-style choice among
+  its candidates (the detected label plus up to three ranked alternatives). The toolbar has
+  **☑ Select all / ☐ Clear**, **✓ Commit selected (n)** and **✓✓ Commit all (n)**. A commit
+  goes through the pure engine helper `commitChordChoices`. It can only choose among the
+  decoder's own candidates, swaps in the chosen voicing, and keeps the replaced label one tap
+  away.
+- **⚡ Auto** (`autoResolveChords`, remembered per device) commits the decoder's own best
+  choice for every uncertain chord, so nothing is left pending. Those rows stay listed as
+  "auto" and can still be changed. Switching Auto off (`reopenAutoChords`) re-queues them but
+  keeps anything the user committed.
+- **What Auto can and cannot do, measured:**
+  - Uncertain chords are about 10–12 % of the timeline.
+  - Their top choice is right 34–40 % of the time; the right answer is among the alternatives
+    another ~20 %.
+  - So a perfect re-ranker could add at most about +2.5 points overall.
+  - "Best match" therefore is the decoder's posterior MAP. Accuracy comes from the front-end,
+    not from a second guesser.
+
+### Measured and NOT shipped: a corpus chord language model
+- **The model:** a transposition-invariant bigram, P(Δroot, q₂ | q₁), trained on the repo's
+  Guitar Pro corpus and used as the HMM's jump weight.
+- **Why the dev split looked good:** +1.4 majmin and +2.1 sevenths, but that was leakage. The
+  model had been trained on the dev songs' own progressions.
+- **Clean test:** retrained on non-benchmark songs only, it was neutral on dev and **−1.9 root
+  on held-out**. The corpus (25 songs, jazz-heavy) is too small to generalise across styles,
+  so it was reverted.
+
+### Shipped: noise-floor rests
+A rest under hiss or bleed is not silent, and its noise chroma was being named. In one
+measured case an organ pad resting 54 % of the time scored 98 % clean but 43 % with 20 dB
+noise, with every rest read as `Em7`. A beat-segment is now also a rest when it is ≥ 12 dB
+under the loud passages **and** its chroma is flat (normalised entropy ≥ 0.97; noise reads
+0.99–1.00, real chords 0.68–0.83). Results: dev +1.5 root / +1.7 majmin; held-out +0.3 root /
++0.6 majmin / +0.9 sevenths. Current held-out totals: **root 76.1 · majmin 77.0 · sevenths
+70.9 · exact pcs 65.9 · bass 74.7 · seg 80.7**, calibration ECE 5.6 %.
+
+### Stems → per-instrument charts (`chartsFromStems`, engine, pure)
+- **One shared beat grid** is tracked on the drum stem (the clearest pulse), with a fallback
+  to the harmonic stems. Every chart decodes on it and quantises with the same ♩=, so bar *n*
+  is the same moment in every chart.
+- **Charts:** Full band (harmonic stems), one chord chart per harmonic stem, the bass line and
+  vocal melody (YIN notes), and drums (`transcribeDrums`, then `drumPattern`, giving a 16th
+  grid and GM-drum MIDI).
+- **Measured** (`tests/bench/stems.mjs`, 9 songs: comp + bass + drums):
+
+  | input | root | majmin | sevenths |
+  |---|---|---|---|
+  | the mix decoded directly | 54.4 | 58.0 | 48.7 |
+  | perfect stems | 76.3 | 76.4 | 69.5 |
+  | stems with −12 dB cross-leakage | 65.1 | 67.5 | 60.2 |
+
+  **Separation is the single largest accuracy lever on a full mix.**
+- **Bass-stem fusion** (`bassFusion: true`) is opt-in. It was within ±1 point with perfect
+  stems and cost 2–3 points with leaky ones, because a walking bass's passing notes pull roots
+  off.
+- **Drums use semi-adaptive NMF** (kick, snare and hat templates). A band-energy detector was
+  tried first and failed for a physical reason: every drum reaches every band (snare precision
+  27 %). On the rendered kit, at full rate: **kick F 98.4 · snare 96.9 · hat 98.7**. The same
+  synthetic kit was used to tune and to score, so real kits will score lower. Soft ghost notes
+  are not drawn. Run it on the full-rate stem; hats live above the 16 kHz analysis Nyquist.
+
+### Separator (`stem-model.js` → `stem-worker.js` → `stem-model-core.js`)
+- **Model:** SCNet via the vendored, MIT-licensed `@audio/neural-separate` bundle. Weights are
+  13 MB int8 (MIT), from a pinned Hugging Face revision, **SHA-256-checked**, then cached.
+  ONNX Runtime Web 1.30.0 comes from a pinned jsDelivr URL.
+- **Published MUSDB18 SDR:** vocals 9.9 · drums 9.4 · bass 8.4 · other 6.2. That is the
+  htdemucs class; htdemucs's own weights are research-only, so they are not used. Moises' models
+  are proprietary, so "matches Moises" cannot be claimed or measured here. This is the best
+  openly-licensed model of its size.
+- **Execution:** WebGPU when available, else single-thread WASM (no COOP/COEP on Pages). It
+  runs in a module Worker, in 60 s blocks with 1.5 s cross-faded context to bound memory.
+- **4 stems only:** guitar and keys are not split (no openly-licensed model does that). Import
+  Moises stems for those.
+- **Verification:**
+  - Done here: the full browser flow was exercised end-to-end with a stub model (worker,
+    progress, tabs, mixer, WAV download, stem import, mic capture).
+  - **Not** done here: the model itself, because Hugging Face is unreachable from the dev
+    sandbox. It is the device check that remains.
+
+### Live capture instead of link downloading
+`🖥 Capture a tab` (getDisplayMedia, desktop Chrome/Edge) and `🎙 Record` (microphone) record
+raw PCM of what the device is playing and feed the same pipeline as a file.
+
+A "paste a YouTube/Spotify link" downloader was deliberately **not** built:
+- Spotify streams are DRM-encrypted.
+- YouTube's terms bar downloading its streams.
+- A zero-server page cannot fetch either without a server running stream-extraction tooling.
+
+A DRM-protected tab may capture as silence; the panel says so rather than failing quietly.

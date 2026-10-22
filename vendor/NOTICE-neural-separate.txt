@@ -1,0 +1,74 @@
+@audio/neural-separate
+Copyright 2026 Dmitry Iv. and audiojs contributors
+
+This product includes a JavaScript translation of parts of open-unmix-pytorch
+(https://github.com/sigsep/open-unmix-pytorch) and norbert (https://github.com/sigsep/norbert):
+filtering.py's multichannel Wiener filter and its expectation-maximization, with their defaults,
+and model.Separator's 300-frame windowing, into separate.js. Both under the MIT License:
+
+    Copyright (c) 2019 Inria (Fabian-Robert Stöter, Antoine Liutkus)
+
+This product includes a JavaScript translation of parts of Demucs
+(https://github.com/facebookresearch/demucs): apply.apply_model's segment overlap-add and
+htdemucs.py's spectrogram framing, into separate.js. Under the MIT License:
+
+    Copyright (c) Meta Platforms, Inc. and affiliates.
+
+This product includes a JavaScript translation of parts of Music-Source-Separation-Training
+(https://github.com/ZFTurbo/Music-Source-Separation-Training): utils/model_utils.py's demix(),
+its segments, fades and reflection, into separate.js. Under the MIT License:
+
+    Copyright (c) 2024 Roman Solovyev (ZFTurbo)
+
+This product includes a JavaScript translation of parts of cocktail-fork-separation
+(https://github.com/merlresearch/cocktail-fork-separation): mrx.py's three STFTs, masks and iSTFTs, and
+separate.py's input loudness, into separate.js. Under the MIT License:
+
+    Copyright (c) 2023 Mitsubishi Electric Research Laboratories (MERL)
+
+This product includes a JavaScript translation of parts of TIGER (https://github.com/JusperLee/TIGER):
+look2hear/models/tiger_dnr.py's TIGERDNR.wav_chunk_inference, its segments and their sum, into separate.js.
+Under the MIT License:
+
+    Copyright (c) 2026 Kai Li
+
+This product includes a JavaScript translation of parts of pyloudnorm
+(https://github.com/csteinmetz1/pyloudnorm): meter.py's integrated loudness and iirfilter.py's K-weighting
+coefficients, into separate.js. Under the MIT License:
+
+    Copyright (c) 2018 Christian Steinmetz
+
+The MIT License, for each notice above:
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy of this
+    software and associated documentation files (the "Software"), to deal in the Software
+    without restriction, including without limitation the rights to use, copy, modify, merge,
+    publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons
+    to whom the Software is furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all copies or
+    substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+    INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+    PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+    FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+    OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+    DEALINGS IN THE SOFTWARE.
+
+No model weights are included. The export scripts write them to the local cache, and the compact
+files of SCNet-large, SCNet, MRX and TIGER are fetched from huggingface.co/audiojs (scnet-large, scnet,
+mrx, tiger-dnr, each with its licence and model card); their terms are their authors' (Open-Unmix
+umxhq: MIT; SCNet and SCNet-large: MIT, Copyright (c) 2024 starrytong, redistributable converted with
+attribution, github.com/starrytong/SCNet/issues/35; Demucs htdemucs
+weights: see the README; MRX: MIT, Copyright 2023 Mitsubishi Electric Research Laboratories (MERL), the
+repository's .reuse/dep5 naming each checkpoint; TIGER's DnR model: Apache 2.0, its model card,
+huggingface.co/JusperLee/TIGER-DnR).
+
+-----
+SCNet weights (scnet.int8.onnx, fetched at runtime from huggingface.co/audiojs/scnet at a pinned revision and SHA-256-checked):
+SCNet by starrytong (https://github.com/starrytong/SCNet), MIT License.
+
+-----
+@audio/neural-separate, @audio/neural-runtime, @audio/resample-sinc, fourier-transform: MIT License (audiojs contributors).
+onnxruntime-web (loaded from cdn.jsdelivr.net at runtime): MIT License, Copyright (c) Microsoft Corporation.

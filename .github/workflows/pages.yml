@@ -60,6 +60,11 @@ jobs:
           cp models/basic-pitch/model.json _site/models/basic-pitch/
           cp models/basic-pitch/group1-shard1of1.bin _site/models/basic-pitch/
           cp models/basic-pitch/NOTICE _site/models/basic-pitch/
+          # Optional full-mix stem separation (SCNet via the vendored, MIT-licensed
+          # @audio/neural-separate bundle; weights fetched at runtime, SHA-256-checked).
+          cp stem-model.js stem-model-core.js stem-worker.js _site/
+          mkdir -p _site/vendor
+          cp vendor/neural-separate.mjs vendor/NOTICE-neural-separate.txt _site/vendor/
 
       # enablement: true turns Pages on (source = GitHub Actions) using the
       # workflow's `pages: write` permission, so no manual Settings toggle is

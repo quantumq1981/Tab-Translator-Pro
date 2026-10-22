@@ -12,6 +12,8 @@ npm run bench:calib           # Stage C calibration (ECE) on the held-out half
 node bench/sweep.mjs decoder --conds clean,bleed,room,noise        # ablations on the DEV half
 node bench/confusion.mjs clean,bleed                               # what the errors are
 node bench/inspect.mjs 11 clean                                    # GT vs decode timeline, one stem
+node bench/stems.mjs        # mix vs separated stems (+ leakage, bass fusion) and drum F-measure
+node bench/ambig.mjs test   # where the right answer sits for uncertain chords (Auto's ceiling)
 ```
 
 ## What is measured

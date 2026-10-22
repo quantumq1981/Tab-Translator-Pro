@@ -32,6 +32,12 @@
     silent — the UI's "not configured" message stays honest. See note-model.js.
   -->
   <script type="module" src="./note-model.js"></script>
+  <!--
+    Optional full-mix stem separation (SCNet, MIT weights) for the Audio panel's
+    "✂ Split this mix into stems". Lazy: nothing downloads until the first split;
+    the separation runs in a module Worker (stem-worker.js). See stem-model.js.
+  -->
+  <script type="module" src="./stem-model.js"></script>
   <script type="importmap">
   {
     "imports": {
