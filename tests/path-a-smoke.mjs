@@ -3053,6 +3053,10 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   expect(/cp guitar-model\.js guitar-model-core\.js guitar-worker\.js _site\//.test(pages) && /cp models\/guitar-crnn\/guitar-gaps\.w8\.onnx models\/guitar-crnn\/NOTICE _site\/models\/guitar-crnn\//.test(pages) && /guitar-model\.js\?v=\$\{BUILD\}/.test(pages), "Pages ships the guitar glue + model, deploy-stamped");
   expect(/window\.TTP_GUITAR_MODEL/.test(ui) && /fingerScore\(polyNotesToScore\(gtrNotes/.test(ui) && /🎸 Guitar → Tab \(ML\)/.test(ui), "the Audio panel's 🎸 Guitar → Tab button runs the model and fingers the notes");
   expect(/\["alphatex", "AlphaTex \(tab\)"\]/.test(ui) && /scoreToAlphaTex\(tscore/.test(ui) && /alphatex: "alphatex"/.test(ui), "ChartPanel exports AlphaTex (tab)");
+  // the tab chart must not auto-Simplify (a guitar line is "melodic" → one chord per bar → notes lost
+  // from the AlphaTex export: the real-app run exported 87 of 117 notes before this) nor share the
+  // chord chart's edits
+  expect(/autoSimplify && isMelodicScore\(score\)/.test(ui) && /score=\{gtrScore\}[\s\S]{0,400}overrides=\{gtrOvr\}[\s\S]{0,120}autoSimplify=\{false\}/.test(ui), "the guitar tab chart keeps every note (no auto-Simplify) and has its own overrides");
   // the core, driven with a fake ORT at the import seam: one session, heads mapped, released once
   const gcore = await import(path.join(repo, "guitar-model-core.js") + "?t=" + Date.now());
   let created = 0, released = 0, seen = null;

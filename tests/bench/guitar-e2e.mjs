@@ -1,7 +1,7 @@
 /* Guitar → Tab end-to-end: the REAL app, REAL guitar worker, REAL 25 MB model, REAL ONNX Runtime
  * Web 1.23.2 (jsDelivr) — no stubs. Dev-only, Node + headless Chromium.
  *
- *   node bench/guitar-e2e.mjs --deps <dir> --gs <guitarset_extract.py dir> [--track 00_BN1-129-Eb_comp] [--ua "<UA>"]
+ *   node bench/guitar-e2e.mjs --deps <dir> --gs <guitarset_extract.py dir> [--track 00_BN1-129-Eb_comp] [--ua "<UA>"] [--tex out.alphatex]
  *
  * 1. Serves the repo, boots index.html (only the boot CDNs the sandbox blocks are served
  *    locally — React/Babel from --deps, same recipe as scnet-e2e.mjs), opens Audio mode, uploads
@@ -89,9 +89,11 @@ const wall = Date.now() - t0;
 clearInterval(tick);
 
 // AlphaTex from the UI's own export button (the chart for this track)
-const panel = page.locator("div", { has: page.getByText(/notes from the guitar model/) }).last();
-await page.getByRole("button", { name: "AlphaTex (tab)" }).last().click();
-const tex = await page.locator("textarea").last().inputValue();
+// scoped to the tab chart's own panel: the audio chord chart renders after it and has the same button
+const panel = page.getByText(/notes from the guitar model/).locator("xpath=..");
+await panel.getByRole("button", { name: "AlphaTex (tab)" }).click();
+const tex = await panel.locator("textarea").inputValue();
+if (arg("tex")) fs.writeFileSync(arg("tex"), tex);
 const imp = new alphaTab.importer.AlphaTexImporter(); imp.initFromString(tex, new alphaTab.Settings());
 let atBars = 0, atNotes = 0, atErr = null;
 try { const sc = imp.readScore(); const st = sc.tracks[0].staves[0]; atBars = st.bars.length; for (const b of st.bars) for (const v of b.voices) for (const bt of v.beats) atNotes += bt.notes.filter((n) => !n.isTieDestination).length; } catch (e) { atErr = e.message; }

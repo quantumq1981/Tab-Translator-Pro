@@ -997,7 +997,7 @@ export default function TabDecoderPro() {
  * the same shape, so the renderer, editor and exporters are identical. Edits are
  * lifted to the parent as an `overrides` map ("<bar>.<beat>" -> symbol) so they
  * survive view/transpose changes and feed straight into export. */
-function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, selKey, onPick, keyOverride, setKeyOverride }) {
+function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, selKey, onPick, keyOverride, setKeyOverride, autoSimplify = true }) {
   const [view, setView] = useState("chart");
   const [editMode, setEditMode] = useState(false);
   const [editKey, setEditKey] = useState("");
@@ -1025,7 +1025,9 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   // for a melodic chart (a densely arpeggiated GP part would otherwise export "quartered",
   // a chord per note), with the raw per-onset view one toggle away.
   const melodic = useMemo(() => isMelodicScore(score), [score]);
-  const [simplify, setSimplify] = useState(() => isMelodicScore(score));
+  // autoSimplify={false}: a chart whose notes ARE the content (the guitar tab) never collapses to
+  // one chord per bar on its own — every note, and its string, must reach the export.
+  const [simplify, setSimplify] = useState(() => autoSimplify && isMelodicScore(score));
   const [arrange, setArrange] = useState("off"); // off | block | quarters | eighths | shuffle
 
   const simp = useMemo(() => (simplify ? simplifyScore(score, useSharp) : score), [simplify, score, useSharp]);
@@ -1057,7 +1059,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   // Re-apply the melodic auto-default whenever a new score loads (upload / part switch /
   // decode / restore) — a melodic part auto-simplifies, a block-harmony part reverts to
   // per-onset. Mid-session the user's manual toggle stands until the next score change.
-  useEffect(() => { setSimplify(isMelodicScore(score)); }, [score]);
+  useEffect(() => { setSimplify(autoSimplify && isMelodicScore(score)); }, [score, autoSimplify]);
   const stopPlay = () => { if (player.current) { player.current.stop(); player.current = null; } setPlaying(false); setPlayKey(""); };
   const stopRef = () => { const s = refAudio.current; if (s.raf) cancelAnimationFrame(s.raf); if (s.src) { try { s.src.stop(); } catch (_) {} s.src = null; } if (s.ctx && s.ctx.state !== "closed") { try { s.ctx.close(); } catch (_) {} s.ctx = null; } s.raf = null; setRefPlaying(false); setPlayKey(""); };
   useEffect(() => () => { stopPlay(); stopRef(); }, []); // stop on unmount
@@ -1275,7 +1277,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
         {refErr && <span style={{ color: C.red }}>{refErr}</span>}
       </div>
 
-      {melodic && !simplify && <MelodicNudge C={C} onSimplify={() => setSimplify(true)} />}
+      {autoSimplify && melodic && !simplify && <MelodicNudge C={C} onSimplify={() => setSimplify(true)} />}
 
       {view === "chart"
         ? <LeadSheetView score={tscore} C={C} overrides={overrides} setOverrides={setOverrides} editMode={editMode}
@@ -2127,7 +2129,8 @@ function AudioImport({ C, useSharp }) {
   const [mlScore, setMlScore] = useState(null);      // ML note-transcription result (basic-pitch), when a model is wired
   const [mlNotes, setMlNotes] = useState(null);      // raw ML notes, kept so voice-count/voice-index can re-derive without re-inference
   const [gtrNotes, setGtrNotes] = useState(null);    // guitar CRNN notes (🎸 Guitar → Tab), re-scored on ♩=/meter changes without re-inference
-  const [gtrProg, setGtrProg] = useState(null);      // { done, total } windows while the guitar model runs
+  const [gtrProg, setGtrProg] = useState(null);
+  const [gtrOvr, setGtrOvr] = useState({});         // the tab's own chord edits (its "bar.beat" keys aren't the chord chart's)      // { done, total } windows while the guitar model runs
   const [voiceCount, setVoiceCount] = useState(3);   // SATB split target (1 = no split, 2 = duet, 3 = SAT, 4 = SATB)
   const [voiceIdx, setVoiceIdx] = useState(0);       // which voice slot is displayed (0 = highest / soprano)
   const [sens, setSens] = useState("balanced");      // ML note-detection sensitivity (see SENS): quiet backing vocals need a lower threshold
@@ -2313,7 +2316,7 @@ function AudioImport({ C, useSharp }) {
     try {
       const pcm = s.sr === 16000 ? s.cur : resampleTo(s.cur, s.sr, 16000);
       const { notes } = await model(pcm, { onProgress: (done, total) => setGtrProg({ done, total }) });
-      setGtrNotes(notes || []); setOverrides({});
+      setGtrNotes(notes || []); setGtrOvr({});
       if (!notes || !notes.length) setErr("The guitar model found no notes in this audio.");
     } catch (e) { setErr("Guitar transcription failed: " + (e && e.message ? e.message : "unknown")); }
     setGtrProg(null); setBusy(false);
@@ -2669,7 +2672,7 @@ function AudioImport({ C, useSharp }) {
           </div>
           <ChartPanel score={gtrScore} title={(name || "Guitar") + " · tab"}
             meta={`${gtrScore.bars.length} bars · ${gtrNotes.length} notes · from the guitar ML model`}
-            C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey="" onPick={() => {}} />
+            C={C} useSharp={useSharp} overrides={gtrOvr} setOverrides={setGtrOvr} selKey="" onPick={() => {}} autoSimplify={false} />
         </div>
       )}
 
