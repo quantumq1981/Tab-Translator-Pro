@@ -248,13 +248,18 @@ under the loud passages **and** its chroma is flat (normalised entropy ≥ 0.97;
 ### Separator (`stem-model.js` → `stem-worker.js` → `stem-model-core.js`)
 - **Model:** SCNet via the vendored, MIT-licensed `@audio/neural-separate` bundle. Weights are
   13 MB int8 (MIT), from a pinned Hugging Face revision, **SHA-256-checked**, then cached.
-  ONNX Runtime Web 1.30.0 comes from a pinned jsDelivr URL.
+  Every WASM session runs ONNX Runtime Web **1.23.2** (plain build, pinned jsDelivr URL); only the
+  library's WebGPU path uses its bundled 1.30.0. ORT ≥ 1.24 ships Abseil 20250814, which Safari's
+  JavaScriptCore miscompiles ("Could not find OrtValue with name '…'" at session creation,
+  microsoft/onnxruntime#33426); 1.23.2 separates bit-identically (`tests/bench/ort-pin.mjs`).
 - **Published MUSDB18 SDR:** vocals 9.9 · drums 9.4 · bass 8.4 · other 6.2. That is the
   htdemucs class; htdemucs's own weights are research-only, so they are not used. Moises' models
   are proprietary, so "matches Moises" cannot be claimed or measured here. This is the best
   openly-licensed model of its size.
-- **Execution:** WebGPU when available, else single-thread WASM (no COOP/COEP on Pages). It
-  runs in a module Worker, in 60 s blocks with 1.5 s cross-faded context to bound memory.
+- **Execution:** WebGPU when available (never on Safari / iOS — ORT's WebGPU builds stall WebKit's
+  optimising WASM tier, microsoft/onnxruntime#26827), else single-thread WASM (no COOP/COEP on
+  Pages). It runs in a module Worker, in 60 s blocks with 1.5 s cross-faded context to bound memory
+  (30 s blocks and a 2.8 s-window model in low-memory mode, the default on iPhone/iPad).
 - **4 stems only:** guitar and keys are not split (no openly-licensed model does that). Import
   Moises stems for those.
 - **Verification:**

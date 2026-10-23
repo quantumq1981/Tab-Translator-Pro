@@ -2074,8 +2074,10 @@ separator and capture are browser glue (device check remains for the real model)
 - **Separator** (`stem-model.js` → `stem-worker.js` → `stem-model-core.js`, `vendor/`):
   `window.TTP_STEM_MODEL(L, R, sr, {onProgress})` → `{ stems:{vocals,drums,bass,other} }` at the
   input rate. SCNet (MIT weights, 13 MB int8, pinned HF revision + **SHA-256 checked** by the
-  vendored MIT `@audio/neural-separate@0.7.0` bundle, then Cache-API cached); ONNX Runtime Web
-  1.30.0 pinned on jsDelivr; WebGPU else single-thread WASM; module Worker (main-thread fallback);
+  vendored MIT `@audio/neural-separate@0.7.0` bundle, then Cache-API cached); **every WASM session is
+  ours, on ONNX Runtime Web 1.23.2** (pinned on jsDelivr — see "Third on-device failure" below; the
+  bundle's own 1.30.0 loader is used only for WebGPU, which is never chosen on Safari/iOS); WebGPU
+  else single-thread WASM; module Worker (main-thread fallback);
   60 s blocks with 1.5 s cross-faded context (bounded memory on phones). htdemucs is research-
   only → never shipped. **Only 4 stems** — no openly-licensed model splits guitar from keys;
   Moises stems can be imported for that (`📂 Import stems`, no `accept` filter). "Matches
@@ -2190,8 +2192,8 @@ separator and capture are browser glue (device check remains for the real model)
       Verified: real app + real worker + real ORT under the cap → stems identical to the uncapped run
       (SDR to the hundredth). The OOM hint now says to reload and split straight after loading the song.
       **Don't remove the cap because it "works on desktop"** — desktop never has trouble reserving 4 GiB.
-    - **Second on-device failure — low-memory mode on WebGPU (fixed, #112; reported on an iPad,
-      iPadOS 26 — the owner tests on both iPhone and iPad):** after the cap, the split died at session
+    - **Second on-device failure — ⚠ MIS-ATTRIBUTED, see the third one below.** (#112; reported on an
+      iPad. "iPadOS 26" was an assumption, never confirmed.) After the cap, the split died at session
       creation: "Can't create a session … allocation_planner.cc:237 Could not find
       OrtValue with name '_sw'" (`_sw` = a `Pow` output in the graph). iOS/iPadOS 26 Safari has WebGPU, so
       `pickDevice` chose it, and ORT's WebGPU EP cannot build/run the graph with the optimiser OFF
@@ -2201,9 +2203,68 @@ separator and capture are browser glue (device check remains for the real model)
       (the measured path); and any WebGPU failure in `separateInBlocks` is retried once on WASM
       (`fellBackFrom: "webgpu"`). The UI no longer blames memory for an `allocation_planner` /
       "Can't create a session" error. WebGPU for the compact model (with the optimiser on) is untested
-      on Apple GPUs — measure on a device before enabling it.
-    - **Device check that remains:** a real iPhone and iPad (iPadOS reports a Mac UA; `isAppleMobile` catches it via touch points, so low-memory mode is on by default there too). If a long song still dies there, the next levers
-      are Int16 stem storage (halves the stems) and WebGPU (ORT's WebGPU EP; iOS 26 Safari has WebGPU).
+      on Apple GPUs — measure on a device before enabling it. **What #112 got wrong:** the SwiftShader
+      repro failed at *run time* on an f16 Cast; the device failed at *session creation* with a missing
+      value name. Those are different failures, and the device report was never reproduced — so the
+      WASM-only change could not fix it, and it didn't (the next report, below).
+    - **Third on-device failure — the real root cause: JavaScriptCore vs ORT ≥ 1.24 (fixed 2026-10-23).**
+      With low-memory mode forced onto WASM (#112), the device still failed at session creation:
+      "allocation_planner.cc:237 … Could not find OrtValue with name **'_pc'**" (the report before said
+      '_sw'). The name changes on every attempt, and it is the exact signature of
+      **microsoft/onnxruntime#33426**: ORT **1.24.1+** ships **Abseil 20250814**, whose `raw_hash_set`
+      sign-extends a 16-bit per-table seed; JavaScriptCore's optimising tier on ARM64 drops the mask, so
+      once a lookup function tiers up it hashes with a different seed than the inserts used and ORT
+      can't find its own values (reporter's standalone repro, no ORT; WebKit bug 271866; reported fixed
+      in Safari 17.5 — **so the owner's device is most likely on iOS/iPadOS < 17.5**, which also fits
+      `pickDevice` never having had WebGPU there: Safari 17 has no `navigator.gpu`). Evidence gathered,
+      not assumed: (1) the path in the device error, `/mnt/azure_nvme_temp/_work/1/s/onnxruntime/…`, is
+      byte-for-byte the 1.30.0 WASM build's (1.23.2's says `/mnt/vss/…`); (2) ORT's own
+      `cmake/deps.txt`: v1.23.2 → Abseil **20250512**, v1.24.1 and v1.30.0 → **20250814**; (3) both
+      failing values feed a `ReduceMean`, but the graph is clean (no duplicate outputs, no subgraphs) and
+      creates fine on V8 under every option and under WASM-memory caps down to 64 MiB — memory pressure
+      gives a clean `std::bad_alloc` at run time, never this error. **Not reproducible here** (no ARM64
+      JavaScriptCore in the container) — the device check remains.
+      **Fix:** every WASM session in the app is now OURS, on ONNX Runtime Web **1.23.2's plain build**
+      (`ORT_WASM_VERSION`, `wasmSession`, the library's `session` hook): the compact model as before, and
+      now the full model too (`fullModelOf` reads the library's own pin — same HF URL, same SHA-256 —
+      and `modelBytes` fetches + checks + caches it), so the bundle's 1.30.0 is never loaded for WASM.
+      **Measured, `tests/bench/ort-pin.mjs`: 1.23.2 output is bit-identical to 1.30.0** for both models
+      (max |Δ| = 0, reproduced twice), peak RSS 644–659 vs 624–651 MB (compact) / 1614–1615 vs 1554–1565 MB
+      (full, ~4 % higher), steady-state run time within noise.
+      WebGPU is **never chosen on WebKit** (`isWebKit` → `pickDevice` = wasm): ORT's JSEP/asyncify
+      builds stall WebKit 26.2's OMG tier (microsoft/onnxruntime#26827; community fix = plain WASM
+      build). The plain 1.23.2 build is also the smaller one (11.9 MB vs 14.2 MB; its largest function
+      bodies are below the size #26827 found to spiral). `capWasmMemory` stays (1.23.2 also asks for a
+      4 GiB shared maximum). If a future ORT release fixes #33426, re-run `ort-pin.mjs` before moving.
+    - **Deploy stamp — a fix must actually reach the device (2026-10-23).** `index.html` fetches the UI
+      `no-cache`, but the separator (`stem-model.js` → worker → core → vendor) loaded unversioned under
+      GitHub Pages' `max-age=600`, so a phone could show the new UI's text while running a cached older
+      core — which made it impossible to tell from a screenshot which code failed. `pages.yml` now stamps
+      `stem-model.js?v=<commit>` (and fails the deploy if the stamp didn't land); `stem-model.js` passes
+      the query to the worker and the core, the worker imports the core with its own query, the core
+      stamps the vendor bundle. The model URL is deliberately NOT stamped (its Cache-API key must
+      survive deploys). Verified in a real browser: `/stem-model.js?v=… /stem-worker.js?v=…
+      /stem-model-core.js?v=… /vendor/neural-separate.mjs?v=…`.
+    - **Every separation error now says what ran:** `envLabel` appends
+      `[stems <build> · ORT <ver> <device> · Safari <x.y> · iOS <a.b>]` (iOS 26 freezes the UA's OS token
+      at 18_6, so the Safari `Version/` — the WebKit release — is the number to read). The UI classifies
+      on the message without the label, and gives the engine signature (`Could not find OrtValue` /
+      `node_index_info` / `Failed to find args for kernel`) its own hint: a WebKit engine fault, update
+      iOS/Safari, or import stems — not memory. `std::bad_alloc` (ORT's real OOM) now counts as memory.
+    - **Real app, headless Chromium, iPad user agent, low-memory, 17.9 s Peg mix (2026-10-23):** device
+      wasm, ORT fetched = `onnxruntime-web@1.23.2/dist/{ort.wasm.min.mjs, ort-wasm-simd-threaded.mjs,
+      ort-wasm-simd-threaded.wasm}` and **zero** 1.30.0 requests; 3.9× real time; peak **+554 MB**;
+      SDR drums 11.1 · bass 16.2 · other 11.8 dB; all 5 tabs; band majmin 71.1 (perfect stems 70.8).
+      Same mix, desktop UA, Low-memory OFF (the full model, now also on our session): weights from the
+      library's pinned HF revision (→ `us.aws.cdn.hf.co` Xet CDN), SHA check passed, ORT 1.23.2 only;
+      5.9× real time; peak +1450 MB; SDR drums 13.9 · bass 19.2 · other 13.7 dB.
+      (`tests/bench/scnet-e2e.mjs` gained `--ua` and `--stamp`; V8 still runs the WASM, so this checks
+      the app's routing and the pinned runtime, not JavaScriptCore.)
+    - **Device check that remains:** a real iPhone and iPad (iPadOS reports a Mac UA; `isAppleMobile` catches it via touch points, so low-memory mode is on by default there too). Any failure screenshot now carries
+      the `[stems … · Safari … · iOS …]` label — read it before theorising. If "Could not find OrtValue" ever
+      appears with `ORT 1.23.2` in the label, the #33426 diagnosis is wrong for that device (update iOS, and
+      compare the Safari version against 17.5). If a long song still dies there, the next levers are Int16
+      stem storage (halves the stems); WebGPU on WebKit stays off until measured on a device (#26827).
 - **Live capture** (`LiveCapture`): `🖥 Capture a tab` (getDisplayMedia, desktop Chrome/Edge,
   "Share tab audio") + `🎙 Record` (mic), raw PCM (ScriptProcessor — the one raw tap iOS
   still has), 15 min cap, silent-take = DRM message, → the SAME `loadBuffer` path as an upload.
@@ -2571,8 +2632,14 @@ accordingly.
   0 done after 0 runs, monotone) and `progressEta`. Low-memory mode: the 120-frame contract through
   the real library, the pinned SHA-256 of the committed model, cache/eviction/refusal, lean session
   options, device detection, worker teardown, the WASM-reservation cap (ladder + pass-through +
-  genuine Memory objects), the crash rail and the deploy list. Real-model
-  numbers: `tests/bench/scnet-e2e.mjs` (`--compact 1` for the phone path).
+  genuine Memory objects), the crash rail and the deploy list. Pinned runtime (2026-10-23): full
+  AND compact WASM separation through the real library with only ORT faked at the import seam —
+  ORT 1.23.2's plain build is the one imported (never 1.30.0), the library's pinned weights are
+  loaded once, one session reused and released once, the model's own frame count; WebKit never gets
+  WebGPU; errors carry the `[stems …]` label exactly once; the deploy stamp rides worker → core →
+  vendor (not the model URL); the UI's engine-bug hint. Real-model numbers:
+  `tests/bench/scnet-e2e.mjs` (`--compact 1` for the phone path, `--ua`/`--stamp` to emulate a device
+  and a deploy) and `tests/bench/ort-pin.mjs` (1.23.2 vs 1.30.0, bit-for-bit).
 - **Key model v2 + manual override**: `npm test` asserts the reported defect is fixed
   (`D · C · G` reads **D major**, and E minor — whose tonic never sounds — loses by >20%),
   the same shape a step round the circle (`G · F · C` → G), that a genuine minor tune and a
