@@ -2519,6 +2519,32 @@ same order) — guarded by the existing audio regression tests (C/Am/G7 detectio
 chroma peaks, clarity ordering) plus a direct `_hann` formula/cache-identity test. Pure
 efficiency win on the mobile-Safari path these features target.
 
+## Audio → TAB engine — proposal review + Stage 3 baseline (2026-10-23)
+
+The "High-Fidelity Audio-to-TAB Engine" proposal (TART / Noise2Fret / Fretting-Transformer
+lineage) was reviewed against this repo. **Full decision record, tool choices and the
+re-sequenced build plan: `docs/AUDIO-TO-TAB-PLAN.md`.** Load-bearing conclusions:
+
+- The cited papers are real (TART arXiv 2609.11904 — **no released weights**; Noise2Fret
+  2608.30854; Fretting-Transformer 2506.14223). **GuitarSet is CC-BY 4.0 on HF**
+  (`jhartquist/guitarset`); **MIT guitar-transcription weights exist**
+  (`xavriley/midi-transcription-models`, `guitar-gaps.pth` 99 MB fp32 — the Stage 1–2 candidate,
+  needs torch → ONNX conversion off-box).
+- Rejected for the shipped path: a **mandatory cloud** stage (breaks zero-server), **MERT**
+  (CC-BY-NC-4.0 + 95M–330M params vs the iOS memory wall), a **MusicXML→AlphaTab normaliser**
+  (emit AlphaTex / `.gp` directly — they carry the string), **Demucs** (research-only; SCNet ships).
+- **Stage 3 is DP-first, model-second** (same contract as `arbitrateChord`): hard hand-span
+  constraint, Noise2Fret terms as costs, corpus-mined transition priors; a learned T5 only if it
+  beats the tuned DP on the held-out half.
+- **The repo's GP files are the fingering oracle:** `node tests/bench/fingering.mjs` re-fingers
+  281 standard-tuned tracks / 151,248 written notes. **Baseline (untuned, string match):
+  lowest-fret 50.4 % / Viterbi 58.1 % on the held-out (odd) half**; dev 60.5 / 66.9. P0b
+  (`fingerScore` in `engine.tsx`) must beat 58.1 % test. The GP parsers already consume the
+  bend/slide/hammer/harmonic/palm-mute/dead bytes — capturing them is the tuplet-style P0c.
+- AudioPod (6-stem incl. guitar, audio→MIDI) is a **dev-time oracle only** (server, credits,
+  URL input, key would leak). Owner decisions pending: opt-in cloud lane?, HF token secret,
+  commercial intent (MERT).
+
 ## Path B (scans / photos) — OUT OF SCOPE
 
 Raster tab (a photo or scanned page) has no text layer and needs an OMR/Vision
