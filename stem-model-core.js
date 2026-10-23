@@ -10,9 +10,10 @@
  * Guitar and keys are NOT separate stems: there is no openly-licensed model that
  * splits them; they arrive together as "other".
  *
- * The 13 MB int8 weights are fetched once from the pinned Hugging Face revision
- * and SHA-256-checked by the library (a partial or altered download is refused),
- * then served from the Cache API — later runs work offline.
+ * The 13 MB int8 weights are fetched once from the revision the library pins on
+ * Hugging Face and SHA-256-checked against the library's pin (a partial or altered
+ * download is refused), then served from the Cache API — later runs work offline.
+ * (WebGPU runs go through the library's own loader, which does the same check.)
  *
  * MEMORY: the library holds full-length arrays, so a whole song at once can exceed
  * an iPhone's budget. The song is processed in `blockSec` blocks (default 60 s)
@@ -27,9 +28,31 @@
  * optimisation is off (its weight pre-packing alone costs ~200 MB), blocks are 30 s.
  * Measured on the 100 s bench mix (CLAUDE.md v2.1 → "Phones"): ~2 dB less SDR per
  * stem for well under half the memory.
+ *
+ * RUNTIME (2026-10-23): every WASM session is OURS, on ONE pinned ONNX Runtime — 1.23.2's plain
+ * build (ORT_WASM_VERSION below). ORT 1.24.1+ (incl. the 1.30.0 the bundle imports) ships Abseil
+ * 20250814, whose hash tables hit a JavaScriptCore WASM miscompile: once a lookup tiers up it hashes
+ * with a different seed than the inserts used, so ORT can't find its own values and session creation
+ * fails with "Could not find OrtValue with name '…'" — a DIFFERENT name each attempt (microsoft/
+ * onnxruntime#33426; WebKit bug 271866). That is exactly what two device reports showed ('_sw', then
+ * '_pc' after low-memory mode had been moved onto WASM; the path in both errors is the 1.30.0 build's).
+ * 1.23.2 (Abseil 20250512) gives bit-identical stems, same memory, same
+ * speed (tests/bench/ort-pin.mjs). WebGPU is never chosen on WebKit: ORT's JSEP/asyncify builds stall
+ * WebKit 26.2's optimising WASM tier (microsoft/onnxruntime#26827).
  * ========================================================================== */
-const SEPARATE_URL = new URL("./vendor/neural-separate.mjs", import.meta.url).href;
-export const ORT_WASM_PATHS = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/";
+// The deploy stamps stem-model.js?v=<commit>; stem-model.js → stem-worker.js → this module pass it on,
+// so a device runs the separator that was deployed, not a cached older copy (the UI is always fetched
+// no-cache — without this the two could disagree, which is what made the last fix look like it failed).
+const BUILD_QS = (() => { try { return new URL(import.meta.url).search; } catch (_) { return ""; } })();
+export const BUILD = (() => { try { return new URLSearchParams(BUILD_QS).get("v") || "dev"; } catch (_) { return "dev"; } })();
+const SEPARATE_URL = new URL("./vendor/neural-separate.mjs" + BUILD_QS, import.meta.url).href;
+export const ORT_WASM_VERSION = "1.23.2";
+export const ORT_WASM_PATHS = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_WASM_VERSION}/dist/`;
+const ORT_WASM_MODULE = "ort.wasm.min.mjs";    // the plain build: no JSEP / asyncify / JSPI
+// The vendored library's own loader (WebGPU on non-WebKit browsers only) imports 1.30.0 — its wasm
+// files must come from the same release as its JS.
+export const ORT_LIB_VERSION = "1.30.0";
+const ORT_LIB_PATHS = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_LIB_VERSION}/dist/`;
 export const STEM_MODEL = "scnet";
 export const STEM_NAMES = ["vocals", "drums", "bass", "other"];
 export const COMPACT_MODEL = {
@@ -39,7 +62,6 @@ export const COMPACT_MODEL = {
 };
 const HOP = 1024;                                              // SCNet's STFT hop (n 4096)
 export const COMPACT_SEGMENT = (COMPACT_MODEL.frames - 1) * HOP; // samples per model run (≈ 2.76 s at 44.1 kHz)
-const ORT_MODULE = { wasm: "ort.wasm.min.mjs", webgpu: "ort.webgpu.min.mjs" };
 
 let _lib = null;
 function lib() {
@@ -72,15 +94,43 @@ export async function ensureCacheUsable(scope = globalThis) {
   }
 }
 
-export async function pickDevice(pref) {
+/* Safari and every iOS / iPadOS browser (all WebKit). A worker's navigator has no maxTouchPoints, but
+ * iPadOS's desktop-class UA ("Macintosh … Version/x Safari/…", no Chrome token) is caught by the second test. */
+export function isWebKit(nav = typeof navigator !== "undefined" ? navigator : null) {
+  const ua = String((nav && nav.userAgent) || "");
+  return /iPhone|iPad|iPod/.test(ua) || (/AppleWebKit\//.test(ua) && /Safari\//.test(ua) && !/Chrome\/|Chromium\/|Edg\/|OPR\/|Firefox\//.test(ua));
+}
+
+export async function pickDevice(pref, nav = typeof navigator !== "undefined" ? navigator : null) {
   if (pref === "wasm" || pref === "webgpu") return pref;
+  if (isWebKit(nav)) return "wasm";            // see RUNTIME in the header: WebKit runs our pinned WASM build
   try {
-    if (typeof navigator !== "undefined" && navigator.gpu) {
-      const a = await navigator.gpu.requestAdapter();
+    if (nav && nav.gpu) {
+      const a = await nav.gpu.requestAdapter();
       if (a) return "webgpu";
     }
   } catch (_) { /* no WebGPU here */ }
   return "wasm";
+}
+
+/* "[stems 3f2a1bc · ORT 1.23.2 wasm · Safari 17.4 · iOS 17.4]" — appended to every separation error so a
+ * device screenshot says which build ran, on which runtime and engine. (iOS 26 freezes the OS token in the
+ * user agent at 18_6, so the Safari "Version/" — the WebKit release — is the number that matters.) */
+export function envLabel(device, nav = typeof navigator !== "undefined" ? navigator : null) {
+  const ua = String((nav && nav.userAgent) || "");
+  const parts = [`stems ${BUILD}`, `ORT ${device === "webgpu" ? ORT_LIB_VERSION : ORT_WASM_VERSION} ${device || "?"}`];
+  const ver = ua.match(/Version\/(\d+(?:\.\d+)*)/), ios = ua.match(/OS (\d+)_(\d+)(?:_(\d+))? like Mac OS X/);
+  const other = ua.match(/(CriOS|FxiOS|EdgiOS|Chrome|Firefox|Edg)\/(\d+)/);
+  if (ver && isWebKit(nav)) parts.push(`Safari ${ver[1]}`);
+  else if (other) parts.push(`${other[1]} ${other[2]}`);
+  if (ios) parts.push(`iOS ${ios[1]}.${ios[2]}${ios[3] ? "." + ios[3] : ""}`);
+  else if (/Macintosh/.test(ua) && isWebKit(nav)) parts.push("macOS/iPadOS");
+  return `[${parts.join(" · ")}]`;
+}
+function withEnv(e, device) {
+  const err = e instanceof Error ? e : new Error(String(e));
+  try { if (!/\[stems /.test(err.message)) err.message = `${err.message} ${envLabel(device)}`; } catch (_) { /* frozen message: leave it */ }
+  return err;
 }
 
 /* iOS: ORT 1.30's only WASM build creates `new WebAssembly.Memory({ initial: 256, maximum: 65536,
@@ -116,10 +166,11 @@ export async function sha256Hex(bytes) {
   return Array.from(new Uint8Array(d), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-/* The compact weights: Cache API first (offline after the first split), else a same-origin
- * fetch. Either way the bytes must match the pinned SHA-256 — a partial download or a stale
- * file is refused (and evicted) instead of silently separating with the wrong network. */
-export async function compactModelBytes(model = COMPACT_MODEL, scope = globalThis) {
+/* Model weights: Cache API first (offline after the first split), else a fetch. Either way the bytes
+ * must match the pinned SHA-256 — a partial download or a stale file is refused (and evicted) instead
+ * of silently separating with the wrong network. Used for both the compact model (same-origin) and the
+ * full one (the library's pinned Hugging Face revision). */
+export async function modelBytes(model = COMPACT_MODEL, scope = globalThis) {
   let cache = null;
   try { cache = scope.caches ? await scope.caches.open("ttp-models") : null; } catch (_) { cache = null; }
   const key = `${model.url}#${model.sha256}`;
@@ -134,29 +185,39 @@ export async function compactModelBytes(model = COMPACT_MODEL, scope = globalThi
     } catch (_) { /* fall through to the network */ }
   }
   const res = await scope.fetch(model.url);
-  if (!res.ok) throw new Error(`could not download the low-memory stem model (HTTP ${res.status})`);
+  if (!res.ok) throw new Error(`could not download the stem model (HTTP ${res.status})`);
   const bytes = new Uint8Array(await res.arrayBuffer());
   const got = await sha256Hex(bytes);
-  if (got !== model.sha256) throw new Error(`the low-memory stem model failed its integrity check (SHA-256 ${got.slice(0, 12)}…, expected ${model.sha256.slice(0, 12)}…) — reload and try again`);
+  if (got !== model.sha256) throw new Error(`the stem model failed its integrity check (SHA-256 ${got.slice(0, 12)}…, expected ${model.sha256.slice(0, 12)}…) — reload and try again`);
   if (cache) { try { await cache.put(key, new Response(bytes)); } catch (_) { /* quota: fine, just not cached */ } }
   return bytes;
 }
 
-/* One ONNX Runtime session for the whole song, in the shape the library's `session` hook
- * expects ({ inputs, outputs, run(feeds), free() }). `free()` is a no-op so the library's
- * per-block release doesn't rebuild it 8 times; `release()` is ours, called once at the end. */
-export async function compactSession(device, bytes, ortImport = (u) => import(/* @vite-ignore */ u)) {
-  const mod = await ortImport(ORT_WASM_PATHS + (ORT_MODULE[device] || ORT_MODULE.wasm));
+/* The full-size model, exactly as the vendored library pins it (revision + SHA-256 + 476-frame window).
+ * The URL is the one the library itself builds (`hosted()`), so a cached copy and a fresh one agree. */
+export function fullModelOf(mod, name = STEM_MODEL) {
+  const p = mod && mod.models && mod.models[name], rev = mod && mod.REVISIONS && mod.REVISIONS[name];
+  if (!p || !rev || !p.sha256 || !p.repo || !p.file) throw new Error("the stem separator library has no pinned SCNet weights (vendor bundle out of date?)");
+  return { url: `https://huggingface.co/${p.repo}/resolve/${rev}/${p.file}`, sha256: p.sha256, frames: p.frames || 476 };
+}
+
+/* One ONNX Runtime session for the whole song, on the pinned WASM build, in the shape the library's
+ * `session` hook expects ({ inputs, outputs, run(feeds), free() }). The library reads the frame count
+ * from inputs[0].dims[3], so `frames` must be the model's. `free()` is a no-op so the library's
+ * per-block release doesn't rebuild it every block; `release()` is ours, called once at the end.
+ * `graphOptimizationLevel` undefined = ORT's default (what the library used for the full model). */
+export async function wasmSession(bytes, { frames = COMPACT_MODEL.frames, graphOptimizationLevel } = {}, ortImport = (u) => import(/* @vite-ignore */ u)) {
+  const mod = await ortImport(ORT_WASM_PATHS + ORT_WASM_MODULE);
   const ort = mod.default || mod;
   if (ort.env && ort.env.wasm) { ort.env.wasm.wasmPaths = ORT_WASM_PATHS; ort.env.wasm.numThreads = 1; }
   const s = await ort.InferenceSession.create(bytes, {
-    executionProviders: [device === "webgpu" ? "webgpu" : "wasm"],
+    executionProviders: ["wasm"],
     enableCpuMemArena: false, enableMemPattern: false,
-    graphOptimizationLevel: "disabled",    // the optimiser's weight pre-packing costs ~200 MB and buys no speed here
+    ...(graphOptimizationLevel ? { graphOptimizationLevel } : {}),
   });
   const inName = s.inputNames[0], outName = s.outputNames[0];
   return {
-    inputs: [{ name: inName, dims: [1, 4, 2049, COMPACT_MODEL.frames] }],
+    inputs: [{ name: inName, dims: [1, 4, 2049, frames] }],
     outputs: [{ name: outName }],
     async run(feeds) {
       const ortFeeds = {};
@@ -170,10 +231,8 @@ export async function compactSession(device, bytes, ortImport = (u) => import(/*
 }
 
 /* Low-memory mode always runs on WASM. Its session turns ORT's graph optimiser off (the optimiser's
- * weight pre-packing costs ~200 MB), and ORT's WebGPU EP cannot run an unoptimised graph: on an
- * iPad (iOS/iPadOS 26 Safari has WebGPU) session creation failed with "allocation_planner.cc:237 Could
- * not find OrtValue with name '_sw'" (reported on-device), and on a software WebGPU adapter the
- * same session fails at run time on an f16 Cast. WASM with the same options is the measured path. */
+ * weight pre-packing costs ~200 MB), and ORT's WebGPU EP cannot run an unoptimised graph (measured on a
+ * software WebGPU adapter: the session fails at run time on an f16 Cast). WASM is the measured path. */
 export function deviceFor(compact, picked) { return compact ? "wasm" : picked; }
 
 export async function separateInBlocks(left, right, sampleRate, opts = {}) {
@@ -184,22 +243,30 @@ export async function separateInBlocks(left, right, sampleRate, opts = {}) {
   } catch (e) {
     // A GPU that can't build or run the graph shouldn't end the split: redo it on WASM (same
     // stems, slower). Anything that already failed on WASM is a real error and surfaces as is.
-    if (device !== "webgpu") throw e;
+    if (device !== "webgpu") throw withEnv(e, device);
     if (opts.onProgress) opts.onProgress(0, 1);
-    const r = await separateOn("wasm", left, right, sampleRate, opts);
+    let r;
+    try { r = await separateOn("wasm", left, right, sampleRate, opts); } catch (e2) { throw withEnv(e2, "wasm"); }
     return { ...r, fellBackFrom: "webgpu", fallbackReason: String(e && e.message || e).slice(0, 200) };
   }
 }
 
 async function separateOn(device, left, right, sampleRate, opts) {
-  const separate = resolveSeparate(await lib());
+  const mod = await lib();
+  const separate = resolveSeparate(mod);
   await ensureCacheUsable();
   const n = Math.min(left.length, right.length);
   const compact = !!opts.compact;
   if (compact) capWasmMemory();                // before ORT is imported (see capWasmMemory)
-  // compact: our own pinned model + one reused session (opts.session stays the test seam)
+  // Every WASM session is ours (pinned runtime, see RUNTIME in the header): the model's SHA-checked bytes
+  // and ONE session reused across blocks. WebGPU keeps the library's own loader. opts.session /
+  // opts.loadModel / opts.ortImport are test seams.
   let own = null;
-  const session = opts.session || (compact ? async () => own || (own = await compactSession(device, await compactModelBytes())) : undefined);
+  const model = device === "wasm" ? (compact ? COMPACT_MODEL : fullModelOf(mod)) : null;
+  const session = opts.session || (model ? () => own || (own = (async () => wasmSession(
+    await (opts.loadModel || modelBytes)(model),
+    { frames: model.frames, graphOptimizationLevel: compact ? "disabled" : undefined },
+    opts.ortImport))()) : undefined);
   const block = Math.max(10, opts.blockSec || (compact ? 30 : 60)) * sampleRate | 0;
   const pad = Math.round((opts.padSec != null ? opts.padSec : 1.5) * sampleRate);
   const starts = [];
@@ -210,9 +277,9 @@ async function separateOn(device, left, right, sampleRate, opts) {
     for (let bi = 0; bi < starts.length; bi++) {
       const a = Math.max(0, starts[bi] - pad), b = Math.min(n, starts[bi] + block + pad);
       const res = await separate([left.subarray(a, b), right.subarray(a, b)], {
-        sampleRate, model: STEM_MODEL, device, wasmPaths: ORT_WASM_PATHS,   // single-threaded WASM without COOP/COEP (ORT falls back itself)
+        sampleRate, model: STEM_MODEL, device, wasmPaths: ORT_LIB_PATHS,    // only used when the library loads ORT itself (WebGPU)
         step: opts.step != null ? opts.step : 0.5,                 // 0.5: half the compute of 0.25 for ~0.1 dB
-        session,                                                   // compact model, or the test seam (the library's own session hook)
+        session,                                                   // our pinned WASM session, or the test seam (the library's own session hook)
         ...(compact ? { segment: COMPACT_SEGMENT } : {}),          // the library's SCNet preset says 11 s; the compact graph takes 2.76 s
         // The library calls progress({ chunk: i + 1 }) BEFORE running chunk i, so `chunk` counts
         // chunks STARTED. Report chunks COMPLETED, or every estimate runs one chunk (over a minute
@@ -235,7 +302,7 @@ async function separateOn(device, left, right, sampleRate, opts) {
       if (opts.onProgress) opts.onProgress(bi + 1, starts.length);
     }
   } finally {
-    if (own) own.release();
+    if (own) { try { (await own).release(); } catch (_) { /* creation failed: nothing to release */ } }
   }
   for (let i = 0; i < n; i++) if (weight[i] > 0 && weight[i] !== 1) for (const k of STEM_NAMES) { out[k][0][i] /= weight[i]; out[k][1][i] /= weight[i]; }
   return { sampleRate, stems: out, device, compact };

@@ -6,16 +6,22 @@
  * single-threaded — a 4-minute song is minutes of compute that would freeze the
  * page on the main thread. WebGPU (when the device has it) is used from here too.
  *
+ * The core is imported with this worker's own ?v=<build> query (stem-model.js passes
+ * the deploy stamp on), so a device never mixes a fresh worker with a cached core.
+ *
  * Message in : { id, left, right, sampleRate, opts:{ device, step, blockSec, compact } }
  * Messages out: { id, type:"progress", done, total } … then
  *               { id, type:"result", sampleRate, stems:{ vocals:[L,R], drums, bass, other } }
  *               or { id, type:"error", message }
  * ========================================================================== */
-import { separateInBlocks } from "./stem-model-core.js";
+const CORE_URL = new URL("./stem-model-core.js" + new URL(import.meta.url).search, import.meta.url).href;
+let _core = null;
+const core = () => _core || (_core = import(/* @vite-ignore */ CORE_URL).catch((e) => { _core = null; throw e; }));
 
 self.onmessage = async (ev) => {
   const { id, left, right, sampleRate, opts } = ev.data || {};
   try {
+    const { separateInBlocks } = await core();
     const res = await separateInBlocks(left, right, sampleRate, {
       ...(opts || {}),
       onProgress: (done, total) => self.postMessage({ id, type: "progress", done, total }),

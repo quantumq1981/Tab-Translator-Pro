@@ -2581,8 +2581,11 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   expect(/window\.TTP_STEM_MODEL = separateStems/.test(sm) && /try \{/.test(sm), "stem-model.js publishes window.TTP_STEM_MODEL inside try/catch (never wedges boot)");
   expect(!/^import /m.test(sm) && /await import\(/.test(sm) && /await import\(|import\(\/\*/.test(core), "nothing is imported at boot — the library loads on the first split");
   expect(/new Worker\(WORKER_URL, \{ type: "module" \}\)/.test(sm) && /onMainThread/.test(sm), "separation runs in a module Worker with a main-thread fallback");
-  expect(/from "\.\/stem-model-core\.js"/.test(wk) && /separateInBlocks/.test(wk), "the worker runs the shared core");
-  expect(/onnxruntime-web@1\.30\.0\/dist\//.test(core) && /onnxruntime-web@1\.30\.0\/dist\/ort\.webgpu\.min\.mjs/.test(vend), "ONNX Runtime Web is pinned (1.30.0) in both the core and the bundle");
+  expect(/new URL\("\.\/stem-model-core\.js" \+ new URL\(import\.meta\.url\)\.search, import\.meta\.url\)/.test(wk) && /separateInBlocks/.test(wk), "the worker runs the shared core, imported with the worker's own build stamp");
+  // WASM sessions: OUR pinned 1.23.2 (ORT 1.24+ ships Abseil 20250814, which JavaScriptCore miscompiles →
+  // "Could not find OrtValue with name '…'" on device). WebGPU: the bundle's own 1.30.0, with matching wasm files.
+  expect(/ORT_WASM_VERSION = "1\.23\.2"/.test(core) && /ORT_WASM_MODULE = "ort\.wasm\.min\.mjs"/.test(core) && /onnxruntime-web@\$\{ORT_WASM_VERSION\}\/dist\//.test(core), "every WASM session runs ONNX Runtime Web 1.23.2's plain build (pinned)");
+  expect(/ORT_LIB_VERSION = "1\.30\.0"/.test(core) && /onnxruntime-web@1\.30\.0\/dist\/ort\.webgpu\.min\.mjs/.test(vend) && /wasmPaths: ORT_LIB_PATHS/.test(core), "the library's own (WebGPU) loader gets wasm files from its own release (1.30.0)");
   expect(/scnet: \{ file: "scnet\.int8\.onnx", repo: "audiojs\/scnet", sha256: "98228931494151762a1c4ab1ec7899a894b1f81fd4a509921a9d2f9bacc50845"/.test(vend) && /scnet: "e71bcdb42bce1d62b7fae25ba90fcbcf90f73f46"/.test(vend),
     "the SCNet weights are pinned to a revision AND a SHA-256 the library checks before use");
   expect(/STEM_MODEL = "scnet"/.test(core) && !/htdemucs/.test(core), "the shipped preset is SCNet (MIT weights) — never the research-only htdemucs");
@@ -2709,10 +2712,10 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
     for (const k of SRC) for (let c = 0; c < 2; c++) { const inp = c ? R : L, st = cres.stems[k][c]; let e = 0, p = 0; for (let i = sr; i < n - sr; i++) { const d = st[i] - W[k] * inp[i]; e += d * d; p += (W[k] * inp[i]) ** 2; } worstC = Math.max(worstC, Math.sqrt(e / p)); }
     expect(worstC < 1e-4, `compact: stems still = mask × input through the shorter STFT windows (worst rel. error ${worstC.toExponential(1)})`);
   }
-  // iPhone (iOS 26 Safari has WebGPU): the compact session turns the graph optimiser off, and ORT's
-  // WebGPU EP can't build an unoptimised graph — "allocation_planner.cc:237 Could not find OrtValue
-  // with name '_sw'" (reported on-device). Low-memory mode must run on WASM; a GPU that fails at all
-  // must not end the split.
+  // The compact session turns the graph optimiser off, and ORT's WebGPU EP can't run an unoptimised graph
+  // (fails at run time on an f16 Cast on a software adapter). Low-memory mode must run on WASM; a GPU that
+  // fails at all must not end the split. (The on-device "Could not find OrtValue with name '_sw'/'_pc'" was
+  // NOT this — it is JavaScriptCore vs ORT ≥ 1.24's Abseil; see the pinned-runtime block below.)
   expect(core.deviceFor(true, "webgpu") === "wasm" && core.deviceFor(false, "webgpu") === "webgpu" && core.deviceFor(false, "wasm") === "wasm", "low-memory mode always runs on WASM; the full model keeps WebGPU where available");
   {
     const g = await core.separateInBlocks(L, R, sr, { session: cSession, compact: true, device: "webgpu" });
@@ -2732,12 +2735,12 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
       caches: { open: async () => ({ match: async (k) => store.has(k) ? new Response(store.get(k)) : undefined, put: async (k, r) => { store.set(k, new Uint8Array(await r.arrayBuffer())); }, delete: async (k) => store.delete(k) }) },
       fetch: async () => (fetches++, new Response(compactBytes)),
     };
-    const b1 = await core.compactModelBytes(core.COMPACT_MODEL, scope), b2 = await core.compactModelBytes(core.COMPACT_MODEL, scope);
+    const b1 = await core.modelBytes(core.COMPACT_MODEL, scope), b2 = await core.modelBytes(core.COMPACT_MODEL, scope);
     expect(b1.length === compactBytes.length && b2.length === compactBytes.length && fetches === 1, `compact weights: downloaded once, then served from the cache (${fetches} fetches)`);
     const key = [...store.keys()][0]; store.set(key, compactBytes.slice(0, 1000));
-    await core.compactModelBytes(core.COMPACT_MODEL, scope);
+    await core.modelBytes(core.COMPACT_MODEL, scope);
     expect(fetches === 2 && store.get(key).length === compactBytes.length, "a corrupt cached copy is evicted and re-downloaded");
-    let bad = ""; try { await core.compactModelBytes(core.COMPACT_MODEL, { fetch: async () => new Response(compactBytes.slice(0, 5000)) }); } catch (e) { bad = e.message; }
+    let bad = ""; try { await core.modelBytes(core.COMPACT_MODEL, { fetch: async () => new Response(compactBytes.slice(0, 5000)) }); } catch (e) { bad = e.message; }
     expect(/integrity check/.test(bad), "a partial / altered download is refused with a readable message");
   }
   // iOS: ORT's shared 4 GiB WASM memory can't be reserved on a busy iPhone ("no available backend
@@ -2764,17 +2767,18 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
     const real = new realScope.WebAssembly.Memory({ initial: 1, maximum: 65536, shared: true });
     expect(real instanceof WebAssembly.Memory && real.buffer.byteLength === 65536, "with the real WebAssembly.Memory the capped constructor still returns a genuine WebAssembly.Memory");
     const coreSrc = fs.readFileSync(path.join(repo, "stem-model-core.js"), "utf8");
-    expect(/if \(compact\) capWasmMemory\(\);/.test(coreSrc) && coreSrc.indexOf("if (compact) capWasmMemory();") < coreSrc.indexOf("compactSession(device, await compactModelBytes())"), "low-memory mode caps the WASM reservation before ORT is imported");
+    expect(/if \(compact\) capWasmMemory\(\);/.test(coreSrc) && coreSrc.indexOf("if (compact) capWasmMemory();") < coreSrc.indexOf("wasmSession(\n    await (opts.loadModel || modelBytes)(model)"), "low-memory mode caps the WASM reservation before ORT is imported");
   }
-  // one ORT session for the whole song, created lean
+  // one ORT session for the whole song, created lean, on the pinned WASM build
   {
     let created = null, released = 0;
     const fakeOrt = { env: { wasm: {} }, Tensor: function (type, data, dims) { this.type = type; this.data = data; this.dims = dims; },
       InferenceSession: { create: async (bytes, so) => (created = so, { inputNames: ["mix_spec"], outputNames: ["stems_spec"], run: async (f) => ({ stems_spec: { data: f.mix_spec.data, dims: f.mix_spec.dims, type: "float32" } }), release: async () => { released++; } }) } };
     let imported = "";
-    const sess = await core.compactSession("wasm", new Uint8Array(4), async (u) => (imported = u, fakeOrt));
-    expect(/onnxruntime-web@1\.30\.0\/dist\/ort\.wasm\.min\.mjs$/.test(imported) && fakeOrt.env.wasm.numThreads === 1 && /onnxruntime-web@1\.30\.0/.test(fakeOrt.env.wasm.wasmPaths), "compact session: pinned ORT 1.30.0 WASM build, single thread");
+    const sess = await core.wasmSession(new Uint8Array(4), { frames: FR, graphOptimizationLevel: "disabled" }, async (u) => (imported = u, fakeOrt));
+    expect(/onnxruntime-web@1\.23\.2\/dist\/ort\.wasm\.min\.mjs$/.test(imported) && fakeOrt.env.wasm.numThreads === 1 && /onnxruntime-web@1\.23\.2\/dist\/$/.test(fakeOrt.env.wasm.wasmPaths), `WASM session: pinned ORT 1.23.2 plain build, its own wasm files, single thread (imported ${imported})`);
     expect(created && created.graphOptimizationLevel === "disabled" && created.enableCpuMemArena === false && created.enableMemPattern === false && JSON.stringify(created.executionProviders) === '["wasm"]', "compact session: graph optimisation off (its weight pre-packing alone costs ~200 MB), no arena, no memory pattern");
+    expect(sess.inputs[0].name === "mix_spec" && sess.inputs[0].dims[3] === FR, "the session declares the model's frame count (the library reads inputs[0].dims[3])");
     sess.free(); sess.free();
     expect(released === 0, "the library's per-block free() does not tear the reused session down");
     sess.release();
@@ -2782,6 +2786,76 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
     expect(released === 1, "release() frees it once, at the end");
     const r = await sess.run({ mix_spec: { data: new Float32Array(6), dims: [1, 4, 2049, FR], type: "float32" } });
     expect(r.stems_spec && r.stems_spec.data.length === 6 && Array.isArray(r.stems_spec.dims), "the session speaks the library's { name: { data, dims } } shape");
+    created = null;
+    const full = await core.wasmSession(new Uint8Array(4), { frames: 476 }, async () => fakeOrt);
+    expect(created && !("graphOptimizationLevel" in created) && created.enableCpuMemArena === false && full.inputs[0].dims[3] === 476, "full-model session: ORT's default optimiser (what the library used), no arena, 476 frames");
+  }
+
+  /* The pinned runtime, end to end (2026-10-23). On device, session creation failed with "Could not find
+   * OrtValue with name '_sw'", then '_pc' — a different name each try, the signature of microsoft/onnxruntime
+   * #33426: ORT ≥ 1.24 (Abseil 20250814) under JavaScriptCore. Every WASM session must now be OURS, on 1.23.2,
+   * for the full model as well as the compact one, and WebKit must never be handed WebGPU. Driven through the
+   * REAL vendored library with only ORT itself faked (the import seam), so the wiring is what's tested. */
+  {
+    const maskOrt = (log) => ({
+      env: { wasm: {} },
+      Tensor: function (type, data, dims) { this.type = type; this.data = data; this.dims = dims; },
+      InferenceSession: { create: async (bytes, so) => (log.created.push(so), {
+        inputNames: ["mix_spec"], outputNames: ["stems_spec"],
+        async run(f) { log.runs++; const x = f.mix_spec.data, len = x.length, o = new Float32Array(SRC.length * len); for (let s2 = 0; s2 < SRC.length; s2++) for (let i = 0; i < len; i++) o[s2 * len + i] = x[i] * W[SRC[s2]]; const d = f.mix_spec.dims; log.frames.add(d[3]); return { stems_spec: { data: o, dims: [1, 16, d[2], d[3]] } }; },
+        release: async () => { log.released++; },
+      }) },
+    });
+    const vendMod = await import(path.join(repo, "vendor/neural-separate.mjs"));
+    const pinned = core.fullModelOf(vendMod);
+    expect(pinned.url === "https://huggingface.co/audiojs/scnet/resolve/e71bcdb42bce1d62b7fae25ba90fcbcf90f73f46/scnet.int8.onnx" && pinned.sha256 === "98228931494151762a1c4ab1ec7899a894b1f81fd4a509921a9d2f9bacc50845" && pinned.frames === 476,
+      "the full model is the library's pin: same URL, same SHA-256, 476 frames");
+    let threwPin = ""; try { core.fullModelOf({ separate() {} }); } catch (e) { threwPin = e.message; }
+    expect(/no pinned SCNet weights/.test(threwPin), "a bundle without pins fails with a readable message");
+    for (const mode of ["full", "compact"]) {
+      const log = { created: [], runs: 0, released: 0, frames: new Set() }, asked = [], imports = [];
+      let out = null, e1 = "";
+      Object.defineProperty(process, "release", { value: { name: "browser-test" }, configurable: true });
+      try {
+        out = await core.separateInBlocks(L, R, sr, {
+          device: "wasm", compact: mode === "compact", blockSec: 10,
+          loadModel: async (m) => (asked.push(m), new Uint8Array(8)),
+          ortImport: async (u) => (imports.push(u), maskOrt(log)),
+        });
+      } catch (e) { e1 = String(e && e.message || e); }
+      finally { if (relDesc) Object.defineProperty(process, "release", relDesc); }
+      expect(out && !e1, `${mode}: WASM separation runs on our own session through the real library` + (e1 ? " — " + e1 : ""));
+      if (!out) continue;
+      const want = mode === "compact" ? core.COMPACT_MODEL : pinned;
+      expect(asked.length === 1 && asked[0].url === want.url && asked[0].sha256 === want.sha256, `${mode}: the pinned weights are loaded once for the whole song (${asked.length}×)`);
+      expect(imports.length === 1 && imports.every((u) => /onnxruntime-web@1\.23\.2\/dist\/ort\.wasm\.min\.mjs$/.test(u)), `${mode}: ONNX Runtime 1.23.2 (plain WASM) is the runtime — never the bundle's 1.30.0 (${imports.join(", ")})`);
+      expect(log.created.length === 1 && log.released === 1 && log.runs >= 3, `${mode}: one session, reused for every model run (${log.runs}), released once (${log.created.length} created, ${log.released} released)`);
+      expect(log.frames.size === 1 && log.frames.has(want.frames), `${mode}: the library feeds the model's own window (${[...log.frames]} frames, want ${want.frames})`);
+      expect(mode === "compact" ? log.created[0].graphOptimizationLevel === "disabled" : !("graphOptimizationLevel" in log.created[0]), `${mode}: optimiser ${mode === "compact" ? "off (low memory)" : "at ORT's default (as the library ran it)"}`);
+      let worstP = 0;
+      for (const k of SRC) for (let c = 0; c < 2; c++) { const inp = c ? R : L, st = out.stems[k][c]; let e = 0, p = 0; for (let i = sr; i < n - sr; i++) { const d = st[i] - W[k] * inp[i]; e += d * d; p += (W[k] * inp[i]) ** 2; } worstP = Math.max(worstP, Math.sqrt(e / p)); }
+      expect(worstP < 1e-4, `${mode}: stems = mask × input through our session (worst rel. error ${worstP.toExponential(1)})`);
+    }
+    // a failure carries what ran: build · runtime · device (so the next device screenshot answers "which code?")
+    let lab = "";
+    try { await core.separateInBlocks(L, R, sr, { device: "wasm", session: async () => { throw new Error("Can't create a session. ERROR_CODE: 1, ERROR_MESSAGE: allocation_planner.cc:237 Could not find OrtValue with name '_pc'"); } }); } catch (e) { lab = e.message; }
+    expect(/Could not find OrtValue with name '_pc' \[stems dev · ORT 1\.23\.2 wasm/.test(lab), `a separation error is labelled with build + runtime + device (got: ${lab.slice(-80)})`);
+    let lab2 = ""; try { await core.separateInBlocks(L, R, sr, { device: "wasm", session: async () => { throw new Error(lab); } }); } catch (e) { lab2 = e.message; }
+    expect((lab2.match(/\[stems /g) || []).length === 1, "an already-labelled error isn't labelled twice");
+    const iphone174 = { userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1" };
+    const iphone26 = { userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1" };
+    const ipadDesk = { userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15" };
+    const iosChrome = { userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/124.0.6367.71 Mobile/15E148 Safari/604.1" };
+    const macChrome = { userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36" };
+    const edgeWin = { userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0" };
+    expect([iphone174, iphone26, ipadDesk, iosChrome].every((nv) => core.isWebKit(nv)) && ![macChrome, edgeWin, null].some((nv) => core.isWebKit(nv)), "WebKit = Safari + every iOS/iPadOS browser (incl. iPadOS's Mac UA); Chrome/Edge are not");
+    expect(/Safari 17\.4 · iOS 17\.4\]$/.test(core.envLabel("wasm", iphone174)) && /Safari 26\.0 · iOS 18\.6\]$/.test(core.envLabel("wasm", iphone26)) && /Safari 17\.3 · macOS\/iPadOS\]$/.test(core.envLabel("wasm", ipadDesk)) && /CriOS 124 · iOS 17\.4\]$/.test(core.envLabel("wasm", iosChrome)) && /ORT 1\.30\.0 webgpu · Chrome 130\]$/.test(core.envLabel("webgpu", macChrome)),
+      "the label reads the Safari (WebKit) version — iOS 26 freezes the OS token at 18_6 — and the runtime per device");
+    const gpuNav = (ua) => ({ ...ua, gpu: { requestAdapter: async () => ({}) } });
+    const picks = await Promise.all([core.pickDevice(undefined, gpuNav(iphone26)), core.pickDevice(undefined, gpuNav(ipadDesk)), core.pickDevice(undefined, gpuNav(macChrome)), core.pickDevice(undefined, macChrome), core.pickDevice("webgpu", iphone26)]);
+    expect(picks.join() === "wasm,wasm,webgpu,wasm,webgpu", `WebKit never gets WebGPU automatically (its JSEP/asyncify builds stall WebKit 26.2); Chrome with an adapter does (got ${picks})`);
+    const stamped = await import(path.join(repo, "stem-model-core.js") + "?v=abc1234");
+    expect(stamped.BUILD === "abc1234" && /\[stems abc1234 · /.test(stamped.envLabel("wasm", iphone174)), "the deploy stamp (?v=) names the build in the label");
   }
   // phones get it by default: iPhone / iPad (incl. iPadOS's Mac user agent with touch)
   {
@@ -2795,17 +2869,25 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
     expect(/compact: opts\.compact != null \? !!opts\.compact : isAppleMobile\(\)/.test(smSrc) && /compact: opts\.compact \}/.test(smSrc), "stem-model.js defaults compact from the device and forwards it to the worker");
     expect(/TTP_STEM_COMPACT_DEFAULT = isAppleMobile\(\)/.test(smSrc), "the page learns the device default (for the UI toggle)");
     expect(/if \(!_pending\.size\) \{ try \{ w\.terminate\(\); \} catch \(_\) \{\} if \(_worker === w\) _worker = null; \}/.test(smSrc), "the stem worker is ended once its split settles (a WASM heap never shrinks; charting ran ~650 MB higher with it alive)");
+    // a deploy must reach the device: the page stamps stem-model.js?v=<commit>, and the stamp rides on down the graph
+    const coreSrc2 = fs.readFileSync(path.join(repo, "stem-model-core.js"), "utf8");
+    expect(/WORKER_URL = new URL\("\.\/stem-worker\.js" \+ BUILD_QS, import\.meta\.url\)/.test(smSrc) && /CORE_URL = new URL\("\.\/stem-model-core\.js" \+ BUILD_QS, import\.meta\.url\)/.test(smSrc), "stem-model.js hands its build stamp to the worker and the main-thread core");
+    expect(/SEPARATE_URL = new URL\("\.\/vendor\/neural-separate\.mjs" \+ BUILD_QS, import\.meta\.url\)/.test(coreSrc2) && /url: new URL\("\.\/models\/scnet-compact\/scnet-f120\.int8\.onnx", import\.meta\.url\)\.href/.test(coreSrc2), "the core stamps the vendor bundle but NOT the model URL (its cache key must survive deploys)");
+    const pagesSrc2 = fs.readFileSync(path.join(repo, ".github", "workflows", "pages.yml"), "utf8");
+    expect(/BUILD="\$\{GITHUB_SHA::7\}"/.test(pagesSrc2) && /sed -i "s#src=\\"\.\/stem-model\.js\\"#src=\\"\.\/stem-model\.js\?v=\$\{BUILD\}\\"#" _site\/index\.html/.test(pagesSrc2) && /grep -q "src=\\"\.\/stem-model\.js\?v=\$\{BUILD\}\\"" _site\/index\.html/.test(pagesSrc2), "Pages stamps stem-model.js with the commit and fails the deploy if the stamp didn't land");
   }
   const ui = fs.readFileSync(path.join(repo, "TabDecoderPro.tsx"), "utf8");
   expect(/TTP_STEM_MODEL\(L, R, src\.sampleRate, \{ compact,/.test(ui), "the UI passes Low-memory mode to the separator");
   expect(/localStorage\.setItem\("ttp:stems:inflight"/.test(ui) && (ui.match(/localStorage\.removeItem\("ttp:stems:inflight"\)/g) || []).length >= 3, "a split marks itself in flight and clears the mark on success and failure");
   expect(/ran out of memory and reloaded the page\. Low-memory mode is now on/.test(ui) && /if \(!last\.compact\) \{\s*setCompact\(true\)/.test(ui), "after iOS kills the tab mid-split, the next load says so and turns Low-memory mode on");
   expect(/allocat\(\?!ion_planner\)/.test(ui) && /Can't create a session/.test(ui), "an ONNX Runtime graph error isn't blamed on memory");
+  expect(/const engineBug = \/Could not find OrtValue\|node_index_info\|Failed to find args for kernel\/i\.test\(raw\)/.test(ui) && /const hint = engineBug\s*\? " That is Safari's WebAssembly engine/.test(ui), "the WebKit engine signature ('Could not find OrtValue …') gets its own honest hint, not a memory one");
+  expect(/const raw = msg\.replace\(\/\\s\*\\\[stems \[\^\\\]\]\*\\\]\\s\*\$\/, ""\)/.test(ui) && /\/backend\|wasm\/i\.test\(raw\)/.test(ui), "errors are classified without the diagnostics label (it always says 'wasm')");
   expect(/📱 Low-memory \{compact \? "on" : "off"\}/.test(ui) && /"ttp:stems:compact"/.test(ui), "the Low-memory toggle is visible and remembered per device");
   expect(/loading && sourceName \? "The song is still loading — try again in a moment\."/.test(ui) && /fmt=\{fmt\} loading=\{busy\}/.test(ui), "pressing Split while a long song is still decoding says so (not 'Upload a song above first')");
   const pagesSrc = fs.readFileSync(path.join(repo, ".github", "workflows", "pages.yml"), "utf8");
   expect(/cp models\/scnet-compact\/scnet-f120\.int8\.onnx models\/scnet-compact\/NOTICE _site\/models\/scnet-compact\//.test(pagesSrc), "Pages ships the compact model + its notice");
-  expect(/const memLike = \/memory\|allocat\(\?!ion_planner\)\|RangeError/.test(ui) && /const hint = memLike/.test(ui), "the separation error only blames memory when the error is about memory");
+  expect(/const memLike = !engineBug && \/memory\|allocat\(\?!ion_planner\)\|bad_alloc\|RangeError/.test(ui) && /: memLike\s*\?/.test(ui), "the separation error only blames memory when the error is about memory (ORT's std::bad_alloc counts)");
   expect(/progressEta\(prog, Date\.now\(\)\)/.test(ui) && /tAt: Date\.now\(\)/.test(ui), "the stems countdown uses progressEta with each event's timestamp");
   expect(/setInterval\(\(\) => setTick/.test(ui), "the countdown re-renders between progress events");
   expect(/Charting every instrument…"\); setErr\(""\); setRes\(null\); setProg\(null\)/.test(ui), "the separator's countdown is cleared when charting starts");

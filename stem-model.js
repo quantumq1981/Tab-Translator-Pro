@@ -2,8 +2,9 @@
  * stem-model.js — browser-only glue that publishes window.TTP_STEM_MODEL, the
  * full-mix → stems separator behind the Audio panel's "✂ Split into stems".
  * Same pattern as note-model.js: nothing is downloaded at boot; the first split
- * loads the vendored library, ONNX Runtime Web (jsDelivr, pinned) and the SCNet
- * weights (13 MB, Hugging Face, pinned + SHA-256-checked, then cached).
+ * loads the vendored library, ONNX Runtime Web (jsDelivr, pinned — 1.23.2 for every
+ * WASM session, see RUNTIME in stem-model-core.js) and the SCNet weights (Hugging Face
+ * or same-origin for the low-memory model, pinned + SHA-256-checked, then cached).
  *
  * Contract:
  *   window.TTP_STEM_MODEL(left, right, sampleRate, { onProgress(done,total), device, blockSec, step, compact })
@@ -21,8 +22,11 @@
  * asserts its contracts (pins, lazy load, fallback, deploy list); the separation
  * itself must be smoke-tested on real hardware.
  * ========================================================================== */
-const WORKER_URL = new URL("./stem-worker.js", import.meta.url);
-const CORE_URL = new URL("./stem-model-core.js", import.meta.url).href;
+// The deploy loads this file as stem-model.js?v=<commit> (pages.yml); the worker and the core inherit the
+// stamp, so a phone can't run a fresh page against a separator its HTTP cache kept from the last deploy.
+const BUILD_QS = (() => { try { return new URL(import.meta.url).search; } catch (_) { return ""; } })();
+const WORKER_URL = new URL("./stem-worker.js" + BUILD_QS, import.meta.url);
+const CORE_URL = new URL("./stem-model-core.js" + BUILD_QS, import.meta.url).href;
 
 let _worker = null, _seq = 0;
 const _pending = new Map();

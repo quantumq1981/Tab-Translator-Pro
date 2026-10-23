@@ -69,6 +69,26 @@ node bench/scnet-e2e.mjs --deps $D/out --tracks 3 --sec 40 --playwright /opt/nod
 
 React and react-dom are bundled into one module so the page gets a single React instance.
 
+Device emulation: `--compact 1` starts with Low-memory mode on; `--ua "<user agent>"` makes the page
+(and its workers) report a device's user agent, e.g. an iPad's desktop-class Safari UA, so the WebKit
+routing runs as it does there (V8 still executes the WASM — this checks the app's choices and the
+pinned runtime, not JavaScriptCore); `--stamp <v>` serves `index.html` the way `pages.yml` deploys it
+(`stem-model.js?v=<v>`). The run logs which separator files were served (with their stamp) and which
+ONNX Runtime files were fetched.
+
+## `ort-pin.mjs` — the pinned ONNX Runtime separates exactly like the bundle's
+
+Every WASM session runs ONNX Runtime Web 1.23.2 (ORT ≥ 1.24's Abseil is miscompiled by Safari's
+JavaScriptCore — `stem-model-core.js`, RUNTIME). This checks the pin costs nothing: the same SCNet
+session on 1.30.0 and 1.23.2, bit for bit, plus create/run time and peak RSS.
+
+```sh
+A=$(mktemp -d) && (cd $A && npm init -y >/dev/null && npm i onnxruntime-web@1.30.0)
+B=$(mktemp -d) && (cd $B && npm init -y >/dev/null && npm i onnxruntime-web@1.23.2)
+curl -L -o /tmp/scnet.int8.onnx https://huggingface.co/audiojs/scnet/resolve/e71bcdb42bce1d62b7fae25ba90fcbcf90f73f46/scnet.int8.onnx
+node bench/ort-pin.mjs --a $A --b $B --full /tmp/scnet.int8.onnx     # exits non-zero unless bit-identical
+```
+
 Charts are scored per song (the songs have different tempi). The run directory keeps the separated
 and reference stems as WAVs plus `run.json`, so `--reuse <run dir>` re-scores them in seconds without
 the ~10-minute browser run; `--chart-opts '{"bassFusion":true}'` passes options to `chartsFromStems`.

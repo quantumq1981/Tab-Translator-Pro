@@ -69,6 +69,12 @@ jobs:
           # in stem-model-core.js (scripts/scnet_reframe.py rebuilds it from the pinned upstream file).
           mkdir -p _site/models/scnet-compact
           cp models/scnet-compact/scnet-f120.int8.onnx models/scnet-compact/NOTICE _site/models/scnet-compact/
+          # Stamp the separator's module graph with this commit: stem-model.js?v=<sha> passes the stamp on to
+          # stem-worker.js → stem-model-core.js → the vendor bundle, so a phone runs the separator that was
+          # deployed instead of a copy its HTTP cache kept (the UI itself is always fetched no-cache).
+          BUILD="${GITHUB_SHA::7}"
+          sed -i "s#src=\"./stem-model.js\"#src=\"./stem-model.js?v=${BUILD}\"#" _site/index.html
+          grep -q "src=\"./stem-model.js?v=${BUILD}\"" _site/index.html
 
       # enablement: true turns Pages on (source = GitHub Actions) using the
       # workflow's `pages: write` permission, so no manual Settings toggle is
