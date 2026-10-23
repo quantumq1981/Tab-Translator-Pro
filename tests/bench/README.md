@@ -14,6 +14,7 @@ node bench/confusion.mjs clean,bleed                               # what the er
 node bench/inspect.mjs 11 clean                                    # GT vs decode timeline, one stem
 node bench/stems.mjs        # mix vs separated stems (+ leakage, bass fusion) and drum F-measure
 node bench/ambig.mjs test   # where the right answer sits for uncertain chords (Auto's ceiling)
+node bench/fingering.mjs    # Stage 3: re-finger the GP corpus, % of notes on the written string
 ```
 
 ## What is measured
