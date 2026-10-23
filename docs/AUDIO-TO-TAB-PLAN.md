@@ -58,13 +58,13 @@ alternative:
 | Tool | Role in this build | Status here |
 |---|---|---|
 | **Hugging Face connector** (`hf_fs`, `hub_repo_details`) | Model/dataset discovery and licence checks. Used in this review: GuitarSet licence, xavriley weights, MERT licence, TART has no released weights | Works (authenticated read) |
-| **`huggingface-skills:hf-cli`** | Download GuitarSet; publish our converted ONNX models to the owner's HF repo (pinned revision + SHA-256, same pattern as SCNet) | The `hf` CLI is **not installed** and there is no HF token in the container. The plugin's own MCP server **needs authorization** |
+| **`huggingface-skills:hf-cli`** | Download GuitarSet; publish our converted ONNX models to the owner's HF repo (pinned revision + SHA-256, same pattern as SCNet) | **Works without a token for public repos.** `pip install --user huggingface_hub` → `~/.local/bin/hf` (v2.3.0); `huggingface.co`, its Xet CDN and PyPI are all reachable. Anonymous `hf download` of `xavriley/midi-transcription-models` and `jhartquist/guitarset` was verified. A token (`HF_TOKEN`, write scope) is only needed to **upload**. The containers are ephemeral, so add the install to the environment's setup script. The plugin's own MCP server needs authorization, but it duplicates the claude.ai Hugging Face connector, which works |
 | **`huggingface-skills:hf-mem`** | Estimate model memory **before** adopting it. iOS memory is the constraint that has broken things before | Same as above |
 | **`huggingface-skills:transformers-js`** | Only if the learned Stage 3 (T5) earns its place: browser seq2seq on WASM/WebGPU | Same ORT/WebKit caveats as SCNet (§5) |
 | **`huggingface-skills:huggingface-datasets`** | Inspect GuitarSet/EGDB splits and schema without downloading | — |
 | **`huggingface-skills:huggingface-spaces` / `-zerogpu`** | **Optional** cloud lane: convert `guitar-gaps.pth` → ONNX (needs torch), or serve a heavy teacher model for dev comparisons. Never in the shipped path | Needs HF auth |
 | **Firecrawl research** (`firecrawl_research_*`) | Literature verification (used above); next for technique-classification and string-timbre papers | Works |
-| **AudioPod connector** (`separate_stems` 6stem incl. **guitar**, `audio_to_midi` guitar) | **Dev-time oracle only**, like PyGuitarPro was for GP3/4/5: a second opinion on real songs. Not shippable: it's server-side, spends credits, takes URLs only, and its key would leak from a static page | The claude.ai connector loaded. The `audiopod` **plugin** server failed to connect (proxy 403) |
+| **AudioPod connector** (`separate_stems` 6stem incl. **guitar**, `audio_to_midi` guitar) | **Dev-time oracle only**, like PyGuitarPro was for GP3/4/5: a second opinion on real songs. Not shippable: it's server-side, spends credits, takes URLs only, and its key would leak from a static page | The claude.ai connector works (it is routed through Anthropic's MCP proxy). The `audiopod` **plugin** connects straight to `mcp.audiopod.ai:443`, which the environment's network policy denies (proxy 403). The fix is to add that host under Allowed domains, or to skip it and use the connector |
 | **Play Sheet Music** | Listen to exported tab/ABC (it already validated ABC in this repo) | Works |
 | **GitHub MCP** | PRs per stage | Works |
 | **`/code-review`** skill | Before each stage merges | — |
@@ -166,8 +166,8 @@ byte-identical.
 | **P0b** | `fingerScore(score, opts)` in `engine.tsx`: tuned Viterbi + corpus transition priors. Gives audio and ML charts a `{tab}` block (the "Stage E" CLAUDE.md lists as not built) | Beat 58.1 % on test; target ≥ 70 % | Nothing external |
 | **P0c** | Technique flags captured in GP3/4/5/GPIF parsers → `event.tech` | Corpus guards stay byte-identical | Nothing external |
 | **P0d** | `scoreToAlphaTex` + `scoreToGP` (GPIF zip via `CompressionStream`) exporters carrying string + technique | Round-trip through our own `parseGPIF`; opens in chord-sheet-maker's AlphaTab | Nothing external |
-| **P1** | GuitarSet harness (`tests/bench/guitarset.mjs`): Tab F1, string-fret F1, a noisy variant from day one | Report basic-pitch + DP end-to-end Tab F1 (the proposal's P0 baseline, on real audio) | HF access from the container (token or allow-listed host) |
-| **P2** | Stage 1: `guitar-gaps` → int8 ONNX in the worker | ≥ 80 % F50 zero-shot on GuitarSet; fits the iPhone memory envelope | torch for conversion (HF Space/Job or the owner's machine) |
+| **P1** | GuitarSet harness (`tests/bench/guitarset.mjs`): Tab F1, string-fret F1, a noisy variant from day one | Report basic-pitch + DP end-to-end Tab F1 (the proposal's P0 baseline, on real audio) | Nothing external. Anonymous `hf download` works |
+| **P2** | Stage 1: `guitar-gaps` → int8 ONNX in the worker | ≥ 80 % F50 zero-shot on GuitarSet; fits the iPhone memory envelope | torch for the conversion, **in this container**: the PyPI build is reachable (~3 GB with its CUDA libraries; 30 GB free). Allowing `download.pytorch.org` gives the ~200 MB CPU build instead. No cloud needed. A write token is only needed to publish the ONNX to HF; otherwise it is vendored same-origin like `models/scnet-compact/` |
 | **P3** | Audio string evidence (§3.3) as a DP emission; tab review UI that reuses `ChordReview` + personalization table | String-fret Tab F1 ≥ 70 % zero-shot (TART's level) | GuitarSet hex channels |
 | **P4** | Technique classifier (small, on note-aligned segments, trained on rendered + GuitarSet audio); learned Stage 3 only if §3.2 shows it pays | ≥ 75 % technique accuracy; < 10 % F1 drop on the noisy variant | A training environment |
 
@@ -182,11 +182,15 @@ byte-identical.
 - Downbeats: pure-DSP downbeat detection was measured and does not work. The beat-aware
   quantizer the proposal wants needs a learned downbeat model. It is not a heuristic to bolt on.
 
-## 6. Decisions only the owner can make
+## 6. Owner decisions (answered 2026-10-23)
 
-1. **Is an opt-in cloud lane acceptable**, or does zero-server stay absolute? This decides
-   whether HF Spaces/Vercel appear at all.
-2. **HF token as an environment secret** (`environment.secrets`). This unblocks P1 and P2:
-   the GuitarSet download, ONNX publication and Space-based conversion.
-3. **Commercial intent.** It decides whether MERT (CC-BY-NC) can be used even as a dev-time
-   teacher.
+1. **Cloud lane: not now.** The owner builds on iPad/iOS. A Linux laptop comes later for
+   publishing and monetising. Every phase above therefore runs in this container or on the
+   device, and the cloud lane stays a future option, never a dependency.
+2. **Commercial intent: yes** (the app will be monetised). **MERT (CC-BY-NC-4.0) is excluded
+   entirely, even as a dev-time teacher.** Every adopted model must carry a commercial-use
+   licence: MIT (`xavriley`, SCNet weights), Apache-2.0 (basic-pitch), CC-BY-4.0 data
+   (GuitarSet, with attribution).
+3. **Hugging Face token: optional.** Reading public models and datasets needs none. A
+   write-scoped token in the environment's Network secrets / environment variables
+   (`HF_TOKEN`) is only for publishing converted models to the owner's HF account.
