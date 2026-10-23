@@ -2542,8 +2542,14 @@ re-sequenced build plan: `docs/AUDIO-TO-TAB-PLAN.md`.** Load-bearing conclusions
   (`fingerScore` in `engine.tsx`) must beat 58.1 % test. The GP parsers already consume the
   bend/slide/hammer/harmonic/palm-mute/dead bytes — capturing them is the tuplet-style P0c.
 - AudioPod (6-stem incl. guitar, audio→MIDI) is a **dev-time oracle only** (server, credits,
-  URL input, key would leak). Owner decisions pending: opt-in cloud lane?, HF token secret,
-  commercial intent (MERT).
+  URL input, key would leak). Its *plugin* fails only because the network policy denies
+  `mcp.audiopod.ai`; the claude.ai connector works.
+- **Owner decisions (2026-10-23):** no cloud lane for now (iPad-only dev; a Linux laptop later);
+  the app WILL be monetised → **no non-commercial licences anywhere** (MERT out, even as a
+  teacher). **`hf` CLI:** `pip install --user huggingface_hub` → `~/.local/bin/hf`; anonymous
+  downloads of public repos work from this container (GuitarSet, xavriley weights verified), a
+  token is only for uploads. torch is installable from PyPI here (CPU-only build needs
+  `download.pytorch.org` allowed) → the ONNX conversion needs no cloud.
 
 ## Path B (scans / photos) — OUT OF SCOPE
 
