@@ -673,6 +673,16 @@ function _parseTuning(staffTunings) {
   });
   return arr.length === 6 && arr.every((v) => typeof v === "number") ? arr : null;
 }
+/* Open-string MIDI pitches keyed EXACTLY like `event.frets` (engine index 0 = lowest of six
+ * slots), with `null` for a slot the instrument does not have — a 4-string bass read from a
+ * GP3/4/5 file sits on keys 2…5, because those readers key frets as 6 − string. Built by
+ * every parser as `score.tuningMidi`, so fingering and tab export use the real tuning
+ * (drop / down-tuned / bass), not the name. `put(key, midi)` ignores keys outside 0…5. */
+function _tuningByKey(fill) {
+  const tk = [null, null, null, null, null, null];
+  fill((k, m) => { if (k >= 0 && k <= 5 && Number.isFinite(m)) tk[k] = m; });
+  return tk.some((m) => m != null) ? tk : null;
+}
 function _tuningName(arr) {
   if (!arr) return "Standard";
   for (const [n, t] of Object.entries(TUNINGS)) if (t.every((v, i) => v === arr[i])) return n;
@@ -823,7 +833,7 @@ function parseMusicXML(xml, useSharp = true, partIndex = 0) {
   const sound = _xEls(doc, "sound").find((s) => s.getAttribute("tempo"));
   if (sound) { const v = parseFloat(sound.getAttribute("tempo")); if (!isNaN(v)) tempo = v; }
   if (tempo == null) { const pm = _xFirst(doc, "per-minute"); if (pm) { const v = parseFloat(_xText(pm)); if (!isNaN(v)) tempo = v; } }
-  return { source: "musicxml", timeSig: bars.length ? bars[0].timeSig : [beats, beatType], tuning: _tuningName(tuning), tempo, bars, parts, partIndex: idx };
+  return { source: "musicxml", timeSig: bars.length ? bars[0].timeSig : [beats, beatType], tuning: _tuningName(tuning), tuningMidi: _tuningByKey((put) => (tuning || []).forEach((m, i) => put(i, m))), tempo, bars, parts, partIndex: idx };
 }
 
 /* ===========================================================================
@@ -875,6 +885,32 @@ function _gpNoteMidi(note) {
   if (toneEl && octEl) { const step = parseInt(_xChildText(toneEl, "Step"), 10), oct = parseInt(_xChildText(octEl, "Number"), 10); if (!isNaN(step) && !isNaN(oct)) return oct * 12 + step; }
   return null;
 }
+// GPIF note techniques: <Property> flags plus a few direct child elements. Accent is a
+// bitmask (1 staccato · 4 heavy accent · 8 accent); <AntiAccent> marks a ghost note.
+// GPIF bend size: the largest of origin / middle / destination, 25 units per quarter-tone.
+function _gpifBendQt(note) {
+  if (!_gpProp(note, "Bended")) return 0;
+  const val = (n) => { const p = _gpProp(note, n); return p ? Math.abs(parseFloat(_xChildText(p, "Float")) || 0) : 0; };
+  return Math.round(Math.max(val("BendOriginValue"), val("BendMiddleValue"), val("BendDestinationValue")) / 25);
+}
+function _gpifNoteTech(note) {
+  const t = [];
+  if (_gpProp(note, "Bended")) t.push("bend");
+  if (_gpProp(note, "Slide")) t.push("slide");
+  if (_gpProp(note, "HopoOrigin") || _gpProp(note, "HopoDestination")) t.push("hammer");
+  if (_gpProp(note, "HarmonicType") || _gpProp(note, "HarmonicFret")) t.push("harmonic");
+  if (_gpProp(note, "PalmMuted")) t.push("palmMute");
+  if (_gpProp(note, "Muted")) t.push("dead");
+  if (_gpProp(note, "Tapped")) t.push("tap");
+  if (_xFirst(note, "Vibrato")) t.push("vibrato");
+  if (_xFirst(note, "LetRing")) t.push("letRing");
+  if (_xFirst(note, "Trill")) t.push("trill");
+  if (_xFirst(note, "AntiAccent")) t.push("ghost");
+  const acc = parseInt(_xChildText(note, "Accent") || "0", 10) || 0;
+  if (acc & 1) t.push("staccato");
+  if (acc & 12) t.push("accent");
+  return t;
+}
 function parseGPIF(xml, useSharp = true, partIndex = 0) {
   const doc = new DOMParser().parseFromString(xml, "text/xml");
   if (_xEls(doc, "parsererror").length) throw new Error("Not valid gpif XML.");
@@ -887,7 +923,8 @@ function parseGPIF(xml, useSharp = true, partIndex = 0) {
   // tuning of the chosen track (display only — MIDI is read directly per note)
   let tuning = null;
   const tunProp = _gpProp(tracks[idx], "Tuning") || (_xFirst(tracks[idx], "Staff") && _gpProp(_xFirst(tracks[idx], "Staff"), "Tuning"));
-  if (tunProp) { const pit = _gpIds(_xChildText(tunProp, "Pitches")).map(Number); if (pit.length === 6 && pit.every((v) => !isNaN(v))) tuning = pit; } // gpif lists low→high (String 0 = low E)
+  let tuningAll = null;
+  if (tunProp) { const pit = _gpIds(_xChildText(tunProp, "Pitches")).map(Number); if (pit.every((v) => !isNaN(v))) { tuningAll = pit; if (pit.length === 6) tuning = pit; } } // gpif lists low→high (String 0 = low E)
 
   const bars = [];
   let lastSig = [4, 4];
@@ -915,7 +952,7 @@ function parseGPIF(xml, useSharp = true, partIndex = 0) {
           const rRef = _xFirst(beat, "Rhythm"); const rEl = rRef && rhythmMap.get(rRef.getAttribute("ref")); const q = _gpRhythmQuarters(rEl); const tup = _gpRhythmTuplet(rEl);
           const noteIds = _gpIds(_xText(_xFirst(beat, "Notes")));
           if (noteIds.length) {
-            if (!onsets.has(cursor)) onsets.set(cursor, { midis: [], frets: {}, tuplet: tup });
+            if (!onsets.has(cursor)) onsets.set(cursor, { midis: [], frets: {}, tech: {}, bends: {}, tuplet: tup });
             const o = onsets.get(cursor);
             noteIds.forEach((nId) => {
               const note = noteMap.get(nId); if (!note) return;
@@ -928,7 +965,7 @@ function parseGPIF(xml, useSharp = true, partIndex = 0) {
               if (midi == null && s != null) { const tun = tuning || TUNINGS.Standard; if (s >= 0 && s < tun.length) midi = tun[s] + f; }
               if (midi == null) return;
               o.midis.push(midi);
-              if (s != null && s >= 0 && s <= 5 && o.frets[s] === undefined) o.frets[s] = f;
+              if (s != null && s >= 0 && s <= 5 && o.frets[s] === undefined) { o.frets[s] = f; const t = _gpifNoteTech(note); if (t.length) o.tech[s] = t; const bq = _gpifBendQt(note); if (bq) o.bends[s] = bq; }
             });
           }
           cursor += q;
@@ -937,7 +974,7 @@ function parseGPIF(xml, useSharp = true, partIndex = 0) {
     }
     const qPerBeat = 4 / btype; // a "beat" = one 1/beatType note
     const raw = [...onsets.entries()].filter(([, o]) => o.midis.length).sort((a, b) => a[0] - b[0])
-      .map(([onset, o]) => ({ symbol: symbolForMidis(o.midis, useSharp), midis: [...o.midis].sort((a, b) => a - b), frets: o.frets, tuplet: o.tuplet || 0, onset }));
+      .map(([onset, o]) => _withTech({ symbol: symbolForMidis(o.midis, useSharp), midis: [...o.midis].sort((a, b) => a - b), frets: o.frets, tuplet: o.tuplet || 0, onset }, o.tech, o.bends));
     const events = [];
     raw.forEach((e) => { const last = events[events.length - 1]; if (!last || last.symbol !== e.symbol) events.push(e); });
     events.forEach((e) => { e.qbeat = e.onset / qPerBeat; e.beat = Math.max(0, Math.min(bts - 1, Math.round(e.qbeat))); });
@@ -951,7 +988,7 @@ function parseGPIF(xml, useSharp = true, partIndex = 0) {
   let tempo = null;
   const tAuto = _xEls(doc, "Automation").find((a) => _xChildText(a, "Type") === "Tempo");
   if (tAuto) { const v = parseFloat((_xChildText(tAuto, "Value") || "").split(/\s+/)[0]); if (!isNaN(v)) tempo = v; }
-  return { source: "gp", timeSig: bars.length ? bars[0].timeSig : lastSig, tuning: _tuningName(tuning), tempo, bars, parts, partIndex: idx };
+  return { source: "gp", timeSig: bars.length ? bars[0].timeSig : lastSig, tuning: _tuningName(tuning), tuningMidi: _tuningByKey((put) => (tuningAll || TUNINGS.Standard).forEach((m, i) => put(i, m))), tempo, bars, parts, partIndex: idx };
 }
 
 /* Inflate a `.gp` (GP7/8) ZIP and return its Content/score.gpif XML text.
@@ -1028,35 +1065,67 @@ function _gpReadDuration(r, flags) {
   if (flags & 0x20) { const tv = r.i32(); const t = _GP_TUPLET[tv]; if (t) { q *= t[1] / t[0]; r._tuplet = tv; } } // tuplet (same bytes; capture the group size)
   return q;
 }
-function _gpReadBend(r) { r.i8(); r.i32(); const n = r.i32(); for (let i = 0; i < n; i++) { r.i32(); r.i32(); r.bool(); } }
+// Bend: type, total value, then n points (offset, value, vibrato). Returns the largest point
+// value in QUARTER-TONES (GP stores 25 units per quarter-tone, the factor alphaTab's importer uses).
+function _gpReadBend(r) { r.i8(); r.i32(); const n = r.i32(); let mx = 0; for (let i = 0; i < n; i++) { r.i32(); const v = r.i32(); r.bool(); if (Math.abs(v) > mx) mx = Math.abs(v); } return Math.round(mx / 25); }
 function _gpReadGrace(r) { r.i8(); r.u8(); r.u8(); r.i8(); }            // fret, velocity, duration, transition
+// Technique tags (`event.tech`) — a fixed vocabulary shared by every reader and exporter.
+const TECHNIQUES = ["bend", "slide", "hammer", "harmonic", "palmMute", "vibrato", "letRing", "staccato", "trill", "tremolo", "grace", "ghost", "accent", "dead", "tap"];
+// GP3/4 note-effect flags → tags. f1: 0x01 bend · 0x02 hammer/pull · 0x04 slide (GP3) ·
+// 0x08 let ring · 0x10 grace; f2 (GP4+): 0x01 staccato · 0x02 palm mute · 0x04 tremolo
+// picking · 0x08 slide · 0x10 harmonic · 0x20 trill · 0x40 vibrato.
+function _gpEffectTags(f1, f2, v) {
+  const t = [];
+  if (f1 & 0x01) t.push("bend");
+  if (f1 & 0x02) t.push("hammer");
+  if (v < 4 && (f1 & 0x04)) t.push("slide");
+  if (f1 & 0x08) t.push("letRing");
+  if (f1 & 0x10) t.push("grace");
+  if (v >= 4) {
+    if (f2 & 0x01) t.push("staccato");
+    if (f2 & 0x02) t.push("palmMute");
+    if (f2 & 0x04) t.push("tremolo");
+    if (f2 & 0x08) t.push("slide");
+    if (f2 & 0x10) t.push("harmonic");
+    if (f2 & 0x20) t.push("trill");
+    if (f2 & 0x40) t.push("vibrato");
+  }
+  return t;
+}
 function _gpReadNoteEffects(r, v) {
   if (v >= 4) {
     const f1 = r.u8(), f2 = r.u8();
-    if (f1 & 0x01) _gpReadBend(r);
+    const bend = (f1 & 0x01) ? _gpReadBend(r) : 0;
     if (f1 & 0x10) _gpReadGrace(r);
     if (f2 & 0x04) r.i8();                                             // tremolo picking
     if (f2 & 0x08) r.i8();                                             // slide
     if (f2 & 0x10) r.i8();                                             // harmonic
     if (f2 & 0x20) { r.i8(); r.i8(); }                                 // trill
-  } else {
-    const f1 = r.u8();
-    if (f1 & 0x01) _gpReadBend(r);
-    if (f1 & 0x10) _gpReadGrace(r);                                    // 0x04 slide: no bytes in GP3
+    return Object.assign(_gpEffectTags(f1, f2, v), { bend });
   }
+  const f1 = r.u8();
+  const bend = (f1 & 0x01) ? _gpReadBend(r) : 0;
+  if (f1 & 0x10) _gpReadGrace(r);                                      // 0x04 slide: no bytes in GP3
+  return Object.assign(_gpEffectTags(f1, 0, v), { bend });
 }
+// Returns the beat-level technique tags (they apply to every note of the beat).
 function _gpReadBeatEffects(r, v) {
+  const t = [];
   if (v >= 4) {
     const f1 = r.u8(), f2 = r.u8();
-    if (f1 & 0x20) r.i8();                                             // slap/tap
+    if (f1 & 0x03) t.push("vibrato");                                  // vibrato / wide vibrato
+    if (f1 & 0x20) { if (r.i8() === 1) t.push("tap"); }                // slap effect: 1 = tapping
     if (f2 & 0x04) _gpReadBend(r);                                     // tremolo bar = bend
     if (f1 & 0x40) { r.i8(); r.i8(); }                                 // stroke
     if (f2 & 0x02) r.i8();                                             // pick stroke
   } else {
     const f1 = r.u8();
-    if (f1 & 0x20) { const slap = r.u8(); if (slap === 0) r.i32(); else r.i32(); } // tremolo bar / tap value
+    if (f1 & 0x03) t.push("vibrato");
+    if (f1 & 0x0c) t.push("harmonic");                                 // natural / artificial harmonic
+    if (f1 & 0x20) { const slap = r.u8(); r.i32(); if (slap === 1) t.push("tap"); } // tremolo bar (0) / slap value
     if (f1 & 0x40) { r.i8(); r.i8(); }                                 // stroke
   }
+  return t;
 }
 function _gpReadMixTableChange(r, v) {
   const vals = [r.i8(), r.i8(), r.i8(), r.i8(), r.i8(), r.i8(), r.i8()]; // instr,vol,bal,chorus,reverb,phaser,tremolo
@@ -1103,13 +1172,15 @@ function _gpReadNote(r, v, stringNumber, tuning, state) {
   let fret = null;
   if (flags & 0x20) fret = r.i8();
   if (flags & 0x80) { r.i8(); r.i8(); }                               // fingering
-  if (flags & 0x08) _gpReadNoteEffects(r, v);
+  const tech = (flags & 0x08) ? _gpReadNoteEffects(r, v) : [];
+  if (flags & 0x04) tech.push("ghost");
+  if (flags & 0x40) tech.push("accent");
   if (type === 2) { fret = state.lastFret[stringNumber]; if (fret == null) return null; } // tie → sustain prior pitch
   else if (type === 3) return null;                                   // dead/muted → no pitch
   if (fret == null) return null;
   fret = Math.min(Math.max(fret, 0), 99);
   state.lastFret[stringNumber] = fret;
-  return { fret, midi: tuning[stringNumber - 1] + fret };
+  return { fret, midi: tuning[stringNumber - 1] + fret, tech, bend: tech.bend || 0 };
 }
 function _gpReadBeat(r, v, stringCount, tuning, state) {
   const flags = r.u8();
@@ -1118,17 +1189,25 @@ function _gpReadBeat(r, v, stringCount, tuning, state) {
   const durQuarters = _gpReadDuration(r, flags);
   if (flags & 0x02) _gpReadChord(r, v, stringCount);
   if (flags & 0x04) r.intByteString();                               // text
-  if (flags & 0x08) _gpReadBeatEffects(r, v);
+  const beatTech = (flags & 0x08) ? _gpReadBeatEffects(r, v) : [];
   if (flags & 0x10) _gpReadMixTableChange(r, v);
   const stringFlags = r.u8();
-  const midis = [], frets = {};
+  const midis = [], frets = {}, tech = {}, bends = {};
   for (let s = 1; s <= stringCount; s++) {
     if (stringFlags & (1 << (7 - s))) {
       const note = _gpReadNote(r, v, s, tuning, state);
-      if (note) { midis.push(note.midi); frets[6 - s] = note.fret; }
+      if (note) { midis.push(note.midi); frets[6 - s] = note.fret; _gpAddTech(tech, 6 - s, note.tech, beatTech, note.bend, bends); }
     }
   }
-  return { durQuarters: empty ? 0 : durQuarters, midis, frets, tuplet: r._tuplet || 0 };
+  return { durQuarters: empty ? 0 : durQuarters, midis, frets, tech, bends, tuplet: r._tuplet || 0 };
+}
+// Merge a note's tags + its beat's tags into a {engIdx → tags} map (only non-empty entries);
+// a bend's size goes to the parallel {engIdx → quarter-tones} map. Plain objects and arrays
+// only — the GP3/4/5 parse runs in a Worker, and structured clone drops array extras.
+function _gpAddTech(map, eng, noteTags, beatTags, bend, bends) {
+  const t = [...new Set([...(noteTags || []), ...(beatTags || [])])];
+  if (t.length) map[eng] = t;
+  if (bend && bends) bends[eng] = bend;
 }
 function parseGP345(u8, useSharp = true, partIndex = 0) {
   const r = _gpReader(u8);
@@ -1190,6 +1269,15 @@ function parseGP345(u8, useSharp = true, partIndex = 0) {
   }
   return _gpBuildScore(tracks, tempo, version, useSharp, partIndex);
 }
+// Attach `tech` ({engIdx → tags}) and `bends` ({engIdx → quarter-tones}) to an event only
+// when present, so technique-free events stay byte-identical to what every exporter and test
+// already sees.
+const _withTech = (e, tech, bends) => {
+  let out = e;
+  if (tech && Object.keys(tech).length) out = { ...out, tech };
+  if (bends && Object.keys(bends).length) out = { ...out, bends };
+  return out;
+};
 function _gpBuildScore(tracks, tempo, version, useSharp, partIndex) {
   const idx = Math.max(0, Math.min(tracks.length - 1, partIndex | 0));
   const tr = tracks[idx];
@@ -1200,13 +1288,13 @@ function _gpBuildScore(tracks, tempo, version, useSharp, partIndex) {
     m.voices.forEach((beats) => {                                     // GP5 has 2 voices; each restarts at beat 0
       let cursor = 0;
       beats.forEach((b) => {
-        if (b.midis.length) { if (!onsets.has(cursor)) onsets.set(cursor, { midis: [], frets: {}, tuplet: b.tuplet || 0 }); const o = onsets.get(cursor); b.midis.forEach((x) => o.midis.push(x)); Object.keys(b.frets).forEach((k) => { if (o.frets[k] === undefined) o.frets[k] = b.frets[k]; }); }
+        if (b.midis.length) { if (!onsets.has(cursor)) onsets.set(cursor, { midis: [], frets: {}, tech: {}, bends: {}, tuplet: b.tuplet || 0 }); const o = onsets.get(cursor); b.midis.forEach((x) => o.midis.push(x)); Object.keys(b.frets).forEach((k) => { if (o.frets[k] === undefined) { o.frets[k] = b.frets[k]; if (b.tech && b.tech[k]) o.tech[k] = b.tech[k]; if (b.bends && b.bends[k]) o.bends[k] = b.bends[k]; } }); }
         cursor += b.durQuarters;
       });
     });
     const qPerBeat = 4 / btype;
     const raw = [...onsets.entries()].filter(([, o]) => o.midis.length).sort((a, b) => a[0] - b[0])
-      .map(([onset, o]) => ({ symbol: symbolForMidis(o.midis, useSharp), midis: [...o.midis].sort((a, b) => a - b), frets: o.frets, tuplet: o.tuplet || 0, onset }));
+      .map(([onset, o]) => _withTech({ symbol: symbolForMidis(o.midis, useSharp), midis: [...o.midis].sort((a, b) => a - b), frets: o.frets, tuplet: o.tuplet || 0, onset }, o.tech, o.bends));
     const events = [];
     raw.forEach((e) => { const last = events[events.length - 1]; if (!last || last.symbol !== e.symbol) events.push(e); });
     events.forEach((e) => { e.qbeat = e.onset / qPerBeat; e.beat = Math.max(0, Math.min(bts - 1, Math.round(e.qbeat))); });
@@ -1216,7 +1304,7 @@ function _gpBuildScore(tracks, tempo, version, useSharp, partIndex) {
     const md = m.meta || {};
     return { number: mi + 1, timeSig: [bts, btype], section: md.section || undefined, repeatStart: !!md.repeatStart, repeatEnd: !!md.repeatEnd, ending: md.ending || null, events: events.map(({ onset, ...e }) => e) };
   });
-  return { source: "gp", timeSig: bars.length ? bars[0].timeSig : [4, 4], tuning: _tuningName(tr.tuning ? [...tr.tuning].reverse() : null), capo: tr.capo || 0, tempo, bars, parts, partIndex: idx };
+  return { source: "gp", timeSig: bars.length ? bars[0].timeSig : [4, 4], tuning: _tuningName(tr.tuning ? [...tr.tuning].reverse() : null), tuningMidi: _tuningByKey((put) => (tr.tuning || []).forEach((m, i) => put(6 - (i + 1), m))), capo: tr.capo || 0, tempo, bars, parts, partIndex: idx };
 }
 /* ---- GP5: a separate reader (different container: RSE, page setup, directions,
  * 2 voices/measure, wider headers/tracks/notes). gt500 = format > 5.0.0 (v5.10),
@@ -1227,12 +1315,13 @@ function _gp5Grace(r) { r.u8(); r.u8(); r.u8(); r.u8(); r.u8(); }
 function _gp5Harmonic(r) { const t = r.i8(); if (t === 2) { r.u8(); r.i8(); r.u8(); } else if (t === 3) r.u8(); }
 function _gp5NoteEffects(r) {
   const f1 = r.u8(), f2 = r.u8();
-  if (f1 & 0x01) _gpReadBend(r);
+  const bend = (f1 & 0x01) ? _gpReadBend(r) : 0;
   if (f1 & 0x10) _gp5Grace(r);
   if (f2 & 0x04) r.i8();                                              // tremolo picking
   if (f2 & 0x08) r.u8();                                              // slide flags
   if (f2 & 0x10) _gp5Harmonic(r);
   if (f2 & 0x20) { r.i8(); r.i8(); }                                  // trill
+  return Object.assign(_gpEffectTags(f1, f2, 5), { bend });
 }
 function _gp5MixTable(r, gt500) {
   const instrument = r.i8();
@@ -1257,13 +1346,15 @@ function _gp5Note(r, stringNumber, tuning, state) {
   if (flags & 0x80) { r.i8(); r.i8(); }                              // fingering
   if (flags & 0x01) r.skip(8);                                       // duration percent (f64)
   r.u8();                                                            // flags2 (always)
-  if (flags & 0x08) _gp5NoteEffects(r);
+  const tech = (flags & 0x08) ? _gp5NoteEffects(r) : [];
+  if (flags & 0x04) tech.push("ghost");
+  if (flags & 0x42) tech.push("accent");                             // accentuated / heavy accent
   if (type === 2) { fret = state.lastFret[stringNumber]; if (fret == null) return null; }
   else if (type === 3) return null;
   if (fret == null) return null;
   fret = Math.min(Math.max(fret, 0), 99);
   state.lastFret[stringNumber] = fret;
-  return { fret, midi: tuning[stringNumber - 1] + fret };
+  return { fret, midi: tuning[stringNumber - 1] + fret, tech, bend: tech.bend || 0 };
 }
 function _gp5Beat(r, stringCount, tuning, state, gt500) {
   const flags = r.u8();
@@ -1272,16 +1363,16 @@ function _gp5Beat(r, stringCount, tuning, state, gt500) {
   const durQuarters = _gpReadDuration(r, flags);
   if (flags & 0x02) _gpReadChord(r, 4, stringCount);                 // GP4-format chord
   if (flags & 0x04) r.intByteString();
-  if (flags & 0x08) _gpReadBeatEffects(r, 4);                        // GP4-format beat effects
+  const beatTech = (flags & 0x08) ? _gpReadBeatEffects(r, 4) : [];  // GP4-format beat effects
   if (flags & 0x10) _gp5MixTable(r, gt500);
   const stringFlags = r.u8();
-  const midis = [], frets = {};
+  const midis = [], frets = {}, tech = {}, bends = {};
   for (let s = 1; s <= stringCount; s++) {
-    if (stringFlags & (1 << (7 - s))) { const note = _gp5Note(r, s, tuning, state); if (note) { midis.push(note.midi); frets[6 - s] = note.fret; } }
+    if (stringFlags & (1 << (7 - s))) { const note = _gp5Note(r, s, tuning, state); if (note) { midis.push(note.midi); frets[6 - s] = note.fret; _gpAddTech(tech, 6 - s, note.tech, beatTech, note.bend, bends); } }
   }
   const f2 = r.i16();
   if (f2 & 0x0800) r.u8();                                           // break-secondary-beams count
-  return { durQuarters: empty ? 0 : durQuarters, midis, frets, tuplet: r._tuplet || 0 };
+  return { durQuarters: empty ? 0 : durQuarters, midis, frets, tech, bends, tuplet: r._tuplet || 0 };
 }
 function parseGP5(u8, version, useSharp = true, partIndex = 0) {
   const r = _gpReader(u8);
@@ -1571,7 +1662,7 @@ function parsePowerTab(u8, useSharp = true, partIndex = 0) {
       bars.push({ number: barNum++, timeSig: [bts, btype], events: events.map(({ onset, ...e }) => e) });
     }
   }
-  return { source: "gp", timeSig: bars.length ? bars[0].timeSig : [4, 4], tuning: _tuningName(tuning.length === 6 ? [...tuning].reverse() : null), tempo, bars, parts, partIndex: idx };
+  return { source: "gp", timeSig: bars.length ? bars[0].timeSig : [4, 4], tuning: _tuningName(tuning.length === 6 ? [...tuning].reverse() : null), tuningMidi: _tuningByKey((put) => tuning.forEach((m, i) => put(tuning.length - 1 - i, m))), tempo, bars, parts, partIndex: idx };
 }
 
 /* Detect format from the file head and dispatch to the right parser. */
@@ -3280,10 +3371,338 @@ function transposeScore(score, n, useSharp) {
     ...b,
     events: b.events.map((e) => {
       const midis = (e.midis || []).map((m) => m + n);
-      return { ...e, midis, frets: undefined, symbol: midis.length ? symbolForMidis(midis, useSharp) : e.symbol };
+      // frets and the string-keyed techniques are position-specific; fingerScore can re-finger.
+      return { ...e, midis, frets: undefined, tech: undefined, bends: undefined, symbol: midis.length ? symbolForMidis(midis, useSharp) : e.symbol };
     }),
   }));
   return { ...score, bars, transposedBy: n };
+}
+
+/* ---- Stage 3: fingering — which string plays each note (fingerScore) ---------
+ * An audio-, ML- or transpose-derived chart knows its PITCHES but not where they
+ * are played: the same E4 is the open 1st string, the 2nd string at fret 5, the
+ * 3rd at 9, … This assigns every note a (string, fret) with a Viterbi pass over
+ * the event sequence — the DP-first half of docs/AUDIO-TO-TAB-PLAN.md §3.2.
+ *
+ *  - STATES are "shapes": one assignment of an event's pitches to DISTINCT
+ *    strings. Hand span is a HARD constraint (a shape wider than maxSpan frets,
+ *    open strings excluded, is never a state), so every emitted chord is
+ *    playable by construction, and pitch validity holds for free.
+ *  - COSTS (Noise2Fret's playability terms, as costs not losses): span, fret
+ *    height, open-string preference, hand movement between consecutive shapes
+ *    (cheaper across a rest), string crossing on a single-note line.
+ *  - Scored against the WRITTEN fingering of the repo's Guitar Pro corpus
+ *    (`tests/bench/fingering.mjs`, dev = even files, test = odd). Weights are
+ *    tuned on dev only; see CLAUDE.md for the measured numbers.
+ * Pure, deterministic, no deps. Tuning arrays are low→high (engine index 0 = low E). */
+/* Learned −log p tables (min-shifted), from the DEV halves only — the GP corpus' even files
+ * + GuitarSet players 0–2 (tests/bench/fingering.mjs --learn-prior --prior-parts cell,move).
+ * cell[string][fret]: how often each position is written/played; move[d]: hand moves of d
+ * frets (window model). Regenerate with the same command; never train on the test halves. */
+const FINGER_PRIOR = {
+  move: [0.014, 0.24, 0, 1.297, 2.665, 3.007, 4.612, 4.36, 5.613, 5.5, 6.306, 6.306, 5.787],
+  cell: [
+    [0.426, 1.007, 1.244, 0, 0.755, 1.326, 1.138, 1.455, 1.758, 2.273, 2.383, 3.49, 3.515, 5.792, 5.233, 4.981, 7.179, 6.08, 6.08, 6.485, 7.179, 7.179, 7.179],
+    [0.273, 1.393, 0.098, 0, 0.1, 0.377, 0.132, 0.323, 0.786, 1.278, 1.866, 2.249, 2.464, 4.775, 3.928, 4.002, 5.18, 5.314, 5.468, 5.65, 5.65, 5.874, 4.957],
+    [0.309, 1.891, 0, 0.329, 0.466, 0.303, 0.082, 0.185, 0.303, 0.554, 0.815, 1.232, 1.534, 2.44, 2.264, 3.346, 3.661, 3.538, 4.157, 4.024, 4.717, 5.092, 4.122],
+    [0.409, 1.214, 0, 0.975, 0.426, 0.429, 0.357, 0.143, 0.644, 0.236, 1.027, 0.989, 1.288, 1.805, 2.643, 2.888, 2.807, 3.644, 4.62, 4.497, 4.983, 4.711, 4.118],
+    [0.716, 0.68, 0.809, 0, 0.859, 0.348, 0.525, 0.628, 0.239, 0.817, 0.531, 1.373, 0.795, 1.799, 2.046, 2.25, 3.769, 2.729, 4.695, 4.604, 4.695, 6.353, 3.55],
+    [0, 0.826, 0.509, 0.152, 0.607, 0.186, 0.686, 0.278, 0.415, 1.086, 0.63, 1.372, 0.951, 1.569, 1.849, 2.046, 2.341, 1.794, 4.105, 1.984, 3.817, 4.51, 2.423],
+  ],
+};
+const FINGER_DEFAULTS = {
+  maxFret: 22,     // highest fret considered
+  maxSpan: 4,      // fretted span a hand holds (hard)
+  beam: 48,        // shapes kept per event (lowest local cost first)
+  span: 0.8,       // per fret of span
+  fretSum: 0.02,   // per fret of height, summed over fretted notes
+  open: 0,         // bonus per open string
+  move: 1.2,       // per fret the hand moves between consecutive shapes
+  restBeats: 2,    // a gap this long (beats) halves the next move's cost
+  cross: 0,        // per string crossed between consecutive single notes
+  window: 3,       // the hand covers this many frets; moving within the window is free
+  prior: FINGER_PRIOR, // corpus prior (null disables)
+  priorWeight: 1,  // scale on the prior tables
+};
+
+function fingerCandidates(midi, tuning, maxFret = FINGER_DEFAULTS.maxFret) {
+  const out = [];
+  for (let s = 0; s < tuning.length; s++) { if (tuning[s] == null) continue; const f = midi - tuning[s]; if (f >= 0 && f <= maxFret) out.push(s, f); }
+  return out; // flat [string, fret, string, fret, …]
+}
+
+const _fingerHandPos = (shape) => {
+  let lo = Infinity;
+  for (const n of shape) if (n.fret > 0 && n.fret < lo) lo = n.fret;
+  return lo === Infinity ? null : lo;
+};
+// Fretted extent [lo, hi] of a shape, or null when every note is open.
+const _fingerExtent = (shape) => {
+  let lo = Infinity, hi = -Infinity;
+  for (const n of shape) if (n.fret > 0) { if (n.fret < lo) lo = n.fret; if (n.fret > hi) hi = n.fret; }
+  return lo === Infinity ? null : [lo, hi];
+};
+
+function _fingerLocalCost(shape, w) {
+  let lo = Infinity, hi = -Infinity, sum = 0, open = 0;
+  for (const n of shape) {
+    if (n.fret === 0) { open++; continue; }
+    if (n.fret < lo) lo = n.fret;
+    if (n.fret > hi) hi = n.fret;
+    sum += n.fret;
+  }
+  const span = lo === Infinity ? 0 : hi - lo;
+  let c = w.span * span + w.fretSum * sum - w.open * open;
+  if (w.prior) {
+    const pw = w.priorWeight;
+    for (const n of shape) {
+      if (w.prior.fret) c += pw * (w.prior.fret[Math.min(n.fret, w.prior.fret.length - 1)] || 0);
+      if (w.prior.cell && w.prior.cell[n.string]) c += pw * (w.prior.cell[n.string][Math.min(n.fret, w.prior.cell[n.string].length - 1)] || 0);
+    }
+  }
+  return c;
+}
+
+/** Every playable assignment of `midis` to distinct strings, best `beam` by local cost.
+ *  An event with more notes than strings, or no shape within maxSpan, relaxes the span
+ *  (then drops the duplicate pitches) rather than returning nothing. */
+function fingerShapes(midis, tuning, opts = {}) {
+  const w = { ...FINGER_DEFAULTS, ...opts };
+  const ms = [...midis].sort((a, b) => a - b);
+  const enumerate = (notes, maxSpan) => {
+    const out = [], used = new Array(tuning.length).fill(false), acc = [];
+    const cands = notes.map((m) => fingerCandidates(m, tuning, w.maxFret));
+    (function rec(i, lo, hi) {
+      if (out.length >= 4096) return;
+      if (i === notes.length) { out.push(acc.slice()); return; }
+      const c = cands[i];
+      for (let k = 0; k < c.length; k += 2) {
+        const s = c[k], f = c[k + 1];
+        if (used[s]) continue;
+        const nlo = f > 0 ? Math.min(lo, f) : lo, nhi = f > 0 ? Math.max(hi, f) : hi;
+        if (nhi - nlo > maxSpan) continue;
+        used[s] = true; acc.push({ string: s, fret: f, midi: notes[i] });
+        rec(i + 1, nlo, nhi);
+        acc.pop(); used[s] = false;
+      }
+    })(0, Infinity, -Infinity);
+    return out;
+  };
+  let shapes = ms.length <= tuning.length ? enumerate(ms, w.maxSpan) : [];
+  for (let sp = w.maxSpan + 1; !shapes.length && sp <= w.maxSpan + 3 && ms.length <= tuning.length; sp++) shapes = enumerate(ms, sp);
+  if (!shapes.length) {
+    const uniq = [...new Set(ms)].slice(-tuning.length);
+    for (let sp = w.maxSpan; !shapes.length && sp <= w.maxFret; sp += 2) shapes = enumerate(uniq, sp);
+  }
+  return shapes
+    .map((sh) => ({ notes: sh, cost: _fingerLocalCost(sh, w), pos: _fingerHandPos(sh), ext: _fingerExtent(sh) }))
+    .sort((a, b) => a.cost - b.cost)
+    .slice(0, w.beam);
+}
+
+/** Viterbi over a sequence of events `[{ midis, gap? }]` (gap = beats since the
+ *  previous event ended). Returns one shape per event (`null` for an unplayable or
+ *  empty event) plus the path cost. */
+function fingerSequence(events, tuning = TUNINGS.Standard, opts = {}) {
+  const w = { ...FINGER_DEFAULTS, ...opts };
+  const memo = new Map();
+  const sets = events.map((e) => {
+    if (!e || !e.midis || !e.midis.length) return [];
+    const key = [...e.midis].sort((a, b) => a - b).join(",");
+    if (!memo.has(key)) memo.set(key, fingerShapes(e.midis, tuning, w));
+    return memo.get(key);
+  });
+  // Hand movement between consecutive shapes. With `window`, the hand is a span of `window`
+  // frets: two shapes whose possible hand placements [hi−window+1, lo] overlap need no move.
+  const moveCost = (a, b, gap) => {
+    let d;
+    if (w.window > 0) {
+      if (!a.ext || !b.ext) return 0;
+      const aLo = a.ext[1] - w.window + 1, aHi = a.ext[0], bLo = b.ext[1] - w.window + 1, bHi = b.ext[0];
+      d = Math.max(0, bLo - aHi, aLo - bHi);
+    } else {
+      if (a.pos == null || b.pos == null) return 0;
+      d = Math.abs(b.pos - a.pos);
+    }
+    let c = w.move * d;
+    if (w.prior && w.prior.move) c += w.priorWeight * (w.prior.move[Math.min(d, w.prior.move.length - 1)] || 0);
+    return gap >= w.restBeats ? c * 0.5 : c;
+  };
+  const crossCost = (a, b) => (w.cross && a.notes.length === 1 && b.notes.length === 1 ? w.cross * Math.abs(a.notes[0].string - b.notes[0].string) : 0);
+  const picks = new Array(events.length).fill(null);
+  let t0 = 0, total = 0;
+  // Each run of playable events is decoded independently (an unplayable event breaks the chain).
+  while (t0 < sets.length) {
+    if (!sets[t0].length) { t0++; continue; }
+    let t1 = t0;
+    while (t1 + 1 < sets.length && sets[t1 + 1].length) t1++;
+    let prev = sets[t0].map((s) => s.cost);
+    const back = [null];
+    for (let t = t0 + 1; t <= t1; t++) {
+      const gap = events[t].gap || 0, cur = new Array(sets[t].length), bk = new Int32Array(sets[t].length);
+      for (let j = 0; j < sets[t].length; j++) {
+        const sh = sets[t][j];
+        let best = Infinity, bi = 0;
+        for (let i = 0; i < sets[t - 1].length; i++) {
+          const c = prev[i] + moveCost(sets[t - 1][i], sh, gap) + crossCost(sets[t - 1][i], sh);
+          if (c < best) { best = c; bi = i; }
+        }
+        cur[j] = best + sh.cost; bk[j] = bi;
+      }
+      back.push(bk); prev = cur;
+    }
+    let k = 0;
+    for (let j = 1; j < prev.length; j++) if (prev[j] < prev[k]) k = j;
+    total += prev[k];
+    for (let t = t1; t >= t0; t--) { picks[t] = sets[t][k].notes; if (t > t0) k = back[t - t0][k]; }
+    t0 = t1 + 1;
+  }
+  return { shapes: picks, cost: total };
+}
+
+/** Fill `frets` ({engIdx → fret}) on every event of a score that lacks them, by
+ *  `fingerSequence` over the whole chart. Events that already carry frets (a tab
+ *  read off the page / a GP file) keep them unless `opts.overwrite`. Returns a NEW
+ *  score; the input is never mutated. Events gain `fingered: true` when the frets
+ *  are inferred, so the UI and the exporters can tell a guess from a written tab. */
+function fingerScore(score, opts = {}) {
+  if (!score || !score.bars) return score;
+  const tuning = opts.tuning || score.tuningMidi || TUNINGS[score.tuning] || TUNINGS.Standard;
+  const flat = [];
+  score.bars.forEach((b, bi) => (b.events || []).forEach((e, ei) => flat.push({ bi, ei, e })));
+  const need = (e) => opts.overwrite || !e.frets || !Object.keys(e.frets).length;
+  const seq = [];
+  let lastEnd = null;
+  for (const { bi, e } of flat) {
+    const bpb = ((score.bars[bi].timeSig || score.timeSig || [4, 4])[0]);
+    const on = bi * bpb + (e.qbeat ?? e.beat ?? 0), dur = e.qdur ?? e.durBeats ?? 1;
+    seq.push({ midis: e.midis || [], gap: lastEnd == null ? 0 : Math.max(0, on - lastEnd) });
+    lastEnd = on + dur;
+  }
+  const { shapes } = fingerSequence(seq, tuning, opts);
+  const bars = score.bars.map((b) => ({ ...b, events: (b.events || []).map((e) => ({ ...e })) }));
+  flat.forEach(({ bi, ei, e }, k) => {
+    if (!need(e) || !shapes[k]) return;
+    const frets = {};
+    for (const n of shapes[k]) frets[n.string] = n.fret;
+    bars[bi].events[ei] = { ...bars[bi].events[ei], frets, fingered: true };
+  });
+  return { ...score, bars };
+}
+
+/* ---- AlphaTex export (scoreToAlphaTex) -----------------------------------------
+ * AlphaTex is alphaTab's text tab format: it states the STRING of every note, so a tab
+ * renders exactly as fingered — no MusicXML→alphaTab string guessing (the proposal's
+ * "normalization layer" is unnecessary when the format carries the string). Layout follows
+ * alphaTab 1.8's own AlphaTexExporter, and the output is validated by alphaTab's parser in
+ * tests: `fret.string{note props}.duration{beat props}`, chords `(f.s f.s).4`, bars `|`.
+ *  - Strings: alphaTex counts 1 = highest; engine index 0 = low E, so s = n − engIdx.
+ *  - Rhythm: each bar is spelled by the vocal-score quantiser (`_voiceNotationMeasures`,
+ *    16th grid, meter-aware note values, ties as `{t}` on the continuation).
+ *  - Notes without frets (audio / ML / transposed charts) are fingered by `fingerScore`.
+ *  - Techniques (`event.tech`, `event.bends`): h · sl · nh · pm · lr · st · g · ac · x on the
+ *    note, `b (0 q)` for a bend of q quarter-tones, `v` vibrato, `tt` tap on the beat.
+ * Honest limit: triplets are rounded to the 16th grid (alphaTex `tu` is not emitted yet). */
+// GP drum tracks carry an all-zero (or otherwise sub-audio) tuning.
+const isPercussionTuning = (tuning) => !!tuning && tuning.filter((m) => m != null).every((m) => m < 20);
+const _ATEX_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+const _atexPitch = (m) => _ATEX_NAMES[((m % 12) + 12) % 12] + (Math.floor(m / 12) - 1);
+const _atexStr = (s) => `"${String(s == null ? "" : s).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+const _ATEX_DUR = { whole: 1, half: 2, quarter: 4, eighth: 8, "16th": 16, "32nd": 32 };
+const _ATEX_NOTE_TECH = { hammer: "h", slide: "sl", harmonic: "nh", palmMute: "pm", letRing: "lr", staccato: "st", ghost: "g", accent: "ac", dead: "x" };
+
+function scoreToAlphaTex(score, opts = {}) {
+  if (!score || !score.bars) return "";
+  const tuning = opts.tuning || score.tuningMidi || TUNINGS[score.tuning] || TUNINGS.Standard;
+  // A GP percussion track tunes every "string" to 0 — its numbers are drum keys, not frets.
+  if (isPercussionTuning(tuning)) throw new Error("This is a drum/percussion track — it has no strings to write as tab.");
+  // alphaTex string 1 = the highest string the instrument HAS (null slots are skipped).
+  const keys = tuning.map((m, k) => (m == null ? -1 : k)).filter((k) => k >= 0);
+  const atexString = (k) => keys.filter((x) => x > +k).length + 1;
+  const sc = opts.finger === false ? score : fingerScore(score, { tuning });
+  const refingered = opts.finger === false ? null : fingerScore(score, { tuning, overwrite: true });
+  const L = [];
+  if (opts.title) L.push(`\\title ${_atexStr(opts.title)}`);
+  if (opts.composer) L.push(`\\artist ${_atexStr(opts.composer)}`);
+  L.push(`\\track (${_atexStr(opts.trackName || "Guitar")})`);
+  L.push(`  \\staff {${opts.notation === false ? "" : "score "}tabs}`);
+  L.push(`    \\tuning (${keys.slice().reverse().map((k) => _atexPitch(tuning[k])).join(" ")})`);
+  let lastSig = null;
+  sc.bars.forEach((bar, bi) => {
+    const sig = bar.timeSig || sc.timeSig || [4, 4];
+    const meta = [];
+    if (!lastSig || sig[0] !== lastSig[0] || sig[1] !== lastSig[1]) meta.push(`\\ts (${sig[0]} ${sig[1]})`);
+    if (bi === 0 && (opts.tempo || sc.tempo)) meta.push(`\\tempo ${Math.round(opts.tempo || sc.tempo)}`);
+    if (bar.section) meta.push(`\\section ${_atexStr(bar.section)}`);
+    if (bar.repeatStart) meta.push("\\ro");
+    if (bar.repeatEnd) meta.push("\\rc 2");
+    lastSig = sig;
+    // Events that land on the same 16th are ONE tab slot: merge them into a chord (a strum or a
+    // fast run would otherwise lose every note after the first — the quantiser keeps one item per
+    // slot). A pitch already in the slot, or a slot already as wide as the instrument, is skipped.
+    const tick = (x) => Math.round(x * (4 / sig[1]) * 4);
+    const slots = new Map();
+    (bar.events || []).forEach((e, ei) => {
+      if (!e.midis || !e.midis.length) return;
+      const on = e.qbeat ?? e.beat ?? 0, end = on + (e.qdur ?? e.durBeats ?? 1), t = tick(on);
+      const alt = refingered ? refingered.bars[bi].events[ei] : null;
+      const sl = slots.get(t);
+      if (!sl) { slots.set(t, { on, end, parts: [{ e, alt }], midis: [...e.midis] }); return; }
+      sl.end = Math.max(sl.end, end); sl.parts.push({ e, alt });
+      for (const m of e.midis) if (!sl.midis.includes(m) && sl.midis.length < keys.length) sl.midis.push(m);
+    });
+    // One notation note per slot, carrying the slot's events through the midis reference.
+    const byMidis = new Map();
+    const beatNotes = [...slots.values()].map((sl) => {
+      byMidis.set(sl.midis, sl);
+      return { onsetBeat: sl.on, durBeat: sl.end - sl.on, midis: sl.midis };
+    });
+    const m = _voiceNotationMeasures(beatNotes, { beatsPerBar: sig[0], beatType: sig[1], minBars: 1 }).measures[0] || [];
+    const cells = m.map((c) => {
+      if (c.rest || c.wholeMeasure) {
+        if (c.wholeMeasure) return `r.${sig[1] <= 1 ? 1 : 1}`;  // whole-measure rest
+        return `r.${_ATEX_DUR[c.type] || 4}${c.dot ? "{d}" : ""}`;
+      }
+      const sl = byMidis.get(c.midis) || { parts: [] };
+      const notes = [];
+      const used = new Set();
+      let e = {};
+      for (const midi of c.midis) {
+        // The written fret when it reconstructs this pitch on this tuning, else the re-fingered one;
+        // across the slot's events, in order (techniques come from the event that supplied the note).
+        let s = null, fret = null;
+        for (const part of sl.parts) {
+          for (const src of [part.e, part.alt]) {
+            if (!src || s != null) continue;
+            for (const [k, f] of Object.entries(src.frets || {})) if (!used.has(k) && tuning[+k] + f === midi) { s = k; fret = f; e = part.e; break; }
+          }
+          if (s != null) break;
+        }
+        if (s == null) continue;
+        used.add(s);
+        const props = [];
+        if (c.tieStop) props.push("t");
+        else {
+          const tags = (e.tech && e.tech[s]) || [];
+          for (const t of tags) if (_ATEX_NOTE_TECH[t]) props.push(_ATEX_NOTE_TECH[t]);
+          if (tags.includes("bend")) props.push(`b (0 ${(e.bends && e.bends[s]) || 4})`);
+        }
+        notes.push(`${fret}.${atexString(s)}${props.length ? `{${props.join(" ")}}` : ""}`);
+      }
+      if (!notes.length) return `r.${_ATEX_DUR[c.type] || 4}${c.dot ? "{d}" : ""}`;
+      const beatProps = [];
+      if (c.dot) beatProps.push("d");
+      if (!c.tieStop) {
+        const all = sl.parts.flatMap((p) => Object.values(p.e.tech || {}).flat());
+        if (all.includes("vibrato")) beatProps.push("v");
+        if (all.includes("tap")) beatProps.push("tt");
+      }
+      const body = notes.length === 1 ? notes[0] : `(${notes.join(" ")})`;
+      return `${body}.${_ATEX_DUR[c.type] || 4}${beatProps.length ? `{${beatProps.join(" ")}}` : ""}`;
+    });
+    L.push(`    ${meta.length ? meta.join(" ") + " " : ""}${cells.join(" ")} |`);
+  });
+  return L.join("\n") + "\n";
 }
 
 /* ---- Brass / Horn / Sax section transposition ---------------------------
@@ -6007,6 +6426,138 @@ async function transcribeWithNoteModel(pcm, sampleRate, model, opts = {}) {
   return { notes, score: polyNotesToScore(notes, opts) };
 }
 
+/* ---- Guitar note transcription: the Kong high-resolution CRNN (guitar weights) ----
+ * The Stage 1–2 model of docs/AUDIO-TO-TAB-PLAN.md: Riley et al.'s guitar retraining
+ * (MIT, `xavriley/midi-transcription-models`, GAPS) of Kong et al.'s onset/offset-
+ * REGRESSION CRNN. The ONNX graph takes 10 s of 16 kHz audio (log-mel inside) and returns
+ * four [1001 × 88] matrices: regressed onset, regressed offset, frame and velocity, at
+ * 100 frames/s from A0 (MIDI 21). This is the pure, headless half — a faithful port of
+ * piano_transcription_inference's enframe/deframe + RegressionPostProcessor; the
+ * browser glue (guitar-model.js) only runs the graph.
+ *  - Segments: 10 s windows, hop 5 s, zero-padded to a whole number of windows; deframe
+ *    keeps the middle half of each (first: 0–75 %, last: 25 %–end) after dropping the
+ *    extra centre=True frame.
+ *  - Onsets/offsets: a frame is a peak when it beats `threshold` and rises/falls
+ *    monotonically for `neighbour` frames (2 for onsets, 4 for offsets); the sub-frame
+ *    shift is Kong's 3-point regression (Section III-D), clamped to ±½ frame (two deliberate
+ *    deviations from the Python: equal neighbours → 0 instead of a divide-by-zero, and a
+ *    near-flat peak can no longer throw an onset to a negative time).
+ *  - Notes: per pitch, onset → the earlier of (offset peak, frame < frameThreshold)
+ *    with Kong's tie rule, a repeated onset closes the previous note, 6 s cap.
+ * Measured on GuitarSet (360 tracks, mic): see CLAUDE.md "Guitar → TAB". */
+const CRNN = { sr: 16000, segment: 160000, fps: 100, classes: 88, minMidi: 21, velocityScale: 128 };
+
+/** Split mono 16 kHz PCM into the model's 10 s windows (hop = half a window). */
+function crnnSegments(pcm, segment = CRNN.segment) {
+  const n = Math.max(1, Math.ceil(pcm.length / segment)) * segment;
+  const x = new Float32Array(n); x.set(pcm.subarray ? pcm.subarray(0, n) : pcm.slice(0, n));
+  const out = [];
+  for (let p = 0; p + segment <= n; p += segment / 2) out.push(x.subarray(p, p + segment));
+  return out;
+}
+
+/** Re-join per-window matrices (each Float32Array [framesPerSeg × classes], row-major) into
+ *  one [frames × classes] matrix, exactly as Kong's deframe, truncated to `frames`. */
+function crnnDeframe(segs, framesPerSeg, classes, frames) {
+  let rows = [];
+  if (segs.length === 1) rows = [[segs[0], 0, framesPerSeg]];
+  else {
+    const L = framesPerSeg - 1;                                  // drop the centre=True extra frame
+    const q1 = Math.floor(L * 0.25), q3 = Math.floor(L * 0.75);
+    rows.push([segs[0], 0, q3]);
+    for (let i = 1; i < segs.length - 1; i++) rows.push([segs[i], q1, q3]);
+    rows.push([segs[segs.length - 1], q1, L]);
+  }
+  const total = rows.reduce((s, [, a, b]) => s + (b - a), 0);
+  const T = Math.min(frames ?? total, total);
+  const out = new Float32Array(T * classes);
+  let t = 0;
+  for (const [m, a, b] of rows) for (let r = a; r < b && t < T; r++, t++) out.set(m.subarray(r * classes, (r + 1) * classes), t * classes);
+  return out;
+}
+
+/** Peak-pick a regressed onset/offset matrix → { bin: Uint8Array, shift: Float32Array }. */
+function crnnBinarize(reg, frames, classes, threshold, neighbour) {
+  const bin = new Uint8Array(frames * classes), shift = new Float32Array(frames * classes);
+  for (let k = 0; k < classes; k++) {
+    const x = (n) => reg[n * classes + k];
+    for (let n = neighbour; n < frames - neighbour; n++) {
+      const v = x(n);
+      if (!(v > threshold)) continue;
+      let mono = true;
+      for (let i = 0; i < neighbour && mono; i++) if (x(n - i) < x(n - i - 1) || x(n + i) < x(n + i + 1)) mono = false;
+      if (!mono) continue;
+      bin[n * classes + k] = 1;
+      const a = x(n - 1), b = x(n + 1);
+      const den = a > b ? v - b : v - a;
+      // Kong's 3-point estimate is a sub-frame correction (±½ frame); a near-flat peak makes the
+      // denominator tiny and the Python can then place an onset at a NEGATIVE time (seen on
+      // GuitarSet). Clamp to the method's own range; 0 when the denominator is exactly 0.
+      shift[n * classes + k] = den !== 0 ? Math.max(-0.5, Math.min(0.5, (b - a) / den / 2)) : 0;
+    }
+  }
+  return { bin, shift };
+}
+
+/** Model outputs ({ onset, offset, frame, velocity } as [frames × 88] Float32Arrays) →
+ *  notes `{ midi, startSec, durSec, endSec, velocity, amp }`, sorted by time then pitch. */
+function crnnNotesFromOutputs(out, opts = {}) {
+  const classes = opts.classes || CRNN.classes, fps = opts.fps || CRNN.fps, minMidi = opts.minMidi ?? CRNN.minMidi;
+  const frames = Math.floor(out.frame.length / classes);
+  const onT = opts.onsetThreshold ?? 0.3, offT = opts.offsetThreshold ?? 0.3, frT = opts.frameThreshold ?? 0.1;
+  const on = crnnBinarize(out.onset, frames, classes, onT, 2), off = crnnBinarize(out.offset, frames, classes, offT, 4);
+  const notes = [];
+  for (let k = 0; k < classes; k++) {
+    const at = (arr, i) => arr[i * classes + k];
+    // Kong's loop uses Python truthiness (frame 0 counts as "no onset"); peaks never land on
+    // frames 0–1 (neighbour ≥ 2), so a null check is equivalent.
+    let bgn = null, gone = null, offAt = null;
+    const emit = (b, f, offShift) => notes.push({ b, f, ons: at(on.shift, b), offs: offShift, vel: at(out.velocity, b), k });
+    for (let i = 0; i < frames; i++) {
+      if (at(on.bin, i) === 1) {
+        if (bgn != null) { emit(bgn, Math.max(i - 1, 0), 0); gone = offAt = null; }
+        bgn = i;
+      }
+      if (bgn != null && i > bgn) {
+        if (at(out.frame, i) <= frT && gone == null) gone = i;
+        if (at(off.bin, i) === 1 && offAt == null) offAt = i;
+        if (gone != null) {
+          const fin = offAt != null && offAt - bgn > gone - offAt ? offAt : gone;
+          emit(bgn, fin, at(off.shift, fin)); bgn = gone = offAt = null;
+        }
+        if (bgn != null && (i - bgn >= 600 || i === frames - 1)) { emit(bgn, i, at(off.shift, i)); bgn = gone = offAt = null; }
+      }
+    }
+  }
+  return notes.map((n) => {
+    const startSec = (n.b + n.ons) / fps, endSec = (n.f + n.offs) / fps;
+    return { midi: minMidi + n.k, startSec: +startSec.toFixed(4), endSec: +endSec.toFixed(4), durSec: +Math.max(0, endSec - startSec).toFixed(4), velocity: Math.trunc(n.vel * CRNN.velocityScale), amp: +n.vel.toFixed(3) };
+  }).sort((a, b) => a.startSec - b.startSec || a.midi - b.midi);
+}
+
+/** Orchestrator over a pluggable model: `model(segment: Float32Array) →
+ *  { onset, offset, frame, velocity }` (each [framesPerSeg × 88]). pcm must be mono 16 kHz.
+ *  Returns { notes, score } — the score is fingered (`fingerScore`), so the chart carries a
+ *  tab and AlphaTex/CSMPN {tab} export works directly. `opts.onProgress(done, total)`. */
+async function transcribeGuitar(pcm, model, opts = {}) {
+  if (typeof model !== "function") throw new Error("no guitar model configured");
+  const segs = crnnSegments(pcm);
+  const per = { onset: [], offset: [], frame: [], velocity: [] };
+  let fpsSeg = 0;
+  for (let i = 0; i < segs.length; i++) {
+    const o = await model(segs[i]);
+    for (const k of Object.keys(per)) per[k].push(o[k]);
+    fpsSeg = Math.round(o.frame.length / CRNN.classes);
+    if (opts.onProgress) opts.onProgress(i + 1, segs.length);
+  }
+  const frames = Math.floor(pcm.length / (CRNN.sr / CRNN.fps)) + 1;
+  const out = {};
+  for (const k of Object.keys(per)) out[k] = crnnDeframe(per[k], fpsSeg, CRNN.classes, frames);
+  const notes = crnnNotesFromOutputs(out, opts);
+  const score = notes.length ? fingerScore(polyNotesToScore(notes, opts), { tuning: opts.tuning }) : null;
+  return { notes, score };
+}
+
 /* ---- SATB-style voice separation --------------------------------------------
  * The ML note transcription is polyphonic BUT UNLABELED — every simultaneous note
  * is dumped in one bucket. For a vocal-harmony stem the user wants each VOICE as its
@@ -6548,6 +7099,15 @@ export {
   _metricValues,
   scoreToVocalMidi,
   transposeScore,
+  FINGER_DEFAULTS,
+  FINGER_PRIOR,
+  fingerCandidates,
+  fingerShapes,
+  fingerSequence,
+  fingerScore,
+  TECHNIQUES,
+  scoreToAlphaTex,
+  isPercussionTuning,
   BRASS_INSTRUMENTS,
   getBrassInstrument,
   scoreToBrassMusicXML,
@@ -6617,6 +7177,12 @@ export {
   notesFromActivations,
   polyNotesToScore,
   transcribeWithNoteModel,
+  CRNN,
+  crnnSegments,
+  crnnDeframe,
+  crnnBinarize,
+  crnnNotesFromOutputs,
+  transcribeGuitar,
   splitVoices,
   suggestVoiceCount,
   _voiceSlices,

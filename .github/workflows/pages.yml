@@ -72,9 +72,16 @@ jobs:
           # Stamp the separator's module graph with this commit: stem-model.js?v=<sha> passes the stamp on to
           # stem-worker.js → stem-model-core.js → the vendor bundle, so a phone runs the separator that was
           # deployed instead of a copy its HTTP cache kept (the UI itself is always fetched no-cache).
+          # Guitar note transcription (🎸 Guitar → Tab): glue + the weight-only int8 CRNN (MIT, SHA-256
+          # pinned in guitar-model-core.js; scripts/guitar_crnn_export.py rebuilds it from the pinned weights).
+          cp guitar-model.js guitar-model-core.js guitar-worker.js _site/
+          mkdir -p _site/models/guitar-crnn
+          cp models/guitar-crnn/guitar-gaps.w8.onnx models/guitar-crnn/NOTICE _site/models/guitar-crnn/
           BUILD="${GITHUB_SHA::7}"
           sed -i "s#src=\"./stem-model.js\"#src=\"./stem-model.js?v=${BUILD}\"#" _site/index.html
           grep -q "src=\"./stem-model.js?v=${BUILD}\"" _site/index.html
+          sed -i "s#src=\"./guitar-model.js\"#src=\"./guitar-model.js?v=${BUILD}\"#" _site/index.html
+          grep -q "src=\"./guitar-model.js?v=${BUILD}\"" _site/index.html
 
       # enablement: true turns Pages on (source = GitHub Actions) using the
       # workflow's `pages: write` permission, so no manual Settings toggle is

@@ -191,6 +191,8 @@ import {
   _harmonyXML,
   scoreToMusicXML,
   transposeScore,
+  fingerScore,
+  scoreToAlphaTex,
   ARRANGE_TEMPLATES,
   arrangeScore,
   _midiVarLen,
@@ -995,7 +997,7 @@ export default function TabDecoderPro() {
  * the same shape, so the renderer, editor and exporters are identical. Edits are
  * lifted to the parent as an `overrides` map ("<bar>.<beat>" -> symbol) so they
  * survive view/transpose changes and feed straight into export. */
-function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, selKey, onPick, keyOverride, setKeyOverride }) {
+function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, selKey, onPick, keyOverride, setKeyOverride, autoSimplify = true }) {
   const [view, setView] = useState("chart");
   const [editMode, setEditMode] = useState(false);
   const [editKey, setEditKey] = useState("");
@@ -1023,7 +1025,9 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   // for a melodic chart (a densely arpeggiated GP part would otherwise export "quartered",
   // a chord per note), with the raw per-onset view one toggle away.
   const melodic = useMemo(() => isMelodicScore(score), [score]);
-  const [simplify, setSimplify] = useState(() => isMelodicScore(score));
+  // autoSimplify={false}: a chart whose notes ARE the content (the guitar tab) never collapses to
+  // one chord per bar on its own — every note, and its string, must reach the export.
+  const [simplify, setSimplify] = useState(() => autoSimplify && isMelodicScore(score));
   const [arrange, setArrange] = useState("off"); // off | block | quarters | eighths | shuffle
 
   const simp = useMemo(() => (simplify ? simplifyScore(score, useSharp) : score), [simplify, score, useSharp]);
@@ -1055,7 +1059,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   // Re-apply the melodic auto-default whenever a new score loads (upload / part switch /
   // decode / restore) — a melodic part auto-simplifies, a block-harmony part reverts to
   // per-onset. Mid-session the user's manual toggle stands until the next score change.
-  useEffect(() => { setSimplify(isMelodicScore(score)); }, [score]);
+  useEffect(() => { setSimplify(autoSimplify && isMelodicScore(score)); }, [score, autoSimplify]);
   const stopPlay = () => { if (player.current) { player.current.stop(); player.current = null; } setPlaying(false); setPlayKey(""); };
   const stopRef = () => { const s = refAudio.current; if (s.raf) cancelAnimationFrame(s.raf); if (s.src) { try { s.src.stop(); } catch (_) {} s.src = null; } if (s.ctx && s.ctx.state !== "closed") { try { s.ctx.close(); } catch (_) {} s.ctx = null; } s.raf = null; setRefPlaying(false); setPlayKey(""); };
   useEffect(() => () => { stopPlay(); stopRef(); }, []); // stop on unmount
@@ -1138,13 +1142,14 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
       : fmt === "csmpn" ? scoreToCSMPN(tscore, opts)
       : fmt === "csml" ? scoreToCSML(tscore, opts)
       : fmt === "music" ? scoreToMusicPrompt(tscore, opts).command
+      : fmt === "alphatex" ? (() => { try { return scoreToAlphaTex(tscore, { title, tempo: bpm, trackName: title }); } catch (e) { return `⚠ ${e && e.message ? e.message : "AlphaTex export failed"}`; } })()
       : scoreToChordPro(tscore, opts);
     setExp({ fmt, text }); setCopied(false); setDownloaded(false);
   };
   const copy = () => { try { navigator.clipboard.writeText(exp.text); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch (_) {} };
   // Download the generated export as a real file. Extension/MIME per format so it
   // opens in the right tool (.musicxml → MuseScore/Guitar Pro, .abc → ABC players).
-  const _EXPORT_EXT = { abc: "abc", musicxml: "musicxml", chordpro: "chordpro", csmpn: "csmpn", csml: "csml", midi: "mid", music: "sh" };
+  const _EXPORT_EXT = { abc: "abc", musicxml: "musicxml", chordpro: "chordpro", csmpn: "csmpn", csml: "csml", midi: "mid", music: "sh", alphatex: "alphatex" };
   const _EXPORT_MIME = { musicxml: "application/vnd.recordare.musicxml+xml", midi: "audio/midi" };
   const [abcExt, setAbcExt] = useAbcExt();
   const download = () => {
@@ -1245,7 +1250,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
           <button onClick={() => bumpBpm(5)} style={{ ...chip(C), padding: "3px 8px" }}>+</button>
         </span>
         <span style={{ marginLeft: "auto", display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "flex-end", gap: 4 }}>
-          {[["chordpro", "ChordPro"], ["abc", "ABC"], ["musicxml", "MusicXML"], ["midi", "MIDI"], ["csmpn", "CSMPN"], ["csml", "ChordSlashML"]].map(([f, lbl]) => (
+          {[["chordpro", "ChordPro"], ["abc", "ABC"], ["musicxml", "MusicXML"], ["midi", "MIDI"], ["csmpn", "CSMPN"], ["csml", "ChordSlashML"], ["alphatex", "AlphaTex (tab)"]].map(([f, lbl]) => (
             <button key={f} onClick={() => doExport(f)} style={{ ...chip(C), padding: "3px 9px", borderColor: exp && exp.fmt === f ? C.cyan : C.border, color: exp && exp.fmt === f ? C.cyan : C.dim }}>{lbl}</button>
           ))}
           <span style={{ width: 1, alignSelf: "stretch", background: C.border, margin: "0 2px" }} />
@@ -1272,7 +1277,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
         {refErr && <span style={{ color: C.red }}>{refErr}</span>}
       </div>
 
-      {melodic && !simplify && <MelodicNudge C={C} onSimplify={() => setSimplify(true)} />}
+      {autoSimplify && melodic && !simplify && <MelodicNudge C={C} onSimplify={() => setSimplify(true)} />}
 
       {view === "chart"
         ? <LeadSheetView score={tscore} C={C} overrides={overrides} setOverrides={setOverrides} editMode={editMode}
@@ -1490,7 +1495,7 @@ function ExportPanel({ exp, setExp, C, bpm, semis, copy, download, copied, downl
   return (
     <div style={{ marginTop: 12 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-        <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim }}>EXPORT · {exp.fmt === "abc" ? "ABC NOTATION" : exp.fmt === "musicxml" ? "MUSICXML" : exp.fmt === "midi" ? "MIDI FILE" : exp.fmt === "csmpn" ? "CSMPN" : exp.fmt === "csml" ? "CHORDSLASHML" : exp.fmt === "music" ? "LISTENHUB · GENERATE AUDIO" : "CHORDPRO"}</span>
+        <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim }}>EXPORT · {exp.fmt === "abc" ? "ABC NOTATION" : exp.fmt === "musicxml" ? "MUSICXML" : exp.fmt === "midi" ? "MIDI FILE" : exp.fmt === "csmpn" ? "CSMPN" : exp.fmt === "csml" ? "CHORDSLASHML" : exp.fmt === "music" ? "LISTENHUB · GENERATE AUDIO" : exp.fmt === "alphatex" ? "ALPHATEX · TAB" : "CHORDPRO"}</span>
         <span style={{ display: "inline-flex", gap: 6 }}>
           {!exp.bytes && <button onClick={copy} style={{ ...chip(C), padding: "3px 9px", borderColor: copied ? C.green : C.border, color: copied ? C.green : C.dim }}>{copied ? "copied ✓" : "copy"}</button>}
           <button onClick={download} title={`download as .${extOf(exp.fmt)}`} style={{ ...chip(C), padding: "3px 9px", borderColor: downloaded ? C.green : C.border, color: downloaded ? C.green : C.cyan }}>{downloaded ? "saved ✓" : "⬇ download"}</button>
@@ -1509,6 +1514,7 @@ function ExportPanel({ exp, setExp, C, bpm, semis, copy, download, copied, downl
       {exp.fmt === "musicxml" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>Save as <b>.musicxml</b> and open in MuseScore / Guitar Pro — carries chord symbols + notes + meter. Round-trips back into this app.</div>}
       {exp.fmt === "csmpn" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}><b>Chord Sheet Maker Pro</b>'s native fake-book source (one chord = one bar; <code>_</code> splits a bar) — also carries the real fingering (<code>{"{tab}"}</code>) and decoded strum rhythm (<code>{"{hybrid}"}</code>). Paste into Pro's editor, or use <b>→ Chord Sheet Maker Pro</b> to send it straight there.</div>}
       {exp.fmt === "csml" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}><b>ChordSlashML</b> — Pro's beat-slotted notation (<code>{"|"}</code> measures, <code>_</code> holds, <code>.</code> rests). Paste into Pro's <b>ChordSlashML</b> live editor.</div>}
+      {exp.fmt === "alphatex" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6, lineHeight: 1.6 }}><b>AlphaTex</b> — alphaTab's tab text: every note with its <b>string</b> and fret, the tuning, meter, sections, and the techniques the file carried (hammer-ons, slides, bends with their size, vibrato, palm mutes, harmonics…). Paste it into any alphaTab viewer (e.g. the alphaTex playground at alphatab.net) to see and hear the tab. Notes without a written tab (audio, ML or a transposed chart) get an <b>inferred</b> fingering — playable, not necessarily the player's.</div>}
       {exp.fmt === "music" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>A ready-to-run <b>ListenHub / Mureka</b> command (<code>@marswave/listenhub-cli</code>, <code>npm i -g</code>, Node ≥ 20) that turns this chart's key / tempo / meter / progression into a prompt for a fresh AI track. The CLI needs Node + login, so it runs in <b>your</b> terminal — <b>copy</b> it, then <code>listenhub auth login</code> once and paste. The <b>recognize → generate</b> half of the pipeline.</div>}
     </div>
   );
@@ -2122,6 +2128,9 @@ function AudioImport({ C, useSharp }) {
   const [ab, setAb] = useState(null);                // { mix, iso } harmonic-clarity A/B, or "busy"
   const [mlScore, setMlScore] = useState(null);      // ML note-transcription result (basic-pitch), when a model is wired
   const [mlNotes, setMlNotes] = useState(null);      // raw ML notes, kept so voice-count/voice-index can re-derive without re-inference
+  const [gtrNotes, setGtrNotes] = useState(null);    // guitar CRNN notes (🎸 Guitar → Tab), re-scored on ♩=/meter changes without re-inference
+  const [gtrProg, setGtrProg] = useState(null);
+  const [gtrOvr, setGtrOvr] = useState({});         // the tab's own chord edits (its "bar.beat" keys aren't the chord chart's)      // { done, total } windows while the guitar model runs
   const [voiceCount, setVoiceCount] = useState(3);   // SATB split target (1 = no split, 2 = duet, 3 = SAT, 4 = SATB)
   const [voiceIdx, setVoiceIdx] = useState(0);       // which voice slot is displayed (0 = highest / soprano)
   const [sens, setSens] = useState("balanced");      // ML note-detection sensitivity (see SENS): quiet backing vocals need a lower threshold
@@ -2187,7 +2196,7 @@ function AudioImport({ C, useSharp }) {
     }, 30);
   };
 
-  const resetFor = (label) => { setErr(""); setName(label); setBusy(true); setRaw([]); setOverrides({}); setAb(null); setMlScore(null); setMlNotes(null); setVoiceIdx(0); setSections([]); ref.current.mlRaw = null; stopPlay(); };
+  const resetFor = (label) => { setErr(""); setName(label); setBusy(true); setRaw([]); setOverrides({}); setAb(null); setMlScore(null); setMlNotes(null); setGtrNotes(null); setVoiceIdx(0); setSections([]); ref.current.mlRaw = null; stopPlay(); };
   const onFile = async (e) => {
     const f = e.target.files && e.target.files[0]; if (!f) return;
     resetFor(f.name);
@@ -2296,6 +2305,27 @@ function AudioImport({ C, useSharp }) {
     catch (e) { setErr("Note transcription failed: " + (e && e.message ? e.message : "unknown")); }
     setBusy(false);
   };
+  /* 🎸 Guitar → Tab: the guitar note CRNN (guitar-model.js → worker → engine.transcribeGuitar,
+   * validated note-for-note against the Python reference), then fingerScore assigns every
+   * note a string. The model + ONNX Runtime download on first use only (≈ 25 MB, cached). */
+  const guitarTab = async () => {
+    const s = ref.current; if (!s.cur) { setErr("Upload audio first."); return; }
+    const model = typeof window !== "undefined" ? window.TTP_GUITAR_MODEL : null;
+    if (typeof model !== "function") { setErr("Guitar → Tab needs the guitar note model (guitar-model.js) — not loaded on this build."); return; }
+    setBusy(true); setErr(""); setGtrNotes(null); setGtrProg({ done: 0, total: 0 });
+    try {
+      const pcm = s.sr === 16000 ? s.cur : resampleTo(s.cur, s.sr, 16000);
+      const { notes } = await model(pcm, { onProgress: (done, total) => setGtrProg({ done, total }) });
+      setGtrNotes(notes || []); setGtrOvr({});
+      if (!notes || !notes.length) setErr("The guitar model found no notes in this audio.");
+    } catch (e) { setErr("Guitar transcription failed: " + (e && e.message ? e.message : "unknown")); }
+    setGtrProg(null); setBusy(false);
+  };
+  const gtrScore = useMemo(() => {
+    if (!gtrNotes || !gtrNotes.length) return null;
+    const base = fingerScore(polyNotesToScore(gtrNotes, { bpm, beatsPerBar: bpb, useSharp }));
+    return sections.length ? applySectionsToScore(base, sections, { bpm, beatsPerBar: bpb }) : base;
+  }, [gtrNotes, bpm, bpb, useSharp, sections]);
   /* Voice split — SATB heuristic (engine.tsx splitVoices) runs on the RAW ML notes,
    * so switching the voice count or the displayed voice is cheap: no re-inference,
    * no re-download. voiceCount === 1 shows the full polyphonic score (no split).
@@ -2475,12 +2505,14 @@ function AudioImport({ C, useSharp }) {
           style={{ ...chip(C), padding: "5px 10px", borderColor: simple ? C.cyan : C.border, color: simple ? C.cyan : C.dim }}>{simple ? "△ Simple ✓" : "△ Simple"}</button>}
         {kind === "chords" && <button onClick={voices} disabled={busy} title="per-VOICE note transcription (the actual sung notes, not just a chord) via a pluggable ML model — for dense vocal harmony"
           style={{ ...chip(C), padding: "5px 10px", borderColor: mlScore ? C.green : C.border, color: mlScore ? C.green : C.dim }}>🎼 Voices (ML)</button>}
+        <button onClick={guitarTab} disabled={busy} title="guitar (or any plucked-string) stem → every note + the string it's on, as an editable tab chart (ML note model ≈ 25 MB, downloaded once; runs on this device)"
+          style={{ ...chip(C), padding: "5px 10px", borderColor: gtrScore ? C.green : C.border, color: gtrScore ? C.green : C.dim }}>🎸 Guitar → Tab (ML)</button>
         {ref.current.stereo && <button onClick={runAB} disabled={busy || ab === "busy"} title="does isolating the center actually clean up THIS file's harmony? compares chroma clarity of the mix vs. the isolated center"
           style={{ ...chip(C), padding: "5px 10px", borderColor: C.border, color: C.dim }}>{ab === "busy" ? "measuring…" : "⚖ A/B clarity"}</button>}
         {name && <span style={{ fontSize: 11, color: C.dim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 180 }}>{name}{dur ? ` · ${fmt(dur)}` : ""}</span>}
       </div>
 
-      {busy && <div style={{ fontSize: 13, color: C.amber, marginBottom: 12 }}>⏳ Analyzing… (FFT over the whole stem)</div>}
+      {busy && <div style={{ fontSize: 13, color: C.amber, marginBottom: 12 }}>{gtrProg ? `⏳ Transcribing guitar… ${gtrProg.total ? `${gtrProg.done}/${gtrProg.total} × 10 s` : "loading the model"}` : "⏳ Analyzing… (FFT over the whole stem)"}</div>}
       {err && <div style={{ fontSize: 12, color: C.red, marginBottom: 12 }}>{err}</div>}
 
       {/* A/B clarity readout: is center-extraction worth it on THIS file? */}
@@ -2629,6 +2661,18 @@ function AudioImport({ C, useSharp }) {
                 meta={`${mlDisplayScore.bars.length} bars · from ML notes${voiceCount > 1 ? ` · voice ${voiceIdx + 1} of ${voiceCount}` : ""}`}
                 C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey="" onPick={() => {}} />
             : <div style={{ fontSize: 11, color: C.dim, padding: 8 }}>Voice {voiceIdx + 1} of {voiceCount} — no notes fell into this slot on this stem.</div>}
+        </div>
+      )}
+
+      {/* GUITAR → TAB: CRNN notes, fingered; AlphaTex export carries the strings */}
+      {gtrScore && (
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 11, color: C.dim, marginBottom: 6, lineHeight: 1.6 }}>
+            🎸 <b style={{ color: C.text }}>{gtrNotes.length} notes</b> from the guitar model · strings <b>inferred</b> (fingerScore — playable, not necessarily the player's) · set ♩= and the meter above to line up the bars · <b>AlphaTex (tab)</b> exports every note with its string.
+          </div>
+          <ChartPanel score={gtrScore} title={(name || "Guitar") + " · tab"}
+            meta={`${gtrScore.bars.length} bars · ${gtrNotes.length} notes · from the guitar ML model`}
+            C={C} useSharp={useSharp} overrides={gtrOvr} setOverrides={setGtrOvr} selKey="" onPick={() => {}} autoSimplify={false} />
         </div>
       )}
 

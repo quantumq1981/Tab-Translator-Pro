@@ -43,8 +43,9 @@ alternative:
    from keys. → Keep SCNet for 4 stems. A user can still import guitar stems from Moises or
    AudioPod (see §2).
 5. **"Joint training objective across stages."** This container has no torch, no GPU and no
-   annotated guitar audio. → **We already own a large, exact fingering corpus**: 78 Guitar Pro
-   files, giving **281 standard-tuned tracks and 151,248 notes with written string+fret**. The
+   annotated guitar audio. → **We already own a large, exact fingering corpus**: the repo's
+   Guitar Pro files give **569 standard-tuned tracks and 94,890 fretted notes with written
+   string+fret** (corrected count, see §3.1). The
    parsers also already read the technique bytes (bend, slide, hammer, harmonic, palm mute,
    dead note) and currently throw them away. That is the training and evaluation substrate
    (§3).
@@ -92,15 +93,20 @@ Every GP track gives two kinds of ground truth:
   (`tests/bench/lib.mjs`) and you have audio with exact string, fret and technique labels. This
   is the proposal's "tablature-first synthesis", and the renderer already exists.
 
-**Measured today** (`node tests/bench/fingering.mjs`, even files = dev, odd = test; the
-heuristic was not tuned):
+**Measured** (`node tests/bench/fingering.mjs`, even files = dev, odd = test):
 
-| Split | Tracks | Notes | Lowest-fret | Viterbi DP (span ≤ 4, hand-move cost) |
-|---|---|---|---|---|
-| dev | 135 | 71,289 | 60.5 % | 66.9 % |
-| test | 146 | 79,959 | 50.4 % | **58.1 %** |
+| Split | Tracks | Notes | Lowest-fret | Untuned DP (first baseline) | Shipped `fingerScore` |
+|---|---|---|---|---|---|
+| dev | 282 | 45,390 | 52.5 % | — | 64.8 % |
+| test | 287 | 49,500 | 46.9 % | 55.6 % | **57.5 %** |
 
-This is the P0 baseline the proposal asks for, reproducible in 1–2 minutes, with no
+> **Correction (2026-10-23, same day).** The first version of this table (PR #114: 135/146
+> tracks, 151,248 notes, 58.1 % test) was wrong. The bench called
+> `parseGuitarProOrXML(bytes, true, index)`, but the signature is `(bytes, fileName,
+> useSharp, partIndex)`, so every "track" was the file's first track, counted many times. The
+> table above is the corrected run.
+
+This is the P0 baseline the proposal asks for, reproducible in about a minute, with no
 download. The metric is the share of notes that land on the written string. Note that it is
 not GuitarSet Tab F1, because the corpus mixes jazz heads, comping and rock. Every Stage 3
 idea is now one number to move on the held-out half.
@@ -117,7 +123,7 @@ and the test oracle, and the model can only win when the oracle is unsure.
   fret height, and circle-of-fifths distance between hand positions. All of them are
   tunable on the dev half.
 - **Learned priors from the corpus at zero runtime cost.** Bigram statistics of
-  (Δposition, Δstring, shape class) mined from the 281 tracks become a transition table. It is
+  (Δposition, Δstring, shape class) mined from the corpus' dev half become a transition table. It is
   small enough to embed, the same way `CHORD_CLASSIFIER` is.
 - **Learned second opinion** (Fretting-Transformer-style T5 via transformers.js) only if it
   beats the tuned DP on the held-out half by a margin that justifies its size. That has to be
@@ -162,12 +168,12 @@ byte-identical.
 
 | Phase | Deliverable | Gate (measured, held-out) | Needs |
 |---|---|---|---|
-| **P0a** ✅ | `tests/bench/fingering.mjs`, the corpus fingering benchmark | Baseline recorded: **58.1 %** test | — |
-| **P0b** | `fingerScore(score, opts)` in `engine.tsx`: tuned Viterbi + corpus transition priors. Gives audio and ML charts a `{tab}` block (the "Stage E" CLAUDE.md lists as not built) | Beat 58.1 % on test; target ≥ 70 % | Nothing external |
-| **P0c** | Technique flags captured in GP3/4/5/GPIF parsers → `event.tech` | Corpus guards stay byte-identical | Nothing external |
-| **P0d** | `scoreToAlphaTex` + `scoreToGP` (GPIF zip via `CompressionStream`) exporters carrying string + technique | Round-trip through our own `parseGPIF`; opens in chord-sheet-maker's AlphaTab | Nothing external |
-| **P1** | GuitarSet harness (`tests/bench/guitarset.mjs`): Tab F1, string-fret F1, a noisy variant from day one | Report basic-pitch + DP end-to-end Tab F1 (the proposal's P0 baseline, on real audio) | Nothing external. Anonymous `hf download` works |
-| **P2** | Stage 1: `guitar-gaps` → int8 ONNX in the worker | ≥ 80 % F50 zero-shot on GuitarSet; fits the iPhone memory envelope | torch for the conversion, **in this container**: the PyPI build is reachable (~3 GB with its CUDA libraries; 30 GB free). Allowing `download.pytorch.org` gives the ~200 MB CPU build instead. No cloud needed. A write token is only needed to publish the ONNX to HF; otherwise it is vendored same-origin like `models/scnet-compact/` |
+| **P0a** ✅ | `tests/bench/fingering.mjs`, the corpus fingering benchmark | Baseline recorded: untuned DP **55.6 %** GP test (corrected) | — |
+| **P0b** ✅ | `fingerScore(score, opts)` in `engine.tsx`: Viterbi with a hard span constraint, Noise2Fret costs, a learned `FINGER_PRIOR`. Gives audio and ML charts frets (`{tab}`) | GP test **57.5 %** (beat 55.6 ✓; the 70 % target ✗). GuitarSet test **72.5 %**, zero-shot (GP-only prior) **67.7 %** | — |
+| **P0c** ✅ | Technique flags captured in GP3/4/5/GPIF parsers → `event.tech` + `event.bends`; `score.tuningMidi` | Corpus guards byte-identical ✓; vs PyGuitarPro on 54 files: 0 false positives (`techniques.mjs`) | — |
+| **P0d** ◐ | `scoreToAlphaTex` ✅ (string + technique; **AlphaTex (tab)** export button). `scoreToGP` not built | Every corpus part parses in alphaTab 1.8.4: 299 parts, 0 failures, 0 warnings, 99.07 % of notes | — |
+| **P1** ✅ | GuitarSet harness (`tests/bench/guitarset.mjs`, `scripts/guitarset_extract.py`, `scripts/guitarset_infer.py`): string accuracy, note F1, Tab F1, dev/test by player, 20 dB noisy variant | See §7 | Anonymous `hf download` (`HF_HUB_DISABLE_XET=1`) |
+| **P2** ✅ | Stage 1: `guitar-gaps` → weight-only int8 ONNX (25.0 MB, `scripts/guitar_crnn_export.py`), in a module worker on the pinned ORT 1.23.2; **🎸 Guitar → Tab (ML)** in Audio mode | ≥ 80 % F50 ✓ (**86.3 %** clean). iPhone memory envelope: measured in headless Chromium only (§7); **device check pending** | Built in this container (PyPI torch); vendored same-origin |
 | **P3** | Audio string evidence (§3.3) as a DP emission; tab review UI that reuses `ChordReview` + personalization table | String-fret Tab F1 ≥ 70 % zero-shot (TART's level) | GuitarSet hex channels |
 | **P4** | Technique classifier (small, on note-aligned segments, trained on rendered + GuitarSet audio); learned Stage 3 only if §3.2 shows it pays | ≥ 75 % technique accuracy; < 10 % F1 drop on the noisy variant | A training environment |
 
@@ -194,3 +200,52 @@ byte-identical.
 3. **Hugging Face token: optional.** Reading public models and datasets needs none. A
    write-scoped token in the environment's Network secrets / environment variables
    (`HF_TOKEN`) is only for publishing converted models to the owner's HF account.
+
+---
+
+## 7. What was built and measured (2026-10-23)
+
+P0b, P0c, P0d (AlphaTex), P1 and P2 shipped in one change. The engine details are in CLAUDE.md
+("Audio → TAB engine"). The numbers that decide what comes next:
+
+**Stage 3 — `fingerScore`** (% of notes on the written / annotated string; GP split by file,
+GuitarSet by player):
+
+| | GP test | GuitarSet test |
+|---|---|---|
+| lowest fret | 46.9 | 45.4 (all tracks) |
+| cost model only | 51.4 | 65.4 |
+| + prior learned from GP dev only (zero-shot on GuitarSet) | 57.0 | **67.7** |
+| shipped (prior from GP dev + GuitarSet dev) | **57.5** | 72.5 |
+
+The GuitarSet test players perform the same pieces as the dev players, so 72.5 flatters the
+shipped prior. Quote **67.7** for unseen material.
+
+**Stage 1–2 — the guitar CRNN** (MIT; weight-only int8, 25.0 MB; all 360 GuitarSet recordings):
+
+| | clean | 20 dB white noise |
+|---|---|---|
+| note F50 (mir_eval) | **86.3 %** | **85.8 %** |
+| Tab F1, test players, shipped fingering | **61.6 %** | 60.2 % |
+| Tab F1, test players, GP-only prior | 57.8 % | 56.8 % |
+
+- **Int8 accuracy:** weight-only int8 matches fp32 (83.27 vs 83.10 on the same 30 tracks).
+  ONNX Runtime's dynamic int8 quantiser collapsed it to 0.55 %.
+- **Memory:** in onnxruntime-web the int8 model peaks at 105 MB RSS vs 269 MB for fp32.
+- **Real app:** headless Chromium, real worker and model, ORT 1.23.2. The page grew by
+  +595–629 MB at peak, ran at 2.5–3.2× real time single-threaded, and fetched only the pinned ORT
+  files. All 117 notes reached the AlphaTex export.
+
+**What this says about the next phase:** note recognition is no longer the weak link (about 86 %).
+Note F1 is around 86 %, but Tab F1 is only about 58–62 %. That whole gap is string choice, and
+solos are the worst case: oracle-MIDI string accuracy is 56 % on solos vs 81 % on comping, and one
+test-player solo scored note F1 97 % but Tab F1 26 %.
+
+**P3 (audio string evidence as a DP emission) is now the highest-value step**, followed by the
+tab review UI. Two checks still need hardware:
+- the 25 MB first-tap download and peak memory on a real iPhone/iPad;
+- run time on a phone. At 3× real time on a desktop CPU, a 4-minute song takes about
+  12 minutes, so a time limit or a progress estimate matters.
+
+Not built yet: `scoreToGP` (the `.gp` writer), the technique classifier (P4), and fingering
+audio chord charts automatically (their AlphaTex export already fingers them).

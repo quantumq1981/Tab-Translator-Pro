@@ -1047,8 +1047,9 @@ the tests, and the future worker boundary stay unchanged. Weights are **embedded
 future model).
 
 **The model brain:** `scripts/train_chord_classifier.py` — a **dependency-free**
-(stdlib-only, seeded) trainer. (This container has no numpy/sklearn and can't
-pip-install, so it's hand-rolled; re-runnable to reproduce `CHORD_CLASSIFIER`.) It
+(stdlib-only, seeded) trainer. (The container it was written in had no numpy/sklearn and
+couldn't pip-install, so it's hand-rolled; re-runnable to reproduce `CHORD_CLASSIFIER`. As of
+2026-10-23 PyPI IS reachable from the cloud container — see "Audio → TAB engine".) It
 synthesises root-relative weighted chromas with **realistic audio-ish augmentation**
 (overtone bleed at the 5th/maj-3rd partials + dropped/spurious tones + per-sample gain)
 and trains a model over the quality vocabulary. It grew in three steps: linear softmax
@@ -2038,7 +2039,8 @@ longer sends them.
 real VOCAL stems are flagged mostly uncertain — correctly — the vocal path is still Voices (ML);
 heavy bleed is the hardest condition (majmin 73); no learned TCN/re-ranker (no training audio,
 iOS/Pages wall) — a learned front-end only has to emit the same `{chroma, bass}` frames;
-Stage E fingering DP not built (audio charts still carry no `{tab}`).
+Stage E fingering DP: built later as `fingerScore` (see "Audio → TAB engine"); audio CHORD charts
+carry no `{tab}` yet (their AlphaTex export fingers them on the way out); the 🎸 Guitar → Tab chart is fingered.
 
 ### v2.1 — batch review, ⚡ Auto, stems → per-instrument charts, live capture (2026-10-22)
 
@@ -2519,37 +2521,160 @@ same order) — guarded by the existing audio regression tests (C/Am/G7 detectio
 chroma peaks, clarity ordering) plus a direct `_hann` formula/cache-identity test. Pure
 efficiency win on the mobile-Safari path these features target.
 
-## Audio → TAB engine — proposal review + Stage 3 baseline (2026-10-23)
+## Audio → TAB engine (2026-10-23)
 
 The "High-Fidelity Audio-to-TAB Engine" proposal (TART / Noise2Fret / Fretting-Transformer
-lineage) was reviewed against this repo. **Full decision record, tool choices and the
-re-sequenced build plan: `docs/AUDIO-TO-TAB-PLAN.md`.** Load-bearing conclusions:
+lineage) was reviewed against this repo and its first four phases were BUILT in the same
+session. **Decision record, tool choices, measurements and the remaining plan:
+`docs/AUDIO-TO-TAB-PLAN.md`.** Summary of the decisions that still bind:
 
-- The cited papers are real (TART arXiv 2609.11904 — **no released weights**; Noise2Fret
-  2608.30854; Fretting-Transformer 2506.14223). **GuitarSet is CC-BY 4.0 on HF**
-  (`jhartquist/guitarset`); **MIT guitar-transcription weights exist**
-  (`xavriley/midi-transcription-models`, `guitar-gaps.pth` 99 MB fp32 — the Stage 1–2 candidate,
-  needs torch → ONNX conversion off-box).
+- Cited papers are real (TART arXiv 2609.11904, **no released weights**; Noise2Fret 2608.30854;
+  Fretting-Transformer 2506.14223). **GuitarSet is CC-BY 4.0 on HF** (`jhartquist/guitarset`).
 - Rejected for the shipped path: a **mandatory cloud** stage (breaks zero-server), **MERT**
-  (CC-BY-NC-4.0 + 95M–330M params vs the iOS memory wall), a **MusicXML→AlphaTab normaliser**
-  (emit AlphaTex / `.gp` directly — they carry the string), **Demucs** (research-only; SCNet ships).
-- **Stage 3 is DP-first, model-second** (same contract as `arbitrateChord`): hard hand-span
-  constraint, Noise2Fret terms as costs, corpus-mined transition priors; a learned T5 only if it
-  beats the tuned DP on the held-out half.
-- **The repo's GP files are the fingering oracle:** `node tests/bench/fingering.mjs` re-fingers
-  281 standard-tuned tracks / 151,248 written notes. **Baseline (untuned, string match):
-  lowest-fret 50.4 % / Viterbi 58.1 % on the held-out (odd) half**; dev 60.5 / 66.9. P0b
-  (`fingerScore` in `engine.tsx`) must beat 58.1 % test. The GP parsers already consume the
-  bend/slide/hammer/harmonic/palm-mute/dead bytes — capturing them is the tuplet-style P0c.
-- AudioPod (6-stem incl. guitar, audio→MIDI) is a **dev-time oracle only** (server, credits,
-  URL input, key would leak). Its *plugin* fails only because the network policy denies
-  `mcp.audiopod.ai`; the claude.ai connector works.
-- **Owner decisions (2026-10-23):** no cloud lane for now (iPad-only dev; a Linux laptop later);
-  the app WILL be monetised → **no non-commercial licences anywhere** (MERT out, even as a
-  teacher). **`hf` CLI:** `pip install --user huggingface_hub` → `~/.local/bin/hf`; anonymous
-  downloads of public repos work from this container (GuitarSet, xavriley weights verified), a
-  token is only for uploads. torch is installable from PyPI here (CPU-only build needs
-  `download.pytorch.org` allowed) → the ONNX conversion needs no cloud.
+  (CC-BY-NC-4.0, and the owner will monetise → no non-commercial licence anywhere, not even as a
+  teacher), a MusicXML→AlphaTab normaliser (we emit AlphaTex directly, which carries the string),
+  Demucs (research-only; SCNet ships).
+- **Owner decisions:** no cloud lane for now (iPad-only dev; a Linux laptop later). `hf` CLI:
+  `pip install --user huggingface_hub` → `~/.local/bin/hf`; anonymous downloads of public repos work,
+  a token is only for uploads. AudioPod = dev-time oracle only (server, credits, key would leak).
+
+### P0b — `fingerScore`: string/fret assignment (Stage 3, pure engine)
+
+`fingerCandidates` → `fingerShapes` → `fingerSequence(events, tuning, opts)` → `fingerScore(score, opts)`.
+A **Viterbi** over per-event fretboard shapes (each pitch on a distinct string). **Hand span is a
+HARD constraint** (`maxSpan` 4 frets, open strings excluded — a wider shape is never a state), so
+every emitted chord is playable and pitch-valid by construction. Noise2Fret's playability terms are
+**costs, not losses**: span, fret height, open-string preference, a hand-window movement model
+(cheaper across a rest), string crossing. Plus a learned `FINGER_PRIOR` (−log p of each
+string×fret cell and of hand moves of d frets) mined from the DEV halves only. `fingerScore` fills
+`frets` on events that lack them (audio / ML charts), sets `fingered:true`, **never mutates its
+input**, and keeps written frets unless `overwrite`. It is what gives audio charts a `{tab}` block.
+
+**Measured** (`node tests/bench/fingering.mjs --gs …`; % of notes on the annotated string):
+
+| | GP dev | **GP test** | GS dev | **GS test** |
+|---|---|---|---|---|
+| lowest fret | 52.5 | 46.9 | — | — |
+| cost model only (`--no-prior`) | 56.7 | 51.4 | 71.5 | 65.4 |
+| + prior from GP dev only (`--prior-from gp --prior-parts cell,move`) | 64.6 | 57.0 | 72.2 | **67.7** (zero-shot) |
+| **shipped** (prior from GP dev + GS dev) | 64.8 | **57.5** | 75.8 | **72.5** |
+
+GP = 569 standard-tuned tracks / 94,890 fretted notes (even file = dev). GS = GuitarSet's 360
+annotated tracks (players 0–2 dev, 3–5 test). **Read the GS test number honestly:** test players
+perform the SAME pieces as dev players, so a GS-trained prior is flattered; the 67.7 zero-shot row
+is the claim to quote for unseen material. GP test is low because the corpus mixes jazz heads,
+comping and rock — three fingering cultures — not because the DP is broken.
+
+**⚠ Correction to the earlier baseline (PR #114):** that run called
+`parseGuitarProOrXML(bytes, true, index)` but the signature is `(bytes, fileName, useSharp,
+partIndex)`, so EVERY track was track 0 — its "281 tracks / 151,248 notes / 58.1 % test" are
+wrong. The corrected corpus is above.
+
+### P0c — techniques captured from the GP bytes (zero alignment risk)
+
+The GP3/4/5 + GPIF parsers already consumed the effect bytes to stay aligned; they now KEEP them,
+tuplet-style. `TECHNIQUES = bend · slide · hammer · harmonic · palmMute · vibrato · letRing ·
+staccato · trill · tremolo · grace · ghost · accent · dead · tap`. Events gain **`tech
+{engIdx:[tags]}`** and **`bends {engIdx: quarter-tones}`** (GP bend units / 25) **only when
+present**, so technique-free events — and every pinned corpus output — stay byte-identical.
+`transposeScore` drops `frets`/`tech`/`bends` (position-specific). Gotchas: **structured clone
+drops non-index array properties**, so bend size can't ride on the tag array → separate `bends`
+map; `_gpBuildScore` keeps the first of consecutive identical chords, so a technique that sits
+only on a repeated chord is lost with it (that's the harmonic score model, not a misread).
+**Validated** (`tests/bench/techniques.mjs` vs PyGuitarPro, 54 files): 2955 track×technique
+presence agreements, **0 false positives**, 21 misses (all repeated-chord merges).
+
+`score.tuningMidi` (new, all parsers): the open-string MIDI keyed like `frets` (0 = low E … 5 =
+high e, `null` for an absent string) — a 4-string bass reads `[null,null,28,33,38,43]`, Eb tuning
+is exact. `isPercussionTuning` flags a drum track (all-zero tuning).
+
+### P0d — `scoreToAlphaTex`: tab export with string + technique
+
+alphaTab 1.8 syntax (metadata arguments in parentheses; `fret.string{note props}.dur{beat props}`),
+one staff per score, tuning from `tuningMidi`, per-bar meter, `_voiceNotationMeasures` for the
+rhythm (16th grid, ties, metric note values). Events landing on the **same 16th slot are merged**
+into one beat (ML onsets of one strum arrive tens of ms apart; two beats can't share a slot). When written frets don't fit (or none exist) it falls back to `fingerScore(…, {overwrite:true})`.
+A drum track THROWS ("This is a drum/percussion track — it has no strings to write as tab.") and the
+UI shows the message. Wired as **AlphaTex (tab)** in `ChartPanel` (`.alphatex`; paste into any
+alphaTab viewer, e.g. the alphatab.net playground). **Validated** by parsing every corpus part
+with `@coderline/alphatab@1.8.4` (test-only dev dep): **299 parts, 0 parse failures, 0 warnings,
+bar counts exact, 99.07 % of notes present**; the 191 pitch differences are all harmonics
+(alphaTab sounds a natural harmonic at its harmonic pitch, by design).
+
+### P1/P2 — Guitar → TAB: the 🎸 Guitar → Tab (ML) note model, on device
+
+**Model:** Riley et al.'s guitar retraining (GAPS, ISMIR 2024 — **MIT**) of Kong et al.'s
+high-resolution onset/offset-regression CRNN (MIT), HF `xavriley/midi-transcription-models`
+`guitar-gaps.pth` @ `b7bec65a…`. Converted by **`scripts/guitar_crnn_export.py`** (pinned
+revision + pth SHA-256 + pti commit `7568dc7f…`): fp32 ONNX opset 17 (**matches PyTorch to
+1.8e-6**) → **weight-only int8** (per-output-channel scale + `DequantizeLinear`; activations stay
+fp32) = **25.0 MB**, `models/guitar-crnn/guitar-gaps.w8.onnx` + NOTICE, SHA-256 `84db798e…f5`.
+Input 10 s of 16 kHz mono (log-mel front end is IN the graph); output four `[1001 × 88]` heads.
+
+**Do not re-derive — measured:**
+- **ORT's `quantize_dynamic` destroys it** (int8 activations): GuitarSet note F1 **0.55 %**. Weight-
+  only int8: **83.3 % vs 83.1 % fp32** (30 tracks).
+- **Export the wrapper in eval mode** (`Wrap(m).eval()`): `torch.onnx.export` restores the
+  exported module's ORIGINAL mode afterwards, and a fresh `Module` is in training mode → the inner
+  CRNN came back with dropout on, and every PyTorch comparison after the export "disagreed" (0.977).
+  The ONNX was fine; the reference was not. The script now computes the reference first and asserts.
+- Memory in onnxruntime-web (Node): **105 MB RSS int8 vs 269 MB fp32**.
+- `HF_HUB_DISABLE_XET=1` is required here: `cas-server.xethub.hf.co` is not on the allowlist.
+- pip/PyPI **works** in this container (torch 2.14.1, onnx, onnxruntime, mir_eval, pyguitarpro were
+  installed into a scratch venv) — the conversion needed no cloud.
+
+**Engine (pure, headless-tested):** `CRNN` constants, `crnnSegments` (50 %-overlap windows, as the
+reference), `crnnDeframe`, `crnnBinarize` (onset/offset peak + regression shift, clamped to ±0.5;
+0 when the parabola's denominator is 0), `crnnNotesFromOutputs` (a port of the reference
+`RegressionPostProcessor`) and `async transcribeGuitar(pcm, model, opts)` → `{ notes, score }`
+(`score = fingerScore(polyNotesToScore(notes))`). The JS port reproduces the Python reference
+**414/414 notes** on real GuitarSet audio.
+
+**Glue (browser-only), same rails as the stem separator:** `guitar-model.js` publishes
+`window.TTP_GUITAR_MODEL(pcm16k, {onProgress})` → module Worker `guitar-worker.js` (imports the
+page's own engine via `__TTP_ENGINE_URL__`; main-thread fallback; terminated after each job) →
+`guitar-model-core.js`: Cache-API + SHA-256-checked weights (a bad cached copy is evicted), ONE
+session on the **pinned ONNX Runtime Web 1.23.2 plain build** (imported from stem-model-core.js —
+#33426), `capWasmMemory()`, single thread, no arena / mem-pattern. Lazy: nothing downloads until
+the button is pressed. `pages.yml` ships the glue + model + NOTICE and stamps `guitar-model.js?v=`.
+**UI:** Audio mode → **🎸 Guitar → Tab (ML)** → progress per 10 s window → a `ChartPanel` tab
+chart (notes re-scored on ♩=/meter changes without re-inference; strings are labelled
+"inferred").
+
+**Measured on GuitarSet** (all 360 mic recordings, fp32 ONNX through `scripts/guitarset_infer.py`;
+Tab = onset ±50 ms + pitch + STRING, strings from the shipped `fingerScore`):
+
+| | clean | + white noise at 20 dB SNR |
+|---|---|---|
+| note F50 (mir_eval, per-track mean, offsets ignored) | **86.3 %** (P 87.8 · R 85.3) | **85.8 %** |
+| note F1, pooled (bench matcher) — dev / test | 81.5 / 86.0 | 80.7 / 85.7 |
+| **Tab F1, shipped fingering** — dev / test | 58.5 / **61.6** | 57.6 / 60.2 |
+| Tab F1, GP-only prior (zero-shot strings) — test | **57.8** | 56.8 |
+| Tab F1, cost model only — test | 54.9 | — |
+
+For orientation only (metric definitions not verified to match, so not a like-for-like comparison): TART reports 81.35 F50
+and 54.08 end-to-end Tab F1 zero-shot. Noise robustness is the model's — −0.5 F50 at 20 dB. The
+gap between note F1 (~86) and Tab F1 (~58–62) is all Stage 3: **string choice is now the
+bottleneck**, and solos are worst (oracle-MIDI string accuracy comp 81.0 % vs solo 56.1 %).
+
+**Real app end to end** (`tests/bench/guitar-e2e.mjs`, headless Chromium, real worker + model +
+ORT 1.23.2 from jsDelivr, no stubs; `00_BN1-129-Eb_comp`, 22.3 s): **117 notes, note F1 87.2 %, Tab F1 86.4 %**, the AlphaTex export
+parses in alphaTab with **all 117 notes** in 12 bars (tempo read as 130; GuitarSet says 129); only
+the three ORT 1.23.2 files + the four same-origin guitar files load; peak **+595 MB** over the page;
+**3.2× real time** (single-thread WASM on this 4-core container — ~70 s per 22 s of audio; a phone
+is likely slower). With an iPad Safari UA on a test-player solo (`05_SS3-98-C_solo`, 39.2 s): same
+files, +629 MB, 2.5× real time, note F1 96.8 % but **Tab F1 25.8 %** — a solo line fingered in the
+wrong position is the typical failure. **Bugs this run caught:** (1) `ChartPanel` auto-Simplified the
+tab (a guitar line is "melodic") and exported one chord per bar → `autoSimplify={false}` on the tab
+chart (+ its own overrides, it was sharing the chord chart's); (2) the bench itself clicked the
+LAST "AlphaTex (tab)" button — the audio chord chart's, which renders after the tab — and read 87
+"missing" notes; it now scopes to the tab panel.
+
+**Honest limits:** zero-shot strings are the DP's guess — playable, not necessarily the player's
+(no audio string evidence yet = P3). No technique classifier yet (P4): audio tabs carry no `tech`.
+GuitarSet is unaccompanied acoustic guitar; a full mix must be separated first (SCNet's "other" stem holds
+guitar AND keys — no open model splits them). Device check remaining: first-tap load + memory on a
+real iPhone/iPad.
 
 ## Path B (scans / photos) — OUT OF SCOPE
 
@@ -2701,6 +2826,15 @@ accordingly.
   relative to K: with reader-robust accidentals, `"N.C."`, the brass header, and the UI's Apple
   `.abc.txt` fallback (Apple maps `.abc` → Alembic 3D). Externally verified with abcjs (0 wrong
   pitches, 0 warnings across Blue Sky/Peg/Anthropology/Au Privave/Yardbird + vocal/brass ABC).
+- **Audio → TAB** (`npm test`): `fingerSequence` keeps every shape inside the hand span and
+  beats lowest-fret on corpus excerpts; `fingerScore` fills frets without mutating its input and
+  keeps written ones; technique capture (exact tag counts and bend sizes on fixtures, `tuningMidi`
+  for bass / Eb / drums); `scoreToAlphaTex` output parsed by alphaTab 1.8.4 (strings, techniques,
+  same-slot merge, the drum-track refusal); the CRNN post-processor on synthetic heads (window
+  count, regression shift, an E4 note) and `transcribeGuitar` with a fake model; the glue
+  contracts (SHA-256 pin = the committed file, ORT 1.23.2 pin, worker + fallback, `pages.yml`
+  stamp, UI wiring) and `guitarSession` against a fake ORT. Accuracy is measured by the benches
+  (`fingering.mjs`, `guitarset.mjs`, `techniques.mjs`, `guitar-e2e.mjs`), not asserted.
 - **Lyrics import (`parseLyrics`)**: `npm test` asserts the strict chord matcher accepts
   real chords and rejects note-letter lyric words (Add/Cab/Bad/Fed/Gem/Bee/Ace), the
   line-level `isChordLine` catches chord lines but spares lyric/blank lines, a full

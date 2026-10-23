@@ -2903,6 +2903,172 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   expect(E({ done: 1, total: 2, t0: 1000, tAt: 1000 }, 1000) === null, "no elapsed time → no rate → null");
 }
 
+/* ---- Stage 3 fingering · technique capture · AlphaTex export (2026-10-23) ----------
+ * fingerScore assigns a string to every note (hard hand-span, Viterbi); the GP readers
+ * keep the technique bytes they always consumed; scoreToAlphaTex writes string-exact tab
+ * that alphaTab itself parses. Accuracy is measured by bench/fingering.mjs + guitarset.mjs;
+ * these guards pin the contracts. */
+{
+  const STD = eng.TUNINGS.Standard;
+  const c64 = eng.fingerCandidates(64, STD);
+  const pairs = []; for (let k = 0; k < c64.length; k += 2) pairs.push(`${c64[k]}:${c64[k + 1]}`);
+  expect(pairs.join(" ") === "1:19 2:14 3:9 4:5 5:0", `E4 has five playable positions (got ${pairs.join(" ")})`);
+  expect(eng.fingerCandidates(38, STD).length === 0 && eng.fingerCandidates(38, eng.TUNINGS["Drop D"]).join() === "0,0", "D2 is unplayable in standard, open low string in Drop D");
+  expect(eng.fingerCandidates(28, [null, null, 28, 33, 38, 43]).join() === "2,0", "null (absent) strings are skipped — a 4-string bass keyed 2…5");
+  // open C: every shape is playable, distinct strings, reconstructs its pitches, span ≤ 4
+  const cShapes = eng.fingerShapes([48, 52, 55, 60, 64], STD);
+  const okShape = (sh, mids) => new Set(sh.notes.map((n) => n.string)).size === sh.notes.length && sh.notes.every((n) => STD[n.string] + n.fret === n.midi) &&
+    [...mids].sort().join() === sh.notes.map((n) => n.midi).sort().join();
+  const span = (sh) => { const f = sh.notes.filter((n) => n.fret > 0).map((n) => n.fret); return f.length ? Math.max(...f) - Math.min(...f) : 0; };
+  expect(cShapes.length > 0 && cShapes.every((sh) => okShape(sh, [48, 52, 55, 60, 64]) && span(sh) <= 4), "every C-major shape is playable: distinct strings, right pitches, span ≤ 4 (hard constraint)");
+  expect(cShapes.some((sh) => sh.notes.map((n) => `${n.string}:${n.fret}`).sort().join() === "1:3 2:2 3:0 4:1 5:0".split(" ").sort().join()), "the open-C shape (x32010) is among the candidates");
+  expect(eng.fingerShapes([40, 45, 50, 55, 59, 64, 67], STD).length > 0, "a 7-note event (more pitches than strings) still yields a shape instead of nothing");
+  // a run of single notes: every pick reconstructs its pitch; a rest is skipped, not a crash
+  const line = [64, 67, 69, 67, 64, 62, 60, 57].map((m) => ({ midis: [m], gap: 0 }));
+  line.splice(4, 0, { midis: [] });
+  const fs1 = eng.fingerSequence(line, STD);
+  expect(fs1.shapes.length === line.length && fs1.shapes[4] === null && fs1.shapes.every((sh, i) => !sh || (sh.length === 1 && STD[sh[0].string] + sh[0].fret === line[i].midis[0])), "fingerSequence: one shape per event, pitches reconstructed, empty events stay null");
+  // fingerScore: keeps written frets, fills missing ones, never mutates its input
+  const gpBS = await eng.parseGP(new Uint8Array(fs.readFileSync(path.join(repo, "blue-sky.gp"))), true, 0);
+  const before = JSON.stringify(gpBS.bars[2].events);
+  const fBS = eng.fingerScore(gpBS);
+  expect(JSON.stringify(gpBS.bars[2].events) === before, "fingerScore never mutates its input");
+  expect(fBS.bars.every((b, bi) => b.events.every((e, ei) => JSON.stringify(e.frets) === JSON.stringify(gpBS.bars[bi].events[ei].frets) && !e.fingered)), "written GP frets are kept as-is (no overwrite)");
+  const naked = { ...gpBS, bars: gpBS.bars.map((b) => ({ ...b, events: b.events.map((e) => ({ ...e, frets: undefined })) })) };
+  const fN = eng.fingerScore(naked);
+  const allEv = fN.bars.flatMap((b) => b.events);
+  expect(allEv.length > 0 && allEv.every((e) => e.fingered && Object.entries(e.frets).every(([k, f]) => e.midis.includes(STD[+k] + f))), "events without frets get inferred frets (flagged `fingered`) that reconstruct their MIDI");
+  expect(/^\{tab$/m.test(eng.scoreToCSMPN(fN, { title: "t" })), "a fingered chart now carries a CSMPN {tab} block");
+  const tN = eng.fingerScore(eng.transposeScore(gpBS, 2, true));
+  expect(tN.bars.flatMap((b) => b.events).every((e) => e.fingered && !e.tech && !e.bends), "a transposed chart is re-fingered; string-keyed techniques are dropped with the frets");
+}
+{
+  // technique capture (zero false positives vs PyGuitarPro across 54 files — tests/bench/techniques.mjs)
+  const cnt = (sc) => { const c = {}; for (const b of sc.bars) for (const e of b.events) if (e.tech) for (const t of Object.values(e.tech).flat()) c[t] = (c[t] || 0) + 1; return c; };
+  const gp0 = await eng.parseGP(new Uint8Array(fs.readFileSync(path.join(repo, "blue-sky.gp"))), true, 0);
+  const c0 = cnt(gp0);
+  expect(c0.hammer === 111 && c0.bend === 23 && c0.slide === 13, `GPIF techniques captured (blue-sky.gp track 1: hammer 111 bend 23 slide 13, got ${JSON.stringify(c0)})`);
+  const bq = {}; for (const b of gp0.bars) for (const e of b.events) if (e.bends) for (const q of Object.values(e.bends)) bq[q] = (bq[q] || 0) + 1;
+  expect(bq[4] === 13 && bq[2] === 7 && bq[6] === 3, `GPIF bend sizes in quarter-tones (full 13 · half 7 · 1½ 3, got ${JSON.stringify(bq)})`);
+  const g3 = eng.parseGP345(new Uint8Array(fs.readFileSync(path.join(repo, "the-allman-brothers-band-blue_sky.gp3"))), true, 0);
+  const c3 = cnt(g3);
+  expect(c3.hammer === 49 && c3.bend === 18 && c3.slide === 7, `GP3 techniques captured (got ${JSON.stringify(c3)})`);
+  const g5 = eng.parseGP345(new Uint8Array(fs.readFileSync(path.join(repo, "Guns N' Roses - Sweet Child O' Mine.gp5"))), true, 2);
+  const c5 = cnt(g5);
+  expect(c5.bend === 75 && c5.hammer === 96 && c5.vibrato === 22 && c5.palmMute === 2 && c5.harmonic === 2, `GP5 techniques captured (got ${JSON.stringify(c5)})`);
+  expect(JSON.stringify(g5.tuningMidi) === "[39,44,49,54,58,63]", "GP5 tuningMidi carries the real (E♭) tuning");
+  const peg = (p) => eng.parseGP345(new Uint8Array(fs.readFileSync(path.join(repo, "Steely Dan - Peg.gp4"))), true, p);
+  expect(JSON.stringify(peg(7).tuningMidi) === "[null,null,28,33,38,43]", "a 4-string bass's tuningMidi is keyed like its frets (slots 2…5)");
+  expect(eng.isPercussionTuning(peg(8).tuningMidi) && !eng.isPercussionTuning(peg(7).tuningMidi), "a GP drum track is recognised by its all-zero tuning");
+  // the rest of the corpus is untouched by the capture: technique-free events carry no new keys
+  const plain = g3.bars.flatMap((b) => b.events).filter((e) => !e.tech);
+  expect(plain.length > 0 && plain.every((e) => !("tech" in e) && !("bends" in e)), "technique-free events carry no tech/bends keys (byte-identical to before)");
+}
+{
+  // AlphaTex: parsed by alphaTab itself (test-only dep), bar-exact and pitch-exact
+  const alphaTab = await import("@coderline/alphatab");
+  const parseTex = (tex) => { const imp = new alphaTab.importer.AlphaTexImporter(); imp.initFromString(tex, new alphaTab.Settings()); return { score: imp.readScore(), warnings: (imp.diagnostics?.items || []).length }; };
+  const notesOf = (score) => score.tracks[0].staves[0].bars.flatMap((b) => b.voices.flatMap((v) => v.beats.flatMap((bt) => bt.notes)));
+  const gp0 = await eng.parseGP(new Uint8Array(fs.readFileSync(path.join(repo, "blue-sky.gp"))), true, 0);
+  const tex = eng.scoreToAlphaTex(gp0, { title: "Blue Sky", trackName: "Guitar" });
+  expect(/^\\title "Blue Sky"$/m.test(tex) && /\\tuning \(E4 B3 G3 D3 A2 E2\)/.test(tex) && /\\ts \(2 4\)/.test(tex), "AlphaTex header: title, tuning high→low, opening 2/4");
+  let ok = true, res = null;
+  try { res = parseTex(tex); } catch (e) { ok = false; }
+  expect(ok && res.warnings === 0, "alphaTab parses the exported AlphaTex with no errors or warnings");
+  if (ok) {
+    const st = res.score.tracks[0].staves[0], notes = notesOf(res.score);
+    const pitches = new Set(gp0.bars.flatMap((b) => b.events.flatMap((e) => e.midis)));
+    expect(st.bars.length === 165, `AlphaTex keeps all 165 bars (got ${st.bars.length})`);
+    expect(notes.length > 500 && notes.every((n) => n.harmonicType || pitches.has(n.realValue)), "every parsed note sounds a pitch of the score (fret + string + tuning round-trip)");
+    expect(notes.filter((n) => n.isHammerPullOrigin).length >= 80 && notes.filter((n) => n.hasBend).length === 23 && notes.filter((n) => n.slideOutType).length === 13, "hammer-ons, bends and slides survive into alphaTab");
+    expect(notes.some((n) => n.hasBend && Math.max(...n.bendPoints.map((p) => p.value)) === 4), "a full-tone bend arrives as 4 quarter-tones");
+  }
+  const g5 = eng.parseGP345(new Uint8Array(fs.readFileSync(path.join(repo, "Guns N' Roses - Sweet Child O' Mine.gp5"))), true, 2);
+  const r5 = parseTex(eng.scoreToAlphaTex(g5));
+  expect(r5.score.tracks[0].staves[0].tuning.join() === "63,58,54,49,44,39", "an E♭-tuned GP5 track exports its own tuning");
+  const peg = (p) => eng.parseGP345(new Uint8Array(fs.readFileSync(path.join(repo, "Steely Dan - Peg.gp4"))), true, p);
+  const rb = parseTex(eng.scoreToAlphaTex(peg(7)));
+  expect(rb.score.tracks[0].staves[0].tuning.join() === "43,38,33,28" && notesOf(rb.score).length > 0, "a 4-string bass exports as a 4-string tab");
+  let threw = false; try { eng.scoreToAlphaTex(peg(8)); } catch (e) { threw = /drum|percussion/i.test(e.message); }
+  expect(threw, "a drum track is refused with a readable message, not written as nonsense tab");
+  // an audio/ML-style chart (pitches only) is fingered on the way out
+  const audio = eng.audioEventsToScore([{ symbol: "C", midis: [48, 52, 55, 60, 64], startSec: 0, durSec: 2 }, { symbol: "G", midis: [43, 47, 50, 55, 59, 67], startSec: 2, durSec: 2 }], { bpm: 120, beatsPerBar: 4 });
+  const ra = parseTex(eng.scoreToAlphaTex(audio));
+  const an = notesOf(ra.score);
+  expect(an.length === 11 && an.every((n) => [48, 52, 55, 60, 64, 43, 47, 50, 59, 67].includes(n.realValue)), `a pitches-only chart is fingered and exported (got ${an.length} notes)`);
+  // ML onsets 50 ms apart land on the same 16th: one beat with both notes (alphaTab drops a second beat there)
+  const slot = { source: "ml", timeSig: [4, 4], bars: [{ number: 1, timeSig: [4, 4], events: [
+    { symbol: "C", midis: [48], beat: 0, durBeats: 0, qbeat: 0, qdur: 0.05 },
+    { symbol: "E", midis: [52], beat: 0, durBeats: 2, qbeat: 0.05, qdur: 1.95 },
+    { symbol: "G", midis: [55], beat: 2, durBeats: 2, qbeat: 2, qdur: 2 }] }] };
+  const sb = parseTex(eng.scoreToAlphaTex(slot)).score.tracks[0].staves[0].bars[0].voices[0].beats.map((b) => b.notes.map((n) => n.realValue).sort().join("+"));
+  expect(sb.join() === "48+52,55", `events on the same 16th slot merge into one beat (got ${sb.join()})`);
+}
+
+{
+  /* Guitar CRNN post-processing (pure engine). The JS port reproduced the Python reference
+   * note-for-note on real GuitarSet model outputs (414/414 notes, identical velocities); these
+   * pin the pieces on synthetic matrices. */
+  const segs = eng.crnnSegments(new Float32Array(16000 * 25));
+  expect(segs.length === 5 && segs.every((s) => s.length === 160000), `25 s → five 10 s windows at a 5 s hop (got ${segs.length})`);
+  const peak = new Float32Array([0, 0, 0.2, 0.5, 0.9, 0.6, 0.3, 0, 0, 0]);
+  const pb = eng.crnnBinarize(peak, peak.length, 1, 0.3, 2);
+  expect([...pb.bin].join("") === "0000100000" && Math.abs(pb.shift[4] - 0.125) < 1e-6, "an onset peak is picked once, with Kong's 3-point sub-frame shift (0.125)");
+  const flat = new Float32Array([0, 0, 0.2, 0.9, 0.9, 0.2, 0, 0, 0, 0]);
+  const fb = eng.crnnBinarize(flat, flat.length, 1, 0.3, 2);
+  expect([...fb.shift].every((v) => Number.isFinite(v) && Math.abs(v) <= 0.5), "a flat-topped peak never yields an infinite or out-of-range shift");
+  // one pitch (E4 = class 43): onset at frame 10, sounding to frame 60
+  const F = 120, K = 88, mk = () => new Float32Array(F * K), out = { onset: mk(), offset: mk(), frame: mk(), velocity: mk() };
+  [0.1, 0.4, 0.9, 0.4, 0.1].forEach((v, i) => { out.onset[(8 + i) * K + 43] = v; });
+  for (let t = 10; t < 60; t++) { out.frame[t * K + 43] = 0.8; out.velocity[t * K + 43] = 0.5; }
+  const nn = eng.crnnNotesFromOutputs(out);
+  expect(nn.length === 1 && nn[0].midi === 64 && Math.abs(nn[0].startSec - 0.10) < 0.006 && Math.abs(nn[0].endSec - 0.60) < 0.011 && nn[0].velocity === 64,
+    `a synthetic E4 becomes one note 0.10–0.60 s, velocity 64 (got ${JSON.stringify(nn)})`);
+  // orchestrator over a fake per-window model → notes + a FINGERED score
+  let calls = 0;
+  const fake = async (seg) => { calls++; const o = {}; for (const k of ["onset", "offset", "frame", "velocity"]) { o[k] = new Float32Array(1001 * K); o[k].set(out[k].subarray(0, Math.min(out[k].length, o[k].length))); } return o; };
+  const prog = [];
+  const tg = await eng.transcribeGuitar(new Float32Array(16000 * 8), fake, { onProgress: (d, t) => prog.push(`${d}/${t}`) });
+  expect(calls === 1 && prog.join() === "1/1" && tg.notes.length === 1 && tg.score && tg.score.bars.flatMap((b) => b.events).every((e) => e.fingered && Object.keys(e.frets).length), "transcribeGuitar: one window per 10 s, progress reported, the score comes back fingered");
+  let threw = false; try { await eng.transcribeGuitar(new Float32Array(16000), null); } catch (_) { threw = true; }
+  expect(threw, "no model → a clear error, not a silent empty chart");
+}
+{
+  // Guitar → Tab browser glue: the same iOS rails as the separator, a pinned model, a worker.
+  const rd = (f) => fs.readFileSync(path.join(repo, f), "utf8");
+  const gm = rd("guitar-model.js"), gc = rd("guitar-model-core.js"), gw = rd("guitar-worker.js"), ui = fs.readFileSync(UI, "utf8"), html = fs.readFileSync(HTML, "utf8");
+  const pages = rd(".github/workflows/pages.yml");
+  const crypto = await import("node:crypto");
+  const pin = (gc.match(/sha256: "([0-9a-f]{64})"/) || [])[1];
+  const file = path.join(repo, "models", "guitar-crnn", "guitar-gaps.w8.onnx");
+  const actual = fs.existsSync(file) ? crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex") : null;
+  expect(pin && pin === actual, `the committed guitar model matches its pinned SHA-256 (pin ${pin && pin.slice(0, 12)}…, file ${actual && actual.slice(0, 12)}…)`);
+  expect(fs.existsSync(path.join(repo, "models", "guitar-crnn", "NOTICE")) && /MIT License/.test(rd("models/guitar-crnn/NOTICE")), "the guitar model ships with its MIT notice");
+  expect(/new URL\("\.\/stem-model-core\.js" \+ BUILD_QS, import\.meta\.url\)/.test(gc) && /ORT_WASM_PATHS \+ "ort\.wasm\.min\.mjs"/.test(gc) && /capWasmMemory\(\)/.test(gc), "the guitar session uses the separator's pinned ORT 1.23.2 plain WASM build + the memory cap");
+  expect(/numThreads = 1/.test(gc) && /executionProviders: \["wasm"\]/.test(gc) && !/webgpu/i.test(gc.replace(/\/\*[\s\S]*?\*\//g, "")), "single-thread WASM only (no WebGPU path on any device)");
+  expect(/caches\.open\("ttp-models"\)/.test(gc) && /sha256Hex\(bytes\)/.test(gc) && /await cache\.delete\(key\)/.test(gc), "weights are SHA-256 checked, Cache-API cached, and a bad cached copy is evicted");
+  expect(/new Worker\(WORKER_URL, \{ type: "module" \}\)/.test(gm) && /onMainThread/.test(gm) && /w\.terminate\(\)/.test(gm) && /window\.TTP_GUITAR_MODEL = transcribeGuitarAudio/.test(gm), "guitar-model.js: module worker, main-thread fallback, worker ended after each job, publishes TTP_GUITAR_MODEL");
+  expect(/window\.__TTP_ENGINE_URL__/.test(gm) && /import\(\/\* @vite-ignore \*\/ engineUrl\)/.test(gw) && /transcribeGuitarPcm/.test(gw), "the worker runs the page's own engine (one engine, no copy)");
+  expect(/<script type="module" src="\.\/guitar-model\.js"><\/script>/.test(html), "index.html loads guitar-model.js");
+  expect(/cp guitar-model\.js guitar-model-core\.js guitar-worker\.js _site\//.test(pages) && /cp models\/guitar-crnn\/guitar-gaps\.w8\.onnx models\/guitar-crnn\/NOTICE _site\/models\/guitar-crnn\//.test(pages) && /guitar-model\.js\?v=\$\{BUILD\}/.test(pages), "Pages ships the guitar glue + model, deploy-stamped");
+  expect(/window\.TTP_GUITAR_MODEL/.test(ui) && /fingerScore\(polyNotesToScore\(gtrNotes/.test(ui) && /🎸 Guitar → Tab \(ML\)/.test(ui), "the Audio panel's 🎸 Guitar → Tab button runs the model and fingers the notes");
+  expect(/\["alphatex", "AlphaTex \(tab\)"\]/.test(ui) && /scoreToAlphaTex\(tscore/.test(ui) && /alphatex: "alphatex"/.test(ui), "ChartPanel exports AlphaTex (tab)");
+  // the tab chart must not auto-Simplify (a guitar line is "melodic" → one chord per bar → notes lost
+  // from the AlphaTex export: the real-app run exported 87 of 117 notes before this) nor share the
+  // chord chart's edits
+  expect(/autoSimplify && isMelodicScore\(score\)/.test(ui) && /score=\{gtrScore\}[\s\S]{0,400}overrides=\{gtrOvr\}[\s\S]{0,120}autoSimplify=\{false\}/.test(ui), "the guitar tab chart keeps every note (no auto-Simplify) and has its own overrides");
+  // the core, driven with a fake ORT at the import seam: one session, heads mapped, released once
+  const gcore = await import(path.join(repo, "guitar-model-core.js") + "?t=" + Date.now());
+  let created = 0, released = 0, seen = null;
+  const fakeOrt = async () => ({ env: { wasm: {} }, Tensor: class { constructor(type, data, dims) { this.type = type; this.data = data; this.dims = dims; } },
+    InferenceSession: { create: async (bytes, o) => { created++; seen = o; return { inputNames: ["audio"],
+      run: async (feeds) => { const z = () => ({ data: new Float32Array(1001 * 88) }); return { reg_onset_output: z(), reg_offset_output: z(), frame_output: z(), velocity_output: z(), _in: feeds.audio }; },
+      release: () => { released++; } }; } } });
+  const sess = await gcore.guitarSession(new Uint8Array(4), fakeOrt);
+  const r = await sess.run(new Float32Array(160000)); sess.release();
+  expect(created === 1 && released === 1 && r.onset.length === 1001 * 88 && r.velocity.length === 1001 * 88 && seen.executionProviders.join() === "wasm" && seen.enableCpuMemArena === false, "guitarSession: one WASM session, the four heads mapped to onset/offset/frame/velocity, released once");
+}
+
 if (fails.length) {
   console.error("\nFAIL:\n  " + fails.join("\n  "));
   console.error("\nRe-run with --log-tokens to dump the raw extractTokens() stream and diff against the reference.");

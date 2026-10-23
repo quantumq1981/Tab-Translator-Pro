@@ -38,6 +38,12 @@
     the separation runs in a module Worker (stem-worker.js). See stem-model.js.
   -->
   <script type="module" src="./stem-model.js"></script>
+  <!--
+    Optional guitar note transcription (🎸 Guitar → Tab): the guitar CRNN (MIT) as a 25 MB
+    same-origin ONNX model, run on the pinned ONNX Runtime Web build in a module Worker that
+    imports this page's engine. Nothing is fetched until the button is pressed. See guitar-model.js.
+  -->
+  <script type="module" src="./guitar-model.js"></script>
   <script type="importmap">
   {
     "imports": {
