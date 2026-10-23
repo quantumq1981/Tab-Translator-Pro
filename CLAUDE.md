@@ -2190,7 +2190,19 @@ separator and capture are browser glue (device check remains for the real model)
       Verified: real app + real worker + real ORT under the cap → stems identical to the uncapped run
       (SDR to the hundredth). The OOM hint now says to reload and split straight after loading the song.
       **Don't remove the cap because it "works on desktop"** — desktop never has trouble reserving 4 GiB.
-    - **Device check that remains:** a real iPhone. If a long song still dies there, the next levers
+    - **Second on-device failure — low-memory mode on WebGPU (fixed, #112; reported on an iPad,
+      iPadOS 26 — the owner tests on both iPhone and iPad):** after the cap, the split died at session
+      creation: "Can't create a session … allocation_planner.cc:237 Could not find
+      OrtValue with name '_sw'" (`_sw` = a `Pow` output in the graph). iOS/iPadOS 26 Safari has WebGPU, so
+      `pickDevice` chose it, and ORT's WebGPU EP cannot build/run the graph with the optimiser OFF
+      (which low-memory mode sets to save ~200 MB). Reproduced in headless Chromium on a SwiftShader
+      WebGPU adapter: `disabled` fails (there at run time, on an f16 Cast); `basic`/`all` run and
+      match WASM to 1e-7. Fix: `deviceFor(compact, picked)` — **low-memory mode always runs on WASM**
+      (the measured path); and any WebGPU failure in `separateInBlocks` is retried once on WASM
+      (`fellBackFrom: "webgpu"`). The UI no longer blames memory for an `allocation_planner` /
+      "Can't create a session" error. WebGPU for the compact model (with the optimiser on) is untested
+      on Apple GPUs — measure on a device before enabling it.
+    - **Device check that remains:** a real iPhone and iPad (iPadOS reports a Mac UA; `isAppleMobile` catches it via touch points, so low-memory mode is on by default there too). If a long song still dies there, the next levers
       are Int16 stem storage (halves the stems) and WebGPU (ORT's WebGPU EP; iOS 26 Safari has WebGPU).
 - **Live capture** (`LiveCapture`): `🖥 Capture a tab` (getDisplayMedia, desktop Chrome/Edge,
   "Share tab audio") + `🎙 Record` (mic), raw PCM (ScriptProcessor — the one raw tap iOS
