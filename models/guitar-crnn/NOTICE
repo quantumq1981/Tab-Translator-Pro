@@ -1,0 +1,40 @@
+guitar-gaps.w8.onnx — guitar note transcription (onset / offset / frame / velocity regression CRNN),
+converted for in-browser inference. 10 s of 16 kHz mono audio in; four [1001 × 88] matrices out
+(100 frames/s, MIDI 21–108). The log-mel front end is part of the graph.
+
+Weights:        guitar-gaps.pth from https://huggingface.co/xavriley/midi-transcription-models
+                (revision b7bec65a2b860aca72856b0feef58b5df407b777, SHA-256
+                65483e7c0e340a90415b15b520687587698c8c728f5fa470a205f13ee45c6513) — Xavier Riley et al.,
+                "GAPS: A Large and Diverse Classical Guitar Dataset and Benchmark Transcription Model"
+                (ISMIR 2024, arXiv:2408.08653) and "High Resolution Guitar Transcription via Domain
+                Adaptation" (ICASSP 2024, arXiv:2402.15258). License: MIT (model card).
+Architecture:   Regress_onset_offset_frame_velocity_CRNN — Qiuqiang Kong et al., "High-resolution Piano
+                Transcription with Pedals by Regressing Onset and Offset Times" (IEEE/ACM TASLP 2021,
+                arXiv:2010.01815); code piano_transcription_inference (MIT), as forked at
+                https://github.com/xavriley/piano_transcription_inference
+                (commit 7568dc7f78b625e40cf9776e2806d164006610e3).
+Conversion:     scripts/guitar_crnn_export.py — fp32 ONNX export (matches PyTorch to 1.8e-6), then
+                weight-only int8 (per-channel scale + DequantizeLinear; activations stay fp32).
+                GuitarSet note F1 (30 tracks): fp32 83.1 %, this file 83.3 %.
+
+This file:      SHA-256 84db798e6545734ebd8fae9fbf2ee8af4e6294b5294a9aaa3ad6552af38cadf5
+
+MIT License
+
+Copyright (c) Xavier Riley (guitar weights and hf_midi_transcription)
+Copyright (c) Qiuqiang Kong (piano_transcription_inference)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+associated documentation files (the "Software"), to deal in the Software without restriction,
+including without limitation the rights to use, copy, modify, merge, publish, distribute,
+sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or
+substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES
+OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

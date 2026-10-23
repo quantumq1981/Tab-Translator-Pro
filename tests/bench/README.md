@@ -17,6 +17,9 @@ node bench/ambig.mjs test   # where the right answer sits for uncertain chords (
 node bench/fingering.mjs    # Stage 3: re-finger the GP corpus, % of notes on the written string
 ```
 
+The audio → TAB benches (fingering, GuitarSet, techniques, guitar end-to-end) are described at
+the end of this file.
+
 ## What is measured
 
 - **Corpus** (`lib.mjs` `CORPUS`): 28 comp/rhythm tracks from 25 songs (jazz heads, Steely
@@ -96,3 +99,60 @@ the ~10-minute browser run; `--chart-opts '{"bassFusion":true}'` passes options 
 The bass stem uses `lib.mjs`'s `bassNote` voice — a guitar pluck an octave down has almost no
 fundamental, and a separator correctly calls it "other". Measured results are in CLAUDE.md (v2.1 →
 "First REAL run").
+
+## Audio → TAB benches (`docs/AUDIO-TO-TAB-PLAN.md`)
+
+**Splits are the same rule everywhere:** Guitar Pro files by index (even = dev, odd = test) and
+GuitarSet by player (0–2 = dev, 3–5 = test). Tune only on dev.
+
+### `fingering.mjs` — Stage 3 against written fingerings
+
+Strips the string/fret from every standard-tuned 6-string GP track (569 tracks, 94,890
+fretted notes), re-fingers the pitches with `fingerSequence`, and counts the notes that land on
+the written string.
+
+```sh
+node bench/fingering.mjs                              # shipped defaults, both splits
+node bench/fingering.mjs --gs /tmp/gs_ex              # + GuitarSet (scripts/guitarset_extract.py output)
+node bench/fingering.mjs --gs /tmp/gs_ex --no-prior   # cost model only
+node bench/fingering.mjs --gs /tmp/gs_ex --with-prior --prior-from gp --prior-parts cell,move   # zero-shot on GuitarSet
+node bench/fingering.mjs --gs /tmp/gs_ex --sweep      # coordinate search on the DEV halves
+node bench/fingering.mjs --gs /tmp/gs_ex --learn-prior --prior-parts cell,move   # regenerate FINGER_PRIOR
+```
+
+### `guitarset.mjs` — real recorded guitar, with the string annotated
+
+GuitarSet (CC-BY 4.0, hexaphonic pickup → every note's string). Get it with
+`HF_HUB_DISABLE_XET=1 hf download jhartquist/guitarset --repo-type dataset --local-dir /tmp/gs`
+(the Xet CAS host is not on this environment's allowlist; the flag falls back to plain HTTP),
+then `python scripts/guitarset_extract.py /tmp/gs /tmp/gs_ex`.
+
+```sh
+node bench/guitarset.mjs /tmp/gs_ex                       # oracle MIDI → fingering → string accuracy
+python scripts/guitarset_infer.py <pti> <model.onnx> /tmp/gs_ex /tmp/pred [--noise-db 20]
+node bench/guitarset.mjs /tmp/gs_ex /tmp/pred             # end to end: note F1 + Tab F1 (onset ±50 ms, pitch, string)
+```
+
+`guitarset_infer.py` runs the CRNN in onnxruntime with the reference Python post-processor
+(`<pti>` = a checkout of xavriley/piano_transcription_inference) and scores note F1 with
+mir_eval. Some GuitarSet annotations start a few ms before 0 s; the script clamps them, because
+mir_eval rejects negative interval times.
+
+### `techniques.mjs` — technique capture vs PyGuitarPro
+
+```sh
+python scripts/pgp_techniques.py .. /tmp/pgp_tech.json    # from tests/, needs pyguitarpro
+node bench/techniques.mjs /tmp/pgp_tech.json
+```
+
+### `guitar-e2e.mjs` — 🎸 Guitar → Tab in the real app
+
+The actual app in headless Chromium, with the real guitar worker, the 25 MB model and ONNX
+Runtime Web 1.23.2 from jsDelivr (no stubs). It uploads a GuitarSet recording, presses the
+button, samples peak memory, records which ORT files were fetched, opens the AlphaTex export,
+parses it with alphaTab, and scores the notes against the annotation. `--deps` is the same React
+and Babel bundle as in `scnet-e2e.mjs`.
+
+```sh
+node bench/guitar-e2e.mjs --deps $D/out --gs /tmp/gs_ex --track 00_BN1-129-Eb_comp [--ua "<iPad UA>"]
+```

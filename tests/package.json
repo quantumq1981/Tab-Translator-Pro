@@ -13,6 +13,7 @@
   "devDependencies": {
     "pdfjs-dist": "3.11.174",
     "@xmldom/xmldom": "^0.8.10",
-    "@babel/standalone": "^7.25.6"
+    "@babel/standalone": "^7.25.6",
+    "@coderline/alphatab": "1.8.4"
   }
 }
