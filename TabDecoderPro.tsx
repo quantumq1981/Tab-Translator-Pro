@@ -2881,14 +2881,22 @@ function StemsPanel({ C, useSharp, getSource, sourceName, fmt, loading }) {
     } catch (e) {
       try { localStorage.removeItem("ttp:stems:inflight"); } catch (_) {}
       const msg = String((e && e.message) || e);
+      // The separator appends "[stems <build> · ORT <ver> <device> · Safari …]" so a screenshot says what ran —
+      // classify on the message without it (the label says "wasm", which isn't evidence of anything).
+      const raw = msg.replace(/\s*\[stems [^\]]*\]\s*$/, "");
+      // ONNX Runtime unable to find its own values ("Could not find OrtValue with name '…'", a different name each
+      // try) is Safari's WebAssembly engine mis-running ORT's hash tables (microsoft/onnxruntime#33426) — not memory.
+      const engineBug = /Could not find OrtValue|node_index_info|Failed to find args for kernel/i.test(raw);
       // Only blame memory when the error actually looks like memory — otherwise the hint sends the user chasing the wrong cause.
       // ("allocation_planner" is ONNX Runtime refusing a graph, not memory — exclude it.)
-      const memLike = /memory|allocat(?!ion_planner)|RangeError|out of bounds|OOM/i.test(msg + (e && e.name)) && !/Can't create a session/i.test(msg);
-      const hint = memLike
+      const memLike = !engineBug && /memory|allocat(?!ion_planner)|bad_alloc|RangeError|out of bounds|OOM/i.test(raw + (e && e.name)) && !/Can't create a session/i.test(raw);
+      const hint = engineBug
+        ? " That is Safari's WebAssembly engine mis-running ONNX Runtime (a known WebKit bug), not a memory problem. Update iOS / Safari (Settings → General → Software Update) and reload, or import stems from Moises/Demucs."
+        : memLike
         ? (!compact ? " Turn on 📱 Low-memory mode and try again, or import stems from Moises/Demucs."
-          : /backend|wasm/i.test(msg) ? " The browser couldn't set aside memory for the separator. Reload the page, load the song and split it straight away (before Isolate vocals, A/B clarity or other analyses), and close other tabs — or import stems from Moises/Demucs."
+          : /backend|wasm/i.test(raw) ? " The browser couldn't set aside memory for the separator. Reload the page, load the song and split it straight away (before Isolate vocals, A/B clarity or other analyses), and close other tabs — or import stems from Moises/Demucs."
           : " Long songs need a lot of memory on a phone — try a shorter clip, or import stems from Moises/Demucs.")
-        : /fetch|network|Load failed|NetworkError|huggingface|jsdelivr|HTTP/i.test(msg)
+        : /fetch|network|Load failed|NetworkError|huggingface|jsdelivr|HTTP/i.test(raw)
           ? ` The first split downloads the model (~${compact ? 11 : 13} MB) — check the connection and try again.`
           : " You can import stems from Moises/Demucs instead.";
       setErr("Stem separation failed: " + msg + "." + hint); setBusy(""); setProg(null);

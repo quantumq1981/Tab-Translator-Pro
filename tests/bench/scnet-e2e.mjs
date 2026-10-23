@@ -1,6 +1,6 @@
 /* SCNet end-to-end: the REAL app, REAL vendor bundle, REAL stem worker, REAL model — no stubs.
  *
- *   node bench/scnet-e2e.mjs --deps <dir> [--tracks 3] [--sec 40] [--out <dir>]
+ *   node bench/scnet-e2e.mjs --deps <dir> [--tracks 3] [--sec 40] [--out <dir>] [--compact 1] [--ua "<user agent>"] [--stamp <v>]
  *
  * 1. Renders known stems from the GP corpus (comp/"other", bass, drums), pans them into a
  *    stereo mix and writes mix.wav.
@@ -86,6 +86,8 @@ function readWav16(file) {
   for (let i = 0; i < n; i++) for (let c = 0; c < ch; c++) out[c][i] = b.readInt16LE(44 + 2 * (i * ch + c)) / 32768;
   return out;
 }
+const STAMP = arg("stamp", "");
+const served = [];                                   // separator files the page actually requested (+ their ?v= stamp)
 async function driveApp() {
   const received = {};
   const MIME = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".tsx": "text/plain", ".json": "application/json", ".wav": "audio/wav", ".bin": "application/octet-stream" };
@@ -101,7 +103,13 @@ async function driveApp() {
     }
     const f = u.pathname === "/__e2e/mix.wav" ? path.join(OUT, "mix.wav") : path.join(L.repo, decodeURIComponent(u.pathname === "/" ? "/index.html" : u.pathname));
     if (!f.startsWith(L.repo) && !f.startsWith(OUT)) { res.statusCode = 403; res.end(); return; }
-    fs.readFile(f, (e, data) => { if (e) { res.statusCode = 404; res.end(); return; } res.setHeader("content-type", MIME[path.extname(f)] || "application/octet-stream"); res.end(data); });
+    if (/stem|vendor\//.test(u.pathname)) served.push(u.pathname + u.search);
+    fs.readFile(f, (e, data) => {
+      if (e) { res.statusCode = 404; res.end(); return; }
+      // --stamp <v>: serve index.html exactly as pages.yml deploys it (stem-model.js?v=<v>)
+      if (STAMP && path.basename(f) === "index.html") data = Buffer.from(String(data).replace('src="./stem-model.js"', `src="./stem-model.js?v=${STAMP}"`));
+      res.setHeader("content-type", MIME[path.extname(f)] || "application/octet-stream"); res.end(data);
+    });
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   const ORIGIN = `http://127.0.0.1:${server.address().port}`;
@@ -116,7 +124,9 @@ const memLine = [];                                   // [s since click, MB tota
 const sampleMem = () => { const v = chromePids().map(pss); const s = v.reduce((a, b) => a + b, 0); memPeak = Math.max(memPeak, s); memPeakProc = Math.max(memPeakProc, ...v, 0); memLine.push([+((Date.now() - memT0) / 1000).toFixed(1), Math.round(s / 2 ** 20), memPhase]); return s; };
 
   const browser = await chromium.launch({ executablePath: arg("chromium", undefined), args: ["--enable-features=SharedArrayBuffer"] });
-  const ctx = await browser.newContext({ acceptDownloads: true });
+  // --ua: emulate a device's user agent (e.g. an iPad's) so the WebKit routing runs as it does there —
+  // Chromium's V8 still executes the WASM, so this checks the app's choices, not JavaScriptCore.
+  const ctx = await browser.newContext({ acceptDownloads: true, ...(arg("ua") ? { userAgent: arg("ua") } : {}) });
   const ALL = fs.readFileSync(path.join(DEPS, "all.mjs"), "utf8"), BABEL = fs.readFileSync(path.join(DEPS, "babel.min.js"));
   const js = (body) => ({ status: 200, contentType: "text/javascript", headers: { "access-control-allow-origin": "*" }, body });
   await ctx.route("https://esm.sh/__e2e/all.mjs", (r) => r.fulfill(js(ALL)));
@@ -193,7 +203,9 @@ const sampleMem = () => { const v = chromePids().map(pss); const s = v.reduce((a
   if (received.meta) await page.evaluate(async () => { const o = window.__stemOut; for (const [k, chs] of Object.entries(o.stems)) for (let c = 0; c < chs.length; c++) await fetch(`/__e2e/stem/${k}_${c}`, { method: "POST", body: chs[c] }); window.__stemOut = null; });
   const uiText = await page.evaluate(() => document.body.innerText).catch(() => "");
   fs.writeFileSync(path.join(OUT, "console.log"), logs.join("\n"));
-  fs.writeFileSync(path.join(OUT, "network.json"), JSON.stringify(net, null, 1));
+  fs.writeFileSync(path.join(OUT, "network.json"), JSON.stringify({ cdn: net, served }, null, 1));
+  console.error("separator files served: " + served.join(" "));
+  console.error("ORT fetched: " + [...new Set(net.map((q) => (q.url.match(/onnxruntime-web@[\d.]+\/dist\/[\w.-]+/) || [""])[0]).filter(Boolean))].join(" "));
   await browser.close(); server.close();
 
   if (uiErr || !received.meta) {
