@@ -6978,6 +6978,655 @@ function alignPcmToScore(samples, sampleRate, score, opts = {}) {
  * Every top-level engine binding is exported so the UI (TabDecoderPro.tsx),
  * the headless tests, and the future parse Web Worker can all import the ONE
  * engine — single source of truth, no copy, no drift. (Roadmap Wave 1 #1.) */
+/* ============================================================================
+ * Chord-voicing library — the lead-sheet "show me the grip" modal (2026-10-24)
+ * ----------------------------------------------------------------------------
+ * Tap a chord on the lead sheet → a modal of guitar chord diagrams: the
+ * dictionary shapes (data/chords.json, tombatossals/chords-db, MIT) plus voicings
+ * DERIVED from the chord's interval formula — drop 2, drop 3, close triads, guide-
+ * tone shells, slash-bass grips and an exhaustive fretboard search. Everything
+ * here is pure (no fetch, no DOM): the UI fetches chords.json once and hands the
+ * parsed object in, so the whole voicing pipeline is headless-testable.
+ *
+ * Pipeline:  symbol → parseChordSymbolForVoicings (aliases, slash bass kept for
+ * display, lookup on the main chord) → voicingFormula (interval grammar: every
+ * suffix the parser understands has a tone list, so a chord the dictionary lacks
+ * still gets voicings) → dictionary positions (looked up by root PITCH CLASS, so
+ * Db finds the Csharp entry) + generated groups → one deduped, finger-assigned,
+ * pitch-validated list per group.
+ *
+ * Data model of a voicing (strings by ENGINE index, 0 = low E … 5 = high e, the
+ * same convention as TUNINGS/fingerScore):
+ *   { frets:[6] (-1 muted, 0 open, absolute fret), fingers:[6] (0 none, 1–4),
+ *     baseFret, fretCount, labels:[6] (interval per sounding string), midi:[],
+ *     title, group, source:"dict"|"gen", rootless? }
+ * Standard tuning only (the dictionary is standard-tuned).
+ * ========================================================================== */
+const _VC_OPEN = [40, 45, 50, 55, 59, 64];            // E2 A2 D3 G3 B3 E4 — engine idx 0 = low E
+const VOICING_DICT_KEYS = ["C", "Csharp", "D", "Eb", "E", "F", "Fsharp", "G", "Ab", "A", "Bb", "B"]; // chords.json key, by pc
+const _VC_MAX_FRET = 15;
+const _VC_PC = { C: 0, "B#": 0, "C#": 1, Db: 1, D: 2, "D#": 3, Eb: 3, E: 4, Fb: 4, "E#": 5, F: 5, "F#": 6, Gb: 6,
+  G: 7, "G#": 8, Ab: 8, A: 9, "A#": 10, Bb: 10, B: 11, Cb: 11 };
+const _VC_GENERIC_LABEL = ["R", "b9", "9", "b3", "3", "11", "#11", "5", "b13", "6", "b7", "7"];
+
+/* Parser aliases (the lead-sheet spellings a player writes → the parser's canonical
+ * suffix). The list the feature was specified with, plus the spellings this engine
+ * itself emits (m7♭5, m(maj7), 7♭9 …) and common Real-Book variants. Anything not
+ * listed still parses through the interval grammar in voicingFormula. */
+const CHORD_SUFFIX_ALIASES = {
+  "": "", maj: "", major: "", M: "", Maj: "",
+  m: "m", min: "m", "-": "m", minor: "m", mi: "m",
+  m7: "m7", min7: "m7", "-7": "m7", mi7: "m7",
+  maj7: "maj7", "Δ7": "maj7", "Δ": "maj7", "^7": "maj7", "^": "maj7", M7: "maj7", Maj7: "maj7", ma7: "maj7",
+  dim: "dim", "°": "dim", o: "dim",
+  dim7: "dim7", "°7": "dim7", o7: "dim7",
+  aug: "aug", "+": "aug",
+  m7b5: "m7b5", "ø": "m7b5", "ø7": "m7b5", "-7b5": "m7b5", min7b5: "m7b5",
+  sus: "sus4", sus4: "sus4", sus2: "sus2",
+  "7#5": "aug7", "7+5": "aug7", "+7": "aug7", aug7: "aug7",
+  "9#5": "aug9", "9+5": "aug9", "+9": "aug9", aug9: "aug9",
+  "6/9": "69", "69": "69", "m6/9": "m69", m69: "m69", "-69": "m69", "-6/9": "m69",
+  mmaj7: "mmaj7", "m(maj7)": "mmaj7", mM7: "mmaj7", "-Δ7": "mmaj7", "-Δ": "mmaj7", "m^7": "mmaj7", minmaj7: "mmaj7", "-maj7": "mmaj7",
+  "-6": "m6", min6: "m6", "-9": "m9", min9: "m9", "-11": "m11", min11: "m11", "-13": "m13", min13: "m13",
+  "Δ9": "maj9", "^9": "maj9", M9: "maj9", "Δ13": "maj13", "^13": "maj13", M13: "maj13",
+  "Δ7#11": "maj7#11", "Δ#11": "maj7#11", "^7#11": "maj7#11", "maj7+11": "maj7#11",
+  "7alt": "alt", alt: "alt",
+  add2: "add9", "m(add9)": "madd9", "-add9": "madd9", add4: "add11",
+};
+/* canonical suffix → chords.json suffix name, where they differ */
+const _VC_DICT_NAME = { "": "major", m: "minor", "7#5": "aug7", "9#5": "aug9",
+  alt: null };   // chords.json "alt" files C-E-G♭ (a ♭5 triad), not a 7alt — never route a lead-sheet alt there
+
+function _vcClean(s) {
+  return String(s == null ? "" : s)
+    .replace(/♭/g, "b").replace(/♯/g, "#").replace(/∆/g, "Δ").replace(/[−–]/g, "-")
+    .replace(/[º˚]/g, "°").replace(/Ø/g, "ø").replace(/\s+/g, "");
+}
+
+/* Interval grammar: a chord suffix → its tones. Returns
+ *   { tones:[{semi,label}], required:[semi], requireAny:[semi]|null, core4:[semi]|null }
+ * or null when the suffix isn't a chord this grammar knows. `required` is what a grip
+ * must sound to BE the chord (the unaltered 5th and lower extensions are optional,
+ * as every voicing book voices them); `core4` is the four-tone set the drop-2/drop-3
+ * generator builds from (guide tones first, then colour, then root, then 5th). */
+function voicingFormula(suffix) {
+  let s = _vcClean(suffix).replace(/[(),]/g, "");
+  if (s === "major" || s === "maj" || s === "M" || s === "Maj") s = "";
+  else if (s === "minor") s = "m";
+  else if (s === "sus") s = "sus4";
+  if (s === "Δ" || s === "^") s = "maj7";
+  if (s === "alt" || s === "7alt") {
+    return _vcBuild({ third: 4, fifth: null, seventh: 10, exts: [[1, "b9"], [3, "#9"], [6, "#11"], [8, "b13"]],
+      requireAny: [1, 3, 6, 8], fifthOptional: true });
+  }
+  if (s === "5") return _vcBuild({ third: null, fifth: 7, power: true });
+  const st = { third: 4, fifth: 7, seventh: null, sixth: false, exts: [], majSev: false, dimSev: false,
+    sus4: false, sus2: false, no3: false, no5: false, fifthAltered: false, thirdOptional: false };
+  let r = s, m;
+  if ((m = r.match(/^(m|min|mi|-)(maj|Maj|MAJ|ma(?=\d)|Δ|\^|M)/))) { st.third = 3; st.majSev = true; r = r.slice(m[0].length); if (!/^\d/.test(r)) r = "7" + r; }
+  else if ((m = r.match(/^ø/))) { st.third = 3; st.fifth = 6; st.fifthAltered = true; r = r.slice(1); if (!/^\d/.test(r)) r = "7" + r; }
+  else if ((m = r.match(/^(dim|°|o(?=7|$))/))) { st.third = 3; st.fifth = 6; st.fifthAltered = true; st.dimSev = true; r = r.slice(m[0].length); }
+  else if ((m = r.match(/^(aug|\+)(?!\d\d)/)) && !/^\+(5|9|11|13)/.test(r)) { st.fifth = 8; st.fifthAltered = true; r = r.slice(m[0].length); }
+  else if ((m = r.match(/^(maj|Maj|MAJ|ma(?=\d)|Δ|\^|M)/))) { st.majSev = true; r = r.slice(m[0].length); if (!/^\d/.test(r)) r = "7" + r; }
+  else if ((m = r.match(/^(min|mi|m|-)/)) && !/^-(5|9|13)/.test(r)) { st.third = 3; r = r.slice(m[0].length); }
+  let num = null;
+  if ((m = r.match(/^(13|11|69|6\/9|9|7|6)/))) { num = m[1]; r = r.slice(m[0].length); }
+  if (num === "6") st.sixth = true;
+  else if (num === "69" || num === "6/9") { st.sixth = true; st.exts.push([2, "9"]); }
+  else if (num) {
+    st.seventh = st.majSev ? 11 : st.dimSev && num === "7" ? 9 : 10;
+    if (num === "9" || num === "11" || num === "13") st.exts.push([2, "9", num !== "9"]);
+    if (num === "11") { st.exts.push([5, "11"]); if (st.third === 4) st.thirdOptional = true; }
+    if (num === "13") { st.exts.push([5, "11", true]); st.exts.push([9, "13"]); }   // 11 optional: dictionaries voice it
+  }
+  const SEV = () => { if (st.seventh == null && !st.sixth) st.seventh = st.majSev ? 11 : 10; };
+  while (r.length) {
+    if ((m = r.match(/^sus2sus4|^sus24/))) { st.sus2 = st.sus4 = true; }
+    else if ((m = r.match(/^sus4|^sus(?!2)/))) st.sus4 = true;
+    else if ((m = r.match(/^sus2/))) st.sus2 = true;
+    else if ((m = r.match(/^add(9|2)/))) st.exts.push([2, "9"]);
+    else if ((m = r.match(/^add(11|4)/))) st.exts.push([5, "11"]);
+    else if ((m = r.match(/^add(13|6)/))) st.exts.push([9, st.seventh != null ? "13" : "6"]);
+    else if ((m = r.match(/^(b|-)5/))) { st.fifth = 6; st.fifthAltered = true; }
+    else if ((m = r.match(/^(#|\+)5/))) { st.fifth = 8; st.fifthAltered = true; }
+    else if ((m = r.match(/^(b|-)9/))) { SEV(); st.exts.push([1, "b9"]); }
+    else if ((m = r.match(/^(#|\+)9/))) { SEV(); st.exts.push([3, "#9"]); }
+    else if ((m = r.match(/^(#|\+)11/))) { SEV(); st.exts.push([6, "#11"]); }
+    else if ((m = r.match(/^(b|-)13/))) { SEV(); st.exts.push([8, "b13"]); }
+    else if ((m = r.match(/^(maj7|M7|Δ7|Δ|\^7)/))) { st.seventh = 11; }
+    else if ((m = r.match(/^13/))) { SEV(); st.exts.push([9, "13"]); }
+    else if ((m = r.match(/^11/))) { SEV(); st.exts.push([5, "11"]); }
+    else if ((m = r.match(/^9/))) { SEV(); st.exts.push([2, "9"]); }
+    else if ((m = r.match(/^7/))) { SEV(); }
+    else if ((m = r.match(/^6/))) { st.sixth = true; }
+    else if ((m = r.match(/^(no|omit)3/))) st.no3 = true;
+    else if ((m = r.match(/^(no|omit)5/))) st.no5 = true;
+    else return null;
+    r = r.slice(m[0].length);
+  }
+  if (st.sus4 || st.sus2 || st.no3) st.third = null;
+  return _vcBuild(st);
+}
+function _vcBuild(st) {
+  const tones = [], req = new Set(), has = (semi) => tones.some((t) => t.semi === semi);
+  const add = (semi, label, required) => { if (has(semi)) return; tones.push({ semi, label }); if (required) req.add(semi); };
+  add(0, "R", true);
+  if (st.third != null) add(st.third, st.third === 3 ? "b3" : "3", !st.thirdOptional);
+  if (st.sus2) add(2, "2", true);
+  if (st.sus4) add(5, "4", true);
+  if (st.seventh != null) add(st.seventh, st.seventh === 11 ? "7" : st.seventh === 9 ? "bb7" : "b7", true);
+  if (st.sixth) add(9, st.seventh != null ? "13" : "6", true);
+  const exts = st.exts || [];
+  // highest plain extension required (13 > 11 > 9); alterations always required
+  const plain = exts.filter(([semi]) => semi === 2 || semi === 5 || semi === 9).map(([semi]) => semi);
+  const top = plain.includes(9) && st.seventh != null ? 9 : plain.includes(5) ? 5 : plain.includes(2) ? 2 : null;
+  for (const [semi, label, optional] of exts) {
+    const alteration = semi === 1 || semi === 3 || semi === 6 || semi === 8;
+    add(semi, label, !st.requireAny && !optional && (alteration || semi === top || st.seventh == null));
+  }
+  if (st.fifth != null && !st.no5) {
+    const lbl = st.fifth === 6 ? "b5" : st.fifth === 8 ? "#5" : "5";
+    const triad = tones.length <= 2;          // R + third/sus → the 5th is load-bearing
+    add(st.fifth, lbl, st.power || triad || (st.fifthAltered && !st.fifthOptional));
+  }
+  const requireAny = st.requireAny || null;
+  // drop-2/3 core: guide tones → alterations → top colour → root → 5th
+  const order = [];
+  const push = (semi) => { if (semi != null && has(semi) && !order.includes(semi)) order.push(semi); };
+  push(st.thirdOptional ? null : st.third); if (st.third == null) { push(st.sus4 ? 5 : null); push(st.sus2 ? 2 : null); }
+  push(st.seventh); if (st.seventh == null && st.sixth) push(9);
+  for (const a of [1, 3, 6, 8]) if (exts.some(([x]) => x === a)) push(a);
+  if (st.seventh != null) push(9); push(top); push(2); push(5);
+  if (st.fifthAltered) push(st.fifth);
+  push(0); push(st.fifth); push(9); push(st.sus4 ? 5 : null);
+  let core4 = order.length >= 4 ? order.slice(0, 4) : null;
+  if (core4 && st.seventh == null && !st.sixth && tones.length > 4) core4 = null;   // add9/add11 triads: no drop form
+  if (tones.length < 4) core4 = null;
+  return { tones, required: [...req], requireAny, core4 };
+}
+const _vcTonesSig = (f) => f.tones.map((t) => t.semi).sort((a, b) => a - b).join(",");
+
+/* Lead-sheet symbol → { ok, display, lookup, root, rootPc, suffix, bass, bassPc, formula }.
+ * The slash bass is preserved for DISPLAY ("C7/E") while the lookup runs on the main
+ * chord ("C7"). `6/9` is a suffix, not an inversion — only a trailing note name is a bass. */
+function parseChordSymbolForVoicings(symbol) {
+  const original = String(symbol == null ? "" : symbol).trim();
+  if (!original || original === "—" || /^N\.?C\.?$/i.test(original)) return { ok: false, original, error: "NO_CHORD" };
+  let main = original, bass = null;
+  const sm = original.match(/^(.*)\/([A-Ga-g][#b♯♭]?)$/);
+  if (sm && sm[1]) { main = sm[1]; bass = sm[2][0].toUpperCase() + _vcClean(sm[2].slice(1)); }
+  const rm = main.match(/^([A-Ga-g])([#b♯♭]?)(.*)$/);
+  if (!rm) return { ok: false, original, error: "INVALID_ROOT" };
+  const root = rm[1].toUpperCase() + _vcClean(rm[2]);
+  const rootPc = _VC_PC[root];
+  const raw = _vcClean(rm[3]);
+  const bare = raw.replace(/[()]/g, "");
+  const suffix = CHORD_SUFFIX_ALIASES[raw] ?? CHORD_SUFFIX_ALIASES[bare] ?? CHORD_SUFFIX_ALIASES[raw.toLowerCase()] ?? bare;
+  const formula = voicingFormula(suffix);
+  const bassPc = bass != null ? _VC_PC[bass] : null;
+  if (rootPc == null) return { ok: false, original, error: "INVALID_ROOT" };
+  if (!formula) return { ok: false, original, root, rootPc, suffix, error: "UNKNOWN_QUALITY" };
+  return { ok: true, original, display: original, lookup: root + rm[3], root, rootPc, suffix,
+    bass, bassPc: bassPc === rootPc ? null : bassPc ?? null, formula };
+}
+
+/* chords.json suffix for a parsed chord: the exact name, a known rename, else the
+ * dictionary suffix with the SAME tone set (so "min7", "-7", "m7" all reach "m7"). */
+function _vcDictSuffix(dict, suffix, formula) {
+  const names = (dict && dict.suffixes) || [];
+  if (_VC_DICT_NAME[suffix] === null) return null;
+  const want = _VC_DICT_NAME[suffix] ?? suffix;
+  if (names.includes(want)) return want;
+  if (!formula) return null;
+  const sig = _vcTonesSig(formula);
+  for (const n of names) {
+    if (n.includes("/") || _VC_DICT_NAME[n] === null) continue;
+    const f = voicingFormula(n);
+    if (f && _vcTonesSig(f) === sig) return n;
+  }
+  return null;
+}
+
+/* A chords.json position (frets relative to baseFret, 1 = baseFret, 0 open, -1 muted)
+ * → absolute frets in engine order (the file already lists low E → high e). */
+function normalizeDictPosition(pos) {
+  if (!pos || !Array.isArray(pos.frets) || pos.frets.length !== 6) return null;
+  const base = pos.baseFret || 1;
+  const frets = pos.frets.map((f) => (f > 0 ? f + base - 1 : f < 0 ? -1 : 0));
+  const fingers = Array.isArray(pos.fingers) && pos.fingers.length === 6 ? pos.fingers.map((x) => (x > 0 ? x : 0)) : null;
+  return { frets, fingers, baseFret: base };
+}
+
+/* Fretting-hand fingers for an absolute fret array: index-finger barre across the
+ * lowest fret when it holds ≥2 strings and every string between is fretted at or above
+ * it, then fingers in fret order (a same-fret group compresses to a mini-barre only
+ * when there aren't enough fingers). Returns { fingers:[6], barres:[{fret,from,to}] }
+ * or null when the shape needs more than four fingers — i.e. it isn't a grip. */
+function assignChordFingers(frets) {
+  const fingers = [0, 0, 0, 0, 0, 0], barres = [];
+  const fretted = [];
+  for (let s = 0; s < 6; s++) if (frets[s] > 0) fretted.push(s);
+  if (!fretted.length) return { fingers, barres };
+  const minF = Math.min(...fretted.map((s) => frets[s]));
+  if (Math.max(...fretted.map((s) => frets[s])) - minF > 4) return null;
+  const atMin = fretted.filter((s) => frets[s] === minF);
+  let rest = fretted.filter((s) => frets[s] !== minF);
+  if (atMin.length >= 2) {
+    const lo = atMin[0], hi = atMin[atMin.length - 1];
+    let ok = true;
+    for (let s = lo; s <= hi; s++) if (!(frets[s] >= minF)) ok = false;
+    if (ok) { for (const s of atMin) fingers[s] = 1; if (hi > lo) barres.push({ fret: minF, from: lo, to: hi }); }
+    else { fingers[atMin[0]] = 1; rest = rest.concat(atMin.slice(1)); }
+  } else fingers[atMin[0]] = 1;
+  // group the remaining notes by fret, low fret first; strings low → high inside a fret
+  const byFret = new Map();
+  for (const s of rest.sort((a, b) => frets[a] - frets[b] || a - b)) {
+    if (!byFret.has(frets[s])) byFret.set(frets[s], []);
+    byFret.get(frets[s]).push(s);
+  }
+  const groups = [...byFret.entries()].map(([fret, strings]) => ({ fret, strings, mini: false }));
+  const need = () => groups.reduce((n, g) => n + (g.mini ? 1 : g.strings.length), 0);
+  // compress the largest contiguous same-fret group(s) until three fingers suffice
+  for (const g of [...groups].sort((a, b) => b.strings.length - a.strings.length)) {
+    if (need() <= 3) break;
+    if (g.strings.length < 2) break;
+    const lo = g.strings[0], hi = g.strings[g.strings.length - 1];
+    let ok = true;
+    for (let s = lo; s <= hi; s++) if (!(frets[s] >= g.fret)) ok = false;
+    if (ok) g.mini = true;
+  }
+  if (need() > 3) return null;
+  let next = 2;
+  for (const g of groups) {
+    const want = Math.min(4, 1 + g.fret - minF);
+    const slots = g.mini ? 1 : g.strings.length;
+    // a finger number never runs past 4 — keep room for the groups still to come
+    const remaining = groups.slice(groups.indexOf(g) + 1).reduce((n, x) => n + (x.mini ? 1 : x.strings.length), 0);
+    let f = Math.max(next, Math.min(want, 5 - slots - remaining));
+    if (f + slots - 1 > 4) return null;
+    if (g.mini) { for (const s of g.strings) fingers[s] = f; barres.push({ fret: g.fret, from: g.strings[0], to: g.strings[g.strings.length - 1] }); next = f + 1; }
+    else for (const s of g.strings) { fingers[s] = f; next = ++f; }
+  }
+  return { fingers, barres };
+}
+
+function _vcMakeVoicing(frets, rootPc, formula, meta) {
+  const sounding = frets.map((f, s) => (f >= 0 ? s : -1)).filter((s) => s >= 0);
+  if (sounding.length < 2) return null;
+  let fg = meta.fingers ? { fingers: meta.fingers, barres: [] } : assignChordFingers(frets);
+  if (!fg && meta.anyShape) fg = { fingers: [0, 0, 0, 0, 0, 0], barres: [] };   // as written: show it even if our finger model can't
+  if (!fg) return null;
+  const fr = frets.filter((f) => f > 0);
+  const maxF = fr.length ? Math.max(...fr) : 0, minF = fr.length ? Math.min(...fr) : 0;
+  const baseFret = meta.baseFret || (maxF <= 4 ? 1 : minF);
+  const fretCount = Math.max(4, maxF - baseFret + 1);
+  const labels = frets.map((f, s) => (f < 0 ? null : _vcLabel(formula, rootPc, (_VC_OPEN[s] + f) % 12)));
+  const midi = sounding.map((s) => _VC_OPEN[s] + frets[s]);
+  return { frets: frets.slice(), fingers: fg.fingers.slice(), barres: fg.barres, baseFret, fretCount, labels, midi,
+    title: meta.title || "", group: meta.group, source: meta.source || "gen", rootless: !!meta.rootless };
+}
+function _vcLabel(formula, rootPc, pc) {
+  const rel = (pc - rootPc + 12) % 12;
+  const t = formula && formula.tones.find((x) => x.semi === rel);
+  return t ? t.label : _VC_GENERIC_LABEL[rel];
+}
+const voicingSignature = (v) => v.frets.join(",");
+
+/* Does a fret array sound this chord? Every pc a chord tone (the slash bass is also
+ * allowed on the lowest string), every required tone present, ≥1 of requireAny. */
+function _vcValid(frets, rootPc, formula, bassPc) {
+  const allowed = new Set(formula.tones.map((t) => (rootPc + t.semi) % 12));
+  const sounding = [];
+  for (let s = 0; s < 6; s++) if (frets[s] >= 0) sounding.push(s);
+  if (sounding.length < Math.min(3, formula.tones.length)) return false;
+  const pcs = new Set();
+  for (let i = 0; i < sounding.length; i++) {
+    const s = sounding[i], pc = (_VC_OPEN[s] + frets[s]) % 12;
+    if (!allowed.has(pc) && !(i === 0 && bassPc != null && pc === bassPc)) return false;
+    pcs.add((pc - rootPc + 12) % 12);
+  }
+  if (bassPc != null && (_VC_OPEN[sounding[0]] + frets[sounding[0]]) % 12 !== bassPc) return false;
+  for (const r of formula.required) if (!pcs.has(r)) return false;
+  if (formula.requireAny && !formula.requireAny.some((x) => pcs.has(x))) return false;
+  return true;
+}
+
+/* Place an ordered bottom→top list of pitch classes on the given strings (engine idx,
+ * ascending), rising in pitch string to string, as compactly as possible. */
+function _vcPlace(pcs, strings, { maxSpan = 4, maxFret = _VC_MAX_FRET } = {}) {
+  let best = null;
+  const cur = new Array(strings.length);
+  (function dfs(i, prevMidi) {
+    if (i === strings.length) {
+      const fr = cur.filter((f) => f > 0);
+      const span = fr.length ? Math.max(...fr) - Math.min(...fr) : 0;
+      if (span > maxSpan) return;
+      const opens = cur.filter((f) => f === 0).length;
+      if (opens && fr.length && Math.max(...fr) > 7) return;          // open string under a high grip: not a voicing
+      const score = span * 100 + (fr.length ? Math.min(...fr) : 0) + opens * 0.5;
+      if (!best || score < best.score) best = { frets: cur.slice(), score };
+      return;
+    }
+    const s = strings[i];
+    for (let f = 0; f <= maxFret; f++) {
+      const midi = _VC_OPEN[s] + f;
+      if (midi % 12 !== pcs[i] || midi <= prevMidi) continue;
+      cur[i] = f; dfs(i + 1, midi);
+    }
+  })(0, -1);
+  if (!best) return null;
+  const frets = [-1, -1, -1, -1, -1, -1];
+  strings.forEach((s, i) => { frets[s] = best.frets[i]; });
+  return frets;
+}
+const _vcStringNums = (strings) => strings.map((s) => 6 - s).join("-");
+
+const DROP_STRING_SETS = { drop2: [[0, 1, 2, 3], [1, 2, 3, 4], [2, 3, 4, 5]], drop3: [[0, 2, 3, 4], [1, 3, 4, 5]] };
+
+/* Drop-2 / drop-3: the four close-position inversions of the chord's core4, the 2nd
+ * (drop 2) or 3rd (drop 3) voice from the top dropped an octave, laid on every string
+ * set. Extended chords build from a guide-tone core (9ths/13ths replace the 5th, and
+ * the root when the core has no room for it — flagged `rootless`). */
+function dropVoicings(rootPc, formula, type) {
+  if (!formula || !formula.core4) return [];
+  const core = formula.core4.slice().sort((a, b) => a - b);
+  const rootless = !core.includes(0);
+  const out = [];
+  for (let inv = 0; inv < 4; inv++) {
+    // close position bottom→top as ascending semitone offsets
+    const order = []; for (let i = 0; i < 4; i++) order.push(core[(inv + i) % 4]);
+    const offs = [0];
+    for (let i = 1; i < 4; i++) { let step = (order[i] - order[i - 1] + 12) % 12; if (!step) step = 12; offs.push(offs[i - 1] + step); }
+    const v = order.map((semi, i) => ({ semi, off: offs[i] }));
+    if (type === "drop2") v[2].off -= 12; else v[1].off -= 12;
+    v.sort((a, b) => a.off - b.off);
+    const pcs = v.map((x) => (rootPc + x.semi) % 12);
+    for (const set of DROP_STRING_SETS[type]) {
+      const frets = _vcPlace(pcs, set);
+      if (!frets) continue;
+      const bassLabel = _vcLabel(formula, rootPc, pcs[0]);
+      out.push({ frets, title: `${bassLabel} in bass · ${_vcStringNums(set)}`, rootless, inv });
+    }
+  }
+  return out;
+}
+
+/* Close triads (root position + both inversions) on the four adjacent string groups. */
+function triadVoicings(rootPc, formula) {
+  if (!formula || formula.tones.length !== 3) return [];
+  const t = formula.tones.map((x) => x.semi).sort((a, b) => a - b);
+  const names = ["Root pos", "1st inv", "2nd inv"], out = [];
+  for (let inv = 0; inv < 3; inv++) {
+    const pcs = [0, 1, 2].map((i) => (rootPc + t[(inv + i) % 3]) % 12);
+    for (const set of [[3, 4, 5], [2, 3, 4], [1, 2, 3], [0, 1, 2]]) {
+      const frets = _vcPlace(pcs, set, { maxSpan: 3 });
+      if (frets) out.push({ frets, title: `${names[inv]} · ${_vcStringNums(set)}` });
+    }
+  }
+  return out;
+}
+
+/* Guide-tone shells (root + 3rd + 7th/6th, the Freddie Green grips) with the root on
+ * the 6th or 5th string, plus the same shell with the chord's top colour tone above. */
+function shellVoicings(rootPc, formula) {
+  if (!formula) return [];
+  const has = (x) => formula.tones.some((t) => t.semi === x);
+  const third = has(4) ? 4 : has(3) ? 3 : has(5) ? 5 : null;
+  const sev = has(10) ? 10 : has(11) ? 11 : has(9) && !formula.tones.some((t) => t.label === "13") ? 9 : null;
+  if (third == null || sev == null) return [];
+  const colour = [9, 2, 1, 3, 6, 8].find((x) => x !== sev && x !== third && has(x) && formula.tones.find((t) => t.semi === x).label !== "6");
+  const pc = (x) => (rootPc + x) % 12, out = [];
+  const shapes = [
+    { tones: [0, sev, third], sets: [[0, 2, 3], [1, 3, 4]] },
+    { tones: [0, third, sev], sets: [[0, 1, 2], [1, 2, 3]] },
+  ];
+  for (const sh of shapes) for (const set of sh.sets) {
+    const frets = _vcPlace(sh.tones.map(pc), set, { maxSpan: 3, maxFret: 12 });
+    if (!frets) continue;
+    const lbl = sh.tones.map((x) => _vcLabel(formula, rootPc, pc(x))).join("-");
+    out.push({ frets, title: `${lbl} · ${_vcStringNums(set)}` });
+    if (colour != null) {
+      const top = set[set.length - 1] + 1;
+      if (top <= 5) {
+        const f2 = _vcPlace([...sh.tones, colour].map(pc), [...set, top], { maxSpan: 4, maxFret: 14 });
+        if (f2) out.push({ frets: f2, title: `${lbl}-${_vcLabel(formula, rootPc, pc(colour))} · ${_vcStringNums([...set, top])}` });
+      }
+    }
+  }
+  return out;
+}
+
+/* Exhaustive fretboard search: every grip in a 4-fret window (open strings allowed low
+ * on the neck) that sounds the chord, needs ≤ 4 fingers and has at most one interior
+ * muted string — ranked complete-first, root-in-bass, fuller, lower — then diversified
+ * across the neck. This is the guarantee that ANY chord the parser understands gets a
+ * spread of real shapes, whether or not the dictionary has it. */
+function enumerateChordGrips(rootPc, formula, { bassPc = null, max = 24, maxBase = 12 } = {}) {
+  if (!formula) return [];
+  const allowed = new Set(formula.tones.map((t) => (rootPc + t.semi) % 12));
+  if (bassPc != null) allowed.add(bassPc);
+  const seen = new Set(), found = [];
+  for (let base = 1; base <= maxBase; base++) {
+    const opts = [];
+    for (let s = 0; s < 6; s++) {
+      const o = [-1];
+      if (base <= 5 && allowed.has(_VC_OPEN[s] % 12)) o.push(0);
+      for (let f = base; f < base + 4; f++) if (allowed.has((_VC_OPEN[s] + f) % 12)) o.push(f);
+      opts.push(o);
+    }
+    const cur = new Array(6);
+    (function dfs(s) {
+      if (s === 6) {
+        if (!cur.some((f) => f === base)) return;                       // anchored on this window
+        const sounding = []; for (let i = 0; i < 6; i++) if (cur[i] >= 0) sounding.push(i);
+        if (sounding.length < Math.min(3, formula.tones.length)) return;
+        let interior = 0;
+        for (let i = sounding[0]; i <= sounding[sounding.length - 1]; i++) if (cur[i] < 0) interior++;
+        if (interior > 1) return;
+        const sig = cur.join(",");
+        if (seen.has(sig) || !_vcValid(cur, rootPc, formula, bassPc)) return;
+        const fg = assignChordFingers(cur);
+        if (!fg) return;
+        seen.add(sig);
+        const pcs = new Set(sounding.map((i) => (_VC_OPEN[i] + cur[i]) % 12));
+        const bassIsRoot = (_VC_OPEN[sounding[0]] + cur[sounding[0]]) % 12 === rootPc;
+        const fr = cur.filter((f) => f > 0);
+        const score = -12 * pcs.size - 3 * sounding.length + (bassIsRoot || bassPc != null ? 0 : 8) + 5 * interior
+          + (Math.max(...fr) - Math.min(...fr)) + 0.25 * base + fg.barres.length * 0.5;
+        found.push({ frets: cur.slice(), score, base });
+        return;
+      }
+      for (const f of opts[s]) { cur[s] = f; dfs(s + 1); }
+    })(0);
+  }
+  found.sort((a, b) => a.score - b.score || a.base - b.base);
+  // diversify: at most 2 per neck region on the first pass, then fill
+  const picked = [], perRegion = new Map();
+  for (const g of found) {
+    const region = Math.floor((g.base - 1) / 3);
+    if ((perRegion.get(region) || 0) >= 2) continue;
+    perRegion.set(region, (perRegion.get(region) || 0) + 1);
+    picked.push(g); if (picked.length >= max) break;
+  }
+  for (const g of found) { if (picked.length >= max) break; if (!picked.includes(g)) picked.push(g); }
+  return picked.sort((a, b) => a.base - b.base || a.score - b.score).map((g) => ({ frets: g.frets }));
+}
+
+/* Dictionary positions for a chord: entry by root PITCH CLASS (Db → "Csharp"), suffix
+ * via _vcDictSuffix; positions that don't actually sound the chord are dropped. */
+function dictVoicings(dict, rootPc, suffix, formula, bassPc = null) {
+  if (!dict || !dict.chords) return [];
+  const entries = dict.chords[VOICING_DICT_KEYS[rootPc]] || [];
+  let ds = _vcDictSuffix(dict, suffix, formula);
+  let entry = null;
+  if (bassPc != null && ds) {   // the dictionary's own slash entries ("/E", "m/B")
+    const head = ds === "major" ? "" : ds === "minor" ? "m" : ds;
+    entry = entries.find((e) => { const mm = e.suffix.match(/^(.*?)\/([A-G][#b]?)$/); return mm && mm[1] === head && _VC_PC[mm[2]] === bassPc; }) || null;
+  } else if (ds) entry = entries.find((e) => e.suffix === ds) || null;
+  if (!entry) return [];
+  const out = [];
+  for (const p of entry.positions || []) {
+    const n = normalizeDictPosition(p);
+    if (!n || !_vcValid(n.frets, rootPc, formula, bassPc)) continue;
+    out.push({ frets: n.frets, fingers: n.fingers, baseFret: n.baseFret, generated: !!p.generated });
+  }
+  return out;
+}
+
+const VOICING_GROUPS = {
+  played: { title: "In this chart", blurb: "The fingering written in the source file." },
+  bass: { title: "Slash bass", blurb: "Grips with the written bass note as the lowest sounding string." },
+  library: { title: "Library", blurb: "Common dictionary shapes across the neck." },
+  drop2: { title: "Drop 2", blurb: "Four-note voicings — 2nd voice from the top dropped an octave (adjacent strings)." },
+  drop3: { title: "Drop 3", blurb: "Four-note voicings — 3rd voice from the top dropped an octave (one string skipped)." },
+  triads: { title: "Triads", blurb: "Close-position triads and their inversions on each string group." },
+  shells: { title: "Shells", blurb: "Guide-tone shells — root, 3rd and 7th (plus a colour tone on top)." },
+  more: { title: "More shapes", blurb: "Every other playable grip found on the fretboard, low to high." },
+};
+
+/* The modal's data: parse → per-group voicings (validated, fingered, deduped, labelled).
+ * opts: { maxMore = 16, maxBass = 8, played } — `played` is the chart's own fingering
+ * ([6] frets, or the score's {engIdx: fret} map), shown first exactly as written. A chord the parser can't read returns ok:false;
+ * a known quality the dictionary lacks still returns the generated groups. */
+function chordVoicings(dict, symbol, opts = {}) {
+  const p = parseChordSymbolForVoicings(symbol);
+  if (!p.ok) return { ok: false, parsed: p, groups: [], total: 0 };
+  const { rootPc, formula, bassPc } = p;
+  const seen = new Set(), groups = [];
+  const played = _vcPlayedFrets(opts.played);
+  if (played) {
+    const v = _vcMakeVoicing(played, rootPc, formula, { title: "as written", group: "played", source: "chart", anyShape: true });
+    if (v) { groups.push({ id: "played", ...VOICING_GROUPS.played, voicings: [v] }); seen.add(played.join(",")); }
+  }
+  const take = (id, list, { dedupe = true, source = "gen", cap = Infinity } = {}) => {
+    const out = [];
+    for (const it of list) {
+      if (out.length >= cap) break;
+      if (!_vcValid(it.frets, rootPc, formula, id === "bass" ? bassPc : null) && !(it.rootless && _vcValidRootless(it.frets, rootPc, formula))) continue;
+      const sig = it.frets.join(",");
+      if (dedupe && seen.has(sig)) continue;
+      const v = _vcMakeVoicing(it.frets, rootPc, formula, { ...it, group: id, source: it.generated ? "gen" : source });
+      if (!v) continue;
+      if (dedupe) seen.add(sig);
+      out.push(v);
+    }
+    if (out.length) groups.push({ id, ...VOICING_GROUPS[id], voicings: out });
+    return out;
+  };
+  if (bassPc != null) {
+    const fromDict = dictVoicings(dict, rootPc, p.suffix, formula, bassPc);
+    const gen = enumerateChordGrips(rootPc, formula, { bassPc, max: opts.maxBass ?? 8 });
+    take("bass", [...fromDict, ...gen].map((x, i) => ({ ...x, title: x.title || `with ${p.bass} · ${i + 1}` })), { dedupe: false, source: "dict" });
+  }
+  const lib = dictVoicings(dict, rootPc, p.suffix, formula);
+  take("library", lib, { source: "dict" });
+  take("drop2", dropVoicings(rootPc, formula, "drop2"));
+  take("drop3", dropVoicings(rootPc, formula, "drop3"));
+  take("triads", triadVoicings(rootPc, formula));
+  take("shells", shellVoicings(rootPc, formula));
+  take("more", enumerateChordGrips(rootPc, formula, { max: (opts.maxMore ?? 16) + 24 }), { cap: opts.maxMore ?? 16 });
+  for (const [id, word] of [["library", "pos"], ["more", "shape"]]) {      // numbered after dedupe
+    const g = groups.find((x) => x.id === id);
+    if (g) g.voicings.forEach((v, i) => { v.title = `${word} ${i + 1}`; });
+  }
+  const total = groups.reduce((n, g) => n + g.voicings.length, 0);
+  return { ok: true, parsed: p, dictSuffix: _vcDictSuffix(dict, p.suffix, formula), groups, total };
+}
+function _vcPlayedFrets(x) {
+  if (!x) return null;
+  const f = [-1, -1, -1, -1, -1, -1];
+  if (Array.isArray(x)) { if (x.length !== 6) return null; x.forEach((v, i) => { f[i] = v >= 0 ? v : -1; }); }
+  else for (const [k, v] of Object.entries(x)) { const i = +k; if (i >= 0 && i < 6 && v >= 0) f[i] = v; }
+  return f.filter((v) => v >= 0).length >= 2 ? f : null;
+}
+/* rootless drop voicings: every pc a chord tone and the required tones bar the root */
+function _vcValidRootless(frets, rootPc, formula) {
+  const f2 = { ...formula, required: formula.required.filter((x) => x !== 0) };
+  return _vcValid(frets, rootPc, f2, null);
+}
+
+/* A voicing → the svguitar `chord()` payload. Strings are numbered 1 = high e; frets
+ * are RELATIVE to the diagram window when it starts above the nut. mode "fingers"
+ * labels each fretted dot with its finger, "intervals" with its chord degree. */
+function voicingToSVGuitar(v, mode = "fingers") {
+  const fingers = [];
+  for (let s = 0; s < 6; s++) {
+    const f = v.frets[s], str = 6 - s;
+    if (f < 0) { fingers.push([str, "x"]); continue; }
+    if (f === 0) { fingers.push([str, 0]); continue; }
+    const rel = v.baseFret > 1 ? f - v.baseFret + 1 : f;
+    const text = mode === "intervals" ? v.labels[s] : v.fingers[s] ? String(v.fingers[s]) : "";
+    fingers.push(text ? [str, rel, text] : [str, rel]);
+  }
+  return { fingers, barres: [], position: v.baseFret, frets: v.fretCount, title: "" };
+}
+
+/* Reharmonisation suggestions (ported from Parker-songbook-tool's chordSubstitutions,
+ * MIT) — classified from the TONE SET, not the spelling, so any alias works. */
+function chordSubstitutions(symbol, useSharp = true) {
+  const p = parseChordSymbolForVoicings(symbol);
+  if (!p.ok) return [];
+  const names = useSharp ? NOTE_SHARP : NOTE_FLAT;
+  const has = (x) => p.formula.tones.some((t) => t.semi === x);
+  const at = (n) => names[(p.rootPc + n) % 12];
+  const src = p.lookup;
+  const R = names[p.rootPc];
+  const sub = (n, q, category, reason) => ({ symbol: at(n) + q, root: at(n), quality: q, category, reason });
+  const alts = [1, 3, 6, 8].some((x) => has(x) && p.formula.tones.find((t) => t.semi === x).label !== "b5");
+  const fam = has(3) && has(6) && has(9) && !has(10) ? "dim7"
+    : has(3) && has(6) && has(10) ? "m7b5"
+    : has(3) && !has(4) && has(5) && has(10) ? "min11"
+    : has(3) && !has(4) ? "min"
+    : has(4) && has(10) ? (alts ? "domAlt" : "dom")
+    : !has(4) && !has(3) && has(5) && has(10) ? "domSus"
+    : has(4) && (has(11) || (has(9) && !has(10))) ? "maj7" : null;
+  switch (fam) {
+    case "dom": case "domAlt": {
+      const out = [
+        sub(6, "7", "Tritone", `${src} → ${at(6)}7: shares the 3rd & b7 (guide tones) — the classic bebop reharm.`),
+        sub(4, "dim7", "Diminished", `${at(4)}dim7 = rootless ${R}7b9 (the vii°7 on the 3rd) — implies this dominant.`),
+        sub(4, "m7b5", "Half-diminished", `${at(4)}m7b5 = rootless ${R}9 — voices this dominant without its root.`),
+        sub(7, "m7", "Make it a ii–V", `Precede ${src} with ${at(7)}m7 (a 5th above) for a full ii–V.`),
+      ];
+      if (fam === "dom") out.push(sub(0, "7b9", "Alteration", `${R}7b9 — add a b9 for tension pulling to a minor target.`),
+        sub(0, "7#11", "Alteration", `${R}7#11 — lydian-dominant colour, same function, brighter.`));
+      return out;
+    }
+    case "domSus": return [
+      sub(7, "m11", "Modal swap", `${src} = ${at(7)}m11 — the sus is the ii voiced over the V root.`),
+      sub(0, "7", "Resolve the sus", `Drop the 4th to the 3rd for the plain ${R}7.`),
+      sub(6, "7", "Tritone", `${at(6)}7 — tritone sub of the underlying dominant.`)];
+    case "min11": return [
+      sub(5, "7sus4", "Sus equivalent", `${src} = ${at(5)}7sus4 — identical pitch collection, a 4th above.`),
+      sub(5, "7", "Its ii–V", `As the ii of a ii–V, ${src} leads to ${at(5)}7.`),
+      sub(3, "6", "Relative major", `${at(3)}6 — the relative major a minor 3rd up shares its notes.`)];
+    case "min": return [
+      sub(3, "6", "Relative major", `${src} ≈ ${at(3)}6 — the relative major 6 a minor 3rd up (same notes as the m7).`),
+      sub(5, "7", "Its ii–V", `As the ii of a ii–V, ${src} leads to ${at(5)}7.`),
+      sub(0, "m11", "Extension", `${R}m11 — stack the 11th for a modern rootless colour.`),
+      sub(5, "7sus4", "Sus equivalent", `Voiced a 4th above, ${src} becomes ${at(5)}7sus4.`)];
+    case "m7b5": return [
+      sub(5, "7b9", "Minor ii–V", `${src} is the ii of a minor key — resolve it to ${at(5)}7b9.`),
+      sub(8, "9", "Upper structure", `${src} = rootless ${at(8)}9 — the dominant a major 3rd below.`),
+      sub(3, "m6", "Relative minor 6", `${at(3)}m6 a minor 3rd up has the same four notes.`)];
+    case "dim7": return [
+      sub(8, "7b9", "Dominant function", `${src} = rootless ${at(8)}7b9 — resolves like that dominant.`),
+      sub(11, "7b9", "Dominant function", `Also the vii°7 of ${at(11)}7b9 (a half-step above).`),
+      sub(1, "m7", "Chromatic target", `Common passing use: resolves up a half-step into ${at(1)}m7.`)];
+    case "maj7": {
+      const six = !has(11);                                 // a 6 chord IS its relative m7 inverted
+      return [
+        six ? sub(9, "m7", "Relative minor", `${src} = ${at(9)}m7 — the same four notes, the vi in the bass.`)
+          : sub(9, "m7", "Relative minor", `${src} ⇄ ${at(9)}m7 — the relative vi shares three of four notes.`),
+        sub(4, "m7", "iii for I", `${at(4)}m7 — the iii substitutes for a tonic major (rootless maj9).`),
+        six ? sub(0, "maj7", "Colour swap", `${R}maj7 — trade the 6 for the major 7th: a brighter, more modern tonic.`)
+          : sub(0, "6", "Colour swap", `${R}6 — trade the maj7 for a 6 to lose the b2-against-root rub.`),
+        sub(2, "7sus4", "Backdoor set-up", `${at(2)}7sus4 — a gospel/backdoor lead-in to ${src}.`)];
+    }
+    default: return [];
+  }
+}
+
 export {
   makeMask,
   popcount,
@@ -7267,4 +7916,22 @@ export {
   _isBareSectionLabel,
   parseLyrics,
   lyricsToText,
+  VOICING_DICT_KEYS,
+  CHORD_SUFFIX_ALIASES,
+  voicingFormula,
+  parseChordSymbolForVoicings,
+  _vcDictSuffix,
+  normalizeDictPosition,
+  assignChordFingers,
+  voicingSignature,
+  DROP_STRING_SETS,
+  dropVoicings,
+  triadVoicings,
+  shellVoicings,
+  enumerateChordGrips,
+  dictVoicings,
+  VOICING_GROUPS,
+  chordVoicings,
+  voicingToSVGuitar,
+  chordSubstitutions,
 };

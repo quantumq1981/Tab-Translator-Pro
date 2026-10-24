@@ -2737,6 +2737,58 @@ wrote a tab it could not show. Now it shows it: **notation + tablature, with pla
 - **Device check remaining:** first view + playback on a real iPad/iPhone (Safari audio unlock, memory on a
   long score). Not built: print/PDF of the tab (alphaTab's `print()` opens a popup — iOS-hostile).
 
+## Chord-voicing modal — guitar diagrams for lead-sheet chords (2026-10-24)
+
+**The ask:** the traditional chord-fingering diagram players expect when reviewing voicings,
+as a modal on the lead sheet (reference: the sibling **Parker-songbook-tool**, MIT, same owner),
+backed by a chord library big enough for "pretty much every voicing".
+
+- **Trigger:** tap a chord on the lead sheet (non-Edit mode) or a bar in the Grid → `ChordVoicingModal`
+  (`ChartPanel` state `voicingChoices`; a grid bar with several chords shows chips to switch).
+  The old readout still updates underneath. Escape / backdrop / × closes.
+- **Engine (pure, `engine.tsx`, headless-tested):** `parseChordSymbolForVoicings` (aliases
+  `CHORD_SUFFIX_ALIASES` — `min7/m7/-7→m7`, `maj7/Δ7/Δ/^7/^→maj7`, `m/min/-→m`, `dim/°`, `dim7/°7`,
+  `aug/+`, `m7b5/ø/ø7`, plus the engine's own `m7♭5`/`m(maj7)`/`6/9`/`7♭9`; the **slash bass is kept for
+  display** (`C7/E`) and the lookup runs on the main chord (`C7`); `6/9` is a suffix, not a slash) →
+  `voicingFormula` (an **interval grammar**: any suffix it can read gets a tone list, `required` tones
+  and a drop core, so a chord the dictionary lacks still gets voicings) → `chordVoicings(dict, symbol,
+  {played})` → groups **In this chart** (the file's own frets, as written) · **Slash bass** · **Library**
+  (chords.json) · **Drop 2** · **Drop 3** · **Triads** · **Shells** · **More shapes**, every voicing
+  pitch-validated, finger-assigned (`assignChordFingers`: index barre, ≤ 4 fingers or rejected),
+  labelled with intervals, deduped across groups. `voicingToSVGuitar` maps a voicing to svguitar's
+  payload (string 1 = high e, frets relative to the window). `chordSubstitutions` (ported from
+  Parker-songbook-tool) is classified from the TONE SET, so every alias works; tap one → its voicings.
+- **Dictionary lookup is by root PITCH CLASS** (`VOICING_DICT_KEYS`), so `Db7`/`C#7`, `Gb`/`F#` reach the
+  same entry — the enharmonic-spelling limitation of a name lookup does not apply here. Suffix: exact
+  name → rename table → the dictionary suffix with the SAME tone set. chords.json's `alt` is a ♭5 triad,
+  NOT a 7alt, so a lead-sheet `alt` never routes there (`_VC_DICT_NAME.alt = null`).
+- **`data/chords.json`** (1.2 MB, ~120 KB gzipped) = tombatossals/chords-db (MIT) via
+  Parker-songbook-tool, **validated + extended** by `scripts/build_chords_json.mjs` (deterministic,
+  imports the engine): every base shape is checked against its chord's formula — **162 of 3,283 were
+  dropped** (wrong key, add9 filed as 9, 7♯11 filed as 9♯11, the ♭5 "alt"…); 20 qualities added (7♯11,
+  13♭9, maj7♯11, m13, 9sus4, 7♭9♭13 …); every key × quality topped up to **12** shapes from
+  `enumerateChordGrips` (`"generated": true`) → **10,447 shapes, 106 suffixes × 12 keys**. Slash entries
+  are kept validated but not topped up (the modal generates slash grips live). Regenerate after changing
+  the grammar/generator: `node scripts/build_chords_json.mjs`. `npm test` asserts every key × every
+  `QUALITIES` suffix has ≥ 12 valid library shapes.
+- **Glue (browser-only, `TabDecoderPro.tsx`):** `loadChordDictionary` fetches `data/chords.json` once and
+  caches the promise in memory (a failed fetch clears it so the next open retries; the generated groups
+  still render with a notice). `loadSVGuitar` injects the **bundled local `./js/svguitar.umd.js`**
+  (svguitar 2.5.1, MIT, unmodified, SHA-256 pinned in `js/NOTICE-svguitar.txt` — no CDN at runtime) on
+  first open. Fingers / Intervals is remembered per device (`ttp:voicingMode`). Tap a diagram to hear it
+  (`playScore`). `pages.yml` ships `js/` and `data/chords.json` + `data/NOTICE`.
+- **Gotcha fixed on the way:** `.panel-rise` used `animation-fill-mode: both`, which leaves a
+  `transform` on every panel — and a transformed ancestor re-roots `position: fixed`, so the modal drew
+  inline inside the panel. It is now `backwards` (same look; no kept transform). Don't put it back.
+- **Measured** (`tests/bench/voicings-e2e.mjs`, the real app in headless Chromium at 390×844): Peg →
+  `Em7/D` opens with **58 diagrams in ~0.9 s**, Intervals relabel, a substitution opens its own voicings,
+  a second chord re-uses the cached dictionary (`/data/chords.json` and `/js/svguitar.umd.js` each fetched
+  **once**, no other origin); Blue Sky rhythm part shows the file's `0 2 2 1 0 0` first. Engine: ~20 ms per
+  chord. **Device check remaining:** a real iPhone/iPad (tap targets, scroll inside the modal, audio).
+- **Honest limits:** standard tuning only; generated grips are playable by a 4-finger/4-fret model, not
+  ranked by a guitarist's taste (the dictionary shapes come first for that reason); fingers on generated
+  shapes are a heuristic; interval labels on open strings aren't drawn (svguitar has no text for them).
+
 ## Path B (scans / photos) — OUT OF SCOPE
 
 Raster tab (a photo or scanned page) has no text layer and needs an OMR/Vision
@@ -2903,6 +2955,14 @@ accordingly.
   the names it ships under; tab-view.js contracts (same-origin path, lazy import, retry, synth player,
   destroy); index.html + pages.yml wiring; the Tab view and the export share one AlphaTex; the tab skips
   Simplify; the guitar chart opens on it; `.alphatex` upload + restore. Rendering itself: `tab-view-e2e.mjs`.
+- **Chord-voicing modal**: `npm test` pins the parser aliases (the specified list + engine spellings),
+  slash handling (`C7/E` display vs `C7` lookup; `6/9` not a slash), interval sets + required tones, lookup
+  by pitch class (Db = C#), relative→absolute frets, that EVERY voicing in every group of 26 qualities
+  sounds only chord tones, has its root (or is flagged rootless), is fingered, labelled, unique and within
+  5 frets; drop-2/drop-3 string geometry (Cmaj7: 12 drop-2 shapes incl. x-x-10-12-12-12), the slash-bass,
+  triad, shell and as-written groups, finger assignment (F barre, open C, 5-finger rejection), the svguitar
+  payload, substitutions (incl. the 6-chord case), the ≥ 12-shapes coverage of chords.json, the pinned
+  svguitar file + licences, and the UI/pages wiring. Rendering: `tests/bench/voicings-e2e.mjs`.
 - **Lyrics import (`parseLyrics`)**: `npm test` asserts the strict chord matcher accepts
   real chords and rejects note-letter lyric words (Add/Cab/Bad/Fed/Gem/Bee/Ace), the
   line-level `isChordLine` catches chord lines but spares lyric/blank lines, a full

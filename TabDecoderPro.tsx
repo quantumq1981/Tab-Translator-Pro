@@ -244,6 +244,9 @@ import {
   scoreChromaSequence,
   pcmChromaSequence,
   alignPcmToScore,
+  chordVoicings,
+  voicingToSVGuitar,
+  chordSubstitutions,
 } from "./engine.tsx";
 
 async function extractTokens(buf) {
@@ -776,7 +779,7 @@ export default function TabDecoderPro() {
         @keyframes glowpulse {0%{transform:scale(.97);opacity:0;}100%{transform:scale(1);opacity:1;}}
         @keyframes rise {from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
         @keyframes pulse {0%,100%{opacity:1;}50%{opacity:.25;}}
-        .panel-rise{animation:rise .5s cubic-bezier(.2,.7,.2,1) both;}
+        .panel-rise{animation:rise .5s cubic-bezier(.2,.7,.2,1) backwards;}  /* not "both": a kept transform would re-root position:fixed (the voicing modal) */
         .chord-pop{animation:glowpulse .35s ease-out;}
         .led{transition:background .18s ease,box-shadow .18s ease,color .18s ease;}
         .tdp-scroll::-webkit-scrollbar{width:8px;height:8px;}
@@ -1017,6 +1020,7 @@ export default function TabDecoderPro() {
  * survive view/transpose changes and feed straight into export. */
 function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, selKey, onPick, keyOverride, setKeyOverride, autoSimplify = true, defaultView = "chart" }) {
   const [view, setView] = useState(defaultView);
+  const [voicingChoices, setVoicingChoices] = useState(null);   // chord(s) whose voicing modal is open
   const [editMode, setEditMode] = useState(false);
   const [editKey, setEditKey] = useState("");
   const [draft, setDraft] = useState("");
@@ -1322,8 +1326,9 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
         : view === "chart"
         ? <LeadSheetView score={tscore} C={C} overrides={overrides} setOverrides={setOverrides} editMode={editMode}
             editKey={editKey} setEditKey={setEditKey} draft={draft} setDraft={setDraft} selKey={selKey}
-            playKey={playKey} showRoman={showRoman} musicKey={key} onPick={onPick} symOf={symOf} />
-        : <GridView score={tscore} C={C} symOf={symOf} selKey={selKey} onPick={onPick} />}
+            playKey={playKey} showRoman={showRoman} musicKey={key} onPick={onPick} symOf={symOf} onVoicings={setVoicingChoices} />
+        : <GridView score={tscore} C={C} symOf={symOf} selKey={selKey} onPick={onPick} onVoicings={setVoicingChoices} />}
+      {voicingChoices && <ChordVoicingModal key={voicingChoices.map((c) => c.symbol).join("|")} choices={voicingChoices} onClose={() => setVoicingChoices(null)} C={C} useSharp={useSharp} />}
 
       <ExportPanel exp={exp} setExp={setExp} C={C} bpm={bpm} semis={semis}
         copy={copy} download={download} copied={copied} downloaded={downloaded} extOf={(f) => (f === "abc" ? abcExt : _EXPORT_EXT[f] || "txt")}
@@ -1374,7 +1379,7 @@ function MelodicNudge({ C, onSimplify }) {
 }
 /* Lead-sheet view: chords on their beat, barlines, inline relabel in Edit mode.
  * `musicKey` is the detected key (named to avoid clashing with React list keys). */
-function LeadSheetView({ score, C, overrides, setOverrides, editMode, editKey, setEditKey, draft, setDraft, selKey, playKey, showRoman, musicKey, onPick, symOf }) {
+function LeadSheetView({ score, C, overrides, setOverrides, editMode, editKey, setEditKey, draft, setDraft, selKey, playKey, showRoman, musicKey, onPick, symOf, onVoicings }) {
   let prevSig = null;
   return (
     <>
@@ -1404,7 +1409,7 @@ function LeadSheetView({ score, C, overrides, setOverrides, editMode, editKey, s
                   const isSel = selKey === k;
                   const isPlaying = playKey === k;
                   return (
-                    <button key={i} onClick={() => (editMode ? (setEditKey(k), setDraft(cur)) : onPick(k, e))} title={editMode ? "click to re-label" : `beat ${e.beat + 1}`}
+                    <button key={i} onClick={() => (editMode ? (setEditKey(k), setDraft(cur)) : (onPick(k, e), onVoicings && onVoicings([{ symbol: cur, frets: e.frets }])))} title={editMode ? "click to re-label" : `beat ${e.beat + 1} · tap for guitar voicings`}
                       style={{ gridColumn: gridCol, justifySelf: "start", textAlign: "left", background: isPlaying ? `${C.green}22` : "transparent", borderRadius: 4, border: "none", borderBottom: isSel ? `2px solid ${C.amber}` : "2px solid transparent", padding: "0 2px", cursor: "pointer", color: isPlaying ? C.green : edited ? C.green : isSel ? C.amber : C.cyan, fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: cur.length > 4 ? 13 : 16, lineHeight: 1.2, transition: "background .1s, color .1s" }}>
                       <span style={{ display: "block", opacity: e.uncertain && !edited ? 0.55 : 1, borderBottom: e.uncertain && !edited ? `1px dashed ${C.amber}` : "none" }} title={e.uncertain && !edited ? "uncertain — see the review list" : undefined}>{cur}{edited ? "*" : ""}{e.uncertain && !edited ? <sup style={{ color: C.amber, fontSize: 9 }}>?</sup> : null}</span>
                       {showRoman && musicKey && <span style={{ display: "block", fontSize: 9, fontWeight: 400, color: C.dim, marginTop: 1 }}>{romanFor(cur, musicKey)}</span>}
@@ -1417,7 +1422,7 @@ function LeadSheetView({ score, C, overrides, setOverrides, editMode, editKey, s
         })}
       </div>
       <div style={{ fontSize: 11, color: C.dim, marginTop: 8 }}>
-        {editMode ? "Edit mode · click a chord to re-label it (blank = revert to detected). * marks edits." : "Lead sheet · chords sit on the beat they change. Tap a chord to inspect its voicing →"}
+        {editMode ? "Edit mode · click a chord to re-label it (blank = revert to detected). * marks edits." : "Lead sheet · chords sit on the beat they change. Tap a chord for its guitar voicings."}
       </div>
     </>
   );
@@ -1535,7 +1540,7 @@ function TabView({ tex, title, C }) {
   );
 }
 
-function GridView({ score, C, symOf, selKey, onPick }) {
+function GridView({ score, C, symOf, selKey, onPick, onVoicings }) {
   return (
     <>
       <div className="tdp-scroll" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(74px, 1fr))", gap: 6, maxHeight: 420, overflow: "auto", paddingRight: 4 }}>
@@ -1544,7 +1549,7 @@ function GridView({ score, C, symOf, selKey, onPick }) {
           const k = `${bar.number}`;
           const isSel = selKey === k;
           return (
-            <button key={k} className="meas" onClick={() => onPick(k, bar.events[0] || {})}
+            <button key={k} className="meas" onClick={() => { onPick(k, bar.events[0] || {}); if (onVoicings && bar.events.length) onVoicings(bar.events.map((e) => ({ symbol: symOf(bar, e), frets: e.frets })).filter((c, i, a) => i === 0 || c.symbol !== a[i - 1].symbol)); }}
               style={{ position: "relative", background: C.bg, border: `1px solid ${isSel ? C.amber : C.border}`, borderRadius: 8, padding: "10px 4px 8px", cursor: "pointer", minHeight: 56, textAlign: "center" }}>
               <span style={{ position: "absolute", top: 3, left: 6, fontSize: 9, color: C.dim }}>{bar.number}</span>
               <div style={{ marginTop: 6, fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: collapsed.join(" ").length > 6 ? 13 : 17, color: C.cyan, lineHeight: 1.15 }}>{collapsed.join(" ")}</div>
@@ -1552,10 +1557,205 @@ function GridView({ score, C, symOf, selKey, onPick }) {
           );
         })}
       </div>
-      <div style={{ fontSize: 11, color: C.dim, marginTop: 8 }}>Tap any bar to inspect its voicing in the readout →</div>
+      <div style={{ fontSize: 11, color: C.dim, marginTop: 8 }}>Tap any bar for its guitar voicings.</div>
     </>
   );
 }
+/* ---- Chord-voicing modal (2026-10-24) ---------------------------------------
+ * Tap a chord on the lead sheet (or a bar in the grid) → its guitar chord diagrams:
+ * the chart's own fingering, the dictionary shapes, drop 2 / drop 3, triads, shells,
+ * slash-bass grips and more, in Fingers or Intervals mode, plus reharmonisation
+ * suggestions (tap one to open ITS voicings). Browser-only glue — every voicing decision
+ * is the pure engine (chordVoicings / voicingToSVGuitar / chordSubstitutions):
+ *   · data/chords.json is fetched ONCE and cached in memory for the session (a failed
+ *     fetch clears the cache so the next open retries; the generated groups render
+ *     without it, so the modal never comes up empty for a chord the parser can read);
+ *   · diagrams are drawn by SVGuitar from the bundled UMD at ./js/svguitar.umd.js —
+ *     same-origin, no CDN at runtime — loaded on the first open. */
+let _chordDictPromise = null;
+function loadChordDictionary() {
+  if (!_chordDictPromise) {
+    _chordDictPromise = fetch("data/chords.json")
+      .then((r) => { if (!r.ok) throw new Error(`data/chords.json: HTTP ${r.status}`); return r.json(); })
+      .catch((err) => { _chordDictPromise = null; throw err; });
+  }
+  return _chordDictPromise;
+}
+let _svguitarPromise = null;
+function loadSVGuitar() {
+  if (typeof window === "undefined") return Promise.reject(new Error("no window"));
+  if (window.svguitar && window.svguitar.SVGuitarChord) return Promise.resolve(window.svguitar);
+  if (!_svguitarPromise) {
+    _svguitarPromise = new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = "./js/svguitar.umd.js";
+      s.async = true;
+      s.onload = () => (window.svguitar && window.svguitar.SVGuitarChord ? resolve(window.svguitar) : reject(new Error("svguitar.umd.js loaded but exposed no SVGuitarChord")));
+      s.onerror = () => { s.remove(); reject(new Error("could not load ./js/svguitar.umd.js")); };
+      document.head.appendChild(s);
+    }).catch((err) => { _svguitarPromise = null; throw err; });
+  }
+  return _svguitarPromise;
+}
+const _VOICING_MODE_KEY = "ttp:voicingMode";
+const _VC_DOT = "#f1c40f", _VC_DOT_TEXT = "#0b1220";
+
+/* One diagram. SVGuitar renders into the div; re-drawn when the voicing or mode changes. */
+function VoicingDiagram({ v, mode, lib, C }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || !lib) return;
+    el.innerHTML = "";
+    try {
+      const p = voicingToSVGuitar(v, mode);
+      new lib.SVGuitarChord(el).configure({
+        strings: 6, frets: p.frets, position: p.position, noPosition: true,   // the tile's badge names the fret
+        color: C.text, fingerColor: _VC_DOT, fingerTextColor: _VC_DOT_TEXT, fingerSize: 0.72, fingerTextSize: 24,
+        emptyStringIndicatorSize: 0.55, strokeWidth: 2, nutWidth: 9, sidePadding: 0.18, showFretMarkers: false,
+        fontFamily: "'IBM Plex Mono', ui-monospace, monospace",
+      }).chord({ fingers: p.fingers, barres: p.barres }).draw();
+      const svg = el.querySelector("svg");
+      if (svg) { svg.style.width = "100%"; svg.style.height = "auto"; svg.setAttribute("role", "img"); svg.setAttribute("aria-label", `frets ${v.frets.map((f) => (f < 0 ? "x" : f)).join(" ")}`); }
+    } catch (err) {
+      el.textContent = "diagram unavailable";
+    }
+  }, [v, mode, lib, C.text]);
+  return <div ref={ref} style={{ minHeight: 120 }} />;
+}
+
+function ChordVoicingModal({ choices, start = 0, onClose, C, useSharp }) {
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  // choices: [{ symbol, frets? }] — the chord(s) tapped (a grid bar can hold several)
+  const [idx, setIdx] = useState(start);
+  const [stack, setStack] = useState([]);              // substitution taps: symbols opened from this chord
+  const base = choices[Math.min(idx, choices.length - 1)] || { symbol: "" };
+  const cur = stack.length ? { symbol: stack[stack.length - 1] } : base;
+  const [mode, setModeState] = useState(() => { try { return localStorage.getItem(_VOICING_MODE_KEY) === "intervals" ? "intervals" : "fingers"; } catch (_) { return "fingers"; } });
+  const setMode = (m) => { setModeState(m); try { localStorage.setItem(_VOICING_MODE_KEY, m); } catch (_) {} };
+  const [dict, setDict] = useState(undefined);         // undefined = loading · null = failed
+  const [dictErr, setDictErr] = useState("");
+  const [lib, setLib] = useState(null);
+  const [libErr, setLibErr] = useState("");
+  const [heard, setHeard] = useState("");
+  const body = useRef(null);
+  const player = useRef(null);
+
+  useEffect(() => {
+    let live = true;
+    loadChordDictionary().then((d) => { if (live) setDict(d); }).catch((err) => { if (live) { setDict(null); setDictErr(err.message || String(err)); } });
+    loadSVGuitar().then((l) => { if (live) setLib(l); }).catch((err) => { if (live) setLibErr(err.message || String(err)); });
+    const onKey = (e) => { if (e.key === "Escape") closeRef.current(); };
+    window.addEventListener("keydown", onKey);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { live = false; window.removeEventListener("keydown", onKey); document.body.style.overflow = prevOverflow; if (player.current) player.current.stop(); };
+  }, []);
+  useEffect(() => { if (body.current) body.current.scrollTop = 0; }, [cur.symbol]);
+
+  const data = useMemo(() => (dict === undefined ? null : chordVoicings(dict, cur.symbol, { played: cur.frets })), [dict, cur.symbol, cur.frets]);
+  const subs = useMemo(() => chordSubstitutions(cur.symbol, useSharp), [cur.symbol, useSharp]);
+  const title = data && data.ok ? data.parsed.display : cur.symbol;
+
+  const audition = (v) => {
+    if (player.current) player.current.stop();
+    const midis = v.midi.slice().sort((a, b) => a - b);
+    const score = { timeSig: [4, 4], bars: [{ number: 1, events: [{ symbol: title, beat: 0, durBeats: 3, qbeat: 0, qdur: 3, midis }] }] };
+    player.current = playScore(score, 100, { onEnd: () => setHeard("") });
+    setHeard(v.frets.join(","));
+  };
+  const badge = (v) => (v.baseFret <= 1 ? "open" : `${v.baseFret}fr`);
+
+  return (
+    <div role="dialog" aria-modal="true" aria-label={`${title} voicings`} onClick={onClose}
+      style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(4,6,12,0.72)", display: "flex", alignItems: "center", justifyContent: "center", padding: "max(12px, env(safe-area-inset-top)) 10px max(12px, env(safe-area-inset-bottom))" }}>
+      <div onClick={(e) => e.stopPropagation()}
+        style={{ width: "100%", maxWidth: 560, maxHeight: "100%", display: "flex", flexDirection: "column", background: C.panel, border: `1.5px solid ${C.cyan}`, borderRadius: 16, overflow: "hidden", boxShadow: "0 12px 40px rgba(0,0,0,0.5)" }}>
+        <div style={{ padding: "14px 16px 12px", borderBottom: `1px solid ${C.border}` }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+            <span style={{ font: "700 26px 'Space Mono', monospace", color: C.amber }}>{title}</span>
+            {stack.length > 0 && (
+              <button onClick={() => setStack((s) => s.slice(0, -1))} style={{ ...chip(C), padding: "2px 9px" }}>← {stack.length > 1 ? stack[stack.length - 2] : base.symbol}</button>
+            )}
+          </div>
+          {choices.length > 1 && !stack.length && (
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+              {choices.map((c, i) => (
+                <button key={i} onClick={() => setIdx(i)} style={{ ...chip(C), padding: "2px 10px", borderColor: i === idx ? C.amber : C.border, color: i === idx ? C.amber : C.dim, fontWeight: 700 }}>{c.symbol}</button>
+              ))}
+            </div>
+          )}
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
+            <div style={{ display: "inline-flex", border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden" }}>
+              {[["fingers", "Fingers"], ["intervals", "Intervals"]].map(([m, label]) => (
+                <button key={m} onClick={() => setMode(m)}
+                  style={{ border: "none", padding: "7px 14px", cursor: "pointer", font: "600 13px 'IBM Plex Mono', monospace", background: mode === m ? C.cyan : C.bg, color: mode === m ? C.bg : C.dim }}>{label}</button>
+              ))}
+            </div>
+            <span style={{ fontSize: 12, color: C.cyan }}>{data ? `${data.total} voicing${data.total === 1 ? "" : "s"}` : "loading…"}</span>
+            <button onClick={onClose} aria-label="close" style={{ marginLeft: "auto", background: C.bg, border: `1px solid ${C.amber}`, color: C.amber, borderRadius: 10, padding: "6px 14px", fontSize: 15, cursor: "pointer" }}>×</button>
+          </div>
+        </div>
+
+        <div ref={body} className="tdp-scroll" style={{ overflowY: "auto", padding: "4px 16px 18px", WebkitOverflowScrolling: "touch" }}>
+          {libErr && <div style={{ fontSize: 11, color: C.red, margin: "10px 0" }}>Chord diagrams couldn't load ({libErr}). Reload to retry.</div>}
+          {dict === null && <div style={{ fontSize: 11, color: C.amber, margin: "10px 0" }}>The chord dictionary couldn't load ({dictErr}) — showing generated voicings only. Close and reopen to retry.</div>}
+          {data && !data.ok && (
+            <div style={{ fontSize: 13, color: C.dim, margin: "16px 0", lineHeight: 1.6 }}>
+              {data.parsed.error === "NO_CHORD" ? "No chord here (N.C. / rest)." : data.parsed.error === "UNKNOWN_QUALITY" ? `"${cur.symbol}" — the quality "${data.parsed.suffix}" isn't one the voicing parser knows.` : `"${cur.symbol}" isn't a chord symbol.`}
+            </div>
+          )}
+          {data && data.ok && data.parsed.bass && (
+            <div style={{ fontSize: 11, color: C.dim, margin: "10px 0 0", lineHeight: 1.5 }}>
+              Voicings for <b style={{ color: C.text }}>{data.parsed.lookup}</b>; grips with <b style={{ color: C.text }}>{data.parsed.bass}</b> in the bass are listed first.
+            </div>
+          )}
+          {data && data.ok && data.groups.map((g) => (
+            <section key={g.id} style={{ marginTop: 18 }}>
+              <div style={{ font: "700 14px 'Space Mono', monospace", color: C.amber, letterSpacing: 1, textTransform: "uppercase" }}>{g.title}</div>
+              <div style={{ fontSize: 11, color: C.dim, margin: "2px 0 10px", lineHeight: 1.5 }}>{g.blurb}</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 10 }}>
+                {g.voicings.map((v, i) => {
+                  const on = heard === v.frets.join(",");
+                  return (
+                    <button key={g.id + i} onClick={() => audition(v)} title="tap to hear it"
+                      style={{ position: "relative", background: C.bg, border: `1.5px solid ${on ? C.green : C.border}`, borderRadius: 12, padding: "10px 8px 6px", cursor: "pointer", textAlign: "center", color: C.text }}>
+                      <span style={{ position: "absolute", top: 7, right: 7, background: C.chord, color: C.bg, borderRadius: 8, padding: "1px 7px", font: "700 11px 'Space Mono', monospace" }}>{badge(v)}</span>
+                      <div style={{ fontSize: 11, color: C.cyan, minHeight: 28, padding: "0 40px 0 4px", textAlign: "left", lineHeight: 1.3 }}>{v.title}{v.rootless ? " · rootless" : ""}</div>
+                      <VoicingDiagram v={v} mode={mode} lib={lib} C={C} />
+                      <div style={{ fontSize: 10, color: C.dim, letterSpacing: 1 }}>{v.frets.map((f) => (f < 0 ? "x" : f)).join(" ")}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+          ))}
+          {subs.length > 0 && (
+            <section style={{ marginTop: 22, border: `1px solid ${C.border}`, borderRadius: 14, padding: "14px 14px 6px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" }}>
+                <span style={{ font: "700 13px 'Space Mono', monospace", color: C.cyan, letterSpacing: 1 }}>SUBSTITUTIONS &amp; REHARMONIZATION</span>
+                <span style={{ fontSize: 11, color: C.dim }}>tap to explore</span>
+              </div>
+              {subs.map((s, i) => (
+                <button key={i} onClick={() => setStack((st) => [...st, s.symbol])}
+                  style={{ display: "block", width: "100%", textAlign: "left", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 12px", margin: "10px 0", cursor: "pointer", color: C.text }}>
+                  <span style={{ font: "700 18px 'Space Mono', monospace", color: C.amber, marginRight: 8 }}>{s.symbol}</span>
+                  <span style={{ fontSize: 10, color: C.bg, background: C.cyan, borderRadius: 999, padding: "2px 8px", textTransform: "uppercase", letterSpacing: 1, verticalAlign: "middle" }}>{s.category}</span>
+                  <div style={{ fontSize: 12, color: C.dim, marginTop: 6, lineHeight: 1.5 }}>{s.reason}</div>
+                </button>
+              ))}
+            </section>
+          )}
+          <div style={{ fontSize: 10, color: C.dim, marginTop: 14, lineHeight: 1.5 }}>
+            Standard tuning. Tap a diagram to hear it. Library shapes: tombatossals/chords-db (MIT), checked against each chord's notes; the rest are derived from the chord's intervals.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ---- ABC file naming (Alembic collision) ------------------------------------
  * iOS / iPadOS / macOS resolve a file's TYPE from its extension, and Apple's Model
  * I/O framework system-declares `.abc` as ALEMBIC — the unrelated 3D-graphics

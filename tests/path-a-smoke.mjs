@@ -3145,6 +3145,112 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   expect(/defaultView="tab"/.test(ui) && /const tex = alphaTexFromBytes\(bytes\);\s*if \(tex != null\)/.test(ui) && /meta\.kind === "alphatex"/.test(ui) && /<TabView tex=\{texDoc\.text\}/.test(ui), "the guitar tab opens on the Tab view; a saved .alphatex upload (and its session restore) opens in the viewer");
 }
 
+/* ---- Chord-voicing modal (2026-10-24): parser · formulas · dictionary · generators ---- */
+{
+  const dict = JSON.parse(fs.readFileSync(path.join(repo, "data", "chords.json"), "utf8"));
+  const OPEN = [40, 45, 50, 55, 59, 64];
+  const pcsOf = (v) => v.frets.map((f, s) => (f >= 0 ? (OPEN[s] + f) % 12 : null)).filter((x) => x != null);
+  const P = (s) => eng.parseChordSymbolForVoicings(s);
+  // parser aliases (the specified list) → canonical suffix
+  const alias = { "Cmin7": "m7", "Cm7": "m7", "C-7": "m7", "Cmaj7": "maj7", "CΔ7": "maj7", "CΔ": "maj7", "C^7": "maj7", "C^": "maj7",
+    "Cm": "m", "Cmin": "m", "C-": "m", "Cdim": "dim", "C°": "dim", "Cdim7": "dim7", "C°7": "dim7", "Caug": "aug", "C+": "aug",
+    "Cm7b5": "m7b5", "Cø": "m7b5", "Cø7": "m7b5" };
+  const bad = Object.entries(alias).filter(([sym, want]) => P(sym).suffix !== want).map(([s]) => `${s}→${P(s).suffix}`);
+  expect(bad.length === 0, `voicing parser aliases map to the canonical suffix (wrong: ${bad.join(", ")})`);
+  // the engine's own spellings parse too
+  expect(P("Cm7♭5").suffix === "m7b5" && P("Cm(maj7)").suffix === "mmaj7" && P("C6/9").suffix === "69" && P("Bb7♭9").formula.tones.some((t) => t.label === "b9"), "engine spellings (m7♭5, m(maj7), 6/9, 7♭9) parse");
+  // slash chords: bass kept for display, lookup on the main chord; 6/9 is not a slash
+  const sl = P("C7/E");
+  expect(sl.ok && sl.display === "C7/E" && sl.lookup === "C7" && sl.bass === "E" && sl.bassPc === 4 && sl.suffix === "7", "C7/E: display keeps the bass, lookup is C7");
+  expect(P("C6/9").bass === null && P("C6/9/E").bass === "E" && P("C6/9/E").suffix === "69", "6/9 is a suffix; only a trailing note name is a slash bass");
+  expect(!P("N.C.").ok && !P("—").ok && P("X7").error === "INVALID_ROOT" && P("Cfoo").error === "UNKNOWN_QUALITY", "N.C. / rest / bad root / unknown quality fail cleanly");
+  // interval grammar
+  const T = (s) => eng.voicingFormula(s).tones.map((t) => t.semi).sort((a, b) => a - b).join(",");
+  expect(T("maj7") === "0,4,7,11" && T("m7b5") === "0,3,6,10" && T("dim7") === "0,3,6,9" && T("7#9") === "0,3,4,7,10" && T("13") === "0,2,4,5,7,9,10"
+    && T("7sus4") === "0,5,7,10" && T("m(maj7)") === "0,3,7,11" && T("69") === "0,2,4,7,9" && T("7b9b13") === "0,1,4,7,8,10" && T("madd9") === "0,2,3,7", "voicingFormula builds the right interval sets");
+  const req = (s) => eng.voicingFormula(s).required.slice().sort((a, b) => a - b).join(",");
+  expect(req("maj7") === "0,4,11" && req("") === "0,4,7" && req("13") === "0,4,9,10" && req("7#5") === "0,4,8,10", "required tones: unaltered 5th + lower extensions optional, altered 5th required");
+  // dictionary lookup by root PITCH CLASS (enharmonic spellings reach the same entry)
+  const lib = (s) => (eng.chordVoicings(dict, s).groups.find((g) => g.id === "library") || { voicings: [] }).voicings.map((v) => v.frets.join(","));
+  expect(lib("Db7").length > 0 && lib("Db7").join("|") === lib("C#7").join("|") && lib("Gbmaj7").join("|") === lib("F#maj7").join("|"), "Db/C#, Gb/F# reach the same dictionary entry");
+  expect(eng._vcDictSuffix(dict, "m7", eng.voicingFormula("m7")) === "m7" && eng._vcDictSuffix(dict, "", eng.voicingFormula("")) === "major" && eng._vcDictSuffix(dict, "alt", eng.voicingFormula("alt")) === null, "canonical suffix → chords.json suffix (and 7alt never routes to the file's ♭5 'alt')");
+  // relative → absolute frets
+  const n = eng.normalizeDictPosition({ frets: [-1, 1, 3, 3, 3, 1], baseFret: 3, fingers: [0, 1, 2, 3, 4, 1] });
+  expect(n.frets.join(",") === "-1,3,5,5,5,3" && eng.normalizeDictPosition({ frets: [3, 2, 0, 0, 1, 1], baseFret: 6 }).frets.join(",") === "8,7,0,0,6,6", "chords.json relative frets → absolute (0 stays open at any baseFret)");
+  // every voicing of every group sounds the chord (pitch-valid), is fingerable and labelled
+  const symbols = ["C", "Am", "Bdim", "Eaug", "Dsus4", "BbΔ7", "C7", "F#m7", "Ebm7b5", "Gdim7", "A6", "Dm6", "C6/9", "G9", "Fmaj9", "Em9", "D13", "Bb7b9", "E7#9", "Galt", "Cmaj7#11", "F7#11", "Am(maj7)", "E5", "Gadd9", "C7sus4"];
+  const errs = [];
+  for (const sym of symbols) {
+    const r = eng.chordVoicings(dict, sym);
+    if (!r.ok || r.total < 12) { errs.push(`${sym}: ${r.total} voicings`); continue; }
+    const p = r.parsed, chordPcs = new Set(p.formula.tones.map((t) => (p.rootPc + t.semi) % 12));
+    const seen = new Set();
+    for (const g of r.groups) for (const v of g.voicings) {
+      const pcs = pcsOf(v);
+      if (pcs.some((x) => !chordPcs.has(x))) errs.push(`${sym} ${g.id} ${v.frets} has a foreign note`);
+      if (!v.rootless && !pcs.includes(p.rootPc)) errs.push(`${sym} ${g.id} ${v.frets} has no root`);
+      if (seen.has(v.frets.join(","))) errs.push(`${sym} ${g.id} ${v.frets} duplicated`);
+      seen.add(v.frets.join(","));
+      if (v.frets.some((f, s) => f > 0 && !(v.fingers[s] >= 1 && v.fingers[s] <= 4))) errs.push(`${sym} ${g.id} ${v.frets} unfingered note`);
+      if (v.frets.some((f, s) => f >= 0 && !v.labels[s])) errs.push(`${sym} ${g.id} ${v.frets} unlabelled note`);
+      const fr = v.frets.filter((f) => f > 0);
+      if (fr.length && Math.max(...fr) - Math.min(...fr) > 4) errs.push(`${sym} ${g.id} ${v.frets} spans > 5 frets`);
+    }
+  }
+  expect(errs.length === 0, `every modal voicing sounds its chord, is fingered, labelled, unique (${errs.slice(0, 6).join(" | ")})`);
+  // drop 2 / drop 3 geometry: adjacent strings for drop 2, one skipped string for drop 3, four notes rising
+  const r7 = eng.chordVoicings(dict, "Cmaj7");
+  const d2 = r7.groups.find((g) => g.id === "drop2"), d3 = r7.groups.find((g) => g.id === "drop3");
+  const strs = (v) => v.frets.map((f, s) => (f >= 0 ? s : -1)).filter((s) => s >= 0);
+  const rising = (v) => { const m = strs(v).map((s) => OPEN[s] + v.frets[s]); return m.every((x, i) => !i || x > m[i - 1]); };
+  expect(d2 && d2.voicings.length >= 10 && d2.voicings.every((v) => { const s = strs(v); return s.length === 4 && s[3] - s[0] === 3 && rising(v); }), "drop 2: four rising notes on four adjacent strings, all inversions × string sets");
+  expect(d3 && d3.voicings.length >= 6 && d3.voicings.every((v) => { const s = strs(v); return s.length === 4 && s[1] - s[0] === 2 && s[3] - s[1] === 2 && rising(v); }), "drop 3: bass, one string skipped, then three adjacent");
+  // the four-note drop-2 inversions of Cmaj7 on strings 4-3-2-1 really are drop 2 (2nd voice from the top an octave down)
+  const raw2 = eng.dropVoicings(0, eng.voicingFormula("maj7"), "drop2").map((v) => v.frets.join(","));
+  expect(raw2.includes("-1,-1,10,12,12,12") && raw2.includes("-1,-1,5,5,5,7") && raw2.length === 12, `Cmaj7 drop 2: 4 inversions × 3 string sets, e.g. x-x-10-12-12-12 (R) and x-x-5-5-5-7 (5 in bass) (${raw2.length})`);
+  // slash bass group, triads, shells, played group
+  const sb = eng.chordVoicings(dict, "C7/E").groups[0];
+  expect(sb.id === "bass" && sb.voicings.length >= 4 && sb.voicings.every((v) => pcsOf(v)[0] === 4), "C7/E lists grips with E as the lowest note first");
+  const tri = eng.chordVoicings(dict, "G").groups.find((g) => g.id === "triads");
+  expect(tri && tri.voicings.length >= 10 && tri.voicings.every((v) => strs(v).length === 3), "major triad: close triads + inversions on each string group");
+  const sh = eng.chordVoicings(dict, "G7").groups.find((g) => g.id === "shells");
+  expect(sh && sh.voicings.some((v) => v.frets.join(",") === "3,-1,3,4,-1,-1"), "G7 shells include the Freddie Green 3-x-3-4 (R-7-3)");
+  const pl = eng.chordVoicings(dict, "E", { played: { 0: 0, 1: 2, 2: 2, 3: 1, 4: 0, 5: 0 } }).groups[0];
+  expect(pl.id === "played" && pl.voicings[0].frets.join(",") === "0,2,2,1,0,0", "the chart's own fingering is shown first, as written");
+  // fingers: barre on the index finger; impossible shapes rejected
+  const F = eng.assignChordFingers([1, 3, 3, 2, 1, 1]);
+  expect(F && F.fingers.join(",") === "1,3,4,2,1,1" && F.barres.some((b) => b.fret === 1 && b.from === 0 && b.to === 5), "F barre: 1-3-4-2-1-1 with the index-finger barre");
+  expect(eng.assignChordFingers([-1, 3, 2, 0, 1, 0]).fingers.join(",") === "0,3,2,0,1,0" && eng.assignChordFingers([1, 2, 3, 4, 5, -1]) === null, "open C fingered 3-2-1; a five-finger shape is rejected");
+  // SVGuitar payload: string 1 = high e, relative frets above the nut, x/0 markers, finger or interval text
+  const sv = eng.voicingToSVGuitar(n.frets && eng.chordVoicings(dict, "C").groups.find((g) => g.id === "library").voicings[1], "fingers");
+  const svI = eng.voicingToSVGuitar(eng.chordVoicings(dict, "C").groups.find((g) => g.id === "library").voicings[0], "intervals");
+  expect(sv.position === 3 && sv.fingers.some((f) => f[0] === 6 && f[1] === "x") && sv.fingers.some((f) => f[0] === 5 && f[1] === 1 && f[2] === "1"), "voicingToSVGuitar: string numbers 1 = high e, relative frets, finger text");
+  expect(svI.fingers.some((f) => f[0] === 5 && f[1] === 3 && f[2] === "R") && svI.fingers.some((f) => f[0] === 4 && f[2] === "3"), "Intervals mode labels each note with its degree");
+  // substitutions (tone-set classified, family spelling)
+  const subs = eng.chordSubstitutions("BbΔ7");
+  expect(subs.map((s) => s.symbol).join(" ") === "Gm7 Dm7 Bb6 C7sus4", `Bbmaj7 substitutions: relative minor, iii, 6, backdoor (${subs.map((s) => s.symbol).join(" ")})`);
+  expect(eng.chordSubstitutions("G6").map((s) => s.symbol).join(" ") === "Em7 Bm7 Gmaj7 A7sus4", "a 6 chord swaps toward maj7, not toward itself");
+  expect(eng.chordSubstitutions("G7")[0].symbol === "C#7" && eng.chordSubstitutions("G7", false)[0].symbol === "Db7" && eng.chordSubstitutions("N.C.").length === 0, "tritone sub spelled by the ♯/♭ toggle; no chord → no subs");
+  // the data pool: every key × every quality the recogniser can name has ≥ 12 library shapes, all pitch-valid
+  const names = [...new Set(eng.QUALITIES.map((q) => q.suffix))];
+  const thin = [];
+  for (let pc = 0; pc < 12; pc++) for (const q of names) {
+    const r = eng.chordVoicings(dict, eng.NOTE_SHARP[pc] + q);
+    const lb = r.groups.find((g) => g.id === "library");
+    if (!lb || lb.voicings.length < 12) thin.push(`${eng.NOTE_SHARP[pc]}${q}:${lb ? lb.voicings.length : 0}`);
+  }
+  expect(thin.length === 0, `chords.json holds ≥ 12 valid shapes for every key × recogniser quality (thin: ${thin.slice(0, 8).join(" ")})`);
+  expect(dict.main.validation && dict.main.validation.dropped > 0 && dict.main.numberOfChords >= 10000 && dict.chords.Csharp && dict.chords.Fsharp, "chords.json is the validated + extended build (≥ 10k shapes, base errors dropped)");
+  // vendored SVGuitar + UI glue contracts
+  const ui = fs.readFileSync(UI, "utf8"), pages = fs.readFileSync(path.join(repo, ".github", "workflows", "pages.yml"), "utf8");
+  const svg = fs.readFileSync(path.join(repo, "js", "svguitar.umd.js"));
+  expect((await import("node:crypto")).createHash("sha256").update(svg).digest("hex") === "c73971fa9c94719b9db55380697792c8d9d2f6520b1c17f11d508691f328cf95" && /factory\(global\.svguitar = \{\}\)/.test(svg.toString()), "js/svguitar.umd.js is the pinned svguitar 2.5.1 UMD build (exposes window.svguitar)");
+  expect(/MIT License/.test(fs.readFileSync(path.join(repo, "js", "NOTICE-svguitar.txt"), "utf8")) && /David Rubert/.test(fs.readFileSync(path.join(repo, "data", "NOTICE"), "utf8")), "svguitar + chords-db licences ship alongside");
+  expect(/s\.src = "\.\/js\/svguitar\.umd\.js"/.test(ui) && !/cdn[^"]*svguitar/i.test(ui) && /fetch\("data\/chords\.json"\)/.test(ui) && /_chordDictPromise = null; throw err/.test(ui), "UI: SVGuitar from the bundled local UMD (no CDN), chords.json fetched once + cached, retry after a failed fetch");
+  expect(/onVoicings=\{setVoicingChoices\}/.test(ui) && /<ChordVoicingModal /.test(ui) && /chordVoicings\(dict, cur\.symbol, \{ played: cur\.frets \}\)/.test(ui) && /\["fingers", "Fingers"\], \["intervals", "Intervals"\]/.test(ui), "ChartPanel: tapping a lead-sheet chord / grid bar opens the voicing modal (Fingers / Intervals)");
+  expect(/cp -r js _site\//.test(pages) && /cp data\/chords\.json data\/NOTICE _site\/data\//.test(pages), "pages.yml ships js/ and data/chords.json");
+}
+
 if (fails.length) {
   console.error("\nFAIL:\n  " + fails.join("\n  "));
   console.error("\nRe-run with --log-tokens to dump the raw extractTokens() stream and diff against the reference.");
