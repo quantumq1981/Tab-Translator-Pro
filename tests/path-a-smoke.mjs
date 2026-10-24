@@ -3003,6 +3003,20 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
     { symbol: "G", midis: [55], beat: 2, durBeats: 2, qbeat: 2, qdur: 2 }] }] };
   const sb = parseTex(eng.scoreToAlphaTex(slot)).score.tracks[0].staves[0].bars[0].voices[0].beats.map((b) => b.notes.map((n) => n.realValue).sort().join("+"));
   expect(sb.join() === "48+52,55", `events on the same 16th slot merge into one beat (got ${sb.join()})`);
+  // A pitch no string can play (a bass note under a guitar part, an octave-up ghost) is LEFT OUT and
+  // counted — it used to become a rest of the note's own value in the middle of the bar (a user's tab
+  // read "r.2 r.8 r.4 r.8" where the audio had a note), and one such pitch cost its whole chord.
+  const fs6495 = eng.fingerShapes([64, 95], eng.TUNINGS.Standard);
+  expect(fs6495.length > 0 && fs6495.every((sh) => sh.notes.length === 1 && sh.notes[0].midi === 64) && eng.fingerShapes([95, 20], eng.TUNINGS.Standard).length === 0,
+    "fingerShapes fingers the playable pitches of a chord and returns nothing for an all-unplayable one");
+  const oor = eng.fingerScore(eng.polyNotesToScore([
+    { midi: 52, startSec: 0, endSec: 0.9, durSec: 0.9 }, { midi: 36, startSec: 1.25, endSec: 1.75, durSec: 0.5 },   // bar 1: E3 + a low C2 on the "and" of 2
+    { midi: 30, startSec: 2.0, endSec: 3.9, durSec: 1.9 },                                                           // bar 2: only an F#1
+    { midi: 95, startSec: 4.5, endSec: 4.9, durSec: 0.4 }, { midi: 64, startSec: 4.5, endSec: 4.9, durSec: 0.4 }], { bpm: 120, beatsPerBar: 4 }));
+  const oTex = eng.scoreToAlphaTex(oor), oBars = oTex.trim().split("\n").filter((l) => /\|\s*$/.test(l));
+  const oScore = parseTex(oTex).score, oNotes = notesOf(oScore).map((n) => n.realValue);
+  expect(/^\/\/ 3 notes outside this instrument's range/.test(oTex) && /^\s*r\.1 \|$/.test(oBars[1]) && oNotes.includes(52) && oNotes.includes(64) && !oNotes.some((v) => v < 40 || v > 86),
+    `out-of-range pitches are counted and left out, their bars spelled normally, playable neighbours kept (bar 2: "${oBars[1] && oBars[1].trim()}")`);
 }
 
 {

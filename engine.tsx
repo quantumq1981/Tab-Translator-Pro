@@ -3468,7 +3468,11 @@ function _fingerLocalCost(shape, w) {
  *  (then drops the duplicate pitches) rather than returning nothing. */
 function fingerShapes(midis, tuning, opts = {}) {
   const w = { ...FINGER_DEFAULTS, ...opts };
-  const ms = [...midis].sort((a, b) => a - b);
+  // Finger the pitches the instrument CAN play. One out-of-range pitch (a bass note under a guitar
+  // chord, a model's octave-up ghost) used to leave the whole chord with no shape, so every note in
+  // it was lost; now only that pitch is (scoreToAlphaTex counts it). Nothing playable → unplayable.
+  const ms = [...midis].filter((m) => fingerCandidates(m, tuning, w.maxFret).length).sort((a, b) => a - b);
+  if (!ms.length) return [];
   const enumerate = (notes, maxSpan) => {
     const out = [], used = new Array(tuning.length).fill(false), acc = [];
     const cands = notes.map((m) => fingerCandidates(m, tuning, w.maxFret));
@@ -3634,7 +3638,7 @@ function scoreToAlphaTex(score, opts = {}) {
   L.push(`\\track (${_atexStr(opts.trackName || "Guitar")})`);
   L.push(`  \\staff {${opts.notation === false ? "" : "score "}tabs}`);
   L.push(`    \\tuning (${keys.slice().reverse().map((k) => _atexPitch(tuning[k])).join(" ")})`);
-  let lastSig = null;
+  let lastSig = null, dropped = 0;
   sc.bars.forEach((bar, bi) => {
     const sig = bar.timeSig || sc.timeSig || [4, 4];
     const meta = [];
@@ -3659,9 +3663,32 @@ function scoreToAlphaTex(score, opts = {}) {
       sl.end = Math.max(sl.end, end); sl.parts.push({ e, alt });
       for (const m of e.midis) if (!sl.midis.includes(m) && sl.midis.length < keys.length) sl.midis.push(m);
     });
-    // One notation note per slot, carrying the slot's events through the midis reference.
+    // Place every pitch on a string NOW, before the rhythm is spelled: the written fret when it
+    // reconstructs the pitch on this tuning, else the re-fingered one, across the slot's events in
+    // order (techniques come from the event that supplied the note). A pitch no string can play —
+    // below the lowest open string or above the top fret, e.g. a bass note when Guitar → Tab hears a
+    // full mix — is LEFT OUT and counted. It used to be dropped only at render time, which turned its
+    // cell into a rest of the note's own value: syncopated, dotted rests in the middle of the bar
+    // (r.2 r.8 r.4 r.8) where the audio actually had a note.
+    for (const sl of slots.values()) {
+      const used = new Set(), assign = [];
+      for (const midi of sl.midis) {
+        let s = null, fret = null, from = null;
+        for (const part of sl.parts) {
+          for (const src of [part.e, part.alt]) {
+            if (!src || s != null) continue;
+            for (const [k, f] of Object.entries(src.frets || {})) if (!used.has(k) && tuning[+k] + f === midi) { s = k; fret = f; from = part.e; break; }
+          }
+          if (s != null) break;
+        }
+        if (s == null) { dropped++; continue; }
+        used.add(s); assign.push({ midi, s, fret, e: from });
+      }
+      sl.assign = assign; sl.midis = assign.map((a) => a.midi);
+    }
+    // One notation note per slot that kept a pitch, carrying the slot through the midis reference.
     const byMidis = new Map();
-    const beatNotes = [...slots.values()].map((sl) => {
+    const beatNotes = [...slots.values()].filter((sl) => sl.midis.length).map((sl) => {
       byMidis.set(sl.midis, sl);
       return { onsetBeat: sl.on, durBeat: sl.end - sl.on, midis: sl.midis };
     });
@@ -3671,23 +3698,10 @@ function scoreToAlphaTex(score, opts = {}) {
         if (c.wholeMeasure) return `r.${sig[1] <= 1 ? 1 : 1}`;  // whole-measure rest
         return `r.${_ATEX_DUR[c.type] || 4}${c.dot ? "{d}" : ""}`;
       }
-      const sl = byMidis.get(c.midis) || { parts: [] };
+      const sl = byMidis.get(c.midis) || { parts: [], assign: [] };
       const notes = [];
-      const used = new Set();
-      let e = {};
-      for (const midi of c.midis) {
-        // The written fret when it reconstructs this pitch on this tuning, else the re-fingered one;
-        // across the slot's events, in order (techniques come from the event that supplied the note).
-        let s = null, fret = null;
-        for (const part of sl.parts) {
-          for (const src of [part.e, part.alt]) {
-            if (!src || s != null) continue;
-            for (const [k, f] of Object.entries(src.frets || {})) if (!used.has(k) && tuning[+k] + f === midi) { s = k; fret = f; e = part.e; break; }
-          }
-          if (s != null) break;
-        }
-        if (s == null) continue;
-        used.add(s);
+      for (const { midi, s, fret, e } of sl.assign) {
+        if (!c.midis.includes(midi)) continue;
         const props = [];
         if (c.tieStop) props.push("t");
         else {
@@ -3710,6 +3724,8 @@ function scoreToAlphaTex(score, opts = {}) {
     });
     L.push(`    ${meta.length ? meta.join(" ") + " " : ""}${cells.join(" ")} |`);
   });
+  // Say so in the file (alphaTex comment) rather than leave silent gaps.
+  if (dropped) L.unshift(`// ${dropped} note${dropped === 1 ? "" : "s"} outside this instrument's range (no string or fret can play ${dropped === 1 ? "it" : "them"}) left out`);
   return L.join("\n") + "\n";
 }
 

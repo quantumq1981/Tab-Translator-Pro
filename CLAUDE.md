@@ -2596,7 +2596,15 @@ one staff per score, tuning from `tuningMidi`, per-bar meter, `_voiceNotationMea
 rhythm (16th grid, ties, metric note values). Events landing on the **same 16th slot are merged**
 into one beat (ML onsets of one strum arrive tens of ms apart; two beats can't share a slot). When written frets don't fit (or none exist) it falls back to `fingerScore(…, {overwrite:true})`.
 A drum track THROWS ("This is a drum/percussion track — it has no strings to write as tab.") and the
-UI shows the message. Wired as **AlphaTex (tab)** in `ChartPanel` (`.alphatex`; paste into any
+UI shows the message. **Unplayable pitches are left out and counted (2026-10-24).** A pitch
+no string can play (below the lowest open string or above fret 22 — a bass note when Guitar → Tab
+hears a full mix, a model's octave-up ghost) is resolved out BEFORE the rhythm is spelled, and the
+file opens with `// N notes outside this instrument's range … left out`. Before, it was dropped only
+when the cell was written, so its cell became a rest of the NOTE's value — syncopated, dotted rests
+mid-bar (a user's tab read `r.2 r.8 r.4 r.8` where the audio had a note) — and `fingerShapes` gave
+the WHOLE chord no shape when one of its pitches was unplayable. Now only that pitch goes (corpus
+coverage 99.07 → 99.16 %, GP fingering test 57.5 → 57.6 %; on GuitarSet 215 of 60,500 model notes
+are out of range). Wired as **AlphaTex (tab)** in `ChartPanel` (`.alphatex`; paste into any
 alphaTab viewer, e.g. the alphatab.net playground). **Validated** by parsing every corpus part
 with `@coderline/alphatab@1.8.4` (test-only dev dep): **299 parts, 0 parse failures, 0 warnings,
 bar counts exact, 99.07 % of notes present**; the 191 pitch differences are all harmonics
