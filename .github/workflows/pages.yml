@@ -80,6 +80,11 @@ jobs:
           # Tab viewer: alphaTab 1.8.4 (MPL-2.0), same-origin so its worker + worklet can load. The version
           # is in the folder name, so those files are never re-stamped and a cached copy is always the right one.
           cp tab-view.js _site/
+          # Chord-voicing modal: svguitar 2.5.1 (MIT) bundled locally — no CDN at runtime — and the
+          # validated chord library (tombatossals/chords-db, MIT, extended by scripts/build_chords_json.mjs).
+          cp -r js _site/
+          mkdir -p _site/data
+          cp data/chords.json data/NOTICE _site/data/
           mkdir -p _site/vendor/alphatab-1.8.4
           cp -r vendor/alphatab-1.8.4/. _site/vendor/alphatab-1.8.4/
           BUILD="${GITHUB_SHA::7}"
