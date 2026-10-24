@@ -156,3 +156,14 @@ and Babel bundle as in `scnet-e2e.mjs`.
 ```sh
 node bench/guitar-e2e.mjs --deps $D/out --gs /tmp/gs_ex --track 00_BN1-129-Eb_comp [--ua "<iPad UA>"]
 ```
+
+### `tab-view-e2e.mjs` — the Tab view in the real app
+
+The real app, the real vendored alphaTab (worker, worklet, font, sound font), no stubs. It opens a
+Guitar Pro file in MusicXML / GP mode, switches to the Tab view, waits for the bar count, presses ▶ Play
+and checks the clock moves, then uploads a saved `.alphatex` and switches to "Tab only". It saves
+screenshots and lists which alphaTab files loaded and any failed requests.
+
+```sh
+node bench/tab-view-e2e.mjs --deps $D/out [--gp blue-sky.gp] [--tex saved.alphatex] [--ua "<UA>"] [--width 390 --height 844] [--out <dir>]
+```

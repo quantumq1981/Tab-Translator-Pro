@@ -3609,6 +3609,13 @@ const _ATEX_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#",
 const _atexPitch = (m) => _ATEX_NAMES[((m % 12) + 12) % 12] + (Math.floor(m / 12) - 1);
 const _atexStr = (s) => `"${String(s == null ? "" : s).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 const _ATEX_DUR = { whole: 1, half: 2, quarter: 4, eighth: 8, "16th": 16, "32nd": 32 };
+// Key signature in alphaTex's compact form, spelled like the ABC K: line (Db not C#, d#minor not
+// ebminor), so the staff's signature agrees with how every other exporter names the key. The
+// spaced form "(C# minor)" is NOT safe: alphaTab 1.8 reads it as C# MAJOR (7 sharps).
+const _atexKey = (key) => {
+  const nm = _abcKeyName(key);
+  return key.mode === "minor" ? nm.replace(/m$/, "").toLowerCase() + "minor" : nm;
+};
 const _ATEX_NOTE_TECH = { hammer: "h", slide: "sl", harmonic: "nh", palmMute: "pm", letRing: "lr", staccato: "st", ghost: "g", accent: "ac", dead: "x" };
 
 function scoreToAlphaTex(score, opts = {}) {
@@ -3633,6 +3640,7 @@ function scoreToAlphaTex(score, opts = {}) {
     const meta = [];
     if (!lastSig || sig[0] !== lastSig[0] || sig[1] !== lastSig[1]) meta.push(`\\ts (${sig[0]} ${sig[1]})`);
     if (bi === 0 && (opts.tempo || sc.tempo)) meta.push(`\\tempo ${Math.round(opts.tempo || sc.tempo)}`);
+    if (bi === 0 && opts.key) meta.push(`\\ks ${_atexKey(opts.key)}`);
     if (bar.section) meta.push(`\\section ${_atexStr(bar.section)}`);
     if (bar.repeatStart) meta.push("\\ro");
     if (bar.repeatEnd) meta.push("\\rc 2");
@@ -3703,6 +3711,35 @@ function scoreToAlphaTex(score, opts = {}) {
     L.push(`    ${meta.length ? meta.join(" ") + " " : ""}${cells.join(" ")} |`);
   });
   return L.join("\n") + "\n";
+}
+
+/** Is this text an AlphaTex document (so an uploaded .alphatex opens in the tab viewer instead of
+ *  being fed to the MusicXML parser)? Decided by the first real token: AlphaTex opens with a
+ *  backslash metadata tag (\title, \track, \staff, \tuning, \tempo, \ts …), optionally after
+ *  line or block comments and a BOM. A ChordPro {title:} file, LaTeX (\documentclass), XML and
+ *  binary bytes all fail that test. Pure; used by the upload handler and tested headlessly. */
+const _ATEX_HEAD = /^\\(title|subtitle|artist|album|words|music|copyright|tab|instructions|notices|tempo|track|staff|tuning|instrument|capo|ts|ks|clef|section|lyrics|chord|bank|defaultsystemslayout|systemslayout|hidedynamics|showdynamics|multibarrest|singletracktracknamepolicy|multitracktracknamepolicy|firstsystemtracknamemode|othersystemstracknamemode|firstsystemtracknameorientation|othersystemstracknameorientation|bracketextendmode|usesystemsignseparator)\b/i;
+function isAlphaTexText(text) {
+  if (typeof text !== "string" || !text) return false;
+  let t = text.replace(/^\uFEFF/, "");
+  for (let guard = 0; guard < 64; guard++) {
+    t = t.replace(/^\s+/, "");
+    if (t.startsWith("//")) { const nl = t.indexOf("\n"); t = nl < 0 ? "" : t.slice(nl + 1); continue; }
+    if (t.startsWith("/*")) { const end = t.indexOf("*/"); t = end < 0 ? "" : t.slice(end + 2); continue; }
+    break;
+  }
+  return _ATEX_HEAD.test(t);
+}
+/** Uploaded bytes → the AlphaTex text, or null when the file is anything else. Binary formats are
+ *  rejected by their magic before decoding (zip/GP7-8 `PK`, GP6 `BCF`, GP3-5 `…FICHIER`, Power Tab
+ *  `ptab`, `%PDF`), then the text must pass `isAlphaTexText`. */
+function alphaTexFromBytes(bytes) {
+  if (!bytes || !bytes.length) return null;
+  const head = String.fromCharCode(...bytes.subarray(0, 32));
+  if (/^(PK|BCF|%PDF|ptab)/.test(head) || /FICHIER GUITAR/.test(head)) return null;
+  let text;
+  try { text = new TextDecoder("utf-8").decode(bytes); } catch (_) { return null; }
+  return isAlphaTexText(text) ? text : null;
 }
 
 /* ---- Brass / Horn / Sax section transposition ---------------------------
@@ -7108,6 +7145,9 @@ export {
   TECHNIQUES,
   scoreToAlphaTex,
   isPercussionTuning,
+  isAlphaTexText,
+  alphaTexFromBytes,
+  _atexKey,
   BRASS_INSTRUMENTS,
   getBrassInstrument,
   scoreToBrassMusicXML,

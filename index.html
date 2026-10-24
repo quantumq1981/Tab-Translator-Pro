@@ -44,6 +44,12 @@
     imports this page's engine. Nothing is fetched until the button is pressed. See guitar-model.js.
   -->
   <script type="module" src="./guitar-model.js"></script>
+  <!--
+    Tab viewer (ChartPanel's "Tab" view + opening a saved .alphatex): alphaTab 1.8.4 (MPL-2.0),
+    vendored same-origin in vendor/alphatab-1.8.4/ so its render worker and audio worklet load.
+    Nothing is fetched until a tab is first shown. See tab-view.js.
+  -->
+  <script type="module" src="./tab-view.js"></script>
   <script type="importmap">
   {
     "imports": {

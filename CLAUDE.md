@@ -362,9 +362,10 @@ assumed)** — time-signature detection from the PDF is the clean next task, sam
 flavour as tuning detection. The `startX`/`endX` fields are purely additive; the
 existing per-bar recognition path is unchanged.
 
-The PDF panel has a **Chart / Grid** toggle: *Chart* is the lead sheet (chords on
+The PDF panel has a **Chart / Grid / Tab** toggle: *Chart* is the lead sheet (chords on
 their beat, barlines, tap a chord to inspect its voicing); *Grid* is the original
-compact one-symbol-per-bar card grid. Both feed the same engine.
+compact one-symbol-per-bar card grid; *Tab* (2026-10-24) draws and plays the AlphaTex tab
+(see "Tab viewer"). All feed the same engine.
 
 ## Path C — MusicXML import (`parseMusicXML`)
 
@@ -2676,6 +2677,44 @@ GuitarSet is unaccompanied acoustic guitar; a full mix must be separated first (
 guitar AND keys — no open model splits them). Device check remaining: first-tap load + memory on a
 real iPhone/iPad.
 
+### Tab viewer — the AlphaTex tab drawn and played in the app (2026-10-24)
+
+**The ask:** "I saved it as an .alphatex but I don't have anything to read it or render it." The app
+wrote a tab it could not show. Now it shows it: **notation + tablature, with playback**, on iPad/iPhone.
+
+- **Renderer: alphaTab 1.8.4 (MPL-2.0), vendored same-origin** in `vendor/alphatab-1.8.4/` (entry +
+  core + render worker + audio worklet, the Bravura woff2/woff font, the 977 KB SONiVOX sf3 sound font;
+  NOTICE + licences alongside). Same-origin is load-bearing: alphaTab spawns its render **worker** and
+  audio **worklet** from its own URL, which a CDN copy can't do cross-origin. Files are the npm
+  release's `.min.*` builds **unmodified, renamed** to the names the entry imports (`alphaTab.core.mjs`,
+  `alphaTab.worker.mjs`, `alphaTab.worklet.mjs`) — `npm test` checks them byte-for-byte against the
+  test dep `@coderline/alphatab@1.8.4`. The **version is in the folder name**, so those files are never
+  stamped and a cached copy is always the right one; upgrading = a new folder.
+- **Glue: `tab-view.js`** publishes `window.TTP_TAB_VIEW.mount(el, tex, {profile, scale, scrollElement,
+  onState, onPlayer})` → `{ setTex, setProfile, playPause, stop, setSpeed, destroy }`. Lazy (nothing at
+  boot; the first tab view fetches ~2.4 MB, then HTTP-cached), a failed load resets so a retry retries,
+  errors come back through `onState`. `pages.yml` ships it + the folder and stamps `tab-view.js?v=`.
+- **UI:** `ChartPanel` gains a **Tab** view next to Chart / Grid (`TabView` component: ▶ Play / ⏸, ■,
+  speed 50–125 %, clock, "Notation + tab" / "Tab only", white paper, scrolls itself into view on a
+  phone). The Tab view and the **AlphaTex (tab)** export are the SAME memo (`tabTex`), so they can't
+  disagree. The 🎸 Guitar → Tab chart opens **on** the Tab view (`defaultView="tab"`). **MusicXML / GP**
+  mode also opens a saved `.alphatex` (`alphaTexFromBytes` → `isAlphaTexText`: binary magics rejected
+  first, then the first token must be an AlphaTex metadata tag), and the session restores it
+  (`kind:"alphatex"`).
+- **The tab skips Simplify** (`tabScore`): Simplify replaces a melodic line with one inferred chord per
+  bar — right for a chord chart, wrong for a tab (it drew Blue Sky's lead as block chords with empty
+  bars). Arrange and transpose still apply; a note under the toolbar says so when Simplify is on.
+- **Key signature:** `scoreToAlphaTex(…, { key })` writes `\ks` (`_atexKey`, spelled like ABC's K:).
+  **Use the compact form** (`E`, `Db`, `c#minor`): alphaTab 1.8 reads the spaced `(C# minor)` as C#
+  MAJOR. All 24 keys read back as `_keyFifths` (tested). No key → no `\ks` (old output unchanged).
+- **Measured** (`tests/bench/tab-view-e2e.mjs`, the real app in headless Chromium, iPad and iPhone UAs):
+  Blue Sky `.gp` → 165 bars drawn in ~1 s, playback clock advances (0:03 after 4 s); the saved `.alphatex`
+  from the guitar run opens (12 bars); only the vendored files load, 0 failed requests, 0 console errors;
+  at 390 px the viewer scrolls into view and draws. `guitar-e2e.mjs` now also checks the 🎸 chart's Tab
+  view draws (12 bars, E♭ major signature on the E♭ track).
+- **Device check remaining:** first view + playback on a real iPad/iPhone (Safari audio unlock, memory on a
+  long score). Not built: print/PDF of the tab (alphaTab's `print()` opens a popup — iOS-hostile).
+
 ## Path B (scans / photos) — OUT OF SCOPE
 
 Raster tab (a photo or scanned page) has no text layer and needs an OMR/Vision
@@ -2835,6 +2874,13 @@ accordingly.
   contracts (SHA-256 pin = the committed file, ORT 1.23.2 pin, worker + fallback, `pages.yml`
   stamp, UI wiring) and `guitarSession` against a fake ORT. Accuracy is measured by the benches
   (`fingering.mjs`, `guitarset.mjs`, `techniques.mjs`, `guitar-e2e.mjs`), not asserted.
+- **Tab viewer** (`npm test`): all 24 `\ks` keys read back as the right signature in alphaTab;
+  Blue Sky with a key → 4 sharps, 165 bars, and without one → no `\ks`; `isAlphaTexText` /
+  `alphaTexFromBytes` accept AlphaTex (title, comments + BOM, bare metadata) and reject ChordPro, LaTeX,
+  MusicXML, GP and empty input; the vendored alphaTab is byte-identical to the 1.8.4 release and imports
+  the names it ships under; tab-view.js contracts (same-origin path, lazy import, retry, synth player,
+  destroy); index.html + pages.yml wiring; the Tab view and the export share one AlphaTex; the tab skips
+  Simplify; the guitar chart opens on it; `.alphatex` upload + restore. Rendering itself: `tab-view-e2e.mjs`.
 - **Lyrics import (`parseLyrics`)**: `npm test` asserts the strict chord matcher accepts
   real chords and rejects note-letter lyric words (Add/Cab/Bad/Fed/Gem/Bee/Ace), the
   line-level `isChordLine` catches chord lines but spares lyric/blank lines, a full
