@@ -1,0 +1,24 @@
+alphaTab 1.8.4 — music notation and guitar tablature rendering. tab-view.js uses it to draw and
+play the AlphaTex tab the app exports; it loads only when a tab is first shown. The version is in
+the folder name so a phone can never mix cached files from two releases.
+
+Files, copied unmodified from the npm package @coderline/alphatab@1.8.4 (dist/), renamed to the
+names the library imports itself by:
+  alphaTab.mjs          ← dist/alphaTab.min.mjs
+  alphaTab.core.mjs     ← dist/alphaTab.core.min.mjs
+  alphaTab.worker.mjs   ← dist/alphaTab.worker.min.mjs   (rendering worker)
+  alphaTab.worklet.mjs  ← dist/alphaTab.worklet.min.mjs  (audio worklet)
+  font/Bravura.woff2, font/Bravura.woff, font/Bravura-OFL.txt  ← dist/font/
+  soundfont/sonivox.sf3, soundfont/LICENSE                      ← dist/soundfont/
+Source: https://github.com/coderline/alphaTab · https://www.npmjs.com/package/@coderline/alphatab
+
+Licences:
+  alphaTab — Mozilla Public License 2.0 (https://mozilla.org/MPL/2.0/; LICENSE.txt). Copyright © 2026 Daniel Kuschny and
+    Contributors. MPL 2.0 is file-level copyleft: these files are distributed unmodified and their
+    source is available at the links above. Bundled libraries (TinySoundFont, SFZero, Haxe std,
+    SharpZipLib, NVorbis: MIT; libvorbis: BSD-3-Clause) are listed in the header of alphaTab.mjs.
+  Bravura — SIL Open Font License 1.1 (font/Bravura-OFL.txt), Steinberg Media Technologies GmbH.
+  SONiVOX sound font — Apache License 2.0 (soundfont/LICENSE), Sonic Network Inc.
+
+The files are pinned by SHA-256 in tests/path-a-smoke.mjs; to upgrade, copy the new release the
+same way and update the pins.

@@ -3052,7 +3052,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   expect(/<script type="module" src="\.\/guitar-model\.js"><\/script>/.test(html), "index.html loads guitar-model.js");
   expect(/cp guitar-model\.js guitar-model-core\.js guitar-worker\.js _site\//.test(pages) && /cp models\/guitar-crnn\/guitar-gaps\.w8\.onnx models\/guitar-crnn\/NOTICE _site\/models\/guitar-crnn\//.test(pages) && /guitar-model\.js\?v=\$\{BUILD\}/.test(pages), "Pages ships the guitar glue + model, deploy-stamped");
   expect(/window\.TTP_GUITAR_MODEL/.test(ui) && /fingerScore\(polyNotesToScore\(gtrNotes/.test(ui) && /🎸 Guitar → Tab \(ML\)/.test(ui), "the Audio panel's 🎸 Guitar → Tab button runs the model and fingers the notes");
-  expect(/\["alphatex", "AlphaTex \(tab\)"\]/.test(ui) && /scoreToAlphaTex\(tscore/.test(ui) && /alphatex: "alphatex"/.test(ui), "ChartPanel exports AlphaTex (tab)");
+  expect(/\["alphatex", "AlphaTex \(tab\)"\]/.test(ui) && /scoreToAlphaTex\(tabScore/.test(ui) && /alphatex: "alphatex"/.test(ui), "ChartPanel exports AlphaTex (tab)");
   // the tab chart must not auto-Simplify (a guitar line is "melodic" → one chord per bar → notes lost
   // from the AlphaTex export: the real-app run exported 87 of 117 notes before this) nor share the
   // chord chart's edits
@@ -3067,6 +3067,53 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   const sess = await gcore.guitarSession(new Uint8Array(4), fakeOrt);
   const r = await sess.run(new Float32Array(160000)); sess.release();
   expect(created === 1 && released === 1 && r.onset.length === 1001 * 88 && r.velocity.length === 1001 * 88 && seen.executionProviders.join() === "wasm" && seen.enableCpuMemArena === false, "guitarSession: one WASM session, the four heads mapped to onset/offset/frame/velocity, released once");
+}
+{
+  // Tab viewer: draw + play the AlphaTex tab in the app (alphaTab 1.8.4, vendored same-origin).
+  const alphaTab = await import("@coderline/alphatab");
+  const readTex = (tex) => { const imp = new alphaTab.importer.AlphaTexImporter(); imp.initFromString(tex, new alphaTab.Settings()); return imp.readScore(); };
+  // key signature: every key's \ks reads back as the signature the other exporters write
+  let ksBad = [];
+  for (let tonic = 0; tonic < 12; tonic++) for (const mode of ["major", "minor"]) {
+    const k = { tonic, mode };
+    const mb = readTex(`\\track ("g")\n  \\staff {score tabs}\n    \\tuning (E4 B3 G3 D3 A2 E2)\n    \\ts (4 4) \\ks ${eng._atexKey(k)} 0.6.1 |`).masterBars[0];
+    if (mb.keySignature !== eng._keyFifths(k) || mb.keySignatureType !== (mode === "minor" ? 1 : 0)) ksBad.push(`${tonic}${mode}`);
+  }
+  expect(ksBad.length === 0, `all 24 keys reach alphaTab as the right key signature (bad: ${ksBad.join(",")})`);
+  const gp1 = await eng.parseGP(new Uint8Array(fs.readFileSync(path.join(repo, "blue-sky.gp"))), true, 1);
+  const withKey = eng.scoreToAlphaTex(gp1, { title: "Blue Sky", key: { tonic: 4, mode: "major" } });
+  const sk = readTex(withKey);
+  expect(/\\ks E\b/.test(withKey) && sk.masterBars[0].keySignature === 4 && sk.masterBars.length === 165, "scoreToAlphaTex writes the key signature it is given (Blue Sky in E: 4 sharps, 165 bars)");
+  expect(!/\\ks/.test(eng.scoreToAlphaTex(gp1, { title: "Blue Sky" })), "no key given → no \\ks (the previous output is unchanged)");
+  // a saved .alphatex upload is recognised; everything else is not
+  expect(eng.isAlphaTexText(withKey) && eng.isAlphaTexText("﻿// a comment\n/* block */\n  \\track (\"g\")\n 0.6.4 |") && eng.isAlphaTexText("\\tempo 90\n0.6.4"), "AlphaTex is recognised (title / comments + BOM / bare metadata)");
+  expect(!eng.isAlphaTexText("{title: Song}\n[C]Hello") && !eng.isAlphaTexText("\\documentclass{article}") && !eng.isAlphaTexText("<?xml version=\"1.0\"?><score-partwise/>") && !eng.isAlphaTexText("") && !eng.isAlphaTexText(null) && !eng.isAlphaTexText("\\textbf{x}"), "ChordPro, LaTeX, MusicXML and empty input are not AlphaTex");
+  const enc = new TextEncoder();
+  expect(eng.alphaTexFromBytes(enc.encode(withKey)) === withKey, "alphaTexFromBytes returns the text of an AlphaTex file");
+  expect(eng.alphaTexFromBytes(new Uint8Array(fs.readFileSync(path.join(repo, "blue-sky.gp")))) === null
+    && eng.alphaTexFromBytes(new Uint8Array(fs.readFileSync(path.join(repo, "the-allman-brothers-band-blue_sky.gp3")))) === null
+    && eng.alphaTexFromBytes(new Uint8Array(fs.readFileSync(path.join(here, "fixtures", "sample.musicxml")))) === null
+    && eng.alphaTexFromBytes(new Uint8Array(0)) === null, "Guitar Pro, MusicXML and empty files are not mistaken for AlphaTex");
+  // the vendored library is byte-identical to the npm release it claims to be (only renamed)
+  const dist = path.join(here, "node_modules", "@coderline", "alphatab", "dist");
+  const V = path.join(repo, "vendor", "alphatab-1.8.4");
+  const same = (a, b) => fs.existsSync(a) && fs.existsSync(b) && Buffer.compare(fs.readFileSync(a), fs.readFileSync(b)) === 0;
+  const pairs = [["alphaTab.mjs", "alphaTab.min.mjs"], ["alphaTab.core.mjs", "alphaTab.core.min.mjs"], ["alphaTab.worker.mjs", "alphaTab.worker.min.mjs"], ["alphaTab.worklet.mjs", "alphaTab.worklet.min.mjs"],
+    ["font/Bravura.woff2", "font/Bravura.woff2"], ["font/Bravura.woff", "font/Bravura.woff"], ["font/Bravura-OFL.txt", "font/Bravura-OFL.txt"], ["soundfont/sonivox.sf3", "soundfont/sonivox.sf3"], ["soundfont/LICENSE", "soundfont/LICENSE"]];
+  const diff = pairs.filter(([v, d]) => !same(path.join(V, v), path.join(dist, d))).map(([v]) => v);
+  expect(diff.length === 0, `vendor/alphatab-1.8.4 is the unmodified @coderline/alphatab@1.8.4 release (differs: ${diff.join(", ")})`);
+  expect(JSON.parse(fs.readFileSync(path.join(here, "node_modules", "@coderline", "alphatab", "package.json"), "utf8")).version === "1.8.4" && /Mozilla Public License 2\.0/.test(fs.readFileSync(path.join(V, "NOTICE"), "utf8")) && fs.existsSync(path.join(V, "LICENSE.txt")), "the vendored alphaTab ships with its NOTICE + licence, and the test dep is the same 1.8.4");
+  const core = fs.readFileSync(path.join(V, "alphaTab.mjs"), "utf8");
+  expect(/from"\.\/alphaTab\.core\.mjs"/.test(core) && /"\.\/alphaTab\.worker\.mjs"/.test(core) && /"\.\/alphaTab\.worklet\.mjs"/.test(core), "the vendored entry imports exactly the file names it is shipped under");
+  // glue + wiring contracts
+  const tv = fs.readFileSync(path.join(repo, "tab-view.js"), "utf8"), ui = fs.readFileSync(UI, "utf8"), html = fs.readFileSync(HTML, "utf8");
+  const pages = fs.readFileSync(path.join(repo, ".github", "workflows", "pages.yml"), "utf8");
+  expect(/window\.TTP_TAB_VIEW = \{ mount/.test(tv) && /new URL\("\.\/vendor\/alphatab-1\.8\.4\/", import\.meta\.url\)/.test(tv) && !/^import /m.test(tv) && /import\(\/\* @vite-ignore \*\/ BASE \+ "alphaTab\.mjs"\)/.test(tv) && /_lib = null; throw e/.test(tv), "tab-view.js: same-origin vendor path, lazy import (nothing at boot), retry after a failed load");
+  expect(/PlayerMode\.EnabledSynthesizer/.test(tv) && /sonivox\.sf3/.test(tv) && /Bravura\.woff2/.test(tv) && /StaveProfile\.Tab/.test(tv) && /api\.destroy\(\)/.test(tv), "tab-view.js: synth player with the vendored sound font, the vendored font, tab-only profile, destroy");
+  expect(/<script type="module" src="\.\/tab-view\.js"><\/script>/.test(html) && /cp tab-view\.js _site\//.test(pages) && /cp -r vendor\/alphatab-1\.8\.4\/\. _site\/vendor\/alphatab-1\.8\.4\//.test(pages) && /tab-view\.js\?v=\$\{BUILD\}/.test(pages), "index.html loads tab-view.js; pages.yml ships it + the vendored alphaTab and stamps it");
+  expect(/\["tab", "Tab"\]/.test(ui) && /view === "tab"/.test(ui) && /<TabView tex=\{tabTex\.text\}/.test(ui) && /fmt === "alphatex" \? \(tabTex\.error/.test(ui), "ChartPanel has a Tab view, drawn from the SAME AlphaTex the export writes");
+  expect(/if \(!simplify\) return tscore;\s*return transposeScore\(arrange === "off" \? score : arrangeScore\(score, arrange\), semis, useSharp\)/.test(ui), "the tab (view + AlphaTex export) skips Simplify — a tab shows the notes played, not one inferred chord per bar");
+  expect(/defaultView="tab"/.test(ui) && /const tex = alphaTexFromBytes\(bytes\);\s*if \(tex != null\)/.test(ui) && /meta\.kind === "alphatex"/.test(ui) && /<TabView tex=\{texDoc\.text\}/.test(ui), "the guitar tab opens on the Tab view; a saved .alphatex upload (and its session restore) opens in the viewer");
 }
 
 if (fails.length) {

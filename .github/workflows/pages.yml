@@ -77,11 +77,18 @@ jobs:
           cp guitar-model.js guitar-model-core.js guitar-worker.js _site/
           mkdir -p _site/models/guitar-crnn
           cp models/guitar-crnn/guitar-gaps.w8.onnx models/guitar-crnn/NOTICE _site/models/guitar-crnn/
+          # Tab viewer: alphaTab 1.8.4 (MPL-2.0), same-origin so its worker + worklet can load. The version
+          # is in the folder name, so those files are never re-stamped and a cached copy is always the right one.
+          cp tab-view.js _site/
+          mkdir -p _site/vendor/alphatab-1.8.4
+          cp -r vendor/alphatab-1.8.4/. _site/vendor/alphatab-1.8.4/
           BUILD="${GITHUB_SHA::7}"
           sed -i "s#src=\"./stem-model.js\"#src=\"./stem-model.js?v=${BUILD}\"#" _site/index.html
           grep -q "src=\"./stem-model.js?v=${BUILD}\"" _site/index.html
           sed -i "s#src=\"./guitar-model.js\"#src=\"./guitar-model.js?v=${BUILD}\"#" _site/index.html
           grep -q "src=\"./guitar-model.js?v=${BUILD}\"" _site/index.html
+          sed -i "s#src=\"./tab-view.js\"#src=\"./tab-view.js?v=${BUILD}\"#" _site/index.html
+          grep -q "src=\"./tab-view.js?v=${BUILD}\"" _site/index.html
 
       # enablement: true turns Pages on (source = GitHub Actions) using the
       # workflow's `pages: write` permission, so no manual Settings toggle is

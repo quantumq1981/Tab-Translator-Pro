@@ -193,6 +193,7 @@ import {
   transposeScore,
   fingerScore,
   scoreToAlphaTex,
+  alphaTexFromBytes,
   ARRANGE_TEMPLATES,
   arrangeScore,
   _midiVarLen,
@@ -550,12 +551,19 @@ export default function TabDecoderPro() {
     next._gpbuf = prev._gpbuf; next._xml = prev._xml; next._gpxbuf = prev._gpxbuf; next._ptbbuf = prev._ptbbuf; return next;
   };
 
+  // An uploaded AlphaTex file (`.alphatex`, e.g. one this app exported): shown in the tab viewer.
+  const [texDoc, setTexDoc] = useState(null); // null | { name, text }
   const onXml = async (e) => {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
-    setXmlErr(""); setXmlScore(null); setXmlBusy(true); clearSel();
+    setXmlErr(""); setXmlScore(null); setTexDoc(null); setXmlBusy(true); clearSel();
     try {
       const bytes = new Uint8Array(await f.arrayBuffer());
+      const tex = alphaTexFromBytes(bytes);
+      if (tex != null) { // a saved .alphatex: draw it — it's already a tab, not something to recognise
+        setTexDoc({ name: f.name, text: tex }); setXmlName(f.name); setRestored(false); saveSessionFile(bytes);
+        return;
+      }
       const sc = await parseScoreOffThread(bytes, f.name, useSharp); // MusicXML / GP3-8 auto-detect (binary GP/PTB off-thread)
       if (!sc.bars.length) setXmlErr("No measures found. Is this a MusicXML score or a Guitar Pro file?");
       setXmlScore(sc); setXmlName(f.name);
@@ -648,10 +656,11 @@ export default function TabDecoderPro() {
   useEffect(() => {
     if (restoringRef.current) return; // the restore effect re-affirms meta itself
     const active = (mode === "pdf" && chart) ? { kind: "pdf", filename: chart.fileName }
-                 : (mode === "xml" && xmlScore) ? { kind: "xml", filename: xmlName } : null;
+                 : (mode === "xml" && xmlScore) ? { kind: "xml", filename: xmlName }
+                 : (mode === "xml" && texDoc) ? { kind: "alphatex", filename: texDoc.name } : null;
     if (!active) return;
     saveSessionMeta({ v: 1, kind: active.kind, filename: active.filename, useSharp, overrides, sysShifts, keyOverride, partIndex: xmlScore ? (xmlScore.partIndex || 0) : 0 });
-  }, [mode, chart, xmlScore, xmlName, overrides, useSharp, keyOverride]);
+  }, [mode, chart, xmlScore, xmlName, texDoc, overrides, useSharp, keyOverride]);
 
   const restoreRef = useRef(null);
   const [restoreReq, setRestoreReq] = useState(0);
@@ -660,7 +669,7 @@ export default function TabDecoderPro() {
       const p = new URLSearchParams(window.location.search);
       if (p.get("import") === "decode" || p.get("import") === "handoff") return; // incoming import wins
       const meta = readSessionMeta();
-      if (!meta || (meta.kind !== "pdf" && meta.kind !== "xml")) return;
+      if (!meta || (meta.kind !== "pdf" && meta.kind !== "xml" && meta.kind !== "alphatex")) return;
       restoreRef.current = meta;
       setRestoreReq((n) => n + 1);
     } catch (err) { console.warn("session restore skipped:", err); }
@@ -686,6 +695,9 @@ export default function TabDecoderPro() {
             const c = buildChart(tokens, { systemShifts: sh });
             setChart({ ...c, tokens, pages, fileName: meta.filename || "restored.pdf" });
           } finally { setPdfBusy(false); }
+        } else if (meta.kind === "alphatex") {
+          const tex = alphaTexFromBytes(bytes);
+          if (tex != null) { setMode("xml"); setXmlScore(null); setXmlErr(""); setTexDoc({ name: meta.filename || "restored.alphatex", text: tex }); setXmlName(meta.filename || ""); }
         } else {
           setMode("xml"); setXmlErr(""); setXmlScore(null); setXmlBusy(true); clearSel();
           try {
@@ -705,7 +717,7 @@ export default function TabDecoderPro() {
 
   const startFresh = async () => {
     try { await clearSession(); } catch (_) {}
-    setChart(null); setXmlScore(null); setXmlName(""); setMode("manual"); clearSel(); setRestored(false); setKeyOverride("");
+    setChart(null); setXmlScore(null); setTexDoc(null); setXmlName(""); setMode("manual"); clearSel(); setRestored(false); setKeyOverride("");
   };
 
   const pickChord = (key, e) => { setSelKey(key); setSelFrets(e.frets || null); setSelMidis(e.midis || null); };
@@ -893,10 +905,10 @@ export default function TabDecoderPro() {
                 <input ref={xmlRef} type="file" onChange={onXml} style={{ display: "none" }} />
                 <button onClick={() => xmlRef.current && xmlRef.current.click()} disabled={xmlBusy}
                   style={{ width: "100%", background: C.bg, border: `1px dashed ${C.border}`, color: C.amber, borderRadius: 10, padding: "22px 12px", fontSize: 14, cursor: xmlBusy ? "default" : "pointer", fontFamily: "'IBM Plex Mono', monospace" }}>
-                  {xmlBusy ? "parsing…" : "⬆  Upload a MusicXML, Guitar Pro or Power Tab file"}
+                  {xmlBusy ? "parsing…" : "⬆  Upload a MusicXML, Guitar Pro, Power Tab or AlphaTex file"}
                 </button>
                 <div style={{ fontSize: 11, color: C.dim, marginTop: 8, lineHeight: 1.6 }}>
-                  Reads <b>real</b> time signature, tuning &amp; rhythm straight from the file — no geometry guessing. Native: <b>MusicXML</b>, Guitar Pro <b>.gp</b> (7/8) / <b>.gpx</b> (6) / <b>.gp3 / .gp4 / .gp5</b>, and Power Tab <b>.ptb</b>.
+                  Reads <b>real</b> time signature, tuning &amp; rhythm straight from the file — no geometry guessing. Native: <b>MusicXML</b>, Guitar Pro <b>.gp</b> (7/8) / <b>.gpx</b> (6) / <b>.gp3 / .gp4 / .gp5</b>, and Power Tab <b>.ptb</b>. A saved <b>.alphatex</b> tab (this app's <b>AlphaTex (tab)</b> export) opens straight in the tab viewer.
                 </div>
                 {xmlErr && <div style={{ marginTop: 10, color: C.red, fontSize: 12 }}>{xmlErr}</div>}
                 {xmlScore && xmlScore.parts && xmlScore.parts.length > 1 && (
@@ -906,6 +918,12 @@ export default function TabDecoderPro() {
                       <button key={p.index} onClick={() => selectPart(p.index)} title={`chart the "${p.name}" part`}
                         style={{ ...chip(C), padding: "3px 9px", borderColor: xmlScore.partIndex === p.index ? C.amber : C.border, color: xmlScore.partIndex === p.index ? C.amber : C.dim }}>{p.name}</button>
                     ))}
+                  </div>
+                )}
+                {texDoc && !xmlScore && (
+                  <div style={{ marginTop: 12 }}>
+                    <SectionLabel C={C}>TAB · {texDoc.name}</SectionLabel>
+                    <TabView tex={texDoc.text} title={texDoc.name} C={C} />
                   </div>
                 )}
                 {xmlScore && (
@@ -997,8 +1015,8 @@ export default function TabDecoderPro() {
  * the same shape, so the renderer, editor and exporters are identical. Edits are
  * lifted to the parent as an `overrides` map ("<bar>.<beat>" -> symbol) so they
  * survive view/transpose changes and feed straight into export. */
-function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, selKey, onPick, keyOverride, setKeyOverride, autoSimplify = true }) {
-  const [view, setView] = useState("chart");
+function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, selKey, onPick, keyOverride, setKeyOverride, autoSimplify = true, defaultView = "chart" }) {
+  const [view, setView] = useState(defaultView);
   const [editMode, setEditMode] = useState(false);
   const [editKey, setEditKey] = useState("");
   const [draft, setDraft] = useState("");
@@ -1033,6 +1051,13 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   const simp = useMemo(() => (simplify ? simplifyScore(score, useSharp) : score), [simplify, score, useSharp]);
   const base = useMemo(() => (arrange === "off" ? simp : arrangeScore(simp, arrange)), [simp, arrange]);
   const tscore = useMemo(() => transposeScore(base, semis, useSharp), [base, semis, useSharp]);
+  // The TAB (Tab view + AlphaTex export) skips Simplify: Simplify replaces a melodic line with one
+  // inferred chord per bar, which is right for a chord chart and wrong for a tab — a tab must show
+  // the notes that are actually played. Arrange and transpose still apply.
+  const tabScore = useMemo(() => {
+    if (!simplify) return tscore;
+    return transposeScore(arrange === "off" ? score : arrangeScore(score, arrange), semis, useSharp);
+  }, [simplify, tscore, score, arrange, semis, useSharp]);
   /* KEY — detected, but CORRECTABLE. The analysis is very good and still not
    * infallible (a ♭VII rock tune, a modal vamp, an audio decode with a noisy
    * chord list), and the key drives the roman numerals AND every export's key
@@ -1134,6 +1159,14 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   };
   const bumpBpm = (d) => setBpm((b) => Math.max(40, Math.min(240, b + d)));
   const symOf = (bar, e) => { const v = overrides[`${bar.number}.${e.beat}`]; return v != null ? v : e.symbol; };
+  // The tab as AlphaTex: what the Tab view draws AND what the AlphaTex export writes, so the two can
+  // never disagree. Computed only while one of them is showing (it fingers every note).
+  const wantTex = view === "tab" || (exp && exp.fmt === "alphatex");
+  const tabTex = useMemo(() => {
+    if (!wantTex) return { text: "", error: "" };
+    try { return { text: scoreToAlphaTex(tabScore, { title, tempo: bpm, trackName: title, key }), error: "" }; }
+    catch (e) { return { text: "", error: e && e.message ? e.message : "AlphaTex export failed" }; }
+  }, [wantTex, tabScore, title, bpm, key]);
   const doExport = (fmt) => {
     const opts = { overrides, title, key, useSharp, tempo: bpm };
     if (fmt === "midi") { setExp({ fmt, bytes: scoreToMidi(tscore, opts) }); setCopied(false); setDownloaded(false); return; } // binary
@@ -1142,7 +1175,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
       : fmt === "csmpn" ? scoreToCSMPN(tscore, opts)
       : fmt === "csml" ? scoreToCSML(tscore, opts)
       : fmt === "music" ? scoreToMusicPrompt(tscore, opts).command
-      : fmt === "alphatex" ? (() => { try { return scoreToAlphaTex(tscore, { title, tempo: bpm, trackName: title }); } catch (e) { return `⚠ ${e && e.message ? e.message : "AlphaTex export failed"}`; } })()
+      : fmt === "alphatex" ? (tabTex.error ? `⚠ ${tabTex.error}` : tabTex.text)
       : scoreToChordPro(tscore, opts);
     setExp({ fmt, text }); setCopied(false); setDownloaded(false);
   };
@@ -1216,7 +1249,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
         </div>
       )}
       <div className="no-print" style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
-        {[["chart", "Chart"], ["grid", "Grid"]].map(([v, lbl]) => (
+        {[["chart", "Chart"], ["grid", "Grid"], ["tab", "Tab"]].map(([v, lbl]) => (
           <button key={v} onClick={() => setView(v)} style={{ ...chip(C), padding: "3px 9px", borderColor: view === v ? C.amber : C.border, color: view === v ? C.amber : C.dim }}>{lbl}</button>
         ))}
         <button onClick={() => { setEditMode((m) => !m); setEditKey(""); }} disabled={view !== "chart"}
@@ -1279,7 +1312,14 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
 
       {autoSimplify && melodic && !simplify && <MelodicNudge C={C} onSimplify={() => setSimplify(true)} />}
 
-      {view === "chart"
+      {view === "tab"
+        ? (tabTex.error
+            ? <div style={{ fontSize: 12, color: C.dim, padding: "10px 4px" }}>{tabTex.error}</div>
+            : <>
+                {simplify && <div style={{ fontSize: 11, color: C.dim, marginBottom: 6 }}>The tab shows every note as written — <b>1 chord/bar</b> only simplifies the Chart and Grid views.</div>}
+                <TabView tex={tabTex.text} title={title} C={C} />
+              </>)
+        : view === "chart"
         ? <LeadSheetView score={tscore} C={C} overrides={overrides} setOverrides={setOverrides} editMode={editMode}
             editKey={editKey} setEditKey={setEditKey} draft={draft} setDraft={setDraft} selKey={selKey}
             playKey={playKey} showRoman={showRoman} musicKey={key} onPick={onPick} symOf={symOf} />
@@ -1428,6 +1468,73 @@ function StringShiftPanel({ systems, shifts, onBump, C }) {
   );
 }
 
+/* TabView — draws an AlphaTex tab as notation + tablature and plays it (alphaTab, vendored
+ * same-origin; see tab-view.js). Browser-only glue: the renderer is window.TTP_TAB_VIEW, loaded
+ * on first use (~2.4 MB once, then cached). `tex` changes re-render in place; unmount frees it.
+ * The paper is white on purpose — notation is drawn black, and it reads like a printed page. */
+function TabView({ tex, title, C }) {
+  const host = useRef(null), scroller = useRef(null), ctrl = useRef(null), root = useRef(null);
+  const [st, setSt] = useState({ phase: "loading" });
+  const [pl, setPl] = useState({ ready: false, playing: false, posSec: 0, endSec: 0 });
+  const [profile, setProfile] = useState("score-tab");
+  const [speed, setSpeed] = useState(1);
+  const lib = typeof window !== "undefined" ? window.TTP_TAB_VIEW : null;
+  const latest = useRef({ tex, profile, speed });
+  latest.current = { tex, profile, speed };
+  useEffect(() => {
+    if (!lib || !host.current) return undefined;
+    let dead = false;
+    const first = latest.current;
+    lib.mount(host.current, first.tex, {
+      profile: first.profile, scale: typeof window !== "undefined" && window.innerWidth < 600 ? 0.8 : 1, scrollElement: scroller.current,
+      onState: (x) => { if (!dead) setSt(x); }, onPlayer: (x) => { if (!dead) setPl(x); },
+    }).then((c) => {
+      if (dead) { c.destroy(); return; }
+      ctrl.current = c;
+      // anything that changed while the renderer was loading
+      const now = latest.current;
+      if (now.tex !== first.tex) c.setTex(now.tex);
+      if (now.profile !== first.profile) c.setProfile(now.profile);
+      if (now.speed !== 1) c.setSpeed(now.speed);
+    }).catch(() => { /* reported via onState */ });
+    return () => { dead = true; if (ctrl.current) { ctrl.current.destroy(); ctrl.current = null; } };
+  }, [lib]);
+  // On a phone the viewer often opens below the fold (the chart's toolbar fills the screen): bring it up.
+  useEffect(() => {
+    try { const r = root.current; if (r && r.getBoundingClientRect().top > window.innerHeight * 0.6) r.scrollIntoView({ behavior: "smooth", block: "start" }); } catch (_) { /* old browser */ }
+  }, []);
+  useEffect(() => { if (ctrl.current) ctrl.current.setTex(tex); }, [tex]);
+  useEffect(() => { if (ctrl.current) ctrl.current.setProfile(profile); }, [profile]);
+  useEffect(() => { if (ctrl.current) ctrl.current.setSpeed(speed); }, [speed]);
+  if (!lib) return <div style={{ fontSize: 12, color: C.dim, padding: "10px 4px" }}>The tab viewer isn't loaded on this build (tab-view.js). The <b>AlphaTex (tab)</b> export still works.</div>;
+  const mmss = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+  const status = st.phase === "loading" ? "loading the tab renderer…"
+    : st.phase === "rendering" ? "drawing the tab…"
+    : st.phase === "error" ? "⚠ " + (st.message || "the tab could not be drawn")
+    : `${st.bars || 0} bars drawn`;
+  const btn = (on) => ({ ...chip(C), padding: "4px 11px", borderColor: on ? C.amber : C.border, color: on ? C.amber : C.dim });
+  return (
+    <div ref={root} data-tab-view="" style={{ marginTop: 4 }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginBottom: 8 }}>
+        <button onClick={() => ctrl.current && ctrl.current.playPause()} disabled={!pl.ready} title={pl.ready ? "play the tab (tap a note to start there)" : "loading the sound font…"}
+          style={{ ...btn(pl.playing), opacity: pl.ready ? 1 : 0.5 }}>{pl.playing ? "⏸ Pause" : "▶ Play"}</button>
+        <button onClick={() => ctrl.current && ctrl.current.stop()} disabled={!pl.ready} style={{ ...btn(false), opacity: pl.ready ? 1 : 0.5 }}>■</button>
+        <select value={speed} onChange={(e) => setSpeed(+e.target.value)} title="playback speed" style={{ ...chip(C), padding: "3px 6px" }}>
+          {[0.5, 0.75, 1, 1.25].map((x) => <option key={x} value={x}>{Math.round(x * 100)}%</option>)}
+        </select>
+        <span style={{ fontSize: 11, color: C.dim }}>{pl.endSec ? `${mmss(pl.posSec)} / ${mmss(pl.endSec)}` : ""}</span>
+        <span style={{ flex: 1 }} />
+        <button onClick={() => setProfile("score-tab")} style={btn(profile === "score-tab")}>Notation + tab</button>
+        <button onClick={() => setProfile("tab")} style={btn(profile === "tab")}>Tab only</button>
+      </div>
+      <div style={{ fontSize: 11, color: st.phase === "error" ? C.red : C.dim, marginBottom: 6 }}>{status}{title ? ` · ${title}` : ""}</div>
+      <div ref={scroller} className="tdp-scroll" style={{ background: "#fff", borderRadius: 8, border: `1px solid ${C.border}`, maxHeight: "70vh", overflow: "auto", WebkitOverflowScrolling: "touch" }}>
+        <div ref={host} style={{ minHeight: 120 }} />
+      </div>
+    </div>
+  );
+}
+
 function GridView({ score, C, symOf, selKey, onPick }) {
   return (
     <>
@@ -1514,7 +1621,7 @@ function ExportPanel({ exp, setExp, C, bpm, semis, copy, download, copied, downl
       {exp.fmt === "musicxml" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>Save as <b>.musicxml</b> and open in MuseScore / Guitar Pro — carries chord symbols + notes + meter. Round-trips back into this app.</div>}
       {exp.fmt === "csmpn" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}><b>Chord Sheet Maker Pro</b>'s native fake-book source (one chord = one bar; <code>_</code> splits a bar) — also carries the real fingering (<code>{"{tab}"}</code>) and decoded strum rhythm (<code>{"{hybrid}"}</code>). Paste into Pro's editor, or use <b>→ Chord Sheet Maker Pro</b> to send it straight there.</div>}
       {exp.fmt === "csml" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}><b>ChordSlashML</b> — Pro's beat-slotted notation (<code>{"|"}</code> measures, <code>_</code> holds, <code>.</code> rests). Paste into Pro's <b>ChordSlashML</b> live editor.</div>}
-      {exp.fmt === "alphatex" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6, lineHeight: 1.6 }}><b>AlphaTex</b> — alphaTab's tab text: every note with its <b>string</b> and fret, the tuning, meter, sections, and the techniques the file carried (hammer-ons, slides, bends with their size, vibrato, palm mutes, harmonics…). Paste it into any alphaTab viewer (e.g. the alphaTex playground at alphatab.net) to see and hear the tab. Notes without a written tab (audio, ML or a transposed chart) get an <b>inferred</b> fingering — playable, not necessarily the player's.</div>}
+      {exp.fmt === "alphatex" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6, lineHeight: 1.6 }}><b>AlphaTex</b> — alphaTab's tab text: every note with its <b>string</b> and fret, the tuning, meter, sections, and the techniques the file carried (hammer-ons, slides, bends with their size, vibrato, palm mutes, harmonics…). To see and hear it, use the <b>Tab</b> view above, or upload the saved <b>.alphatex</b> in <b>MusicXML / GP</b> mode; any alphaTab viewer reads it too. Notes without a written tab (audio, ML or a transposed chart) get an <b>inferred</b> fingering — playable, not necessarily the player's.</div>}
       {exp.fmt === "music" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>A ready-to-run <b>ListenHub / Mureka</b> command (<code>@marswave/listenhub-cli</code>, <code>npm i -g</code>, Node ≥ 20) that turns this chart's key / tempo / meter / progression into a prompt for a fresh AI track. The CLI needs Node + login, so it runs in <b>your</b> terminal — <b>copy</b> it, then <code>listenhub auth login</code> once and paste. The <b>recognize → generate</b> half of the pipeline.</div>}
     </div>
   );
@@ -2672,7 +2779,7 @@ function AudioImport({ C, useSharp }) {
           </div>
           <ChartPanel score={gtrScore} title={(name || "Guitar") + " · tab"}
             meta={`${gtrScore.bars.length} bars · ${gtrNotes.length} notes · from the guitar ML model`}
-            C={C} useSharp={useSharp} overrides={gtrOvr} setOverrides={setGtrOvr} selKey="" onPick={() => {}} autoSimplify={false} />
+            C={C} useSharp={useSharp} overrides={gtrOvr} setOverrides={setGtrOvr} selKey="" onPick={() => {}} autoSimplify={false} defaultView="tab" />
         </div>
       )}
 

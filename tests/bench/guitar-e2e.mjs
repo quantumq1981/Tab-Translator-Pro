@@ -1,7 +1,7 @@
 /* Guitar → Tab end-to-end: the REAL app, REAL guitar worker, REAL 25 MB model, REAL ONNX Runtime
  * Web 1.23.2 (jsDelivr) — no stubs. Dev-only, Node + headless Chromium.
  *
- *   node bench/guitar-e2e.mjs --deps <dir> --gs <guitarset_extract.py dir> [--track 00_BN1-129-Eb_comp] [--ua "<UA>"] [--tex out.alphatex]
+ *   node bench/guitar-e2e.mjs --deps <dir> --gs <guitarset_extract.py dir> [--track 00_BN1-129-Eb_comp] [--ua "<UA>"] [--tex out.alphatex] [--shot tab.png]
  *
  * 1. Serves the repo, boots index.html (only the boot CDNs the sandbox blocks are served
  *    locally — React/Babel from --deps, same recipe as scnet-e2e.mjs), opens Audio mode, uploads
@@ -91,6 +91,11 @@ clearInterval(tick);
 // AlphaTex from the UI's own export button (the chart for this track)
 // scoped to the tab chart's own panel: the audio chord chart renders after it and has the same button
 const panel = page.getByText(/notes from the guitar model/).locator("xpath=..");
+// the tab chart opens on the Tab view: alphaTab draws it in the page
+const tabView = { status: null };
+try { await panel.locator("[data-tab-view]").getByText(/bars drawn/).waitFor({ timeout: 120000 }); tabView.status = await panel.locator("[data-tab-view]").getByText(/bars drawn/).innerText(); }
+catch (e) { tabView.status = "not drawn: " + e.message.split("\n")[0]; }
+if (arg("shot")) await panel.locator("[data-tab-view]").screenshot({ path: arg("shot") }).catch(() => {});
 await panel.getByRole("button", { name: "AlphaTex (tab)" }).click();
 const tex = await panel.locator("textarea").inputValue();
 if (arg("tex")) fs.writeFileSync(arg("tex"), tex);
@@ -120,6 +125,7 @@ console.log(JSON.stringify({
   ortFiles: [...new Set(net.map((u) => u.replace(/^https:\/\/cdn\.jsdelivr\.net\/npm\//, "")))], guitarFiles: [...new Set(served)],
   notes: est.length, annotated: ref.length, noteF1: +f1(tp).toFixed(1), tabF1: +f1(tpTab).toFixed(1),
   alphaTex: { bars: atBars, notes: atNotes, parseError: atErr },
+  tabView,
 }, null, 1));
 const bad = logs.filter((l) => /error|fail/i.test(l)); if (bad.length) console.log("console:", bad.slice(0, 8).join("\n"));
 await browser.close(); server.close();
