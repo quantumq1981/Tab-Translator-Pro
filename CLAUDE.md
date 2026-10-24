@@ -1671,6 +1671,20 @@ karaoke/azimuth trick, done right in the spectral domain, **zero deps / no model
   E4** → `extractCenter` keeps A (chroma pc9 > 0.9) and **drops the panned E** (pc4 < 0.15),
   and a purely centered signal reconstructs ~unchanged (energy ratio ~1.0, proves the ISTFT
   normalisation). Decode/playback stay device-only.
+- **Edge-burst bug, fixed 2026-10-24.** Frames started at sample 0, so the first/last samples sat
+  under only a window's near-zero tip and the overlap-add divided by ~1e-8. With the app's
+  `minFreq: 100` high-pass that amplified the masked spectrum's leakage into a burst at the START of
+  every isolated file: a 0.4-amplitude 110 Hz tone peaked at **1429** (44.1 kHz) / **41.7** (16 kHz),
+  ~3× a guitar recording's whole energy. Frames now start `N−hop` before 0 and run past the end (same
+  grid, interior unchanged; every sample gets the full overlap). The old identity test only looked at
+  the middle of the signal; the new one checks the edges at 110/220/440 Hz with the high-pass on.
+- **Not for Guitar → Tab (measured 2026-10-24, 30 GuitarSet tracks, the shipped int8 CRNN, fixed
+  engine):** note F50 raw **83.27** → isolated **82.72** with the guitar centred, **82.72** with it
+  panned (L 1 / R 0.35, where isolation also throws away 62 % of the guitar's energy). Meanwhile
+  `harmonicClarity` went UP (0.676 → 0.683), so the **A/B clarity number does not predict tab
+  accuracy** — it measures chord-shaped chroma, not whether notes survive. In a real mix it is worse
+  than this test: isolation keeps the centred vocal/bass/kick and drops a panned guitar. For tab, use
+  the raw recording or a separated guitar ("other") stem, with Isolate OFF.
 - **HONEST LIMIT:** center extraction is an approximation — **centered non-vocal content
   (kick/snare/bass) leaks in**, and a mono file is a near-passthrough. True separation from
   any mix is an ML model (Demucs/MDX-class) = a Wave-4 bet against the iOS/Pages no-WASM-

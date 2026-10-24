@@ -834,6 +834,21 @@ expect(eng.transcribeChords(new Float32Array(SR), SR).length === 0, "silence →
   const id = eng.extractCenter(A, A, SR);
   let eIn = 0, eOut = 0; for (let i = 4096; i < 8192; i++) { eIn += A[i] * A[i]; eOut += id[i] * id[i]; }
   expect(eOut / eIn > 0.9 && eOut / eIn < 1.1, `centered-only signal reconstructs ~unchanged, energy ratio ${(eOut / eIn).toFixed(3)}`);
+  // …at the EDGES too, with the app's high-pass on (the UI calls it with minFreq 100). Frames used to
+  // start at sample 0, so the first/last samples sat under a window's near-zero tip and the overlap-add
+  // divided the masked spectrum by ~1e-8 — a burst at the start of every isolated file (2× the input on
+  // this tone, ~3× a guitar recording's whole energy).
+  // Worst near the cutoff — guitar territory (A2 = 110 Hz: the old code peaked at 1429 here at 44.1 kHz).
+  const peak = (a, i0, i1) => { let m = 0; for (let i = i0; i < i1; i++) m = Math.max(m, Math.abs(a[i])); return m; };
+  const edge = [110, 220, 440].map((f) => {
+    const x = tone(f, 1.2), hp = eng.extractCenter(x, x, SR, { minFreq: 100 });
+    let e = 0, e0 = 0; for (let i = 0; i < x.length; i++) { e += hp[i] * hp[i]; e0 += x[i] * x[i]; }
+    return { f, head: peak(hp, 0, 2048), tail: peak(hp, hp.length - 2048, hp.length), ratio: e / e0 };
+  });
+  // (110 Hz keeps ~0.84 of its energy: the high-pass legitimately trims the low side of its spectral
+  // main lobe. The check is "no gain" everywhere, and ~unchanged well above the cutoff.)
+  expect(edge.every((r) => r.head < 0.4 * 1.15 && r.tail < 0.4 * 1.15 && r.ratio < 1.05) && edge.filter((r) => r.f >= 220).every((r) => r.ratio > 0.95),
+    `no edge burst (input peak 0.4): ${edge.map((r) => `${r.f} Hz head ${r.head.toFixed(2)} tail ${r.tail.toFixed(2)} energy ×${r.ratio.toFixed(2)}`).join(" · ")}`);
 }
 
 /* ---- harmonicClarity + the A/B (mix vs isolated) --------------------------
