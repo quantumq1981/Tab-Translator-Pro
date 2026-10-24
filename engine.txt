@@ -4172,8 +4172,13 @@ function extractCenter(left, right, sampleRate, opts = {}) {
   const out = new Float64Array(len), wsum = new Float64Array(len);
   const lr = new Float64Array(N), li = new Float64Array(N), rr = new Float64Array(N), ri = new Float64Array(N);
   const eps = 1e-9;
-  for (let s = 0; s + N <= len + hop; s += hop) {
-    for (let i = 0; i < N; i++) { const p = s + i; const w = win[i]; lr[i] = p < len ? (left[p] || 0) * w : 0; li[i] = 0; rr[i] = p < len ? (right[p] || 0) * w : 0; ri[i] = 0; }
+  // Frames start N−hop before sample 0 and run past the end, so EVERY sample sits under the full
+  // 4-frame overlap and wsum is constant. Starting at 0 left the first/last samples under only a
+  // window's near-zero tip: dividing by that tiny wsum amplified the masked spectrum's leakage into a
+  // burst (2× the input on a sine with minFreq on; ~3× a guitar track's whole energy). Same frame
+  // grid, so the interior is unchanged.
+  for (let s = -(N - hop); s < len; s += hop) {
+    for (let i = 0; i < N; i++) { const p = s + i; const w = win[i]; const inb = p >= 0 && p < len; lr[i] = inb ? (left[p] || 0) * w : 0; li[i] = 0; rr[i] = inb ? (right[p] || 0) * w : 0; ri[i] = 0; }
     _fft(lr, li); _fft(rr, ri);
     for (let k = 0; k < N; k++) {
       const f = (Math.min(k, N - k) * sampleRate) / N;           // fold to real frequency
@@ -4188,7 +4193,7 @@ function extractCenter(left, right, sampleRate, opts = {}) {
       lr[k] = g * (lr[k] + rr[k]) * 0.5; li[k] = g * (li[k] + ri[k]) * 0.5;     // weighted mid
     }
     _ifft(lr, li);
-    for (let i = 0; i < N; i++) { const p = s + i; if (p < len) { out[p] += lr[i] * win[i]; wsum[p] += win[i] * win[i]; } }
+    for (let i = 0; i < N; i++) { const p = s + i; if (p >= 0 && p < len) { out[p] += lr[i] * win[i]; wsum[p] += win[i] * win[i]; } }
   }
   const res = new Float32Array(len);
   for (let i = 0; i < len; i++) res[i] = wsum[i] > eps ? out[i] / wsum[i] : 0;
