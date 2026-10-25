@@ -3228,7 +3228,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   // the tab chart must not auto-Simplify (a guitar line is "melodic" → one chord per bar → notes lost
   // from the AlphaTex export: the real-app run exported 87 of 117 notes before this) nor share the
   // chord chart's edits
-  expect(/autoSimplify && isMelodicScore\(score\)/.test(ui) && /score=\{gtrScore\}[\s\S]{0,400}overrides=\{gtrOvr\}[\s\S]{0,120}autoSimplify=\{false\}/.test(ui), "the guitar tab chart keeps every note (no auto-Simplify) and has its own overrides");
+  expect(/autoSimplify && \(isMelodicScore\(score\) \|\| !!score\.merged\)/.test(ui) && /score=\{gtrScore\}[\s\S]{0,400}overrides=\{gtrOvr\}[\s\S]{0,120}autoSimplify=\{false\}/.test(ui), "the guitar tab chart keeps every note (no auto-Simplify) and has its own overrides");
   // the core, driven with a fake ORT at the import seam: one session, heads mapped, released once
   const gcore = await import(path.join(repo, "guitar-model-core.js") + "?t=" + Date.now());
   let created = 0, released = 0, seen = null;
@@ -3284,7 +3284,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   expect(/PlayerMode\.EnabledSynthesizer/.test(tv) && /sonivox\.sf3/.test(tv) && /Bravura\.woff2/.test(tv) && /StaveProfile\.Tab/.test(tv) && /api\.destroy\(\)/.test(tv), "tab-view.js: synth player with the vendored sound font, the vendored font, tab-only profile, destroy");
   expect(/<script type="module" src="\.\/tab-view\.js"><\/script>/.test(html) && /cp tab-view\.js _site\//.test(pages) && /cp -r vendor\/alphatab-1\.8\.4\/\. _site\/vendor\/alphatab-1\.8\.4\//.test(pages) && /tab-view\.js\?v=\$\{BUILD\}/.test(pages), "index.html loads tab-view.js; pages.yml ships it + the vendored alphaTab and stamps it");
   expect(/\["tab", "Tab"\]/.test(ui) && /view === "tab"/.test(ui) && /<TabView tex=\{tabTex\.text\}/.test(ui) && /fmt === "alphatex" \? \(tabTex\.error/.test(ui), "ChartPanel has a Tab view, drawn from the SAME AlphaTex the export writes");
-  expect(/if \(!simplify\) return tscore;\s*return respellScore\(transposeScore\(arrange === "off" \? score : arrangeScore\(score, arrange\), semis, useSharp\), vocab/.test(ui), "the tab (view + AlphaTex export) skips Simplify — a tab shows the notes played, not one inferred chord per bar");
+  expect(/if \(!simplify\) return tscore;\s*const t = respellScore\(transposeScore\(arrange === "off" \? score : arrangeScore\(score, arrange\), semis, useSharp\), vocab/.test(ui), "the tab (view + AlphaTex export) skips Simplify — a tab shows the notes played, not one inferred chord per bar");
   expect(/defaultView="tab"/.test(ui) && /const tex = alphaTexFromBytes\(bytes\);\s*if \(tex != null\)/.test(ui) && /meta\.kind === "alphatex"/.test(ui) && /<TabView tex=\{texDoc\.text\}/.test(ui), "the guitar tab opens on the Tab view; a saved .alphatex upload (and its session restore) opens in the viewer");
 }
 
@@ -3392,6 +3392,82 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   expect(/s\.src = "\.\/js\/svguitar\.umd\.js"/.test(ui) && !/cdn[^"]*svguitar/i.test(ui) && /fetch\("data\/chords\.json"\)/.test(ui) && /_chordDictPromise = null; throw err/.test(ui), "UI: SVGuitar from the bundled local UMD (no CDN), chords.json fetched once + cached, retry after a failed fetch");
   expect(/onVoicings=\{setVoicingChoices\}/.test(ui) && /<ChordVoicingModal /.test(ui) && /chordVoicings\(dict, cur\.symbol, \{ played: cur\.frets \}\)/.test(ui) && /\["fingers", "Fingers"\], \["intervals", "Intervals"\]/.test(ui), "ChartPanel: tapping a lead-sheet chord / grid bar opens the voicing modal (Fingers / Intervals)");
   expect(/cp -r js _site\//.test(pages) && /cp data\/chords\.json data\/NOTICE _site\/data\//.test(pages), "pages.yml ships js/ and data/chords.json");
+}
+
+/* Muscriptor sheets zip + MIDI import + Harmony reading + key-aware spelling (2026-10-25).
+ * Fixture: the owner's real Muscriptor v0.4 output for "Saddle Up" (score.mid + score.musicxml
+ * from <song>_sheets.zip, STORED like Muscriptor writes it; the PDFs dropped). */
+{
+  const zip = new Uint8Array(fx("muscriptor-saddle-up_sheets.zip"));
+  const bar = (sc, n = 16) => sc.bars.slice(0, n).map((b) => b.events.map((e) => e.symbol).join("_") || "·").join(" | ");
+  const chart = (sc) => { const r = eng.respellScore(sc.merged ? eng.simplifyScore(sc, true) : sc, "chart", { useSharp: true }); const k = eng.analyzeKey(r); return { k, sc: eng.spellScoreForKey(r, k) }; };
+  const sc = await eng.parseGuitarProOrXML(zip, "Saddle_Up_sheets.zip", true);
+  expect(sc.source === "musicxml" && sc.partIndex === eng.HARMONY_PART && sc.merged && sc.bars.length === 31 && sc.tempo === 67 && sc.timeSig.join("/") === "4/4" && typeof sc._xml === "string",
+    `a Muscriptor sheets zip opens its score.musicxml on the Harmony reading (31 bars, ♩=67, 4/4) — got ${sc.source} part ${sc.partIndex} ${sc.bars.length} bars`);
+  expect(sc.parts.length === 5 && sc.mergedParts.length === 3 && !sc.mergedParts.some((n) => /voice|drum|percussion/i.test(n)),
+    `Harmony reads piano + bass + guitar, leaving out voice and drums (${sc.mergedParts.join(" · ")})`);
+  const { k, sc: shown } = chart(sc);
+  expect(eng.keyNameForKey(k) === "Fm" && bar(shown, 8) === "Fm9 | Bbm9 | Fm7 | Bbm7 | Eb/F | Bbm7 | Db | Bb7/Ab",
+    `Saddle Up Harmony, Pro names, spelled for F minor: ${eng.keyNameForKey(k)} · ${bar(shown, 8)}`);
+  expect(!/C#|G#|D#|A#/.test(bar(shown, 31)), "spelled for 4-flat F minor: no C#/G#/D#/A# roots or basses anywhere in the chart");
+  const p0 = await eng.parseGuitarProOrXML(zip, "x.zip", true, 0);
+  expect(p0.partIndex === 0 && !p0.merged && /piano/i.test(p0.parts[0].name), "asking for part 0 of the zip charts that one part (no merge)");
+  const re = eng.parseMusicXML(sc._xml, true, eng.HARMONY_PART);
+  expect(bar(re, 31) === bar(sc, 31), "re-parsing the stored _xml at HARMONY_PART reproduces the zip's reading (part switch / ♯♭ / restore)");
+  // the zip's MIDI: same song, independent importer → same harmony (bars cut in ticks, real note lengths)
+  const ent = eng._zipEntries(zip).find((e) => e.name === "score.mid");
+  const mid = await eng._zipRead(zip, ent);
+  const m0 = eng.parseMidiFile(mid, true, 0);
+  expect(m0.source === "midi" && m0.parts.map((p) => p.name).join("|") === "electric piano|electric bass|distorted electric guitar|drums|voice" && m0.tempo === 67 && m0.timeSig.join("/") === "4/4" && m0.bars.length === 31,
+    `parseMidiFile reads Muscriptor's score.mid: 5 named tracks, ♩=67, no meter meta → 4/4, 31 bars (${m0.parts.map((p) => p.name).join("|")} ${m0.tempo} ${m0.bars.length})`);
+  expect(eng.parseMidiFile(mid, true, 3).bars.every((b) => !b.events.length), "the drum track (channel 10) carries no pitched events");
+  const mh = await eng.parseGuitarProOrXML(mid, "score.mid", true);
+  // MuseScore re-quantised the notes when it engraved the MusicXML, so a few late bars differ in
+  // rhythm detail; the two importers must still agree on the opening and on most of the song
+  const mBars = bar(chart(mh).sc, 31).split(" | "), xBars = bar(shown, 31).split(" | ");
+  const agree = mBars.filter((x, i) => x === xBars[i]).length;
+  expect(mh.partIndex === eng.HARMONY_PART && mh._midbuf && bar(chart(mh).sc, 16) === bar(shown, 16) && agree >= 25,
+    `a bare .mid lands on Harmony; its reading matches the MusicXML's on bars 1–16 and ${agree}/31 overall (${bar(chart(mh).sc, 10)})`);
+  // a DEFLATED zip of a single MusicXML (the common "zipped score" case): build one in-test
+  const xmlBytes = fx("sample.musicxml");
+  const comp = new Uint8Array(await new Response(new Response(xmlBytes).body.pipeThrough(new CompressionStream("deflate-raw"))).arrayBuffer());
+  const nm = new TextEncoder().encode("song/sample.musicxml");
+  const lh = new Uint8Array(30 + nm.length), cd = new Uint8Array(46 + nm.length), eo = new Uint8Array(22);
+  const lv = new DataView(lh.buffer), cv = new DataView(cd.buffer), ev = new DataView(eo.buffer);
+  lv.setUint32(0, 0x04034b50, true); lv.setUint16(8, 8, true); lv.setUint32(18, comp.length, true); lv.setUint32(22, xmlBytes.length, true); lv.setUint16(26, nm.length, true); lh.set(nm, 30);
+  cv.setUint32(0, 0x02014b50, true); cv.setUint16(10, 8, true); cv.setUint32(20, comp.length, true); cv.setUint32(24, xmlBytes.length, true); cv.setUint16(28, nm.length, true); cv.setUint32(42, 0, true); cd.set(nm, 46);
+  ev.setUint32(0, 0x06054b50, true); ev.setUint16(8, 1, true); ev.setUint16(10, 1, true); ev.setUint32(12, cd.length, true); ev.setUint32(16, lh.length + comp.length, true);
+  const dz = new Uint8Array(lh.length + comp.length + cd.length + eo.length); dz.set(lh, 0); dz.set(comp, lh.length); dz.set(cd, lh.length + comp.length); dz.set(eo, lh.length + comp.length + cd.length);
+  const zs = await eng.parseGuitarProOrXML(dz, "song.zip", true);
+  expect(zs.source === "musicxml" && zs.partIndex === 0 && bar(zs, 3) === "C_G | Am | F", `a deflated zip of a one-part MusicXML opens that part (${bar(zs, 3)})`);
+  const empty = new Uint8Array(22); new DataView(empty.buffer).setUint32(0, 0x06054b50, true);
+  let zerr = ""; try { await eng.parseScoreZip(empty); } catch (e) { zerr = e.message; }
+  expect(/no score/.test(zerr), `a zip with no score in it says so (${zerr})`);
+  // existing paths are untouched: a plain MusicXML still lands on part 0
+  const mp = eng.parseMusicXML(new TextDecoder().decode(fx("sample-multipart.musicxml")), true);
+  expect(mp.partIndex === 0 && !mp.merged && mp.parts.length === 2, "a plain multi-part MusicXML still opens on part 0 with its own parts list");
+  // key-aware spelling
+  const S1 = (sym, key) => eng.spellSymbolForKey(sym, eng.keyNoteNames(eng.parseKeyName(key)));
+  expect(S1("C#maj7", "Fm") === "Dbmaj7" && S1("Bbm7/G#", "Fm") === "Bbm7/Ab" && S1("Abm", "E") === "G#m" && S1("C#dim7", "Dm") === "C#dim7" && S1("D#7", "Eb") === "Eb7",
+    "spelled by scale degree: Dbmaj7 + /Ab in F minor, G#m in E, the leading tone C# in D minor, Eb7 in Eb");
+  expect(eng.keyNoteNames(eng.parseKeyName("C")).join(" ") === eng.NOTE_SHARP.join(" ") && S1("C6/9", "Fm") === "C6/9" && S1("N.C.", "Fm") === "N.C." && S1("—", "Fm") === "—",
+    "C major = the family table; a 6/9 suffix is not a bass; N.C. and — untouched");
+  expect(eng.keyNoteNames(eng.parseKeyName("G#m")).every((n) => !/x|bb|##/.test(n)), "no double accidental is ever written as a chord root (G# minor's F𝄪 falls back to G)");
+  const src = { bars: [{ number: 1, timeSig: [4, 4], events: [{ symbol: "C#maj7", midis: [61, 65, 68, 72] }] }] };
+  const out = eng.spellScoreForKey(src, eng.parseKeyName("Fm"));
+  expect(out.bars[0].events[0].symbol === "Dbmaj7" && src.bars[0].events[0].symbol === "C#maj7" && out.bars[0].events[0].midis === src.bars[0].events[0].midis && eng.spellScoreForKey(src, null) === src,
+    "spellScoreForKey renames without mutating, keeps the notes, and is a no-op without a key");
+  const dbKey = eng.parseKeyName("Db"), dbScore = eng.spellScoreForKey({ timeSig: [4, 4], bars: [{ number: 1, timeSig: [4, 4], events: [{ symbol: "C#", beat: 0, durBeats: 4, qbeat: 0, qdur: 4, midis: [61, 65, 68] }] }] }, dbKey);
+  const csm = eng.scoreToCSMPN(dbScore, { key: dbKey, spellKey: true }), csm0 = eng.scoreToCSMPN(dbScore, { key: dbKey });
+  expect(/^Key: Db$/m.test(csm) && /\bDb\b/.test(csm.split("- Chart")[1]) && /^Key: C#$/m.test(csm0) && /^\{key: Db\}$/m.test(eng.scoreToChordPro(dbScore, { key: dbKey, spellKey: true })),
+    "exports write the key spelled like the chords when spellKey is set (Key: Db), and as before without it");
+  // UI contracts
+  const ui = fs.readFileSync(UI, "utf8");
+  expect(/selectPart\(HARMONY_PART\)/.test(ui) && /Harmony \(all pitched parts\)/.test(ui) && /prev\._midbuf\) next = parseMidiFile\(prev\._midbuf, sharp, idx\)/.test(ui) && /next\._midbuf = prev\._midbuf/.test(ui),
+    "UI: Harmony chip in the part picker; MIDI re-parse keeps its bytes for ♯♭ / part switch");
+  expect(/meta\.partIndex != null && meta\.partIndex !== sc\.partIndex/.test(ui), "restore re-applies a saved part only when it differs from where the file lands (a zip lands on Harmony)");
+  expect(/_usePref\(_SPELL_KEY, "key"/.test(ui) && /keySpelled \? spellScoreForKey\(nscore, key\) : nscore/.test(ui) && /spellKey: keySpelled/.test(ui) && /analyzeKeyCandidates\(nscore/.test(ui) && /isMelodicScore\(score\) \|\| !!score\.merged/.test(ui),
+    "UI: spelling for the key by default (after naming, key read from the unspelled chart); a Harmony reading simplifies to one chord per bar");
 }
 
 if (fails.length) {

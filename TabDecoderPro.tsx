@@ -249,6 +249,10 @@ import {
   chordVoicings,
   voicingToSVGuitar,
   chordSubstitutions,
+  HARMONY_PART,
+  parseMidiFile,
+  spellScoreForKey,
+  keyNameForKey,
 } from "./engine.tsx";
 
 async function extractTokens(buf) {
@@ -551,9 +555,10 @@ export default function TabDecoderPro() {
     if (prev._ptbbuf) next = parsePowerTab(prev._ptbbuf, sharp, idx);           // Power Tab .ptb
     else if (prev._gpxbuf) next = parseGPX(prev._gpxbuf, sharp, idx);            // GP6 .gpx
     else if (prev._gpbuf) next = parseGP345(prev._gpbuf, sharp, idx);            // GP3/4/5 binary
+    else if (prev._midbuf) next = parseMidiFile(prev._midbuf, sharp, idx);       // Standard MIDI File
     else if (prev._xml) next = prev.source === "gp" ? parseGPIF(prev._xml, sharp, idx) : parseMusicXML(prev._xml, sharp, idx);
     else return prev;
-    next._gpbuf = prev._gpbuf; next._xml = prev._xml; next._gpxbuf = prev._gpxbuf; next._ptbbuf = prev._ptbbuf; return next;
+    next._gpbuf = prev._gpbuf; next._xml = prev._xml; next._gpxbuf = prev._gpxbuf; next._ptbbuf = prev._ptbbuf; next._midbuf = prev._midbuf; return next;
   };
 
   // An uploaded AlphaTex file (`.alphatex`, e.g. one this app exported): shown in the tab viewer.
@@ -707,7 +712,7 @@ export default function TabDecoderPro() {
           setMode("xml"); setXmlErr(""); setXmlScore(null); setXmlBusy(true); clearSel();
           try {
             let sc = await parseScoreOffThread(bytes, meta.filename || "restored", sharp);
-            if (meta.partIndex) sc = _reparseScore(sc, sharp, meta.partIndex);
+            if (meta.partIndex != null && meta.partIndex !== sc.partIndex) sc = _reparseScore(sc, sharp, meta.partIndex);
             setXmlScore(sc); setXmlName(meta.filename || "restored");
           } finally { setXmlBusy(false); }
         }
@@ -910,15 +915,19 @@ export default function TabDecoderPro() {
                 <input ref={xmlRef} type="file" onChange={onXml} style={{ display: "none" }} />
                 <button onClick={() => xmlRef.current && xmlRef.current.click()} disabled={xmlBusy}
                   style={{ width: "100%", background: C.bg, border: `1px dashed ${C.border}`, color: C.amber, borderRadius: 10, padding: "22px 12px", fontSize: 14, cursor: xmlBusy ? "default" : "pointer", fontFamily: "'IBM Plex Mono', monospace" }}>
-                  {xmlBusy ? "parsing…" : "⬆  Upload a MusicXML, Guitar Pro, Power Tab or AlphaTex file"}
+                  {xmlBusy ? "parsing…" : "⬆  Upload a MusicXML, Guitar Pro, Power Tab, MIDI, zip or AlphaTex file"}
                 </button>
                 <div style={{ fontSize: 11, color: C.dim, marginTop: 8, lineHeight: 1.6 }}>
-                  Reads <b>real</b> time signature, tuning &amp; rhythm straight from the file — no geometry guessing. Native: <b>MusicXML</b>, Guitar Pro <b>.gp</b> (7/8) / <b>.gpx</b> (6) / <b>.gp3 / .gp4 / .gp5</b>, and Power Tab <b>.ptb</b>. A saved <b>.alphatex</b> tab (this app's <b>AlphaTex (tab)</b> export) opens straight in the tab viewer.
+                  Reads <b>real</b> time signature, tuning &amp; rhythm straight from the file — no geometry guessing. Native: <b>MusicXML</b>, Guitar Pro <b>.gp</b> (7/8) / <b>.gpx</b> (6) / <b>.gp3 / .gp4 / .gp5</b>, Power Tab <b>.ptb</b>, Standard MIDI <b>.mid</b>, and a <b>.zip</b> of a score (e.g. Muscriptor's <i>sheets</i> zip — every instrument is read together as <b>Harmony</b>; pick one part to chart it alone). A saved <b>.alphatex</b> tab (this app's <b>AlphaTex (tab)</b> export) opens straight in the tab viewer.
                 </div>
                 {xmlErr && <div style={{ marginTop: 10, color: C.red, fontSize: 12 }}>{xmlErr}</div>}
                 {xmlScore && xmlScore.parts && xmlScore.parts.length > 1 && (
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginTop: 12 }}>
                     <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim }}>PART</span>
+                    {(xmlScore.source === "musicxml" || xmlScore.source === "midi") && (
+                      <button onClick={() => selectPart(HARMONY_PART)} title={`read every pitched part together (voices and drums left out)${xmlScore.merged && xmlScore.mergedParts ? ": " + xmlScore.mergedParts.join(", ") : ""}`}
+                        style={{ ...chip(C), padding: "3px 9px", borderColor: xmlScore.partIndex === HARMONY_PART ? C.amber : C.border, color: xmlScore.partIndex === HARMONY_PART ? C.amber : C.dim }}>Harmony (all pitched parts)</button>
+                    )}
                     {xmlScore.parts.map((p) => (
                       <button key={p.index} onClick={() => selectPart(p.index)} title={`chart the "${p.name}" part`}
                         style={{ ...chip(C), padding: "3px 9px", borderColor: xmlScore.partIndex === p.index ? C.amber : C.border, color: xmlScore.partIndex === p.index ? C.amber : C.dim }}>{p.name}</button>
@@ -1051,7 +1060,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   const melodic = useMemo(() => isMelodicScore(score), [score]);
   // autoSimplify={false}: a chart whose notes ARE the content (the guitar tab) never collapses to
   // one chord per bar on its own — every note, and its string, must reach the export.
-  const [simplify, setSimplify] = useState(() => autoSimplify && isMelodicScore(score));
+  const [simplify, setSimplify] = useState(() => autoSimplify && (isMelodicScore(score) || !!score.merged));
   const [arrange, setArrange] = useState("off"); // off | block | quarters | eighths | shuffle
 
   const simp = useMemo(() => (simplify ? simplifyScore(score, useSharp) : score), [simplify, score, useSharp]);
@@ -1059,17 +1068,14 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   /* Chord NAMES follow the shared Chart / Basic / Full setting for every chart, not just audio
    * decodes: a PDF / Guitar Pro / MusicXML voicing C#-E-F#-G#-B over C# reads C#m11 in Chart
    * (the oracle's literal E6/9/C# in Full). Last in the chain, because transpose re-names from
-   * the notes. Display, exports, key analysis and the Pro handoff all read tscore. */
+   * the notes. Key analysis reads nscore; display, exports and the Pro handoff read tscore
+   * (nscore spelled for the key, below). */
   const [vocab, setVocab] = useChordVocab();
   const [sixNine, setSixNine] = useSixNine();
-  const tscore = useMemo(() => respellScore(transposeScore(base, semis, useSharp), vocab, { sixNine, useSharp }), [base, semis, useSharp, vocab, sixNine]);
+  const nscore = useMemo(() => respellScore(transposeScore(base, semis, useSharp), vocab, { sixNine, useSharp }), [base, semis, useSharp, vocab, sixNine]);
   // The TAB (Tab view + AlphaTex export) skips Simplify: Simplify replaces a melodic line with one
   // inferred chord per bar, which is right for a chord chart and wrong for a tab — a tab must show
   // the notes that are actually played. Arrange and transpose still apply.
-  const tabScore = useMemo(() => {
-    if (!simplify) return tscore;
-    return respellScore(transposeScore(arrange === "off" ? score : arrangeScore(score, arrange), semis, useSharp), vocab, { sixNine, useSharp });
-  }, [simplify, tscore, score, arrange, semis, useSharp, vocab, sixNine]);
   /* KEY — detected, but CORRECTABLE. The analysis is very good and still not
    * infallible (a ♭VII rock tune, a modal vamp, an audio decode with a noisy
    * chord list), and the key drives the roman numerals AND every export's key
@@ -1080,13 +1086,29 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   const [localKeyOv, setLocalKeyOv] = useState("");
   const keyOv = keyOverride !== undefined ? keyOverride : localKeyOv;
   const setKeyOv = setKeyOverride || setLocalKeyOv;
-  const keyCands = useMemo(() => analyzeKeyCandidates(tscore, { limit: 5 }), [tscore]);
+  const keyCands = useMemo(() => analyzeKeyCandidates(nscore, { limit: 5 }), [nscore]);
   const key = useMemo(() => {
     const manual = parseKeyName(keyOv);
     if (manual) return { tonic: (((manual.tonic + semis) % 12) + 12) % 12, mode: manual.mode, confidence: 1, manual: true };
     const c = keyCands[0];
     return c ? { tonic: c.tonic, mode: c.mode, confidence: c.confidence } : null;
   }, [keyOv, keyCands, semis]);
+  /* SPELLING — chord roots and slash basses spelled for the key (Dbmaj7 in F minor, G#m in E),
+   * the default; "family" keeps the family table (C# Eb F# Ab Bb). Only on the default ♯♭
+   * setting: an explicit Flats ♭ choice stays all-flat. Spelling only — the notes never move,
+   * and the key analysis above reads the unspelled names (it works in pitch classes). */
+  const [spelling, setSpelling] = useSpellingPref();
+  const keySpelled = spelling === "key" && useSharp && !!key;
+  const tscore = useMemo(() => (keySpelled ? spellScoreForKey(nscore, key) : nscore), [keySpelled, nscore, key]);
+  const kName = (k) => (keySpelled && k ? keyNameForKey(k) : keyName(k, useSharp));
+  // The TAB (Tab view + AlphaTex export) skips Simplify: Simplify replaces a melodic line with one
+  // inferred chord per bar, which is right for a chord chart and wrong for a tab — a tab must show
+  // the notes that are actually played. Arrange and transpose still apply.
+  const tabScore = useMemo(() => {
+    if (!simplify) return tscore;
+    const t = respellScore(transposeScore(arrange === "off" ? score : arrangeScore(score, arrange), semis, useSharp), vocab, { sixNine, useSharp });
+    return keySpelled ? spellScoreForKey(t, key) : t;
+  }, [simplify, tscore, score, arrange, semis, useSharp, vocab, sixNine, keySpelled, key]);
   // A local, zero-dep analog of the ListenHub music skill's `describe` — a one-glance
   // summary (complexity + human tags) of whatever the chart currently is (post
   // simplify/arrange/transpose). Pure metadata; never touches recognition.
@@ -1096,7 +1118,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   // Re-apply the melodic auto-default whenever a new score loads (upload / part switch /
   // decode / restore) — a melodic part auto-simplifies, a block-harmony part reverts to
   // per-onset. Mid-session the user's manual toggle stands until the next score change.
-  useEffect(() => { setSimplify(autoSimplify && isMelodicScore(score)); }, [score, autoSimplify]);
+  useEffect(() => { setSimplify(autoSimplify && (isMelodicScore(score) || !!score.merged)); }, [score, autoSimplify]);
   const stopPlay = () => { if (player.current) { player.current.stop(); player.current = null; } setPlaying(false); setPlayKey(""); };
   const stopRef = () => { const s = refAudio.current; if (s.raf) cancelAnimationFrame(s.raf); if (s.src) { try { s.src.stop(); } catch (_) {} s.src = null; } if (s.ctx && s.ctx.state !== "closed") { try { s.ctx.close(); } catch (_) {} s.ctx = null; } s.raf = null; setRefPlaying(false); setPlayKey(""); };
   useEffect(() => () => { stopPlay(); stopRef(); }, []); // stop on unmount
@@ -1180,7 +1202,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
     catch (e) { return { text: "", error: e && e.message ? e.message : "AlphaTex export failed" }; }
   }, [wantTex, tabScore, title, bpm, key]);
   const doExport = (fmt) => {
-    const opts = { overrides, title, key, useSharp, tempo: bpm };
+    const opts = { overrides, title, key, useSharp, tempo: bpm, spellKey: keySpelled };
     if (fmt === "midi") { setExp({ fmt, bytes: scoreToMidi(tscore, opts) }); setCopied(false); setDownloaded(false); return; } // binary
     const text = fmt === "abc" ? scoreToABC(tscore, opts)
       : fmt === "musicxml" ? scoreToMusicXML(tscore, opts)
@@ -1224,7 +1246,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
    * blocking. Wrapped in try/catch so a failure never wedges the UI. */
   const sendToPro = () => {
     try {
-      const opts = { overrides, title, key, useSharp, tempo: bpm };
+      const opts = { overrides, title, key, useSharp, tempo: bpm, spellKey: keySpelled };
       const formats = { csmpn: scoreToCSMPN(tscore, opts), chordpro: scoreToChordPro(tscore, opts) };
       try { const xml = scoreToMusicXML(tscore, opts); if (xml && xml.length < 1500000) formats.musicxml = xml; } catch (_) {}
       const env = {
@@ -1248,7 +1270,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, fontSize: 11, color: C.dim, margin: "14px 0 6px" }}>
         <span style={{ color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 220 }}>{title}</span>
         <span>{meta}{semis ? ` · ${semis > 0 ? "+" : ""}${semis} st` : ""}
-          {key ? <> · key <b style={{ color: key.manual ? C.green : C.dim }}>{keyName(key, useSharp)}</b>
+          {key ? <> · key <b style={{ color: key.manual ? C.green : C.dim }}>{kName(key)}</b>
             {key.manual ? " (set)" : ` (${Math.round(key.confidence * 100)}%)`}</> : null}</span>
       </div>
       {describe && describe.tags.length > 0 && (
@@ -1266,12 +1288,19 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
         ))}
         <button onClick={() => { setEditMode((m) => !m); setEditKey(""); }} disabled={view !== "chart"}
           style={{ ...chip(C), padding: "3px 9px", opacity: view !== "chart" ? 0.4 : 1, borderColor: editMode ? C.green : C.border, color: editMode ? C.green : C.dim }}>{editMode ? "✓ Editing" : "✎ Edit"}</button>
-        <button onClick={() => setShowRoman((r) => !r)} title={key ? `key of ${keyName(key, useSharp)}` : "key analysis"}
+        <button onClick={() => setShowRoman((r) => !r)} title={key ? `key of ${kName(key)}` : "key analysis"}
           style={{ ...chip(C), padding: "3px 9px", borderColor: showRoman ? C.cyan : C.border, color: showRoman ? C.cyan : C.dim }}>{showRoman ? "I·V·vi ✓" : "I·V·vi"}</button>
         <KeyPicker C={C} value={keyOv} onChange={setKeyOv} cands={keyCands} useSharp={useSharp} semis={semis} />
         <button onClick={() => setSimplify((s) => !s)} title="aggregate each bar's notes into one chord (for dense transcriptions)"
           style={{ ...chip(C), padding: "3px 9px", borderColor: simplify ? C.green : C.border, color: simplify ? C.green : C.dim }}>{simplify ? "1 chord/bar ✓" : "Simplify"}</button>
         {vocabPicker && <ChordVocabPicker C={C} value={vocab} onChange={setVocab} sixNine={sixNine} onSixNine={setSixNine} />}
+        {useSharp && (
+          <select value={spelling} onChange={(e) => setSpelling(e.target.value)} title="for key: Dbmaj7 in F minor, G#m in E · family: always C# Eb F# Ab Bb"
+            style={{ ...chip(C), padding: "3px 9px", borderColor: C.border, color: C.dim, background: C.raised, cursor: "pointer" }}>
+            <option value="key">Spell for key</option>
+            <option value="family">Spell C# Eb F# Ab Bb</option>
+          </select>
+        )}
         <select value={arrange} onChange={(e) => setArrange(e.target.value)} title="stamp a strum/comping rhythm across each bar (exports as CSMPN/CSML slash-rhythm)"
           style={{ ...chip(C), padding: "3px 9px", borderColor: arrange !== "off" ? C.cyan : C.border, color: arrange !== "off" ? C.cyan : C.dim, background: C.raised, cursor: "pointer" }}>
           <option value="off">Arrange…</option>
@@ -1842,6 +1871,12 @@ function useChordVocab() {
  * is written maj7 either way; Basic writes maj9 as maj7. Remembered per device. */
 const _SIX9_KEY = "ttp:sixNine";
 const SIX9_CHOICES = [["maj9", "maj9"], ["maj7", "maj7"], ["triad", "triad"]];
+/* Chord spelling: "key" (the default — roots and slash basses spelled for the key) or "family"
+ * (C# Eb F# Ab Bb whatever the key). Remembered per device. */
+const _SPELL_KEY = "ttp:spelling";
+function useSpellingPref() {
+  return _usePref(_SPELL_KEY, "key", (x) => x === "key" || x === "family");
+}
 function useSixNine() {
   return _usePref(_SIX9_KEY, "maj9", (x) => SIX9_CHOICES.some(([k]) => k === x));
 }

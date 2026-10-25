@@ -884,6 +884,12 @@ function _harmonyChord(h, useSharp) {
 }
 
 function parseMusicXML(xml, useSharp = true, partIndex = 0) {
+  if (partIndex === HARMONY_PART) {                       // every pitched part read together (see mergePartNotes)
+    const head = parseMusicXML(xml, useSharp, 0);
+    const notes = head.parts.map((p) => _musicXmlPartNotes(xml, p.index));
+    const keep = harmonyPartIndices(head.parts, notes);
+    return { ...head, ...mergePartNotes(head.bars, keep.map((i) => notes[i]), useSharp, { names: keep.map((i) => head.parts[i].name) }) };
+  }
   const doc = new DOMParser().parseFromString(xml, "text/xml");
   if (_xEls(doc, "parsererror").length) throw new Error("Not valid XML.");
   const partEls = _xEls(doc, "part");
@@ -1809,10 +1815,283 @@ function parsePowerTab(u8, useSharp = true, partIndex = 0) {
 }
 
 /* Detect format from the file head and dispatch to the right parser. */
-async function parseGuitarProOrXML(buf, fileName, useSharp = true, partIndex = 0) {
+/* ===========================================================================
+ *  HARMONY — every pitched part merged into one chord reading (2026-10-25)
+ *  --------------------------------------------------------------------------
+ *  A multi-instrument transcription (Muscriptor's sheets zip, a band MIDI file)
+ *  has no chord symbols: each part holds only its own notes, so the piano alone
+ *  reads Dbmaj7 where the bass under it says Bbm9. `mergePartNotes` reads the
+ *  parts TOGETHER: at every onset of any part, the chord is the union of what
+ *  each part is sounding there, from the notes' REAL written lengths (score
+ *  events only keep the gap to the part's next onset, which would cut a chord
+ *  held under a moving melody short — measured on the Muscriptor fixture, the
+ *  MusicXML and MIDI readings only agree when real lengths are used). Vocal and drum parts are left out by
+ *  name (`_HARMONY_EXCLUDE`) — a sung melody fakes extensions and slash basses —
+ *  unless nothing else has notes. The result is the shared score shape, flagged
+ *  `merged`, and ChartPanel simplifies it to one chord per bar by default.
+ *  `partIndex === HARMONY_PART` selects it in parseMusicXML / parseMidiFile.
+ * ==========================================================================*/
+const HARMONY_PART = -1;
+const _HARMONY_EXCLUDE = /\b(voice|vocals?|vox|choir|singers?|soprano|alto|tenor|baritone|drums?|drum\s*kit|percussion|kit)\b/i;
+/* Which parts to read together: every part with pitched notes whose name is not a voice or a
+ * drum kit; if that leaves nothing, every pitched part. `partNotes[i]` = per-bar note lists. */
+function harmonyPartIndices(parts, partNotes) {
+  const all = parts.map((p, i) => i).filter((i) => partNotes[i] && partNotes[i].some((b) => b.length));
+  const keep = all.filter((i) => !_HARMONY_EXCLUDE.test(parts[i].name || ""));
+  return keep.length ? keep : all;
+}
+/* `barsMeta[b]` = a bar of the shared shape (number, timeSig, section, repeats…; its events are
+ * replaced); `partNotes[part][bar]` = [{ midi, q, d }] in beats from the bar start, with the
+ * notes' REAL lengths — a held chord under a moving melody is still sounding at every melody
+ * onset. At each onset of any part the chord is every note sounding there. */
+function mergePartNotes(barsMeta, partNotes, useSharp = true, opts = {}) {
+  const EPS = 1e-6;
+  const bars = barsMeta.map((ref, bi) => {
+    const beats = (ref.timeSig || [4, 4])[0];
+    const notes = partNotes.flatMap((pn) => pn[bi] || []).filter((n) => n.d > EPS);
+    const points = [...new Set(notes.map((n) => +n.q.toFixed(6)))].sort((a, b) => a - b);
+    const raw = [];
+    for (const t of points) {
+      const ms = [...new Set(notes.filter((n) => n.q <= t + EPS && t < n.q + n.d - EPS).map((n) => n.midi))].sort((a, b) => a - b);
+      if (ms.length) raw.push({ symbol: symbolForMidis(ms, useSharp), midis: ms, frets: {}, tuplet: 0, qbeat: t });
+    }
+    const events = [];
+    raw.forEach((e) => { const last = events[events.length - 1]; if (!last || last.symbol !== e.symbol) events.push(e); });
+    events.forEach((e) => { e.beat = Math.max(0, Math.min(beats - 1, Math.round(e.qbeat))); });
+    for (let i = 1; i < events.length; i++) if (events[i].beat <= events[i - 1].beat) events[i].beat = Math.min(beats - 1, events[i - 1].beat + 1);
+    events.forEach((e, i) => { e.durBeats = (i + 1 < events.length ? events[i + 1].beat : beats) - e.beat; });
+    _fillTrueDur(events, beats);
+    return { ...ref, events };
+  });
+  return { bars, merged: true, mergedParts: opts.names || [], partIndex: HARMONY_PART };
+}
+/* Per-bar pitched notes of one MusicXML part, with their written lengths (same cursor /
+ * <chord/> / <backup> / <forward> walk as parseMusicXML; grace notes, rests, slash noteheads and
+ * unpitched drum notes carry no pitch). A tied continuation is a note of its own bar. */
+function _musicXmlPartNotes(xml, partIndex) {
+  const doc = new DOMParser().parseFromString(xml, "text/xml");
+  const part = _xEls(doc, "part")[partIndex];
+  if (!part) return [];
+  let divisions = 1, beatType = 4, tuning = null;
+  return _xEls(part, "measure").map((measure) => {
+    let cursor = 0, lastOnset = 0; const out = [];
+    for (let node = measure.firstChild; node; node = node.nextSibling) {
+      if (node.nodeType !== 1) continue;
+      const tag = node.nodeName;
+      if (tag === "attributes") {
+        const d = _xChildText(node, "divisions"); if (d) divisions = parseInt(d, 10) || divisions;
+        const t = _xFirst(node, "time"); if (t) { const bt = _xChildText(t, "beat-type"); if (bt) beatType = parseInt(bt, 10) || beatType; }
+        const sts = _xEls(node, "staff-tuning"); if (sts.length) { const tu = _parseTuning(sts); if (tu) tuning = tu; }
+      } else if (tag === "note") {
+        if (_xFirst(node, "grace")) continue;
+        const dur = parseInt(_xChildText(node, "duration") || "0", 10) || 0;
+        const isChord = !!_xFirst(node, "chord");
+        const onset = isChord ? lastOnset : cursor;
+        if (!isChord) { lastOnset = cursor; cursor += dur; }
+        if (_xFirst(node, "rest") || _xChildText(node, "notehead").toLowerCase() === "slash") continue;
+        let midi = null; const pe = _xFirst(node, "pitch"); if (pe) midi = _pitchToMidi(pe);
+        if (midi == null) { const tech = _xFirst(node, "technical"); if (tech) { const sNum = parseInt(_xChildText(tech, "string"), 10), f = parseInt(_xChildText(tech, "fret"), 10); const open = (tuning || TUNINGS.Standard)[6 - sNum]; if (!isNaN(f) && open != null) midi = open + f; } }
+        if (midi == null) continue;
+        const dpb = (divisions * 4) / beatType || divisions;
+        out.push({ midi, q: onset / dpb, d: dur / dpb });
+      } else if (tag === "backup") cursor -= parseInt(_xChildText(node, "duration") || "0", 10) || 0;
+      else if (tag === "forward") cursor += parseInt(_xChildText(node, "duration") || "0", 10) || 0;
+    }
+    return out;
+  });
+}
+
+/* ===========================================================================
+ *  Standard MIDI File import (`parseMidiFile`, 2026-10-25)
+ *  --------------------------------------------------------------------------
+ *  Zero-dependency SMF reader (format 0/1; running status; sysex skipped) →
+ *  the shared score shape, one PART per track (a format-0 file is split by
+ *  channel; channel 10 is the drum kit and carries no pitched events, like an
+ *  unpitched MusicXML staff). Bars are cut in TICKS from the time-signature
+ *  metas (4/4 when none — Muscriptor writes no meter when it can't tell), so a
+ *  tempo map can never misplace a bar line; `tempo` is the first tempo meta.
+ *  Notes starting within 1/24 beat of each other are one onset; a note held
+ *  across a bar line sounds again at the next bar's downbeat (MusicXML would
+ *  write it there as a tied note). Built for Muscriptor's `score.mid`, which
+ *  is already shifted so bar 1 starts at tick 0.
+ * ==========================================================================*/
+function _readSmf(u8) {
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  const str = (o, n) => String.fromCharCode(...u8.subarray(o, o + n));
+  if (u8.length < 14 || str(0, 4) !== "MThd") throw new Error("Not a MIDI file (no MThd header).");
+  const hlen = dv.getUint32(4), format = dv.getUint16(8), ntrk = dv.getUint16(10), div = dv.getUint16(12);
+  const ppq = div & 0x8000 ? 480 : (div || 480);
+  const tracks = [], metas = { tempo: [], timeSig: [], keySig: [] };
+  let p = 8 + hlen;
+  for (let t = 0; t < ntrk && p + 8 <= u8.length; t++) {
+    if (str(p, 4) !== "MTrk") break;
+    const len = dv.getUint32(p + 4), end = Math.min(u8.length, p + 8 + len);
+    let q = p + 8, tick = 0, status = 0, name = "";
+    const notes = [], open = new Map(), programs = {};
+    const vlq = () => { let v = 0, b; do { b = u8[q++]; v = (v << 7) | (b & 0x7f); } while (b & 0x80 && q < end); return v; };
+    while (q < end) {
+      tick += vlq();
+      let st = u8[q];
+      if (st & 0x80) { q++; if (st < 0xf0) status = st; } else st = status;
+      if (st === 0xff) {
+        const type = u8[q++], n = vlq(), d = u8.subarray(q, q + n); q += n;
+        if (type === 0x03 && !name) name = new TextDecoder("latin1").decode(d).trim();
+        else if (type === 0x51 && n === 3) metas.tempo.push({ tick, usq: (d[0] << 16) | (d[1] << 8) | d[2] });
+        else if (type === 0x58 && n >= 2) metas.timeSig.push({ tick, num: d[0], den: 1 << d[1] });
+        else if (type === 0x59 && n >= 2) metas.keySig.push({ tick, sf: (d[0] << 24) >> 24, minor: d[1] === 1 });
+        else if (type === 0x2f) break;
+      } else if (st === 0xf0 || st === 0xf7) { q += vlq(); }
+      else {
+        const kind = st & 0xf0, ch = st & 0x0f, a = u8[q++], b = kind === 0xc0 || kind === 0xd0 ? 0 : u8[q++];
+        if (kind === 0x90 && b > 0) { const k = ch * 128 + a; if (!open.has(k)) open.set(k, []); open.get(k).push(notes.length); notes.push({ ch, midi: a, start: tick, end: null }); }
+        else if (kind === 0x80 || (kind === 0x90 && b === 0)) { const st2 = open.get(ch * 128 + a); if (st2 && st2.length) notes[st2.shift()].end = tick; }
+        else if (kind === 0xc0) { if (programs[ch] == null) programs[ch] = a; }
+      }
+    }
+    notes.forEach((n) => { if (n.end == null || n.end <= n.start) n.end = n.start + ppq / 4; });
+    tracks.push({ name, notes, programs });
+    p = 8 + p + len;
+  }
+  return { format, ppq, tracks, metas };
+}
+function parseMidiFile(bytes, useSharp = true, partIndex = 0) {
+  const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const smf = _readSmf(u8);
+  // parts: one per track with notes; a track holding several channels (format 0) splits by channel
+  const partDefs = [];
+  smf.tracks.forEach((tr, ti) => {
+    const chans = [...new Set(tr.notes.map((n) => n.ch))].sort((a, b) => a - b);
+    chans.forEach((ch) => {
+      const drum = ch === 9;
+      const base = tr.name || (drum ? "Drums" : `Track ${ti + 1}`);
+      partDefs.push({ name: chans.length > 1 ? `${base} (ch ${ch + 1})` : base, notes: tr.notes.filter((n) => n.ch === ch), drum });
+    });
+  });
+  if (!partDefs.length) throw new Error("This MIDI file has no notes.");
+  const parts = partDefs.map((d, i) => ({ index: i, id: `T${i + 1}`, name: d.drum && !/drum|perc|kit/i.test(d.name) ? `${d.name} (drums)` : d.name }));
+  const ppq = smf.ppq;
+  // bar grid from the meter metas (ticks), 4/4 by default
+  const sigs = smf.metas.timeSig.slice().sort((a, b) => a.tick - b.tick);
+  const lastTick = Math.max(...partDefs.flatMap((d) => d.notes.map((n) => n.end)), 1);
+  const barStarts = [];
+  let t = 0, cur = { num: 4, den: 4 }, si = 0;
+  while (t < lastTick && barStarts.length < 4000) {
+    while (si < sigs.length && sigs[si].tick <= t) cur = sigs[si++];
+    const len = Math.max(1, Math.round((cur.num * ppq * 4) / cur.den));
+    barStarts.push({ tick: t, num: cur.num, den: cur.den, len });
+    t += len;
+  }
+  const tol = ppq / 24;
+  // every part's notes clipped to each bar, in beats with their real lengths (for HARMONY_PART)
+  const barNotes = (def) => barStarts.map((bs) => {
+    const tpb = (ppq * 4) / bs.den, endT = bs.tick + bs.len;
+    return def.drum ? [] : def.notes.filter((n) => n.start < endT && n.end > bs.tick)
+      .map((n) => { const a = Math.max(n.start, bs.tick); return { midi: n.midi, q: (a - bs.tick) / tpb, d: (Math.min(n.end, endT) - a) / tpb }; });
+  });
+  const tm = smf.metas.tempo.slice().sort((a, b) => a.tick - b.tick)[0];
+  const tempo = tm ? Math.round(600000000 / tm.usq) / 10 : null;
+  if (partIndex === HARMONY_PART) {
+    const notesByPart = partDefs.map(barNotes);
+    const keep = harmonyPartIndices(parts, notesByPart);
+    const meta = barStarts.map((bs, bi) => ({ number: bi + 1, timeSig: [bs.num, bs.den], repeatStart: false, repeatEnd: false, ending: null, events: [] }));
+    return { source: "midi", timeSig: meta.length ? meta[0].timeSig : [4, 4], tuning: _tuningName(null), tuningMidi: null, tempo, parts,
+      ...mergePartNotes(meta, keep.map((i) => notesByPart[i]), useSharp, { names: keep.map((i) => parts[i].name) }) };
+  }
+  const idx = Math.max(0, Math.min(partDefs.length - 1, partIndex | 0));
+  const def = partDefs[idx];
+  const notes = def.drum ? [] : def.notes.slice().sort((a, b) => a.start - b.start || a.midi - b.midi);
+  const bars = barStarts.map((bs, bi) => {
+    const tpb = (ppq * 4) / bs.den, endT = bs.tick + bs.len;
+    const groups = [];
+    const held = notes.filter((n) => n.start < bs.tick && n.end > bs.tick + tol);
+    if (held.length) groups.push({ tick: bs.tick, midis: held.map((n) => n.midi) });
+    for (const n of notes) {
+      if (n.start < bs.tick || n.start >= endT) continue;
+      const g = groups[groups.length - 1];
+      if (g && n.start - g.tick <= tol) g.midis.push(n.midi); else groups.push({ tick: n.start, midis: [n.midi] });
+    }
+    const raw = groups.map((g) => { const midis = [...new Set(g.midis)].sort((a, b) => a - b); return { symbol: symbolForMidis(midis, useSharp), midis, frets: {}, tuplet: 0, qbeat: (g.tick - bs.tick) / tpb }; });
+    const events = [];
+    raw.forEach((e) => { const last = events[events.length - 1]; if (!last || last.symbol !== e.symbol) events.push(e); });
+    events.forEach((e) => { e.beat = Math.max(0, Math.min(bs.num - 1, Math.round(e.qbeat))); });
+    for (let i = 1; i < events.length; i++) if (events[i].beat <= events[i - 1].beat) events[i].beat = Math.min(bs.num - 1, events[i - 1].beat + 1);
+    events.forEach((e, i) => { e.durBeats = (i + 1 < events.length ? events[i + 1].beat : bs.num) - e.beat; });
+    _fillTrueDur(events, bs.num);
+    return { number: bi + 1, timeSig: [bs.num, bs.den], repeatStart: false, repeatEnd: false, ending: null, events };
+  });
+  return { source: "midi", timeSig: bars.length ? bars[0].timeSig : [4, 4], tuning: _tuningName(null), tuningMidi: null, tempo, bars, parts, partIndex: idx };
+}
+
+/* ---- generic ZIP reading (a Muscriptor sheets zip, or any zip of a score) ----
+ * Same central-directory walk as gpUnzip (which stays as it is for .gp), but
+ * listing every entry so the dispatcher can pick score.gpif / MusicXML / MIDI. */
+function _zipEntries(u8) {
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  let eo = -1;
+  for (let i = u8.length - 22; i >= 0 && i >= u8.length - 22 - 65536; i--) if (dv.getUint32(i, true) === 0x06054b50) { eo = i; break; }
+  if (eo < 0) throw new Error("Not a zip file (no ZIP directory).");
+  const cdOff = dv.getUint32(eo + 16, true), cdCount = dv.getUint16(eo + 10, true), out = [];
+  let p = cdOff;
+  for (let n = 0; n < cdCount && p + 46 <= u8.length && dv.getUint32(p, true) === 0x02014b50; n++) {
+    const method = dv.getUint16(p + 10, true), compSize = dv.getUint32(p + 20, true);
+    const nameLen = dv.getUint16(p + 28, true), extraLen = dv.getUint16(p + 30, true), commentLen = dv.getUint16(p + 32, true);
+    out.push({ name: new TextDecoder().decode(u8.subarray(p + 46, p + 46 + nameLen)), method, compSize, lhOff: dv.getUint32(p + 42, true) });
+    p += 46 + nameLen + extraLen + commentLen;
+  }
+  return out;
+}
+async function _zipRead(u8, entry) {
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength), lh = entry.lhOff;
+  if (dv.getUint32(lh, true) !== 0x04034b50) throw new Error("Corrupt zip (bad local header).");
+  const dataStart = lh + 30 + dv.getUint16(lh + 26, true) + dv.getUint16(lh + 28, true);
+  const comp = u8.subarray(dataStart, dataStart + entry.compSize);
+  if (entry.method === 0) return comp.slice();
+  if (entry.method !== 8) throw new Error(`Unsupported zip compression (method ${entry.method}).`);
+  const stream = new Response(comp).body.pipeThrough(new DecompressionStream("deflate-raw"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+/* A zip that is not a .gp: Muscriptor's `<song>_sheets.zip` (score.musicxml + score.mid +
+ * PDFs), a compressed MusicXML (.mxl: META-INF/container.xml names the score), or any zip
+ * holding one score. MusicXML wins over MIDI (it carries the engraved, quantised rhythm and
+ * the meter); with several parts and no part asked for, it lands on HARMONY_PART. */
+async function parseScoreZip(u8, useSharp = true, partIndex) {
+  const entries = _zipEntries(u8).filter((e) => !e.name.endsWith("/") && !/(^|\/)__MACOSX\//.test(e.name));
+  const base = (e) => e.name.split("/").pop().toLowerCase();
+  let pick = null;
+  const container = entries.find((e) => e.name === "META-INF/container.xml");
+  if (container) {
+    const m = new TextDecoder().decode(await _zipRead(u8, container)).match(/full-path="([^"]+)"/);
+    if (m) pick = entries.find((e) => e.name === m[1]) || null;
+  }
+  pick = pick || entries.find((e) => base(e) === "score.musicxml")
+    || entries.find((e) => /\.(musicxml|xml)$/.test(base(e)) && !e.name.startsWith("META-INF/"));
+  if (pick) {
+    const xml = new TextDecoder("utf-8").decode(await _zipRead(u8, pick));
+    let sc = parseMusicXML(xml, useSharp, partIndex == null ? 0 : partIndex);
+    if (partIndex == null && sc.parts.length > 1) sc = parseMusicXML(xml, useSharp, HARMONY_PART);
+    sc._xml = xml; return sc;
+  }
+  const mid = entries.find((e) => base(e) === "score.mid") || entries.find((e) => /\.midi?$/.test(base(e)));
+  if (mid) {
+    const mb = await _zipRead(u8, mid);
+    let sc = parseMidiFile(mb, useSharp, partIndex == null ? 0 : partIndex);
+    if (partIndex == null && sc.parts.length > 1) sc = parseMidiFile(mb, useSharp, HARMONY_PART);
+    sc._midbuf = mb; return sc;
+  }
+  throw new Error("This zip holds no score (no score.gpif, MusicXML or MIDI file inside).");
+}
+
+/* `partIndex` omitted → part 0, except a zip of a non-GP score or a MIDI file with several
+ * parts, which lands on HARMONY_PART (every pitched part read together). */
+async function parseGuitarProOrXML(buf, fileName, useSharp = true, partIndexArg) {
   const u8 = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  const partIndex = partIndexArg == null ? 0 : partIndexArg;
   const head = new TextDecoder("latin1").decode(u8.subarray(0, 32));
-  if (u8[0] === 0x50 && u8[1] === 0x4b) { const xml = await gpUnzip(u8); const sc = parseGPIF(xml, useSharp, partIndex); sc._xml = xml; return sc; }        // GP7/8
+  if (u8[0] === 0x50 && u8[1] === 0x4b) {
+    if (!_zipEntries(u8).some((e) => e.name.endsWith("score.gpif"))) return parseScoreZip(u8, useSharp, partIndexArg);  // Muscriptor sheets / .mxl / zipped score
+    const xml = await gpUnzip(u8); const sc = parseGPIF(xml, useSharp, partIndex); sc._xml = xml; return sc;             // GP7/8
+  }
+  if (head.startsWith("MThd")) { let sc = parseMidiFile(u8, useSharp, partIndex); if (partIndexArg == null && sc.parts.length > 1) sc = parseMidiFile(u8, useSharp, HARMONY_PART); sc._midbuf = u8; return sc; } // Standard MIDI File
   if (head.startsWith("BCFZ") || head.startsWith("BCFS")) { const sc = parseGPX(u8, useSharp, partIndex); sc._gpxbuf = u8; return sc; }                      // GP6 .gpx
   if (head.includes("FICHIER GUITAR PRO")) { const sc = parseGP345(u8, useSharp, partIndex); sc._gpbuf = u8; return sc; }                                  // GP3/4/5
   if (head.startsWith("ptab")) { const sc = parsePowerTab(u8, useSharp, partIndex); sc._ptbbuf = u8; return sc; }                                          // Power Tab .ptb
@@ -2362,11 +2641,17 @@ function scoreToABC(score, opts = {}) {
   out.push(body.trim());
   return out.join("\n") + "\n";
 }
+/* The key as exporters write it: spelled for itself when the chart's chords are (opts.spellKey —
+ * "Db", not "C#", for a 5-flat key), else the ♯/♭ table as before. */
+function _exportKeyName(opts) {
+  if (!opts.key) return null;
+  return opts.spellKey ? keyNameForKey(opts.key) : keyName(opts.key, opts.useSharp !== false);
+}
 function scoreToChordPro(score, opts = {}) {
   const ov = opts.overrides || {};
   const [b, bt] = score.timeSig;
   const out = [`{title: ${opts.title || "Tab Decoder chart"}}`, `{time: ${b}/${bt}}`];
-  if (opts.key) out.push(`{key: ${keyName(opts.key, opts.useSharp !== false)}}`);
+  if (opts.key) out.push(`{key: ${_exportKeyName(opts)}}`);
   out.push("{start_of_grid}");
   let row = [];
   score.bars.forEach((bar, bi) => {
@@ -2428,7 +2713,7 @@ function scoreToCSMPN(score, opts = {}) {
   const [b, bt] = score.timeSig;
   const out = [`Title: ${opts.title || "Tab Decoder chart"}`];
   if (opts.composer) out.push(`Composer: ${opts.composer}`);
-  const kn = keyName(opts.key, opts.useSharp !== false);
+  const kn = _exportKeyName(opts);
   if (kn) out.push(`Key: ${kn}`);
   out.push(`Time: ${b}/${bt}`);
   if (opts.tempo) out.push(`Tempo: ${Math.round(opts.tempo)}`);
@@ -2524,7 +2809,7 @@ function scoreToCSML(score, opts = {}) {
   const [b, bt] = score.timeSig;
   const out = [`Title: ${opts.title || "Tab Decoder chart"}`];
   if (opts.composer) out.push(`Composer: ${opts.composer}`);
-  const kn = keyName(opts.key, opts.useSharp !== false);
+  const kn = _exportKeyName(opts);
   if (kn) out.push(`Key: ${kn}`);
   out.push(`Time: ${b}/${bt}`);
   if (opts.tempo) out.push(`Tempo: ${Math.round(opts.tempo)}`);
@@ -2880,6 +3165,50 @@ function _keySpeller(key, fallbackSharp = true) {
     const [letter, alter] = table[((Math.round(m) % 12) + 12) % 12];
     return { step: _LETTERS[letter], alter, oct: Math.round((m - alter - _LETTER_PC[letter]) / 12) - 1 };
   };
+}
+/* ---- key-aware chord spelling (2026-10-25) ------------------------------------
+ * The family default table (C# Eb F# Ab Bb) ignores the key, so a 4-flat F-minor tune read
+ * C#maj7 for Dbmaj7. `spellScoreForKey` re-spells every chord ROOT and slash BASS by scale
+ * degree in the given key (`_keySpeller`: diatonic notes by the key's letters; chromatic ones
+ * major ♯1 ♭3 ♯4 ♭6 ♭7, minor ♭2 ♮3 ♯4 ♮6 ♮7), so Db in F minor, G# in E major, C# (the
+ * leading tone) in D minor. In C major / A minor it is the family table, give or take the
+ * minor's leading tone. A double accidental (Fx) is never written as a chord root — it falls
+ * back to the family name. Names only: midis, frets and every other field stay. Pure, never
+ * mutates; no key → the score unchanged. A display/export transform: parsers keep the family
+ * table, so every pinned importer output is unchanged. */
+function keyNoteNames(key) {
+  if (!key || typeof key.tonic !== "number") return NOTE_SHARP.slice();
+  const sp = _keySpeller(key);
+  return NOTE_SHARP.map((fam, pc) => { const p = sp(60 + pc); return Math.abs(p.alter) > 1 ? fam : p.step + (p.alter === 1 ? "#" : p.alter === -1 ? "b" : ""); });
+}
+function keyNameForKey(key) {
+  if (!key || typeof key.tonic !== "number") return null;
+  return keyNoteNames(key)[((key.tonic % 12) + 12) % 12] + (key.mode === "minor" ? "m" : "");
+}
+// every single-accidental spelling (the engine tables hold only one name per black key)
+const _PC_ANY = { C: 0, "B#": 0, "C#": 1, Db: 1, D: 2, "D#": 3, Eb: 3, E: 4, Fb: 4, "E#": 5, F: 5, "F#": 6, Gb: 6, G: 7, "G#": 8, Ab: 8, A: 9, "A#": 10, Bb: 10, B: 11, Cb: 11 };
+function spellSymbolForKey(symbol, names) {
+  if (!symbol || typeof symbol !== "string") return symbol;
+  const m = symbol.match(/^([A-G][#b]?)(.*)$/);
+  if (!m || _PC_ANY[m[1]] === undefined) return symbol;
+  let rest = m[2];
+  const bm = rest.match(/^(.*)\/([A-G][#b]?)$/);
+  if (bm && _PC_ANY[bm[2]] !== undefined) rest = `${bm[1]}/${names[_PC_ANY[bm[2]]]}`;
+  return names[_PC_ANY[m[1]]] + rest;
+}
+function spellScoreForKey(score, key) {
+  if (!score || !score.bars || !key || typeof key.tonic !== "number") return score;
+  const names = keyNoteNames(key);
+  const bars = score.bars.map((b) => {
+    let changed = false;
+    const events = (b.events || []).map((e) => {
+      const sym = spellSymbolForKey(e && e.symbol, names);
+      if (!e || sym === e.symbol) return e;
+      changed = true; return { ...e, symbol: sym };
+    });
+    return changed ? { ...b, events } : b;
+  });
+  return { ...score, bars };
 }
 /* The key signature as letter → alter (for accidental bookkeeping). */
 function _keySigAlters(key) {
@@ -8096,4 +8425,18 @@ export {
   chordVoicings,
   voicingToSVGuitar,
   chordSubstitutions,
+  HARMONY_PART,
+  harmonyPartIndices,
+  mergePartNotes,
+  _musicXmlPartNotes,
+  _readSmf,
+  parseMidiFile,
+  _zipEntries,
+  _zipRead,
+  parseScoreZip,
+  keyNoteNames,
+  keyNameForKey,
+  _exportKeyName,
+  spellSymbolForKey,
+  spellScoreForKey,
 };

@@ -2980,7 +2980,45 @@ Full write-up: **`docs/MUSCRIPTOR-REVIEW.md`**. Bench: `tests/bench/beatthis/`.
   post-processing (auto grid/triplet choice, tempo map in MIDI/MusicXML/playback) → P5 stereo-split
   check-by-ear playback → P4 "⬇ All parts (zip)" from `chartsFromStems` (STORED zip + CRC32, no dep) →
   P1 `beat_this` behind the real-audio gate, as a fallback-safe second tracker → P6 import Muscriptor
-  zips + add SMF import.
+  zips + add SMF import (**P6 built 2026-10-25** — next section).
+
+## Muscriptor zip + MIDI import, Harmony reading, key spelling (2026-10-25, built)
+
+Plan item P6 from the review, plus the owner's go-ahead on key-aware spelling. Fixture: the owner's
+real Muscriptor v0.4 output, `tests/fixtures/muscriptor-saddle-up_sheets.zip` (score.mid +
+score.musicxml, STORED like Muscriptor; PDFs dropped). E2E: `tests/bench/muscriptor-e2e.mjs`.
+
+- **What a Muscriptor zip holds:** 5 parts (piano, 5-string bass, guitar, drums, voice), 31 bars, ♩=67,
+  **no chord symbols**, MusicXML by MuseScore 4.7.4 (key −4), MIDI with named tracks, one tempo, **no
+  time-signature or key metas**, a `muscriptor:bar_offset` marker (bar 1 already at tick 0).
+- **Zip** (`parseScoreZip`, `_zipEntries`/`_zipRead`): the dispatcher's `PK` branch keeps `gpUnzip`
+  for any zip holding `score.gpif`; anything else opens `META-INF/container.xml`'s rootfile (.mxl),
+  else `score.musicxml` / any MusicXML, else `score.mid` / any MIDI. Method 0 and 8 (DecompressionStream).
+- **MIDI** (`parseMidiFile`, `_readSmf`): one part per track (format 0 split by channel; channel 10 has
+  no pitched events), bars cut in TICKS from the meter metas (4/4 when none), first tempo, onsets within
+  1/24 beat grouped, a note held across a bar line re-sounds at the next downbeat. `_midbuf` rides on the
+  score for ♯♭ / part re-parse.
+- **Harmony** (`HARMONY_PART = -1`, `mergePartNotes`, `harmonyPartIndices`): every pitched part except
+  voices/drums (`_HARMONY_EXCLUDE`, by name; all pitched parts if that leaves none) read together **from
+  the notes' real written lengths** (`_musicXmlPartNotes` for MusicXML). The first version merged the
+  score EVENTS, whose `qdur` is only the gap to the part's next onset — a piano chord held under a moving
+  melody counted for a 16th, and bars 11–12 read `Fm | C` from MusicXML but `Dbmaj7 | Bb` from MIDI. With
+  real lengths the two importers agree on bars 1–16 and 26/31 overall (the rest: MuseScore re-quantised
+  the rhythm when it engraved). A zip or MIDI with several parts lands on Harmony; a plain MusicXML still
+  lands on part 0 (the pinned multi-part test is unchanged). The UI shows a "Harmony (all pitched parts)"
+  chip for MusicXML/MIDI; a merged score auto-Simplifies (one chord per bar).
+- **Measured on Saddle Up (Pro names, key spelling):** F minor (0.85), `Fm9 | Bbm9 | Fm7 | Bbm7 | Eb/F |
+  Bbm7 | Db | Bb7/Ab | Fm | Bbm9 | Fm | C | Fm | Bbm7 | Dbmaj7 | Bb7 …`. Single parts disagreed (piano bar 2
+  `C#maj7`, bass `Bbm9`); CSMP's old whole-bar MIDI import gave `C7b9/Bb` (voice pollution).
+- **Key-aware spelling** (`spellScoreForKey`, `keyNoteNames`, `keyNameForKey`, `spellSymbolForKey`):
+  roots and slash basses by scale degree via `_keySpeller` (Db in F minor, G# in E, C# leading tone in D
+  minor; C major = the family table; a double accidental falls back to the family name). **Default ON** in
+  ChartPanel (`useSpellingPref`, `ttp:spelling` = `key` | `family`, select "Spell for key"), only when the
+  ♯♭ setting is the family default (Flats ♭ stays all-flat). Chain: `nscore` (named) → key analysis →
+  `tscore` = spelled → display, exports, handoff; exporters take `opts.spellKey` so `Key:` / `{key:}` match
+  (`_exportKeyName`). **Parsers keep the family table**, so every pinned importer output is unchanged —
+  this bends the "always C#" rule only on screen and in exports, by the owner's decision.
+- Found, not fixed (pre-existing): at 390 px the mode-tab row (Manual … Tuner) is wider than the screen.
 
 ## Path B (scans / photos) — OUT OF SCOPE
 

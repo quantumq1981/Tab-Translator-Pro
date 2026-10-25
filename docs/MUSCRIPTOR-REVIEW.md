@@ -79,7 +79,7 @@ These help today with our existing tracker:
 ### P5 — Stereo-split "check by ear" playback
 Original recording hard left, synthesis of the chart/tab hard right (`StereoPannerNode`; −6 dB on a stereo source, as `audio.ts` does), plus a crossfade slider. It is the fastest way to hear a wrong chord or a wrong bar line. Browser-only, about 40 lines on the existing reference-audio player.
 
-### P6 — Import Muscriptor's own outputs (license-clean bridge)
+### P6 — Import Muscriptor's own outputs (license-clean bridge) — ✅ built 2026-10-25
 The owner already gets Muscriptor zips from the hosted site. Let Tab Translator **read** them: accept a `.zip` (read each entry → existing MusicXML parser, part picker = Muscriptor's instruments) and add **Standard MIDI File import** (Tab Translator has none; CSMP's `midiImport.js` is the starting point). Muscriptor's MIDI carries the tempo map, the time signature and one named track per program. Then Tab Translator re-chords, re-fingers (`fingerScore`) and hands the chart to CSMP. We parse files the user chose to produce; we don't call their service.
 
 ### Rejected — do not re-derive
@@ -105,3 +105,12 @@ Still open, by the docs' own accounts, most valuable first:
 
 P3 (manual tempo/bar fixes, no model) → P2 (onset delay + grid choice + tempo map) → P5 (stereo check) → P4 (all-parts zip) → P1 (beat_this, behind the real-audio gate) → P6 (Muscriptor/MIDI import).
 P2–P5 touch only MIT-ported algorithms and our own code, and each one is useful alone.
+
+## 7. Update 2026-10-25 — P6 built against the owner's real Muscriptor file
+
+`Saddle_Up_MSTFix_sheets.zip` (Muscriptor v0.4): 5 parts, no chord symbols, MIDI with no meter or key.
+Both apps now open the zip (and its `.mid`) on a **Harmony** reading — every pitched part except voice
+and drums, from the notes' real lengths — named with the Pro vocabulary and spelled for the key:
+F minor, `Fm9 | Bbm9 | Fm7 | Bbm7 | Eb/F | Bbm7 | Db | Bb7/Ab | …` (was `C#maj7` piano-only / `C7b9/Bb`
+whole-bar). Chord Sheet Maker Pro gets it through its vendored copy of this engine. Details: CLAUDE.md
+"Muscriptor zip + MIDI import, Harmony reading, key spelling".
