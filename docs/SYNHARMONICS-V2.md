@@ -293,10 +293,10 @@ foreign basses. `chart` is the UI default; `full` stays the engine default (unch
 
 | truth named by | split | full | chart |
 |---|---|---|---|
-| full oracle | dev | 77.8 / 79.8 / 74.2 / 66.9 / 81.8 | 76.6 / 79.3 / 71.1 / 63.8 / 79.2 |
-| full oracle | test | 75.6 / 76.5 / 70.6 / 65.8 / 74.5 | 73.6 / 75.0 / 70.2 / 64.8 / 66.1 |
-| chart vocabulary | dev | 73.7 / 73.7 / 67.9 / 63.1 / 72.3 | 75.3 / 75.9 / 70.0 / 65.4 / 76.4 |
-| chart vocabulary | test | 74.9 / 75.2 / 68.4 / 65.4 / 60.6 | 73.7 / 74.5 / 68.4 / 65.4 / 69.3 |
+| full oracle | dev | 77.8 / 79.8 / 74.2 / 66.9 / 81.8 | 74.4 / 77.0 / 70.9 / 63.6 / 79.2 |
+| full oracle | test | 75.6 / 76.5 / 70.6 / 65.8 / 74.5 | 73.4 / 74.8 / 69.9 / 64.5 / 66.2 |
+| chart vocabulary | dev | 73.7 / 73.7 / 67.8 / 63.0 / 72.3 | 76.9 / 77.7 / 71.7 / 66.9 / 76.4 |
+| chart vocabulary | test | 74.9 / 75.1 / 68.3 / 65.4 / 60.6 | 73.7 / 74.7 / 68.6 / 65.4 / 69.3 |
 
 (root / majmin / sevenths / pcs / written bass, 28 tracks × 5 conditions.)
 
@@ -307,9 +307,22 @@ Findings that shaped it:
   C read `Gsus4`. The 3rd of m7/m7♭5 and the 4th of sus4 are not hidden: the bass is the natural root.
   In the corpus those voicings are tonic I6 chords (Cheryl, Anthropology), so the bench's vocabulary
   truth (`relabelForVocabulary`) reads them from the bass too.
+- 6/9 → maj9 (owner's convention): `writeAs` detects `6/9` / `6` and writes `maj9` / `maj7` (setting
+  `sixNine`: maj9 | maj7 | triad). Plain triads aren't promoted (maj7+maj9 time 4.6 → 7.7 % on the
+  corpus); vs `triad`, +1.6…+3.2 dev, +0…+0.4 held-out at the vocabulary level.
 - `dim` stays in chart (−0.8 root without it); `6`/`m6` add nothing measurable; restricting foreign basses
   to F/G, Bb/C, D/C, Am/G costs nothing.
 
 Tools: `bench/vocab.mjs` (decoded-vocabulary histograms, `--real` for the repo's audio),
 `bench/vocabdiff.mjs` (where a vocabulary gains/loses root vs full), `run.mjs --gtvocab chart`,
 `bench/vocab-e2e.mjs` (the picker in the real app).
+
+### 9.1 Every chart, and m11 (same day)
+
+The owner's screenshot showed `E6/9/C#` "all over the place" — produced not by the audio decoder but
+by the notation oracle, which names file imports, Voices (ML), Guitar → Tab and transposed charts. So
+the vocabulary is now a naming pass over any chart (`respellScore`, run last in ChartPanel), `m11`
+joined QUALITIES (oracle unchanged: 0 of 100,179 corpus names moved), and vocabulary-mode `recognise`
+gained a bass filter, a bass-rooted tie-break, a no-invented-notes guard and sus2/add9 → triad.
+The audio decoder gained too (vocabulary-level held-out +1.1 root / +1.0 majmin / +1.1 sevenths).
+Full detail and numbers: CLAUDE.md, "Chord vocabulary".
