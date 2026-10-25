@@ -10,7 +10,8 @@
  * the deploy stamp on), so a device never mixes a fresh worker with a cached core.
  *
  * Message in : { id, left, right, sampleRate, opts:{ device, step, blockSec, compact } }
- * Messages out: { id, type:"progress", done, total } … then
+ * (stage = "library" | "model" | "runtime" | "separating", so a slow device can say what it is doing)
+ * Messages out: { id, type:"stage", stage } / { id, type:"progress", done, total } … then
  *               { id, type:"result", sampleRate, stems:{ vocals:[L,R], drums, bass, other } }
  *               or { id, type:"error", message }
  * ========================================================================== */
@@ -25,6 +26,7 @@ self.onmessage = async (ev) => {
     const res = await separateInBlocks(left, right, sampleRate, {
       ...(opts || {}),
       onProgress: (done, total) => self.postMessage({ id, type: "progress", done, total }),
+      onStage: (stage) => self.postMessage({ id, type: "stage", stage }),
     });
     const transfer = [];
     for (const k of Object.keys(res.stems)) for (const ch of res.stems[k]) transfer.push(ch.buffer);

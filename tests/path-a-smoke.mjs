@@ -2782,7 +2782,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
     const real = new realScope.WebAssembly.Memory({ initial: 1, maximum: 65536, shared: true });
     expect(real instanceof WebAssembly.Memory && real.buffer.byteLength === 65536, "with the real WebAssembly.Memory the capped constructor still returns a genuine WebAssembly.Memory");
     const coreSrc = fs.readFileSync(path.join(repo, "stem-model-core.js"), "utf8");
-    expect(/if \(compact\) capWasmMemory\(\);/.test(coreSrc) && coreSrc.indexOf("if (compact) capWasmMemory();") < coreSrc.indexOf("wasmSession(\n    await (opts.loadModel || modelBytes)(model)"), "low-memory mode caps the WASM reservation before ORT is imported");
+    expect(/if \(compact\) capWasmMemory\(\);/.test(coreSrc) && coreSrc.indexOf("if (compact) capWasmMemory();") < coreSrc.indexOf("await (opts.loadModel || modelBytes)(model)"), "low-memory mode caps the WASM reservation before ORT is imported");
   }
   // one ORT session for the whole song, created lean, on the pinned WASM build
   {
@@ -2871,6 +2871,50 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
     expect(picks.join() === "wasm,wasm,webgpu,wasm,webgpu", `WebKit never gets WebGPU automatically (its JSEP/asyncify builds stall WebKit 26.2); Chrome with an adapter does (got ${picks})`);
     const stamped = await import(path.join(repo, "stem-model-core.js") + "?v=abc1234");
     expect(stamped.BUILD === "abc1234" && /\[stems abc1234 · /.test(stamped.envLabel("wasm", iphone174)), "the deploy stamp (?v=) names the build in the label");
+
+    /* Older iPads (2026-10-25): a first-generation iPad Pro is stuck on iPadOS 16.7 (Safari 16.6, A9X). The split
+     * works there in principle but takes tens of minutes, so the page must say what it is doing before the first
+     * progress tick, offer a faster setting, and never freeze the page. */
+    {
+      const log = { created: [], runs: 0, released: 0, frames: new Set() }, stages = [], prog2 = [];
+      Object.defineProperty(process, "release", { value: { name: "browser-test" }, configurable: true });
+      try {
+        await core.separateInBlocks(L, R, sr, { device: "wasm", compact: true, loadModel: async () => new Uint8Array(8), ortImport: async () => maskOrt(log),
+          onStage: (st) => stages.push([st, prog2.length]), onProgress: (d) => prog2.push(d) });
+      } finally { if (relDesc) Object.defineProperty(process, "release", relDesc); }
+      expect(stages.map((x) => x[0]).join() === "library,model,runtime,separating" && stages.every((x) => x[1] <= 1), `stages arrive in order, before the model's first progress (got ${JSON.stringify(stages)})`);
+      const st2 = []; await core.separateInBlocks(L, R, sr, { device: "wasm", session: async () => ({ inputs: [{ name: "mix_spec", dims: [1, 4, 2049, 476] }], outputs: [{ name: "stems_spec" }], run: async (f) => ({ stems_spec: { data: new Float32Array(16 * 2049 * 476), dims: [1, 16, 2049, 476] } }), free() {} }), onStage: (x) => st2.push(x) });
+      expect(st2.join() === "library,separating", `an injected session skips the model/runtime stages (got ${st2})`);
+      let threwCb = ""; try { await core.separateInBlocks(L, R, sr, { device: "wasm", compact: true, loadModel: async () => new Uint8Array(8), ortImport: async () => maskOrt({ created: [], runs: 0, released: 0, frames: new Set() }), onStage: () => { throw new Error("ui bug"); } }); } catch (e) { threwCb = e.message; }
+      expect(!threwCb, "a throwing stage callback can't break the split");
+      expect(core.FAST_STEP === 0.75, "FAST_STEP is 0.75 (25 % overlap)");
+      const runsAt = async (step) => { const lg = { created: [], runs: 0, released: 0, frames: new Set() }; await core.separateInBlocks(L, R, sr, { device: "wasm", compact: true, step, loadModel: async () => new Uint8Array(8), ortImport: async () => maskOrt(lg) }); return lg.runs; };
+      const r05 = await runsAt(0.5), r075 = await runsAt(core.FAST_STEP);
+      expect(r075 < r05 * 0.75, `⚡ Faster needs fewer model runs (${r075} vs ${r05})`);
+    }
+    {
+      const sm2 = await import(path.join(repo, "stem-model.js") + "?t=" + Date.now());
+      const T = (ua, plat = "", mtp = 5) => sm2.isLegacyIOS({ userAgent: ua, platform: plat, maxTouchPoints: mtp });
+      expect(T("Mozilla/5.0 (iPad; CPU OS 16_7_10 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1", "iPad")
+        && T("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Safari/605.1.15", "MacIntel")
+        && T("Mozilla/5.0 (iPhone; CPU iPhone OS 15_8 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/120.0 Mobile/15E148 Safari/604.1", "iPhone"),
+        "iPadOS 16.7 (mobile or desktop-class UA) and iOS 15 Chrome count as legacy → ⚡ Faster by default");
+      expect(!T("Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1", "iPhone")
+        && !T("Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1", "iPhone")
+        && !T("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Safari/605.1.15", "MacIntel", 0)
+        && !sm2.isLegacyIOS(null), "iOS 17+/26 (frozen 18_6 token, Version/26), a Mac, and no navigator are not legacy");
+      expect(sm2.cancelStems() === false, "cancel with nothing running is a no-op");
+      const smSrc2 = fs.readFileSync(path.join(repo, "stem-model.js"), "utf8"), wk2 = fs.readFileSync(path.join(repo, "stem-worker.js"), "utf8");
+      expect(!/\/worker\|module\|import\/i\.test/.test(smSrc2) && (smSrc2.match(/onMainThread\(/g) || []).length === 2, "a worker failure is NOT retried on the main thread (minutes of WASM there froze the page) — only a missing Worker falls back");
+      expect(/err\.cancelled = true/.test(smSrc2) && /w\.terminate\(\)/.test(smSrc2) && /TTP_STEM_CANCEL = cancelStems/.test(smSrc2) && /TTP_STEM_FAST_DEFAULT = isLegacyIOS\(\)/.test(smSrc2), "cancel ends the worker and rejects with err.cancelled; the page learns cancel + the Faster default");
+      expect(/type: "stage", stage/.test(wk2) && /m\.type === "stage"/.test(smSrc2) && /onStage: opts\.onStage/.test(smSrc2), "stages flow core → worker → page");
+      const uiS = fs.readFileSync(path.join(repo, "TabDecoderPro.tsx"), "utf8");
+      expect(/navigator\.wakeLock/.test(uiS) && /wl\.request\("screen"\)/.test(uiS) && /addEventListener\("visibilitychange"/.test(uiS) && /st\.lock\.release\(\)/.test(uiS) && /holdAwake\(\);/.test(uiS) && (uiS.match(/releaseAwake\(\)/g) || []).length >= 3, "the screen is kept awake for the split (re-requested when the page returns) and released after");
+      expect(/Safari was in the background or the screen locked during the split/.test(uiS), "a failure after the page was hidden says the split pauses in the background");
+      expect(/L0\.subarray\(a, b\)/.test(uiS) && /\[0, 30, 60, 90\]/.test(uiS) && /offsetSec: a \/ sr0/.test(uiS), "a 30/60/90 s section can be split instead of the whole song");
+      expect(/onClick=\{cancelSplit\}/.test(uiS) && /e && e\.cancelled/.test(uiS) && /No progress for \{Math\.round\(quiet \/ 60\)\} min \(stage:/.test(uiS), "Cancel, a cancelled split that isn't an error, and a stall warning naming the stage");
+      expect(/"ttp:stems:fast"/.test(uiS) && /window\.TTP_STEM_FAST_DEFAULT/.test(uiS) && /STEM_STAGE_TEXT/.test(uiS), "⚡ Faster is remembered per device and defaults from the device; stages have readable text");
+    }
   }
   // phones get it by default: iPhone / iPad (incl. iPadOS's Mac user agent with touch)
   {
@@ -2892,7 +2936,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
     expect(/BUILD="\$\{GITHUB_SHA::7\}"/.test(pagesSrc2) && /sed -i "s#src=\\"\.\/stem-model\.js\\"#src=\\"\.\/stem-model\.js\?v=\$\{BUILD\}\\"#" _site\/index\.html/.test(pagesSrc2) && /grep -q "src=\\"\.\/stem-model\.js\?v=\$\{BUILD\}\\"" _site\/index\.html/.test(pagesSrc2), "Pages stamps stem-model.js with the commit and fails the deploy if the stamp didn't land");
   }
   const ui = fs.readFileSync(path.join(repo, "TabDecoderPro.tsx"), "utf8");
-  expect(/TTP_STEM_MODEL\(L, R, src\.sampleRate, \{ compact,/.test(ui), "the UI passes Low-memory mode to the separator");
+  expect(/TTP_STEM_MODEL\(L, R, src\.sampleRate, \{\s*compact, step: fast \? 0\.75 : undefined/.test(ui), "the UI passes Low-memory mode and ⚡ Faster (FAST_STEP 0.75) to the separator");
   expect(/localStorage\.setItem\("ttp:stems:inflight"/.test(ui) && (ui.match(/localStorage\.removeItem\("ttp:stems:inflight"\)/g) || []).length >= 3, "a split marks itself in flight and clears the mark on success and failure");
   expect(/ran out of memory and reloaded the page\. Low-memory mode is now on/.test(ui) && /if \(!last\.compact\) \{\s*setCompact\(true\)/.test(ui), "after iOS kills the tab mid-split, the next load says so and turns Low-memory mode on");
   expect(/allocat\(\?!ion_planner\)/.test(ui) && /Can't create a session/.test(ui), "an ONNX Runtime graph error isn't blamed on memory");
