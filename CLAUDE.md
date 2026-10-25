@@ -1986,6 +1986,9 @@ shifts every bar in the chart.
 chroma), not DSP heuristics, and that is why. If downbeats are wanted, that is the route —
 along the same seam as the `basic-pitch` note model. Do not bolt a phase-guesser onto the
 beat tracker.
+**Candidate found (2026-10-25):** `beat_this` (CPJKU, **MIT code + weights**), the tracker Muscriptor
+v0.4.0 uses. Measured on synthetic GP renders, it beats `detectBeats` without drums but not with them,
+and it gives downbeats. Not shipped yet; see "Muscriptor v0.4.0 review" below.
 
 **Honest limits.** This does not rescue a dense full mix — the Wagner prelude labels 96%
 of its duration but the vocabulary histogram still reads like mush being force-named.
@@ -2946,6 +2949,38 @@ backed by a chord library big enough for "pretty much every voicing".
 - **Honest limits:** standard tuning only; generated grips are playable by a 4-finger/4-fret model, not
   ranked by a guitarist's taste (the dictionary shapes come first for that reason); fingers on generated
   shapes are a heuristic; interval labels on open strings aren't drawn (svguitar has no text for them).
+
+## Muscriptor v0.4.0 review (2026-10-25) — decisions, do not re-derive
+
+Full write-up: **`docs/MUSCRIPTOR-REVIEW.md`**. Bench: `tests/bench/beatthis/`.
+
+- **Muscriptor has no stem splitter.** The per-instrument zip (score.mid / score.musicxml / full_score.pdf /
+  one PDF per part + `_tab.pdf` per fretted part) comes from a multi-instrument **transcription** model
+  (decoder-only transformer, MT3-style tokens, 5 s chunks decoded in order), then **MuseScore 4 CLI**
+  engraving on their server.
+- **Weights are CC BY-NC 4.0 (gated)** → never shipped, distilled or used as a teacher (the owner's
+  rule, as with MERT). They would not fit anyway: small = 103 M params = 412 MB fp32, autoregressive.
+  Code is MIT → algorithms may be ported with attribution. Calling muscriptor.kyutai.org from the app
+  is rejected (zero-server).
+- **What v0.4 adds is post-processing**, all built on `beat_this` beats + downbeats: onset-delay/grid
+  detection (circular mean of onset phase over subdivisions 1…24, |R| ≥ 0.5, ≥ 40 onsets, ≤ 40 ms),
+  `regularized_beats` (fill missed/drop extra beats), least-squares tempo + steadiness (residual ≤ 5 % of
+  a beat), meter only when 90 % of bars agree, a tempo map (Savitzky–Golay 9 + fewest changes within
+  25 ms, on bar lines), quantise with strength, fill gaps, trim leading bars, ×2/÷2 beat scale, manual
+  first-downbeat. It quantises before MuseScore because MuseScore's own MIDI quantiser is poor.
+- **Measured (`tests/bench/beatthis`; 9 GP renders, ±70 ms, native ORT CPU, third-party ONNX exports):**
+  beat F with drums ours **0.826** vs final0 0.646 / small0 0.684; without drums ours 0.581 vs final0
+  **0.723** / small0 0.624; downbeat F final0 0.46 (drums) / 0.62 (none), which we can't do at all; meter
+  right 5/9 with drums. final0 locks half a beat off on 2/9 kit mixes. Synthetic = out-of-distribution,
+  so **the gate before shipping is real annotated audio** (GuitarSet beat positions + owner-annotated
+  mixes), and iPhone WASM speed/memory is unmeasured (native: final0 0.07× RT / 838 MB; small0 0.05× /
+  1495 MB). Official weights host `cloud.cp.jku.at` is blocked here; production must export from the
+  official checkpoint, pin SHA-256, int8-weight-quantise and check torch parity.
+- **Plan (in order):** P3 manual ×2/÷2 + "bar 1 here" + meter override → P2 port the MIT
+  post-processing (auto grid/triplet choice, tempo map in MIDI/MusicXML/playback) → P5 stereo-split
+  check-by-ear playback → P4 "⬇ All parts (zip)" from `chartsFromStems` (STORED zip + CRC32, no dep) →
+  P1 `beat_this` behind the real-audio gate, as a fallback-safe second tracker → P6 import Muscriptor
+  zips + add SMF import.
 
 ## Path B (scans / photos) — OUT OF SCOPE
 
