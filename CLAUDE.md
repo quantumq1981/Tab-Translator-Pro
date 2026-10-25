@@ -2265,6 +2265,38 @@ separator and capture are browser glue (device check remains for the real model)
       appears with `ORT 1.23.2` in the label, the #33426 diagnosis is wrong for that device (update iOS, and
       compare the Safari version against 17.5). If a long song still dies there, the next levers are Int16
       stem storage (halves the stems); WebGPU on WebKit stays off until measured on a device (#26827).
+    - **Device report after #113 (2026-10-25): iPhone ✅ (slow but works); first-generation iPad Pro ❌ "freezes,
+      then times out".** That iPad (A9X, 2015/16) is stuck on **iPadOS 16.7 = Safari 16.6**. Checked, not assumed:
+      ORT 1.23.2 is built with **Emscripten 4.0.8** (`build_args.py`), whose `MIN_SAFARI_VERSION` is **15.0**, with no
+      tail-call / relaxed-SIMD flags; WebAssembly SIMD is Safari **16.4+**; our JS/the bundle/ORT use nothing newer
+      than Safari 15.4 (`Float16Array` is feature-detected). So it CAN run there — the problem is time and the page's
+      lifecycle: an A9X core is ~3× slower than a current iPhone's, a song takes tens of minutes, iPadOS suspends a
+      Safari tab when the screen auto-locks or Safari is backgrounded, and the loader then **retried a failed worker
+      run on the MAIN thread** (any error mentioning "import/module/worker") — minutes of WASM on the page's thread
+      freeze it until iOS kills it. Fixes (all also help the iPhone):
+      - **No main-thread retry** once a worker exists (only a browser that can't construct a module worker falls back).
+      - **Screen Wake Lock** for the split (Safari 16.4+; re-requested on `visibilitychange`, released after); if the
+        page was hidden during a failed split the error says the split pauses in the background.
+      - **Stages** (`opts.onStage`: library → model → runtime → separating, core → worker → page) shown before the
+        first progress tick, a **stall warning** (quiet > max(3 min, 4× the device's own gap between progress
+        events), naming the stage) and **✕ Cancel** (`cancelStems` / `TTP_STEM_CANCEL`: ends the worker; the promise
+        rejects with `err.cancelled`, shown as "Split cancelled.", not an error).
+      - **⚡ Faster** = `FAST_STEP` 0.75 (25 % window overlap), default ON when `isLegacyIOS` (Safari `Version/` < 17,
+        or the OS token for other iOS browsers), remembered per device. Measured on the compact model (real library,
+        ORT 1.23.2, 17 s mix with known stems): **5.5× → 3.7× real time (−34 %), same peak (922 MB max RSS), SDR
+        −0.7 drums / −0.9 bass / −0.5 other dB.** A **1.4 s window (F=60)** was measured and REJECTED: −180 MB (742 MB)
+        but −1.4 / −4.6 / −2.3 dB and barely faster — don't ship it unless a 2 GB device proves it necessary.
+      - **Split a section** (Whole song / 30 / 60 / 90 s, from m:ss): the charts cover that part; the tracks carry
+        `offsetSec`. On an A9X a 60 s section is the practical unit.
+      - `opts.segment` overrides the compact segment (needed by any other window size; used by the sweep).
+      Verified: `npm test` (stage order before the first progress, injected-session stages, a throwing stage callback
+      can't break a split, FAST_STEP needs < 75 % of the runs, `isLegacyIOS` on iPadOS 16.7 mobile + desktop-class UAs /
+      iOS 15 Chrome vs iOS 17 / 26 / Mac, cancel no-op, no main-thread retry, stage plumbing, wake-lock + section +
+      cancel + stall + Faster UI guards; mutation-tested) and the real app in headless Chromium as an iPadOS 16.6
+      Safari (UA + `platform` MacIntel + touch): Low-memory and Faster default on, stage text, Cancel → "Split
+      cancelled." with the wake lock released, then a 30 s section split → all charts, wake lock 2 requested / 2
+      released. **Device check that remains:** the iPad itself (V8, not JavaScriptCore, ran these). If it still
+      stalls, the stall line names the stage — "starting the AI runtime" means JSC is compiling the 11.9 MB WASM.
 - **Live capture** (`LiveCapture`): `🖥 Capture a tab` (getDisplayMedia, desktop Chrome/Edge,
   "Share tab audio") + `🎙 Record` (mic), raw PCM (ScriptProcessor — the one raw tap iOS
   still has), 15 min cap, silent-take = DRM message, → the SAME `loadBuffer` path as an upload.

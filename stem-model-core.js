@@ -60,6 +60,11 @@ export const COMPACT_MODEL = {
   sha256: "3a926ef9710754f8bc04b3ded790ac6a0ac10465ca06a50e367382deed53d180",
   frames: 120,
 };
+/* "⚡ Faster" (default on iOS/iPadOS ≤ 16 — an A9X core is ~3× slower than a current iPhone's): windows overlap
+ * by 25 % instead of 50 %. Measured on the compact model (real library, ORT 1.23.2, 17 s mix with known stems):
+ * 34 % less time (5.5× → 3.7× real time), same peak memory, SDR −0.7 drums / −0.9 bass / −0.5 other dB.
+ * (A 1.4 s window was measured too and rejected: −180 MB but −1.4 / −4.6 / −2.3 dB, and barely faster.) */
+export const FAST_STEP = 0.75;
 const HOP = 1024;                                              // SCNet's STFT hop (n 4096)
 export const COMPACT_SEGMENT = (COMPACT_MODEL.frames - 1) * HOP; // samples per model run (≈ 2.76 s at 44.1 kHz)
 
@@ -252,6 +257,10 @@ export async function separateInBlocks(left, right, sampleRate, opts = {}) {
 }
 
 async function separateOn(device, left, right, sampleRate, opts) {
+  // Stages let the page say what a slow device is doing before the first progress tick (on an A9X iPad the
+  // runtime compile + first 2.8 s window can take minutes) — and name where it stalled if it never moves.
+  const stage = (s) => { try { if (opts.onStage) opts.onStage(s); } catch (_) { /* UI callback only */ } };
+  stage("library");
   const mod = await lib();
   const separate = resolveSeparate(mod);
   await ensureCacheUsable();
@@ -263,10 +272,15 @@ async function separateOn(device, left, right, sampleRate, opts) {
   // opts.loadModel / opts.ortImport are test seams.
   let own = null;
   const model = device === "wasm" ? (compact ? COMPACT_MODEL : fullModelOf(mod)) : null;
-  const session = opts.session || (model ? () => own || (own = (async () => wasmSession(
-    await (opts.loadModel || modelBytes)(model),
-    { frames: model.frames, graphOptimizationLevel: compact ? "disabled" : undefined },
-    opts.ortImport))()) : undefined);
+  const session = opts.session || (model ? () => own || (own = (async () => {
+    stage("model");
+    const bytes = await (opts.loadModel || modelBytes)(model);
+    stage("runtime");
+    const s = await wasmSession(bytes, { frames: model.frames, graphOptimizationLevel: compact ? "disabled" : undefined }, opts.ortImport);
+    stage("separating");
+    return s;
+  })()) : undefined);
+  if (!model || opts.session) stage("separating");
   const block = Math.max(10, opts.blockSec || (compact ? 30 : 60)) * sampleRate | 0;
   const pad = Math.round((opts.padSec != null ? opts.padSec : 1.5) * sampleRate);
   const starts = [];
@@ -278,9 +292,9 @@ async function separateOn(device, left, right, sampleRate, opts) {
       const a = Math.max(0, starts[bi] - pad), b = Math.min(n, starts[bi] + block + pad);
       const res = await separate([left.subarray(a, b), right.subarray(a, b)], {
         sampleRate, model: STEM_MODEL, device, wasmPaths: ORT_LIB_PATHS,    // only used when the library loads ORT itself (WebGPU)
-        step: opts.step != null ? opts.step : 0.5,                 // 0.5: half the compute of 0.25 for ~0.1 dB
+        step: opts.step != null ? opts.step : 0.5,                 // 0.5: half the compute of 0.25 for ~0.1 dB; FAST_STEP for slow devices
         session,                                                   // our pinned WASM session, or the test seam (the library's own session hook)
-        ...(compact ? { segment: COMPACT_SEGMENT } : {}),          // the library's SCNet preset says 11 s; the compact graph takes 2.76 s
+        ...(compact ? { segment: opts.segment || COMPACT_SEGMENT } : {}),   // the library's SCNet preset says 11 s; the compact graph takes 2.76 s
         // The library calls progress({ chunk: i + 1 }) BEFORE running chunk i, so `chunk` counts
         // chunks STARTED. Report chunks COMPLETED, or every estimate runs one chunk (over a minute
         // on single-thread WASM) ahead of the work actually done.

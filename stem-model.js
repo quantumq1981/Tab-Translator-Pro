@@ -8,14 +8,17 @@
  *
  * Contract:
  *   window.TTP_STEM_MODEL(left, right, sampleRate, { onProgress(done,total), device, blockSec, step, compact })
+ *   window.TTP_STEM_CANCEL() — stop a split in progress (the promise rejects with err.cancelled = true)
+ *   window.TTP_STEM_FAST_DEFAULT — true on iOS/iPadOS ≤ 16 (slow devices default to ⚡ Faster, step 0.75)
+ *   opts.onStage(stage) — "library" | "model" | "runtime" | "separating", before the first progress tick
  *   window.TTP_STEM_COMPACT_DEFAULT — true on iPhone/iPad: one full-size SCNet run needs ~1.3 GB, more
  *     than iOS gives a Safari tab, so phones use the compact (2.8 s-window) model unless told otherwise
  *     → Promise<{ sampleRate, device, stems: { vocals:[L,R], drums:[L,R], bass:[L,R], other:[L,R] } }>
  *   (stems at the INPUT rate, sample-aligned with the input — the per-instrument charts
  *    rely on that alignment for their shared beat grid)
  *
- * Runs in a module Worker (stem-worker.js) so the page stays responsive; if a
- * Worker can't be made, the same code runs on the main thread. Any failure rejects
+ * Runs in a module Worker (stem-worker.js) so the page stays responsive; only if a
+ * module Worker can't be constructed at all does the same code run on the main thread. Any failure rejects
  * the promise with a readable message — the UI shows it; nothing pretends.
  *
  * DEVICE-ONLY seam (same category as note-model.js, PDF.js, Web Audio): npm test
@@ -39,6 +42,7 @@ function getWorker() {
       const m = ev.data || {}, p = _pending.get(m.id);
       if (!p) return;
       if (m.type === "progress") { if (p.onProgress) p.onProgress(m.done, m.total); return; }
+      if (m.type === "stage") { if (p.onStage) p.onStage(m.stage); return; }
       _pending.delete(m.id);
       // A WASM heap never shrinks: the worker would keep the model's ~0.65–1.8 GB peak for the rest
       // of the visit, right while the page charts the stems (measured: the page sat ~650 MB higher
@@ -64,6 +68,29 @@ async function onMainThread(left, right, sampleRate, opts) {
   return core.separateInBlocks(left, right, sampleRate, opts);
 }
 
+/* Stop a split in progress: the worker is ended (its WASM heap goes with it) and the pending promise rejects
+ * with an error whose `cancelled` is true. A main-thread fallback run can't be interrupted — returns false. */
+export function cancelStems() {
+  const w = _worker;
+  if (!w || !_pending.size) return false;
+  try { w.terminate(); } catch (_) { /* already gone */ }
+  _worker = null;
+  const err = new Error("stem separation cancelled"); err.cancelled = true;
+  _pending.forEach((p) => p.reject(err)); _pending.clear();
+  return true;
+}
+
+/* Safari 16 and older (iOS/iPadOS 16 — e.g. a first-generation iPad Pro, which can't update past 16.7): these
+ * devices run the separator, but several times slower than a current iPhone, so the page defaults them to
+ * ⚡ Faster. Read from Safari's "Version/" (the WebKit release) — or, for other iOS browsers, the OS token, which
+ * iOS only froze (at 18_6) from iOS 26 on. */
+export function isLegacyIOS(nav = typeof navigator !== "undefined" ? navigator : null) {
+  if (!isAppleMobile(nav)) return false;
+  const ua = String(nav.userAgent || "");
+  const v = ua.match(/Version\/(\d+)/) || ua.match(/OS (\d+)_\d+(?:_\d+)? like Mac OS X/);
+  return !!v && +v[1] < 17;
+}
+
 /* iPhone / iPod / iPad — including iPadOS, which reports a Mac user agent but has touch. */
 export function isAppleMobile(nav = typeof navigator !== "undefined" ? navigator : null) {
   if (!nav) return false;
@@ -77,19 +104,19 @@ async function separateStems(left, right, sampleRate, opts = {}) {
   const L = Float32Array.from(left), R = Float32Array.from(right || left);   // copies: we transfer them
   const w = getWorker();
   if (!w) return onMainThread(L, R, sampleRate, opts);
-  try {
-    return await new Promise((resolve, reject) => {
-      const id = ++_seq;
-      _pending.set(id, { resolve, reject, onProgress: opts.onProgress });
-      w.postMessage({ id, left: L, right: R, sampleRate, opts: { device: opts.device, blockSec: opts.blockSec, step: opts.step, compact: opts.compact } }, [L.buffer, R.buffer]);
-    });
-  } catch (err) {
-    // a Worker that cannot load modules / WebGPU in workers missing: one main-thread retry
-    if (/worker|module|import/i.test(String(err && err.message))) return onMainThread(Float32Array.from(left), Float32Array.from(right || left), sampleRate, opts);
-    throw err;
-  }
+  // No main-thread retry once the worker exists: a split is minutes of WebAssembly, and running it on the page's
+  // thread freezes the page until iOS kills it — worse than an honest error. (Only a browser that can't even
+  // construct a module worker, above, runs it here.)
+  return new Promise((resolve, reject) => {
+    const id = ++_seq;
+    _pending.set(id, { resolve, reject, onProgress: opts.onProgress, onStage: opts.onStage });
+    w.postMessage({ id, left: L, right: R, sampleRate, opts: { device: opts.device, blockSec: opts.blockSec, step: opts.step, compact: opts.compact } }, [L.buffer, R.buffer]);
+  });
 }
 
 try {
-  if (typeof window !== "undefined") { window.TTP_STEM_MODEL = separateStems; window.TTP_STEM_COMPACT_DEFAULT = isAppleMobile(); }
+  if (typeof window !== "undefined") {
+    window.TTP_STEM_MODEL = separateStems; window.TTP_STEM_COMPACT_DEFAULT = isAppleMobile();
+    window.TTP_STEM_CANCEL = cancelStems; window.TTP_STEM_FAST_DEFAULT = isLegacyIOS();
+  }
 } catch (_) { /* never wedge boot */ }

@@ -2798,6 +2798,12 @@ function LiveCapture({ C, onCaptured, disabled }) {
  * drum stem's pulse), so bar n is the same moment in every chart; all charts quantise with
  * the same ♩= here, so they stay in sync when you nudge it. A mixer solos / mutes stems
  * (sample-aligned, one clock) and every stem downloads as WAV. Browser glue only. */
+const STEM_STAGE_TEXT = {
+  library: "loading the separator…",
+  model: "loading the model (first time ~11–13 MB)…",
+  runtime: "starting the AI runtime (older devices: a minute or more)…",
+  separating: "separating…",
+};
 function StemsPanel({ C, useSharp, getSource, sourceName, fmt, loading }) {
   const [tracks, setTracks] = useState(null);           // { sampleRate, list:[{ role, name, L, R }] } at FULL rate
   const [busy, setBusy] = useState(""), [prog, setProg] = useState(null), [err, setErr] = useState("");
@@ -2811,6 +2817,18 @@ function StemsPanel({ C, useSharp, getSource, sourceName, fmt, loading }) {
     return typeof window !== "undefined" && !!window.TTP_STEM_COMPACT_DEFAULT;
   });
   const setCompact = (v) => { setCompactState(v); try { localStorage.setItem("ttp:stems:compact", v ? "1" : "0"); } catch (_) {} };
+  // ⚡ Faster: windows overlap 25 % instead of 50 % (FAST_STEP 0.75 in stem-model-core.js) — 34 % less time for
+  // ~0.5–0.9 dB. Default ON on iOS/iPadOS ≤ 16 (stem-model.js decides), remembered per device once flipped.
+  const [fast, setFastState] = useState(() => {
+    try { const v = localStorage.getItem("ttp:stems:fast"); if (v === "1" || v === "0") return v === "1"; } catch (_) {}
+    return typeof window !== "undefined" && !!window.TTP_STEM_FAST_DEFAULT;
+  });
+  const setFast = (v) => { setFastState(v); try { localStorage.setItem("ttp:stems:fast", v ? "1" : "0"); } catch (_) {} };
+  // Split a SECTION instead of the whole song (an older iPad takes tens of minutes for a full song).
+  const [sectionSec, setSectionSec] = useState(0);       // 0 = whole song
+  const [sectionFrom, setSectionFrom] = useState("0:00");
+  const [stage, setStage] = useState("");                // separator stage before/while progress ticks
+  const splitRef = useRef({ lock: null, hidden: false, onVis: null });
   // A split the browser killed leaves this flag behind: say what happened instead of a silent reload.
   const [recovered, setRecovered] = useState("");
   useEffect(() => {
@@ -2864,22 +2882,57 @@ function StemsPanel({ C, useSharp, getSource, sourceName, fmt, loading }) {
     setBusy(""); setProg(null);
   };
 
+  /* Keep the screen on for the length of a split. iOS suspends a Safari tab when the screen auto-locks (or Safari
+   * goes to the background) — on a slow device a split outlasts the auto-lock, stalls, and is eventually killed.
+   * Screen Wake Lock is Safari 16.4+ (so iPadOS 16.7 has it); a lock is dropped whenever the page is hidden, so
+   * it is re-requested when the page comes back. Everything is feature-detected; nothing depends on it. */
+  const holdAwake = () => {
+    const st = splitRef.current; st.hidden = false;
+    const req = () => { try { const wl = typeof navigator !== "undefined" && navigator.wakeLock; if (wl && wl.request) wl.request("screen").then((l) => { st.lock = l; }, () => {}); } catch (_) {} };
+    st.onVis = () => { if (document.visibilityState === "hidden") st.hidden = true; else req(); };
+    try { document.addEventListener("visibilitychange", st.onVis); } catch (_) {}
+    req();
+  };
+  const releaseAwake = () => {
+    const st = splitRef.current;
+    try { if (st.onVis) document.removeEventListener("visibilitychange", st.onVis); } catch (_) {}
+    try { if (st.lock) st.lock.release().catch(() => {}); } catch (_) {}
+    st.lock = null; st.onVis = null;
+  };
+  useEffect(() => () => releaseAwake(), []);
+  const cancelSplit = () => { try { if (window.TTP_STEM_CANCEL) window.TTP_STEM_CANCEL(); } catch (_) {} };
+  const parseClock = (t) => { const m = String(t || "").trim().match(/^(?:(\d+):)?(\d+(?:\.\d+)?)$/); return m ? (+(m[1] || 0)) * 60 + +m[2] : 0; };
+
   const split = async () => {
     const src = getSource && getSource();
     // a long song takes a while to decode: say so instead of claiming nothing was uploaded
     if (!src) { setErr(loading && sourceName ? "The song is still loading — try again in a moment." : "Upload a song above first."); return; }
     if (typeof window === "undefined" || typeof window.TTP_STEM_MODEL !== "function") { setErr("The stem separator isn't loaded (it needs a connection the first time) — reload the page and try again."); return; }
-    stop(); setErr(""); setRecovered(""); setRes(null); setBusy(`Separating stems${compact ? " (low-memory)" : ""} (first time: ~${compact ? 11 : 13} MB model download)…`); setProg({ done: 0, total: 1, t0: Date.now() });
-    try { localStorage.setItem("ttp:stems:inflight", JSON.stringify({ t: Date.now(), compact, sec: src.duration })); } catch (_) {}
+    holdAwake();
+    // a section: [from, from + length) of the song, clamped to it
+    const total = src.length, sr0 = src.sampleRate;
+    const a = sectionSec ? Math.min(Math.max(0, Math.round(parseClock(sectionFrom) * sr0)), Math.max(0, total - sr0)) : 0;
+    const b = sectionSec ? Math.min(total, a + Math.round(sectionSec * sr0)) : total;
+    stop(); setErr(""); setRecovered(""); setRes(null); setStage(""); setBusy(`Separating stems${compact ? " (low-memory)" : ""}${fast ? " · faster" : ""}${sectionSec ? ` · ${fmt(a / sr0)}–${fmt(b / sr0)}` : ""}`); setProg({ done: 0, total: 1, t0: Date.now(), tAt: Date.now() });
+    try { localStorage.setItem("ttp:stems:inflight", JSON.stringify({ t: Date.now(), compact, sec: (b - a) / sr0 })); } catch (_) {}
     try {
-      const L = src.getChannelData(0), R = src.numberOfChannels > 1 ? src.getChannelData(1) : L;
-      const out = await window.TTP_STEM_MODEL(L, R, src.sampleRate, { compact, onProgress: (done, total) => setProg((p) => ({ ...(p || { t0: Date.now() }), done, total, tAt: Date.now() })) });
+      const L0 = src.getChannelData(0), R0 = src.numberOfChannels > 1 ? src.getChannelData(1) : L0;
+      const L = a || b < total ? L0.subarray(a, b) : L0, R = a || b < total ? R0.subarray(a, b) : R0;
+      const out = await window.TTP_STEM_MODEL(L, R, src.sampleRate, {
+        compact, step: fast ? 0.75 : undefined,                   // 0.75 = FAST_STEP in stem-model-core.js
+        onStage: (s) => { setStage(s); setProg((p) => ({ ...(p || { t0: Date.now() }), tAt: Date.now() })); },
+        onProgress: (done, total2) => setProg((p) => ({ ...(p || { t0: Date.now() }), done, total: total2, tAt: Date.now(), n: ((p && p.n) || 0) + 1 })),
+      });
+      releaseAwake();
       try { localStorage.removeItem("ttp:stems:inflight"); } catch (_) {}
       const list = ["vocals", "drums", "bass", "other"].filter((k) => out.stems[k]).map((k) => ({ role: k, name: STEM_ROLE_NAMES[k], L: out.stems[k][0], R: out.stems[k][1] }));
-      const t = { sampleRate: out.sampleRate || src.sampleRate, list, device: out.device, compact: !!out.compact };
-      setTracks(t); await analyse(t);
+      const t = { sampleRate: out.sampleRate || src.sampleRate, list, device: out.device, compact: !!out.compact, fast, offsetSec: a / sr0 };
+      setStage(""); setTracks(t); await analyse(t);
     } catch (e) {
+      const wasHidden = splitRef.current.hidden;
+      releaseAwake(); setStage("");
       try { localStorage.removeItem("ttp:stems:inflight"); } catch (_) {}
+      if (e && e.cancelled) { setErr(""); setRecovered("Split cancelled."); setBusy(""); setProg(null); return; }
       const msg = String((e && e.message) || e);
       // The separator appends "[stems <build> · ORT <ver> <device> · Safari …]" so a screenshot says what ran —
       // classify on the message without it (the label says "wasm", which isn't evidence of anything).
@@ -2899,7 +2952,8 @@ function StemsPanel({ C, useSharp, getSource, sourceName, fmt, loading }) {
         : /fetch|network|Load failed|NetworkError|huggingface|jsdelivr|HTTP/i.test(raw)
           ? ` The first split downloads the model (~${compact ? 11 : 13} MB) — check the connection and try again.`
           : " You can import stems from Moises/Demucs instead.";
-      setErr("Stem separation failed: " + msg + "." + hint); setBusy(""); setProg(null);
+      const bg = wasHidden ? " Safari was in the background or the screen locked during the split, which pauses it — keep this tab open and in front until it finishes." : "";
+      setErr("Stem separation failed: " + msg + "." + bg + hint); setBusy(""); setProg(null);
     }
   };
 
@@ -2979,8 +3033,24 @@ function StemsPanel({ C, useSharp, getSource, sourceName, fmt, loading }) {
           <input type="file" multiple onChange={importStems} style={{ display: "none" }} />
         </label>
         <button onClick={() => setCompact(!compact)} disabled={!!busy} title="A smaller version of the same separator that fits a phone's memory — about 2 dB less separation per stem" style={{ ...chip(C), padding: "5px 12px", color: compact ? C.green || C.cyan : C.dim, borderColor: compact ? C.green || C.cyan : C.border }}>📱 Low-memory {compact ? "on" : "off"}</button>
-        {busy && <span style={{ fontSize: 11, color: C.cyan }}>{busy}{prog && prog.total ? ` ${Math.round((100 * prog.done) / prog.total)}%` : ""}{prog && prog.total ? (() => { const eta = progressEta(prog, Date.now()); return eta == null ? " · estimating time left…" : eta < 60 ? " · under a minute left" : ` · ~${Math.round(eta / 60)} min left`; })() : ""}</span>}
+        <button onClick={() => setFast(!fast)} disabled={!!busy} title="Overlap the model's windows 25 % instead of 50 %: about a third less time for slightly less separation (~0.5–0.9 dB). On by default on older iPhones/iPads." style={{ ...chip(C), padding: "5px 12px", color: fast ? C.green || C.cyan : C.dim, borderColor: fast ? C.green || C.cyan : C.border }}>⚡ Faster {fast ? "on" : "off"}</button>
+        {busy && <span style={{ fontSize: 11, color: C.cyan }}>{busy}{stage && !(prog && prog.done) ? ` · ${STEM_STAGE_TEXT[stage] || stage}` : ""}{prog && prog.total ? ` ${Math.round((100 * prog.done) / prog.total)}%` : ""}{prog && prog.total ? (() => { const eta = progressEta(prog, Date.now()); return eta == null ? " · estimating time left…" : eta < 60 ? " · under a minute left" : ` · ~${Math.round(eta / 60)} min left`; })() : ""}</span>}
+        {busy && stage && <button onClick={cancelSplit} style={{ ...chip(C), padding: "3px 10px", color: C.red || C.amber }}>✕ Cancel</button>}
       </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginBottom: 8, fontSize: 11, color: C.dim }}>
+        <span>Split:</span>
+        {[0, 30, 60, 90].map((sec) => (
+          <button key={sec} onClick={() => setSectionSec(sec)} disabled={!!busy} style={{ ...chip(C), padding: "3px 9px", color: sectionSec === sec ? C.cyan : C.dim, borderColor: sectionSec === sec ? C.cyan : C.border }}>{sec ? `${sec} s` : "Whole song"}</button>
+        ))}
+        {sectionSec > 0 && <label style={{ display: "flex", alignItems: "center", gap: 4 }}>from <input value={sectionFrom} onChange={(ev) => setSectionFrom(ev.target.value)} disabled={!!busy} inputMode="decimal" style={{ width: 52, background: C.raised, color: C.text || C.cyan, border: `1px solid ${C.border}`, borderRadius: 6, padding: "2px 6px", fontSize: 11 }} /></label>}
+        {sectionSec > 0 && <span>— a section finishes far sooner on an older device; its charts cover just that part.</span>}
+      </div>
+      {busy && stage && prog && prog.tAt && (() => {
+        // stalled = quiet for 3 min, or 4× the device's own measured gap between progress events if that's longer
+        const quiet = (Date.now() - prog.tAt) / 1000, gap = prog.n ? (prog.tAt - prog.t0) / 1000 / prog.n : 0;
+        const limit = Math.max(180, 4 * gap);
+        return quiet > limit ? <div style={{ fontSize: 11, color: C.amber, marginBottom: 8 }}>No progress for {Math.round(quiet / 60)} min (stage: {STEM_STAGE_TEXT[stage] || stage}). Older iPads can be very slow — keep this tab in front with the screen on. If it still doesn't move, Cancel and split a 30–60 s section.</div> : null;
+      })()}
       {err && <div style={{ fontSize: 11, color: C.red || C.amber, marginBottom: 8 }}>{err}</div>}
       {recovered && !busy && <div style={{ fontSize: 11, color: C.amber, marginBottom: 8 }}>{recovered}</div>}
 
@@ -3003,7 +3073,7 @@ function StemsPanel({ C, useSharp, getSource, sourceName, fmt, loading }) {
             <button onClick={play} style={{ ...chip(C), padding: "4px 12px", color: playing ? C.green : C.amber }}>{playing ? "■ Stop" : "▶ Play stems"}</button>
             <span style={{ color: C.dim }}>{fmt(pos)} · S = solo · M = mute (live)</span>
             {tracks.imported && <button onClick={() => analyse(tracks)} disabled={!!busy} style={{ ...chip(C), padding: "4px 12px", color: C.green }}>♫ Chart these stems</button>}
-            {tracks.device && <span style={{ color: C.dim }}>separated on {tracks.device === "webgpu" ? "GPU" : "CPU"}{tracks.compact ? " · low-memory model" : ""}</span>}
+            {tracks.device && <span style={{ color: C.dim }}>separated on {tracks.device === "webgpu" ? "GPU" : "CPU"}{tracks.compact ? " · low-memory model" : ""}{tracks.fast ? " · faster" : ""}{tracks.offsetSec ? ` · section from ${fmt(tracks.offsetSec)}` : ""}</span>}
           </div>
         </div>
       )}
