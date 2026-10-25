@@ -1282,8 +1282,9 @@ gained an **opt-in `opts.maxRank`** that skips qualities above a `rank` (basic t
 sus are ranks ≤14; the jazz extensions add9/m(maj7)/6-9/9/m9/maj9/7♭9/7♯9 are ≥15). **DEFAULT
 is undefined → zero filtering, so the tab/PDF/GP/XML oracle stays byte-identical** (the whole
 validated corpus is untouched — guarded by a test). It threads `recognise` → `chordFromChroma`
-→ `transcribeChords`; the Audio panel's **△ Simple** toggle passes `maxRank:14`, collapsing the
-over-labelled soup back to the real skeleton. This is the fast, honest half-fix for vocal
+→ `transcribeChords`; the Audio panel's **△ Simple** toggle passed `maxRank:14`, collapsing the
+over-labelled soup back to the real skeleton. (**Superseded in the UI on 2026-10-25** by the
+Chart / Basic / Full chord-vocabulary picker — see "Chord vocabulary" below; `maxRank` still works.) This is the fast, honest half-fix for vocal
 harmony; the real answer is polyphonic per-voice note transcription (a chord *label* still
 can't name the 3 sung notes — that's the next build).
 
@@ -2324,6 +2325,76 @@ separator and capture are browser glue (device check remains for the real model)
   stem import roles, batch commit, Auto persistence, fake-mic capture) — 17/17. The real SCNet
   run is the device check that remains (HF is unreachable from the dev sandbox).
 
+### Chord vocabulary — Chart / Basic / Full for audio decodes (2026-10-25)
+
+**The report:** "every stem or audio file comes back 6/9, sus2 and slash chords with unfamiliar bass
+notes — I want maj7, maj9, m7♭5, 7♭9, dim7, what a professional chart uses." An outside diagnosis
+blamed NNLS overtone attribution (the 9th harmonic read as an extension) and proposed raising
+thresholds, filtering the voicing modal, and mapping muddy chords to 7♭9/dim7. **Measured before
+changing anything, and the diagnosis was wrong:** on the repo's real stems 6/9 was 0–1.3 % of decoded
+time; the noise was **slash chords at 21–43 %** (`Em7/B`, `Dmaj7/C#`, `Cmaj7/B`, `Asus4/E` — v2's
+inversion STATES let the lowest note, often the 3rd of three singers, name every chord) plus sus2 at
+6–7 %. The voicing modal only draws diagrams for a symbol already chosen; it decides nothing.
+Posterior normalisation can't change a MAP label. Mapping muddy chords to 7♭9 would invent a dominant.
+
+**What shipped — a vocabulary, defined as data** (`CHORD_VOCABULARIES` + `resolveChordVocabulary` in
+`engine.tsx`; opt `vocabulary`, read by `chordStatesV2`, `recognise`, `chordStates`, so v2, v1,
+sliding-window and `chartsFromStems` all honour it):
+- `qualities` — the names the decoder may choose. A left-out quality is NOT mapped to anything: the
+  decoder picks the best-fitting chord that IS allowed (C6/9 over C → `C`; A7♭9 needs its A in the bass,
+  otherwise it's the dim7 — the bass decides, no rule needed).
+- `inversions` — slashes that are WRITTEN (chart: `C/E`, `C/G`, `Cm/Eb`, `Cm/G`, `C7/E`, `C7/Bb`).
+- `hidden` — inversions DECODED but written in root position (`Cmaj7` over B reads `Cmaj7`). **Load-
+  bearing:** with inversions simply removed from the state space, a 5th in the bass picked the wrong
+  ROOT (`Dsus4/A` → `A7sus4`, −4.9 root on dev). Hidden states let the bass evidence point at the root
+  without writing the slash. **Deliberately NOT hidden:** the 3rd of m7/m7♭5 and the 4th of sus4 —
+  there the bass is itself the natural root (Am7 over C = **C6**, Bm7♭5 over D = Dm6, Gsus4 over C =
+  Csus2), so the chord is read FROM the bass. Verified in the corpus: every such "Am7/C" is a tonic
+  I6 (*Cheryl*: `Dm7 G7 "Am7/C" C7`; *Anthropology*: `"Gm7/Bb" G7 Cm7` = B♭6 VI7 ii) — the oracle
+  only prefers the m7 name because `m7` out-ranks `6`.
+- `foreign` — non-chord-tone basses charts actually write: major over the 2nd (`F/G`, `Bb/C`) and ♭7
+  (`D/C`), minor over the ♭7 (`Am/G`).
+
+`chart` = `"" m 7 maj7 m7 m7♭5 dim dim7 sus4 7sus4 9 m9 maj9 7♭9` (no 6/9, sus2, add9, 6, m6, 5, aug,
+m(maj7), 7♯9). `dim` stays: removing it cost −0.8 root (a real C° became Ab7/F#); `6`/`m6` measured +0.0
+and the owner didn't want them. `basic` = `"" m 7 maj7 m7 m7♭5 dim7 sus4`, never a slash. `full` = all
+qualities + every chord-tone inversion = **the engine default, byte-identical to before** (every pinned
+test unchanged). **The UI defaults to `chart`**: `ChordVocabPicker` ("Chord names: Chart · Basic ·
+Full", `useChordVocab`, `localStorage["ttp:chordVocab"]`, try/catch) replaces △ Simple in the Audio
+panel and also sits above the stem-chart tabs; a change re-analyses (stems: re-charts the split stems,
+never re-runs the separator). A hidden inversion's event voicing carries no bass note, so transpose
+(which re-names from `midis`) can't revive the slash.
+
+**Measured** (`tests/bench`, 28 tracks × 5 conditions; root / majmin / sevenths / pcs / written bass):
+
+| truth named by | split | full | chart |
+|---|---|---|---|
+| full oracle | dev | 77.8 / 79.8 / 74.2 / 66.9 / 81.8 | 76.6 / 79.3 / 71.1 / 63.8 / 79.2 |
+| full oracle | test | 75.6 / 76.5 / 70.6 / 65.8 / 74.5 | 73.6 / 75.0 / 70.2 / 64.8 / 66.1 |
+| chart vocabulary | dev | 73.7 / 73.7 / 67.9 / 63.1 / 72.3 | **75.3 / 75.9 / 70.0 / 65.4 / 76.4** |
+| chart vocabulary | test | 74.9 / 75.2 / 68.4 / 65.4 / 60.6 | 73.7 / 74.5 / 68.4 / 65.4 / **69.3** |
+
+Against the full oracle chart "loses" 1–3 points, almost all renames to the same notes (`Bsus2` →
+`F#sus4`, `Cm6` → `Am7♭5`, `A6/9` → `F#m7`, `Am7/C` → `C`). Scored at the vocabulary level
+(`--gtvocab chart`, MIREX practice) it is a wash: dev +1.6…+2.3, held-out −1.2…0, written bass +4 / +9.
+The one real held-out loss is a Steely Dan `F#m/G` (a notated foreign slash chart doesn't write; it
+reads `Gmaj9`). **Real stems, share of decoded time that is a slash (full → chart → basic):** 25 or 6
+to 4 42.6 → 23.8 → 0 %, backing vocals 41.6 → 22.8 → 0, Peg vocals 39.5 → 21.2 → 0, Heart of Rock & Roll
+21.1 → 9.9 → 0; sus2 / 6/9 / add9 (up to 8.5 % in full) → 0 in chart and basic. Real app (headless
+Chromium, 390 px, `bench/vocab-e2e.mjs`): backing-vocal stem 24 → 13 → 0 slashed chords of 51, choice
+survives a reload.
+
+**Rejected from the outside proposal, with reasons:** (1) an NNLS 9th-overtone penalty — 6/9/add9 were
+not the noise, and NNLS already attributes overtones; (2) filtering the voicing-modal alias map — it
+renders diagrams for a decided symbol; (3) a ">85 % confidence escape hatch" for extensions — Full is
+one tap; (4) "if no 7th, write maj7" (the 6/9 ban) — writes a B that isn't sounding and can clash with
+the melody's tonic; the chart writes the triad, the player colours it; (5) "group muddy slash chords as
+7♭9 / dim7" — invents a dominant function the audio doesn't support. Do not re-derive these.
+
+**Honest limits:** chart still writes triad/7th inversions when the bass is sustained, which on a
+vocal stem can be the lowest singer — Basic is the no-slash choice for vocal harmony. Synthetic
+bench stems (deltas are the read). A pure C–D–G with zero 3rd reads `Gsus4` in chart (same notes).
+
 ### Key detection v2 — harmonic FUNCTION weights, not scale membership (2026-09-10)
 
 **The reported defect.** An audio-decoded chart of Marshall Tucker's *Can't You See*
@@ -2921,6 +2992,13 @@ accordingly.
   `Bb/C`, and `D7/C` = the oracle's name), short-gap carry vs long rest, posterior
   normalisation, the v2 default + `engine:"v1"` routing, and the UI glue (resampler, review
   strip, uncertain rendering). Accuracy itself is measured by `tests/bench` (dev/test split).
+- **Chord vocabulary** (`npm test`): no vocabulary = `full` = an unknown name (engine default unchanged);
+  chart reads C6/9-over-C as `C`, Cmaj7-over-B as `Cmaj7`, Dsus4-over-A as `Dsus4` (hidden inversion),
+  never names A-C-E-G-over-C from an A root, still writes `C/E`, `Bb/C`, `C7/Bb`, has no `F#m/G`; basic
+  never writes a slash; vocabulary contents are real chord tones and exclude the bass-is-root inversions;
+  hidden inversions carry no bass note; alternatives obey the vocabulary; `recognise` + `chartsFromStems`
+  honour it; UI guards (picker, Chart default, both call sites, Simple gone, per-device storage).
+  Mutation-tested (re-allowing 6/9 + the m7/♭3 hidden state → 5 failures; dropping hidden → 4).
 - **v2.1 batch / stems / capture**: `npm test` pins the noise-floor rest gate (hiss in a rest
   is not a chord; `flatEntropy:1` lets it through), `commitChordChoices` / `autoResolveChords` /
   `reopenAutoChords` semantics (no mutation, candidates only, user commits survive Auto off),

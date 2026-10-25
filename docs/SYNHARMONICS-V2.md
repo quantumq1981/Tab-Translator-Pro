@@ -278,3 +278,38 @@ A "paste a YouTube/Spotify link" downloader was deliberately **not** built:
 - A zero-server page cannot fetch either without a server running stream-extraction tooling.
 
 A DRM-protected tab may capture as silence; the panel says so rather than failing quietly.
+
+
+## 9. Chord vocabulary: Chart / Basic / Full (2026-10-25)
+
+Owner report: audio decodes read as 6/9, sus2 and slash chords over unfamiliar basses. Measured on the
+repo's real stems, 6/9 was 0–1.3 % of decoded time; slash chords were 21–43 % and sus2 6–7 %. The cause
+is the Stage C design itself: inversions are states, so the lowest sounding note names the chord, and on
+a vocal stem that is often the 3rd or 5th sung by the lowest voice.
+
+`CHORD_VOCABULARIES` (engine) defines, per vocabulary, the allowed qualities, the inversions that are
+written, the inversions that are decoded but written in root position (`hidden`), and the allowed
+foreign basses. `chart` is the UI default; `full` stays the engine default (unchanged behaviour).
+
+| truth named by | split | full | chart |
+|---|---|---|---|
+| full oracle | dev | 77.8 / 79.8 / 74.2 / 66.9 / 81.8 | 76.6 / 79.3 / 71.1 / 63.8 / 79.2 |
+| full oracle | test | 75.6 / 76.5 / 70.6 / 65.8 / 74.5 | 73.6 / 75.0 / 70.2 / 64.8 / 66.1 |
+| chart vocabulary | dev | 73.7 / 73.7 / 67.9 / 63.1 / 72.3 | 75.3 / 75.9 / 70.0 / 65.4 / 76.4 |
+| chart vocabulary | test | 74.9 / 75.2 / 68.4 / 65.4 / 60.6 | 73.7 / 74.5 / 68.4 / 65.4 / 69.3 |
+
+(root / majmin / sevenths / pcs / written bass, 28 tracks × 5 conditions.)
+
+Findings that shaped it:
+- Removing inversions from the state space cost −4.9 root on dev: a 5th in the bass then picked the
+  wrong root (`Dsus4/A` → `A7sus4`). Hidden inversion states fix it (−0.3).
+- Hiding EVERY chord-tone inversion is wrong too: a C6/9 over a C bass then read `Am7`, and C–D–G over
+  C read `Gsus4`. The 3rd of m7/m7♭5 and the 4th of sus4 are not hidden: the bass is the natural root.
+  In the corpus those voicings are tonic I6 chords (Cheryl, Anthropology), so the bench's vocabulary
+  truth (`relabelForVocabulary`) reads them from the bass too.
+- `dim` stays in chart (−0.8 root without it); `6`/`m6` add nothing measurable; restricting foreign basses
+  to F/G, Bb/C, D/C, Am/G costs nothing.
+
+Tools: `bench/vocab.mjs` (decoded-vocabulary histograms, `--real` for the repo's audio),
+`bench/vocabdiff.mjs` (where a vocabulary gains/loses root vs full), `run.mjs --gtvocab chart`,
+`bench/vocab-e2e.mjs` (the picker in the real app).

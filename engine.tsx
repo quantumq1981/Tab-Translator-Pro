@@ -55,6 +55,56 @@ const QUALITIES = [
   { name: "7♯9",            suffix: "7♯9",   intervals: [0, 3, 4, 7, 10],  rank: 22 },
 ].map((q) => ({ ...q, mask: makeMask(q.intervals) }));
 
+/* ---- Chord VOCABULARIES for the AUDIO decoders ---------------------------
+ * Which chord names an audio decode is allowed to write, and which slash chords. The
+ * tab/PDF/GP/XML oracle never reads this (it names exactly what is written); audio does,
+ * because a recording can't tell an arranger's 6/9 from a triad with a ringing overtone,
+ * nor a deliberate bass line from the lowest of three singers.
+ *
+ *   qualities   QUALITIES suffixes the decoder may choose from. A quality left out is
+ *               not "mapped" to anything: the decoder picks the best-fitting chord that
+ *               IS allowed (C6/9 → C, C#dim7 stays dim7, A7♭9 needs its A in the bass).
+ *   inversions  per quality, the bass intervals above the root that are WRITTEN as a
+ *               slash (C/E, C/G, C7/Bb).
+ *   hidden      per quality, bass intervals that are decoded but written in root position
+ *               (Cmaj7 over B reads "Cmaj7"; Dsus4 over A reads "Dsus4"). They exist so a 5th
+ *               or 7th in the bass still points at the right ROOT — without them Dsus4/A came
+ *               out A7sus4. Deliberately NOT the 3rd of m7/m7♭5 nor the 4th of sus4: there the
+ *               bass is itself the natural root (Am7 over C is C6, Bm7♭5 over D is Dm6, Gsus4
+ *               over C is Csus2), so the chord must be read FROM the bass. Any bass in neither
+ *               list is not a state.
+ *   foreign     per triad quality, bass intervals that are NOT chord tones but are
+ *               standard chart slash chords: major over the 2nd (F/G, Bb/C — the sus
+ *               dominant) and over the ♭7 (D/C); minor over the ♭7 (Am/G).
+ *
+ * `chart` is the professional lead-sheet set and the Audio panel's default (measured in
+ * docs/SYNHARMONICS-V2.md §9). `full` = every quality and every chord-tone inversion
+ * (the pre-2026-10-25 behaviour). `basic` = triads and 7ths in root position. */
+const CHORD_VOCABULARIES = {
+  chart: {
+    label: "Chart",
+    qualities: ["", "m", "7", "maj7", "m7", "m7♭5", "dim", "dim7", "sus4", "7sus4", "9", "m9", "maj9", "7♭9"],
+    inversions: { "": [4, 7], m: [3, 7], "7": [4, 10] },
+    hidden: { "7": [7], maj7: [4, 7, 11], m7: [7, 10], "m7♭5": [6, 10], dim: [3, 6], sus4: [7], "7sus4": [7] },
+    foreign: { "": [2, 10], m: [10] },
+  },
+  basic: {
+    label: "Basic",
+    qualities: ["", "m", "7", "maj7", "m7", "m7♭5", "dim7", "sus4"],
+    inversions: {},
+    hidden: { "": [4, 7], m: [7], "7": [4, 7, 10], maj7: [4, 7, 11], m7: [7, 10], "m7♭5": [6, 10], sus4: [7] },
+    foreign: {},
+  },
+  full: { label: "Full", qualities: null, inversions: null, hidden: null, foreign: null },
+};
+/* A vocabulary name or object → { allow:Set, inversions, hidden, foreign } (null = no limit).
+ * Unknown names fall back to `full` so a typo can never empty the state space. */
+function resolveChordVocabulary(v) {
+  const V = typeof v === "string" ? CHORD_VOCABULARIES[v] : v;
+  if (!V || !V.qualities) return null;
+  return { allow: new Set(V.qualities), inversions: V.inversions || {}, hidden: V.hidden || {}, foreign: V.foreign || {} };
+}
+
 const PRESETS = [
   { label: "C major",        tuning: "Standard", tab: "e|-0-|\nB|-1-|\nG|-0-|\nD|-2-|\nA|-3-|\nE|-x-|" },
   { label: "G major",        tuning: "Standard", tab: "e|-3-|\nB|-0-|\nG|-0-|\nD|-0-|\nA|-2-|\nE|-3-|" },
@@ -127,9 +177,11 @@ function recognise(chroma, chordMask, bassPc, opts = {}) {
   if (chroma.length === 0) return null;
   if (chroma.length === 1) return { roots: chroma[0], single: true, candidates: [], bassPc };
   const candidates = [];
+  const vocab = resolveChordVocabulary(opts.vocabulary);     // audio only; undefined = every quality
   for (const root of chroma) {
     const transposed = rotateRight(chordMask, root);
     for (const q of QUALITIES) {
+      if (vocab && !vocab.allow.has(q.suffix)) continue;
       // Opt-in: cap chord complexity by `rank` (basic triads/7ths/6/sus ≤14, jazz
       // extensions add9/9/m9/maj9/6-9/7♭9/7♯9/m(maj7) ≥15). DEFAULT is undefined → no
       // filtering, so the oracle stays byte-identical for tab/PDF/GP/XML recognition;
@@ -4391,8 +4443,10 @@ function detectBeats(samples, sampleRate, opts = {}) {
  * filters to the plain triad/7th vocabulary (Simple mode) exactly as `recognise` does. */
 function chordStates(opts = {}) {
   const states = [];
+  const vocab = resolveChordVocabulary(opts.vocabulary);
   for (const q of QUALITIES) {
     if (opts.maxRank != null && q.rank > opts.maxRank) continue;
+    if (vocab && !vocab.allow.has(q.suffix)) continue;
     for (let root = 0; root < 12; root++) {
       const vec = new Float64Array(12);
       for (const iv of q.intervals) vec[(root + iv) % 12] = 1;
@@ -5140,22 +5194,33 @@ function nnlsChromagram(samples, sampleRate, opts = {}) {
 function chordStatesV2(opts = {}) {
   const states = [];
   const inv = opts.inversions !== false;
+  const vocab = resolveChordVocabulary(opts.vocabulary);
   for (const q of QUALITIES) {
     if (opts.maxRank != null && q.rank > opts.maxRank) continue;
+    if (vocab && !vocab.allow.has(q.suffix)) continue;
     const invertible = inv && q.rank <= 14 && q.intervals.length >= 3 && q.intervals.length <= 4;
+    /* Without a vocabulary every chord tone may be the bass, written as a slash. A vocabulary
+     * lists the inversions it writes and the ones it decodes but writes in root position
+     * (CHORD_VOCABULARIES `hidden`); every other bass is not a state. */
+    const shown = vocab ? (invertible ? vocab.inversions[q.suffix] || [] : []) : null;
+    const invIv = !vocab ? (invertible ? q.intervals : [0]) : [0, ...shown, ...(invertible ? vocab.hidden[q.suffix] || [] : [])];
+    const foreignIv = vocab ? vocab.foreign[q.suffix] || [] : null;
     for (let root = 0; root < 12; root++) {
       const vec = new Float64Array(12);
       for (const iv of q.intervals) vec[(root + iv) % 12] = 1;
       const nrm = Math.sqrt(q.intervals.length);
       for (let p = 0; p < 12; p++) vec[p] /= nrm;
-      const basses = invertible ? q.intervals.map((iv) => (root + iv) % 12) : [root];
-      for (const bassPc of basses) states.push({ root, quality: q, vec, bassPc, inversion: bassPc !== root });
+      for (const iv of invIv) states.push({ root, quality: q, vec, bassPc: (root + iv) % 12, inversion: iv !== 0, showBass: iv !== 0 && (!shown || shown.indexOf(iv) >= 0) });
       /* Triads over a FOREIGN bass — D/C, F/G, Bb/C (the sus-dominant voicing), F#m/G.
        * Everywhere in pop/jazz comping, and unrepresentable as a chord-tone inversion.
        * A separate, larger prior (`slashPenalty`) keeps a passing bass note from
        * inventing one: it must be the bass for long enough to outweigh it. */
       if (opts.slashChords !== false && (q.suffix === "" || q.suffix === "m")) {
-        for (let bp = 0; bp < 12; bp++) if (q.intervals.indexOf((bp - root + 12) % 12) < 0) states.push({ root, quality: q, vec, bassPc: bp, inversion: true, foreign: true });
+        for (let bp = 0; bp < 12; bp++) {
+          const iv = (bp - root + 12) % 12;
+          if (q.intervals.indexOf(iv) >= 0 || (foreignIv && foreignIv.indexOf(iv) < 0)) continue;
+          states.push({ root, quality: q, vec, bassPc: bp, inversion: true, foreign: true, showBass: true });
+        }
       }
     }
   }
@@ -5411,9 +5476,10 @@ function transcribeChordsV2(samples, sampleRate, opts = {}) {
   const { path, post } = hmmChordDecode(E, gated, opts);
   const S = states.length, K = S + 1;
   const useSharp = opts.useSharp !== false, names = useSharp ? NOTE_SHARP : NOTE_FLAT;
-  const symOf = (st) => names[st.root] + st.quality.suffix + (st.inversion ? "/" + names[st.bassPc] : "");
+  const symOf = (st) => names[st.root] + st.quality.suffix + (st.showBass ? "/" + names[st.bassPc] : "");
   // a playable voicing: chord tones from C3 up, the bass note an octave below when inverted
-  const midisOf = (st) => (st.inversion ? [36 + st.bassPc] : []).concat(st.quality.intervals.map((i) => 48 + st.root + i));
+  // (a hidden inversion carries no bass note, so re-naming the midis — transpose — can't bring the slash back)
+  const midisOf = (st) => (st.showBass ? [36 + st.bassPc] : []).concat(st.quality.intervals.map((i) => 48 + st.root + i));
   const logK = Math.log(K);
   // collapse runs of one state into events
   const events = [];
@@ -7637,6 +7703,8 @@ export {
   NOTE_FLAT,
   INTERVAL_LABELS,
   QUALITIES,
+  CHORD_VOCABULARIES,
+  resolveChordVocabulary,
   PRESETS,
   parseTab,
   fretToMidi,

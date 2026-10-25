@@ -39,6 +39,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
  * every call site below resolves exactly as it did when this was one file. */
 import {
   makeMask,
+  CHORD_VOCABULARIES,
   popcount,
   rotateRight,
   toBinary12,
@@ -1796,6 +1797,32 @@ function AbcExtToggle({ C, ext, setExt }) {
     </span>
   );
 }
+/* Which chord names an AUDIO decode may write (engine CHORD_VOCABULARIES). Chart = the
+ * professional lead-sheet set (no 6/9, sus2, add9; slash chords only where charts write them);
+ * Basic = triads/7ths/sus4, never a slash; Full = everything the engine knows. Remembered per
+ * device; Chart unless the user picked otherwise. Shared by the chord panel and the stems. */
+const _VOCAB_KEY = "ttp:chordVocab";
+const VOCAB_CHOICES = [
+  ["chart", "Chart", "professional chart names: triads, 7ths, maj7, m7, m7♭5, dim7, sus4, 9ths, 7♭9 — no 6/9, sus2 or add9; slash only for C/E, C/G, C7/B♭, F/G, D/C, Am/G"],
+  ["basic", "Basic", "triads, 7ths, maj7, m7, m7♭5, dim7, sus4 — never a slash; for dense vocal harmony"],
+  ["full", "Full", "every chord the engine knows (6/9, add9, sus2, altered…) and every inversion as a slash"],
+];
+function useChordVocab() {
+  const [v, setV] = useState(() => { try { const x = localStorage.getItem(_VOCAB_KEY); if (CHORD_VOCABULARIES[x]) return x; } catch (_) {} return "chart"; });
+  const set = (x) => { setV(x); try { localStorage.setItem(_VOCAB_KEY, x); } catch (_) {} };
+  return [v, set];
+}
+function ChordVocabPicker({ C, value, onChange, disabled }) {
+  return (
+    <span style={{ display: "inline-flex", gap: 4, alignItems: "center", fontSize: 11, color: C.dim }}>
+      Chord names:
+      {VOCAB_CHOICES.map(([k, lbl, tip]) => (
+        <button key={k} onClick={() => value !== k && onChange(k)} disabled={disabled} title={tip}
+          style={{ ...chip(C), padding: "4px 9px", borderColor: value === k ? C.cyan : C.border, color: value === k ? C.cyan : C.dim }}>{lbl}{value === k ? " ✓" : ""}</button>
+      ))}
+    </span>
+  );
+}
 /* Export preview: the generated text (or MIDI byte summary) + copy/download. */
 function ExportPanel({ exp, setExp, C, bpm, semis, copy, download, copied, downloaded, extOf, abcExt, setAbcExt }) {
   if (!exp) return null;
@@ -2455,7 +2482,7 @@ function AudioImport({ C, useSharp }) {
   const [secBusy, setSecBusy] = useState(false);
   const [secSens, setSecSens] = useState("balanced");// how finely to cut the song
   const [bpb, setBpb] = useState(4);                 // beats per bar
-  const [simple, setSimple] = useState(false);       // triad/7th bias (no 9th/extension over-labels) — good for vocal harmony
+  const [vocab, setVocab] = useChordVocab();          // which chord names the decode may write (Chart by default)
   // ⚡ Auto: uncertain chords take the decoder's best match with nothing left pending (per device)
   const [autoPick, setAutoPick] = useState(() => { try { return localStorage.getItem("ttp:autoPick") === "1"; } catch (_) { return false; } });
   const autoPickRef = useRef(autoPick);
@@ -2481,7 +2508,7 @@ function AudioImport({ C, useSharp }) {
     // (guarded by confidence + gap length) so a chart isn't littered with false N.C. bars.
     // chords: SynHarmonics v2 (the engine default) — NNLS front-end + HMM posteriors; the
     // legacy sliding-window knobs (hopSec/smoothSec/recoverGaps) are v1-only.
-    const opts = k === "notes" ? { hop: Math.floor(sr * 0.08) } : { useSharp, ...(simple ? { maxRank: 14 } : {}) };
+    const opts = k === "notes" ? { hop: Math.floor(sr * 0.08) } : { useSharp, vocabulary: vocab };
     setTimeout(async () => {                          // let "Analyzing…" paint first
       try {
         if (k === "notes") { setRaw((await analyzeAudioOffThread(ds, sr, k, opts)) || []); }
@@ -2561,9 +2588,9 @@ function AudioImport({ C, useSharp }) {
     setRaw((evs) => (n ? autoResolveChords(evs) : reopenAutoChords(evs)));
     return n;
   });
-  // Re-analyse when the Simple (no-extensions) toggle flips — `run` reads the fresh `simple`.
-  const simpleRef = useRef(simple);
-  useEffect(() => { if (simpleRef.current !== simple) { simpleRef.current = simple; const s = ref.current; if (s.cur) run(s.cur, s.sr, kind); } }, [simple]);
+  // Re-analyse when the chord vocabulary changes — `run` reads the fresh `vocab`.
+  const vocabRef = useRef(vocab);
+  useEffect(() => { if (vocabRef.current !== vocab) { vocabRef.current = vocab; const s = ref.current; if (s.cur) run(s.cur, s.sr, kind); } }, [vocab]);
   const toggleIsolate = () => { const v = !isolate; setIsolate(v); setOverrides({}); prepare(v, kind); };
   /* Per-voice ML note transcription (basic-pitch). Pure-JS multi-F0 can't do dense vocal
    * harmony, so this runs a PLUGGABLE, hosted model — `window.TTP_NOTE_MODEL(pcm, sr)` →
@@ -2808,8 +2835,7 @@ function AudioImport({ C, useSharp }) {
         </span>
         <button onClick={toggleIsolate} disabled={busy} title="isolate the center channel (where vocals usually sit) before analysing — for scoring sung harmony from a full mix"
           style={{ ...chip(C), padding: "5px 10px", borderColor: isolate ? C.green : C.border, color: isolate ? C.green : C.dim }}>{isolate ? "🎤 Vocals isolated ✓" : "🎤 Isolate vocals"}</button>
-        {kind === "chords" && <button onClick={() => { setSimple((v) => !v); setOverrides({}); }} disabled={busy} title="bias to plain triads / 7ths — stops dense/vocal audio being over-labelled with 9ths & extensions"
-          style={{ ...chip(C), padding: "5px 10px", borderColor: simple ? C.cyan : C.border, color: simple ? C.cyan : C.dim }}>{simple ? "△ Simple ✓" : "△ Simple"}</button>}
+        {kind === "chords" && <ChordVocabPicker C={C} value={vocab} onChange={(v) => { setVocab(v); setOverrides({}); }} disabled={busy} />}
         {kind === "chords" && <button onClick={voices} disabled={busy} title="per-VOICE note transcription (the actual sung notes, not just a chord) via a pluggable ML model — for dense vocal harmony"
           style={{ ...chip(C), padding: "5px 10px", borderColor: mlScore ? C.green : C.border, color: mlScore ? C.green : C.dim }}>🎼 Voices (ML)</button>}
         <button onClick={guitarTab} disabled={busy} title="guitar (or any plucked-string) stem → every note + the string it's on, as an editable tab chart (ML note model ≈ 25 MB, downloaded once; runs on this device)"
@@ -2984,7 +3010,7 @@ function AudioImport({ C, useSharp }) {
       )}
 
       {/* STEMS → split a full mix (or import stems) → a chart per instrument */}
-      <StemsPanel C={C} useSharp={useSharp} getSource={() => ref.current.audioBuf || null} sourceName={name} fmt={fmt} loading={busy} />
+      <StemsPanel C={C} useSharp={useSharp} vocab={vocab} setVocab={setVocab} getSource={() => ref.current.audioBuf || null} sourceName={name} fmt={fmt} loading={busy} />
 
       {/* SONG STRUCTURE → detected + editable, applied to the chart below */}
       {!!raw.length && !!ref.current.cur && (
@@ -3155,7 +3181,7 @@ const STEM_STAGE_TEXT = {
   runtime: "starting the AI runtime (older devices: a minute or more)…",
   separating: "separating…",
 };
-function StemsPanel({ C, useSharp, getSource, sourceName, fmt, loading }) {
+function StemsPanel({ C, useSharp, vocab, setVocab, getSource, sourceName, fmt, loading }) {
   const [tracks, setTracks] = useState(null);           // { sampleRate, list:[{ role, name, L, R }] } at FULL rate
   const [busy, setBusy] = useState(""), [prog, setProg] = useState(null), [err, setErr] = useState("");
   const [res, setRes] = useState(null);                 // chartsFromStems result
@@ -3225,13 +3251,16 @@ function StemsPanel({ C, useSharp, getSource, sourceName, fmt, loading }) {
         full[tr.role] = full[tr.role] ? Float32Array.from(full[tr.role], (v, i) => v + (mono[i] || 0)) : mono;
       }
       for (const role of Object.keys(full)) byRole[role] = await resampleOffThread(full[role], sr, asr);
-      const r = await chartsFromStemsOffThread(byRole, asr, { useSharp, fullRate: full.drums ? { drums: full.drums, sampleRate: sr } : undefined });
+      const r = await chartsFromStemsOffThread(byRole, asr, { useSharp, vocabulary: vocab, fullRate: full.drums ? { drums: full.drums, sampleRate: sr } : undefined });
       setRes(r); setOvr({});
       if (r.bpm) setBpm(Math.round(r.bpm));
-      setTab(r.charts.length ? r.charts[0].role : "band");
+      setTab((cur) => (r.charts.some((c) => c.role === cur) ? cur : r.charts.length ? r.charts[0].role : "band"));
     } catch (e) { setErr("Charting the stems failed: " + ((e && e.message) || e)); }
     setBusy(""); setProg(null);
   };
+  // a new chord vocabulary re-charts the stems already split (seconds), never re-runs the separator
+  const vocabSeen = useRef(vocab);
+  useEffect(() => { if (vocabSeen.current !== vocab) { vocabSeen.current = vocab; if (tracks && res && !busy) analyse(tracks); } }, [vocab]);
 
   /* Keep the screen on for the length of a split. iOS suspends a Safari tab when the screen auto-locks (or Safari
    * goes to the background) — on a slow device a split outlasts the auto-lock, stalls, and is eventually killed.
@@ -3435,6 +3464,7 @@ function StemsPanel({ C, useSharp, getSource, sourceName, fmt, loading }) {
             {res.charts.map((c) => (
               <button key={c.role} onClick={() => setTab(c.role)} style={{ ...chip(C), padding: "4px 10px", borderColor: tab === c.role ? C.cyan : C.border, color: tab === c.role ? C.cyan : C.dim }}>{c.name}</button>
             ))}
+            {setVocab && <ChordVocabPicker C={C} value={vocab} onChange={setVocab} disabled={!!busy} />}
             <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11 }}>
               <button onClick={() => setBpm((b) => Math.max(40, b - 1))} style={{ ...chip(C), padding: "2px 8px" }}>−</button>
               <span style={{ color: C.amber }}>♩={bpm}</span>
