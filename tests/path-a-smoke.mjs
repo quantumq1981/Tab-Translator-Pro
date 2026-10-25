@@ -1346,6 +1346,37 @@ let synhSummary = "";
     expect(st.charts.length && st.charts[0].events.every((e) => !e.symbol.includes("/")), `chartsFromStems forwards the vocabulary (got ${st.charts[0] && st.charts[0].events.map((e) => e.symbol)})`);
   }
 
+  /* respellScore (2026-10-25): the vocabulary names EVERY chart, not just audio decodes. The
+   * owner's screenshot: a notated C#-E-F#-G#-B over C# shown as the oracle's E6/9/C# "all over the
+   * place" — a chart writes C#m11. Notated voicings are exact, so these are recognise() cases. */
+  {
+    const one = (ms, extra = {}) => ({ bars: [{ number: 1, events: [{ symbol: eng.symbolForMidis(ms, true), midis: ms, beat: 0, durBeats: 4, ...extra }] }] });
+    const rs = (ms, v, o) => eng.respellScore(one(ms), v, o || {}).bars[0].events[0].symbol;
+    const M11 = [49, 52, 54, 56, 59], SOWHAT = [40, 45, 50, 55, 59];
+    expect(eng.symbolForMidis(M11, true) === "E6/9/C#" && eng.symbolForMidis(SOWHAT, true) === "G6/9/E", "the notation oracle is unchanged by the new m11 quality (E6/9/C#, G6/9/E)");
+    expect(rs(M11, "chart") === "C#m11" && rs(M11, "full") === "E6/9/C#" && rs(M11, "basic") === "C#m7", `C#-E-F#-G#-B over C#: chart C#m11 · full E6/9/C# · basic C#m7 (got ${rs(M11, "chart")}, ${rs(M11, "full")}, ${rs(M11, "basic")})`);
+    expect(rs(SOWHAT, "chart") === "Em11", `the So What voicing reads Em11 (got ${rs(SOWHAT, "chart")})`);
+    const cases = [[[48, 52, 55, 57], "Cmaj7"], [[47, 48, 52, 55], "Cmaj7"], [[40, 48, 52, 55], "C/E"], [[46, 48, 52, 55], "C7/Bb"], [[36, 46, 50, 53], "Bb/C"],
+      [[43, 54, 57, 61], "F#m"], [[48, 50, 55], "C"], [[48, 52, 55, 62], "C"], [[52, 56, 59, 61, 66], "Emaj9"], [[49, 51, 54, 56], "C#sus4"], [[52, 56, 61], "C#m/E"]];
+    for (const [ms, want] of cases) expect(rs(ms, "chart") === want, `chart respell of ${eng.symbolForMidis(ms, true)} → ${want} (got ${rs(ms, "chart")})`);
+    expect(rs([52, 56, 61], "basic") === "C#m", `basic reads a minor triad over its 3rd as the triad, not E6→Emaj7 (got ${rs([52, 56, 61], "basic")})`);
+    expect(rs([52, 56, 59, 61, 66], "chart", { sixNine: "maj7" }) === "Emaj7" && rs([52, 56, 59, 61, 66], "chart", { sixNine: "triad" }) === "E", "the 6/9 setting reaches respellScore");
+    // no invented notes: a 3-note voicing with no exact match never becomes a 5-note chord missing two
+    expect(!/9|13/.test(rs([48, 50, 55], "chart")), `C-D-G is not named C9/Cmaj9 in chart (got ${rs([48, 50, 55], "chart")})`);
+    const rv = eng.recognise([0, 2, 7], eng.makeMask([0, 2, 7]), 0, { vocabulary: "chart" });
+    expect(rv.candidates.every((c) => c.missing <= 1), "recognise({vocabulary}) drops candidates missing ≥ 2 tones when a closer one exists");
+    // purity: no mutation, idempotent, reviewed / single notes / rests untouched, Full = identity
+    const sc = one(M11); const before = JSON.stringify(sc); const out = eng.respellScore(sc, "chart");
+    expect(JSON.stringify(sc) === before && out !== sc && eng.respellScore(out, "chart").bars[0].events[0].symbol === "C#m11", "respellScore never mutates and is idempotent");
+    expect(eng.respellScore(sc, "full") === sc && eng.respellScore(sc, undefined) === sc, "full / no vocabulary returns the score as written");
+    expect(eng.respellScore(one(M11, { reviewed: true }), "chart").bars[0].events[0].symbol === "E6/9/C#", "a chord the user picked in the review list is never re-named");
+    const mixed = { bars: [{ number: 1, events: [{ symbol: "E", midis: [52], beat: 0, durBeats: 1 }, { symbol: "—", beat: 1, durBeats: 1 }] }] };
+    expect(eng.respellScore(mixed, "chart").bars[0] === mixed.bars[0], "single notes and rests are left alone (bar object reused)");
+    // a reviewed audio chord survives audioEventsToScore so respell can see it
+    const aes = eng.audioEventsToScore([{ symbol: "G/F", midis: [41, 55, 59, 62], startSec: 0, durSec: 2, reviewed: true }], { bpm: 120, beatsPerBar: 4 });
+    expect(aes.bars[0].events[0].reviewed === true && eng.respellScore(aes, "chart").bars[0].events[0].symbol === "G/F", "audioEventsToScore carries `reviewed`, and respell honours it");
+  }
+
   // Stage D · repetition smoothing is opt-in and shape-preserving
   {
     const segs = Array.from({ length: 40 }, (_, i) => ({ t0: i, t1: i + 1, chroma: Float64Array.from({ length: 12 }, (_, p) => ((p + i) % 4 === 0 ? 1 : 0.1)), bass: new Float64Array(12).fill(0.1), level: -20 }));
@@ -2209,11 +2240,14 @@ expect(!/\bfrom\s*["']react["']/.test(engineSrc) && !/\buseState\s*\(/.test(engi
 expect(!/^const\s+makeMask\b/m.test(uiSrc) && !/^function\s+buildChart\b/m.test(uiSrc), "UI must not re-define engine internals (engine moved to engine.tsx)");
 expect(uiSrc.includes('async function extractTokens'), "extractTokens (browser PDF seam) stays in the UI file");
 // chord vocabulary picker (2026-10-25): Chart by default, shared by the chord panel + stems, remembered per device
-expect(/function ChordVocabPicker/.test(uiSrc) && /function useChordVocab/.test(uiSrc) && /return "chart";/.test(uiSrc), "UI ships the chord-vocabulary picker, Chart by default");
+expect(/function ChordVocabPicker/.test(uiSrc) && /function useChordVocab/.test(uiSrc) && /_usePref\(_VOCAB_KEY, "chart"/.test(uiSrc), "UI ships the chord-vocabulary picker, Chart by default");
 expect(/vocabulary: vocab, sixNine \}/.test(uiSrc) && /chartsFromStemsOffThread\(byRole, asr, \{ useSharp, vocabulary: vocab/.test(uiSrc), "the chord decode and the stem charts both pass the chosen vocabulary");
 expect(!/maxRank: 14/.test(uiSrc) && !/setSimple/.test(uiSrc), "the old △ Simple toggle (maxRank:14) is replaced by the picker");
-expect(/function useSixNine/.test(uiSrc) && /return "maj9";/.test(uiSrc) && /vocabulary: vocab, sixNine \}/.test(uiSrc) && /vocabulary: vocab, sixNine, fullRate/.test(uiSrc), "the 6/9 → maj9/maj7/triad setting defaults to maj9 and reaches both decodes");
-expect(/localStorage\.getItem\(_VOCAB_KEY\)/.test(uiSrc) && /try \{ localStorage\.setItem\(_VOCAB_KEY/.test(uiSrc), "the vocabulary choice is remembered per device, guarded by try/catch");
+expect(/function useSixNine/.test(uiSrc) && /_usePref\(_SIX9_KEY, "maj9"/.test(uiSrc) && /vocabulary: vocab, sixNine \}/.test(uiSrc) && /vocabulary: vocab, sixNine, fullRate/.test(uiSrc), "the 6/9 → maj9/maj7/triad setting defaults to maj9 and reaches both decodes");
+expect(/function _usePref/.test(uiSrc) && /try \{ const x = localStorage\.getItem\(key\)/.test(uiSrc) && /try \{ localStorage\.setItem\(key, x\); \} catch/.test(uiSrc) && /_prefListeners/.test(uiSrc), "the vocabulary choices are shared live between pickers and remembered per device, guarded by try/catch");
+// every chart (PDF / GP / MusicXML / ML / guitar tab) is named by the same vocabulary
+expect(/respellScore\(transposeScore\(base, semis, useSharp\), vocab, \{ sixNine, useSharp \}\)/.test(uiSrc) && /vocabPicker && <ChordVocabPicker/.test(uiSrc), "ChartPanel names every chart with the shared vocabulary and shows the picker");
+expect((uiSrc.match(/vocabPicker=\{false\}/g) || []).length === 2, "the audio and stem charts hide the duplicate picker (theirs sits above)");
 expect(/from\s*\$\{engineUrl\}/.test(htmlSrc) || /engine\.tsx/.test(htmlSrc), "index.html loader must reference/wire engine.tsx");
 const pagesYml = fs.readFileSync(path.join(repo, ".github", "workflows", "pages.yml"), "utf8");
 expect(/cp\s+engine\.tsx\s+_site/.test(pagesYml) && /cp\s+TabDecoderPro\.tsx\s+_site/.test(pagesYml),
@@ -3247,7 +3281,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   expect(/PlayerMode\.EnabledSynthesizer/.test(tv) && /sonivox\.sf3/.test(tv) && /Bravura\.woff2/.test(tv) && /StaveProfile\.Tab/.test(tv) && /api\.destroy\(\)/.test(tv), "tab-view.js: synth player with the vendored sound font, the vendored font, tab-only profile, destroy");
   expect(/<script type="module" src="\.\/tab-view\.js"><\/script>/.test(html) && /cp tab-view\.js _site\//.test(pages) && /cp -r vendor\/alphatab-1\.8\.4\/\. _site\/vendor\/alphatab-1\.8\.4\//.test(pages) && /tab-view\.js\?v=\$\{BUILD\}/.test(pages), "index.html loads tab-view.js; pages.yml ships it + the vendored alphaTab and stamps it");
   expect(/\["tab", "Tab"\]/.test(ui) && /view === "tab"/.test(ui) && /<TabView tex=\{tabTex\.text\}/.test(ui) && /fmt === "alphatex" \? \(tabTex\.error/.test(ui), "ChartPanel has a Tab view, drawn from the SAME AlphaTex the export writes");
-  expect(/if \(!simplify\) return tscore;\s*return transposeScore\(arrange === "off" \? score : arrangeScore\(score, arrange\), semis, useSharp\)/.test(ui), "the tab (view + AlphaTex export) skips Simplify — a tab shows the notes played, not one inferred chord per bar");
+  expect(/if \(!simplify\) return tscore;\s*return respellScore\(transposeScore\(arrange === "off" \? score : arrangeScore\(score, arrange\), semis, useSharp\), vocab/.test(ui), "the tab (view + AlphaTex export) skips Simplify — a tab shows the notes played, not one inferred chord per bar");
   expect(/defaultView="tab"/.test(ui) && /const tex = alphaTexFromBytes\(bytes\);\s*if \(tex != null\)/.test(ui) && /meta\.kind === "alphatex"/.test(ui) && /<TabView tex=\{texDoc\.text\}/.test(ui), "the guitar tab opens on the Tab view; a saved .alphatex upload (and its session restore) opens in the viewer");
 }
 

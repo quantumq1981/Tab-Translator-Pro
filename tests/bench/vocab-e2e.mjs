@@ -3,6 +3,7 @@
  * survives a reload. Dev-only.
  *
  *   node bench/vocab-e2e.mjs --deps <dir> [--audio "<file in repo>"] [--width 390 --height 844]
+ *   node bench/vocab-e2e.mjs --deps <dir> --gp "<Guitar Pro file in repo>" [--part N]   # the ChartPanel picker on a file import
  *
  * --deps is the React + Babel bundle scnet-e2e.mjs describes (the sandbox blocks esm.sh / unpkg). */
 import fs from "node:fs"; import path from "node:path"; import http from "node:http";
@@ -47,14 +48,29 @@ const settle = async (prev) => {   // wait for the re-analysis to land: "Analyzi
   await page.waitForTimeout(500);
   return chartSyms();
 };
-const stats = (s) => ({ chords: s.length, slash: s.filter((x) => /\/[A-G]/.test(x.replace("6/9", ""))).length, sus2_69_add9: s.filter((x) => /sus2|6\/9|add9/.test(x)).length, maj7: s.filter((x) => /maj7/.test(x)).length, maj9: s.filter((x) => /maj9/.test(x)).length, sample: s.slice(0, 14).join(" ") });
+const stats = (s) => ({ chords: s.length, slash: s.filter((x) => /\/[A-G]/.test(x.replace("6/9", ""))).length, sus2_69_add9: s.filter((x) => /sus2|6\/9|add9/.test(x)).length, maj7: s.filter((x) => /maj7/.test(x)).length, maj9: s.filter((x) => /maj9/.test(x)).length, m11: s.filter((x) => /m11/.test(x)).length, sample: s.slice(0, 14).join(" ") });
 
 await page.goto(ORIGIN + "/"); await page.waitForTimeout(500);
+if (arg("gp")) {
+  // a file import is named by the oracle; the ChartPanel picker re-names it (respellScore)
+  await page.getByRole("button", { name: "MusicXML / GP" }).click({ timeout: 60000 });
+  await page.locator('input[type="file"]').first().setInputFiles(path.resolve(L.repo, arg("gp")));
+  if (arg("part")) { await page.locator('button[title^="chart the "]').nth(+arg("part")).click(); }
+  await page.locator('button[title*="guitar voicings"]').first().waitFor({ timeout: 60000 }); await page.waitForTimeout(600);
+  const res = { chart: stats(await chartSyms()), chartActive: await page.getByRole("button", { name: "Pro ✓" }).first().isVisible() };
+  await page.getByRole("button", { name: /^Full$/ }).first().click(); await page.waitForTimeout(600);
+  res.full = stats(await chartSyms());
+  await page.getByRole("button", { name: /^Pro$/ }).first().click(); await page.waitForTimeout(600);
+  res.back = stats(await chartSyms());
+  res.errors = logs.filter((l) => !/ERR_FAILED/.test(l));
+  await page.screenshot({ path: path.join(arg("out", process.cwd()), "vocab-e2e-gp.png") });
+  console.log(JSON.stringify(res, null, 2)); await browser.close(); server.close(); process.exit(0);
+}
 await page.getByRole("button", { name: "Audio 🎵" }).click({ timeout: 60000 });
 await page.locator('label', { hasText: 'Upload audio' }).locator('input[type="file"]').setInputFiles(AUDIO);
 const out = {};
 out.chart = stats(await settle());
-out.chartActive = await page.getByRole("button", { name: "Chart ✓" }).first().isVisible();
+out.chartActive = await page.getByRole("button", { name: "Pro ✓" }).first().isVisible();
 const six = page.locator("label", { hasText: "6/9 →" }).locator("select").first();
 out.sixNineDefault = await six.inputValue();
 await six.selectOption("maj7");

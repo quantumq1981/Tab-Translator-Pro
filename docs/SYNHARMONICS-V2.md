@@ -316,3 +316,13 @@ Findings that shaped it:
 Tools: `bench/vocab.mjs` (decoded-vocabulary histograms, `--real` for the repo's audio),
 `bench/vocabdiff.mjs` (where a vocabulary gains/loses root vs full), `run.mjs --gtvocab chart`,
 `bench/vocab-e2e.mjs` (the picker in the real app).
+
+### 9.1 Every chart, and m11 (same day)
+
+The owner's screenshot showed `E6/9/C#` "all over the place" — produced not by the audio decoder but
+by the notation oracle, which names file imports, Voices (ML), Guitar → Tab and transposed charts. So
+the vocabulary is now a naming pass over any chart (`respellScore`, run last in ChartPanel), `m11`
+joined QUALITIES (oracle unchanged: 0 of 100,179 corpus names moved), and vocabulary-mode `recognise`
+gained a bass filter, a bass-rooted tie-break, a no-invented-notes guard and sus2/add9 → triad.
+The audio decoder gained too (vocabulary-level held-out +1.1 root / +1.0 majmin / +1.1 sevenths).
+Full detail and numbers: CLAUDE.md, "Chord vocabulary".

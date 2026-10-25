@@ -40,6 +40,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   makeMask,
   CHORD_VOCABULARIES,
+  respellScore,
   popcount,
   rotateRight,
   toBinary12,
@@ -1019,7 +1020,7 @@ export default function TabDecoderPro() {
  * the same shape, so the renderer, editor and exporters are identical. Edits are
  * lifted to the parent as an `overrides` map ("<bar>.<beat>" -> symbol) so they
  * survive view/transpose changes and feed straight into export. */
-function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, selKey, onPick, keyOverride, setKeyOverride, autoSimplify = true, defaultView = "chart" }) {
+function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, selKey, onPick, keyOverride, setKeyOverride, autoSimplify = true, defaultView = "chart", vocabPicker = true }) {
   const [view, setView] = useState(defaultView);
   const [voicingChoices, setVoicingChoices] = useState(null);   // chord(s) whose voicing modal is open
   const [editMode, setEditMode] = useState(false);
@@ -1055,14 +1056,20 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
 
   const simp = useMemo(() => (simplify ? simplifyScore(score, useSharp) : score), [simplify, score, useSharp]);
   const base = useMemo(() => (arrange === "off" ? simp : arrangeScore(simp, arrange)), [simp, arrange]);
-  const tscore = useMemo(() => transposeScore(base, semis, useSharp), [base, semis, useSharp]);
+  /* Chord NAMES follow the shared Chart / Basic / Full setting for every chart, not just audio
+   * decodes: a PDF / Guitar Pro / MusicXML voicing C#-E-F#-G#-B over C# reads C#m11 in Chart
+   * (the oracle's literal E6/9/C# in Full). Last in the chain, because transpose re-names from
+   * the notes. Display, exports, key analysis and the Pro handoff all read tscore. */
+  const [vocab, setVocab] = useChordVocab();
+  const [sixNine, setSixNine] = useSixNine();
+  const tscore = useMemo(() => respellScore(transposeScore(base, semis, useSharp), vocab, { sixNine, useSharp }), [base, semis, useSharp, vocab, sixNine]);
   // The TAB (Tab view + AlphaTex export) skips Simplify: Simplify replaces a melodic line with one
   // inferred chord per bar, which is right for a chord chart and wrong for a tab — a tab must show
   // the notes that are actually played. Arrange and transpose still apply.
   const tabScore = useMemo(() => {
     if (!simplify) return tscore;
-    return transposeScore(arrange === "off" ? score : arrangeScore(score, arrange), semis, useSharp);
-  }, [simplify, tscore, score, arrange, semis, useSharp]);
+    return respellScore(transposeScore(arrange === "off" ? score : arrangeScore(score, arrange), semis, useSharp), vocab, { sixNine, useSharp });
+  }, [simplify, tscore, score, arrange, semis, useSharp, vocab, sixNine]);
   /* KEY — detected, but CORRECTABLE. The analysis is very good and still not
    * infallible (a ♭VII rock tune, a modal vamp, an audio decode with a noisy
    * chord list), and the key drives the roman numerals AND every export's key
@@ -1264,6 +1271,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
         <KeyPicker C={C} value={keyOv} onChange={setKeyOv} cands={keyCands} useSharp={useSharp} semis={semis} />
         <button onClick={() => setSimplify((s) => !s)} title="aggregate each bar's notes into one chord (for dense transcriptions)"
           style={{ ...chip(C), padding: "3px 9px", borderColor: simplify ? C.green : C.border, color: simplify ? C.green : C.dim }}>{simplify ? "1 chord/bar ✓" : "Simplify"}</button>
+        {vocabPicker && <ChordVocabPicker C={C} value={vocab} onChange={setVocab} sixNine={sixNine} onSixNine={setSixNine} />}
         <select value={arrange} onChange={(e) => setArrange(e.target.value)} title="stamp a strum/comping rhythm across each bar (exports as CSMPN/CSML slash-rhythm)"
           style={{ ...chip(C), padding: "3px 9px", borderColor: arrange !== "off" ? C.cyan : C.border, color: arrange !== "off" ? C.cyan : C.dim, background: C.raised, cursor: "pointer" }}>
           <option value="off">Arrange…</option>
@@ -1803,14 +1811,31 @@ function AbcExtToggle({ C, ext, setExt }) {
  * device; Chart unless the user picked otherwise. Shared by the chord panel and the stems. */
 const _VOCAB_KEY = "ttp:chordVocab";
 const VOCAB_CHOICES = [
-  ["chart", "Chart", "professional chart names: triads, 7ths, maj7, m7, m7♭5, dim7, sus4, 9ths, 7♭9 — a heard 6/9 is written maj9 (or maj7), no sus2 or add9; slash only for C/E, C/G, C7/B♭, F/G, D/C, Am/G"],
+  ["chart", "Pro", "professional chart names: triads, 7ths, maj7, m7, m7♭5, dim7, sus4, 9ths, m11, 7♭9 — a 6/9 is written maj9 (or maj7), sus2/add9 as the triad, a chord is read from its bass (C#m11, not E6/9/C#); slash only for C/E, C/G, C7/B♭, F/G, D/C, Am/G"],
   ["basic", "Basic", "triads, 7ths, maj7, m7, m7♭5, dim7, sus4 — never a slash; for dense vocal harmony"],
   ["full", "Full", "every chord the engine knows (6/9, add9, sus2, altered…) and every inversion as a slash"],
 ];
-function useChordVocab() {
-  const [v, setV] = useState(() => { try { const x = localStorage.getItem(_VOCAB_KEY); if (CHORD_VOCABULARIES[x]) return x; } catch (_) {} return "chart"; });
-  const set = (x) => { setV(x); try { localStorage.setItem(_VOCAB_KEY, x); } catch (_) {} };
+/* One live, per-device preference shared by every component that reads it — the Audio panel's
+ * picker, the stem charts' picker and every ChartPanel stay in step (a change in one re-renders
+ * the others). localStorage is a convenience only: every access is guarded. */
+const _prefListeners = new Map();
+function _usePref(key, fallback, valid) {
+  const [v, setV] = useState(() => { try { const x = localStorage.getItem(key); if (valid(x)) return x; } catch (_) {} return fallback; });
+  useEffect(() => {
+    const subs = _prefListeners.get(key) || new Set();
+    _prefListeners.set(key, subs);
+    subs.add(setV);
+    return () => { subs.delete(setV); };
+  }, [key]);
+  const set = (x) => {
+    try { localStorage.setItem(key, x); } catch (_) {}
+    (_prefListeners.get(key) || new Set()).forEach((fn) => fn(x));
+    setV(x);
+  };
   return [v, set];
+}
+function useChordVocab() {
+  return _usePref(_VOCAB_KEY, "chart", (x) => !!CHORD_VOCABULARIES[x]);
 }
 /* How a DETECTED 6/9 is written in Chart/Basic (the tonic-major chart convention): maj9 keeps
  * the 9th that really sounds, maj7 is the plainest, triad = don't detect 6 / 6/9 at all. A 6
@@ -1818,9 +1843,7 @@ function useChordVocab() {
 const _SIX9_KEY = "ttp:sixNine";
 const SIX9_CHOICES = [["maj9", "maj9"], ["maj7", "maj7"], ["triad", "triad"]];
 function useSixNine() {
-  const [v, setV] = useState(() => { try { const x = localStorage.getItem(_SIX9_KEY); if (SIX9_CHOICES.some(([k]) => k === x)) return x; } catch (_) {} return "maj9"; });
-  const set = (x) => { setV(x); try { localStorage.setItem(_SIX9_KEY, x); } catch (_) {} };
-  return [v, set];
+  return _usePref(_SIX9_KEY, "maj9", (x) => SIX9_CHOICES.some(([k]) => k === x));
 }
 function ChordVocabPicker({ C, value, onChange, sixNine, onSixNine, disabled }) {
   return (
@@ -3059,7 +3082,7 @@ function AudioImport({ C, useSharp }) {
             </span>
           </div>
           <ChordReview events={raw} C={C} fmt={fmt} onSeek={(t) => play(t)} onCommit={commitChoices} auto={autoPick} onAuto={toggleAuto} />
-          <ChartPanel score={audioScore} title={name || "Audio stem"} meta={`${audioScore.bars.length} bars · ♩=${bpm} · from audio`} C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey="" onPick={() => {}} />
+          <ChartPanel score={audioScore} vocabPicker={false} title={name || "Audio stem"} meta={`${audioScore.bars.length} bars · ♩=${bpm} · from audio`} C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey="" onPick={() => {}} />
           <div style={{ fontSize: 11, color: C.dim, marginTop: 10, lineHeight: 1.6 }}>
             Decoded with <b>SynHarmonics v2</b> (note-level NNLS transcription, tuning compensation, inversions + slash chords, calibrated confidence). Faded chords with a <b style={{ color: C.amber }}>?</b> are the uncertain ones — fix them from the review list or <b>✎ Edit</b>, set <b>♩=</b> so bars align, then <b>CSMPN</b> / <b>→ Chord Sheet Maker Pro</b> to send it on. Dense voicings / heavy bleed still mislabel.
           </div>
@@ -3498,7 +3521,7 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, getSour
               : <div style={{ fontSize: 11, color: C.dim }}>No clear notes in this stem.</div>
           )}
           {chartScore && (
-            <ChartPanel score={chartScore} title={`${base} — ${chart.name}`} meta={`${chartScore.bars.length} bars · ♩=${bpm} · ${chart.name}${res.key && chart.role === "band" ? "" : ""}`}
+            <ChartPanel score={chartScore} vocabPicker={false} title={`${base} — ${chart.name}`} meta={`${chartScore.bars.length} bars · ♩=${bpm} · ${chart.name}${res.key && chart.role === "band" ? "" : ""}`}
               C={C} useSharp={useSharp} overrides={ovr[chart.role] || {}} setOverrides={(f) => setOvr((o) => ({ ...o, [chart.role]: typeof f === "function" ? f(o[chart.role] || {}) : f }))} selKey="" onPick={() => {}} />
           )}
           {groove && (

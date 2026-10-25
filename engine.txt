@@ -53,6 +53,10 @@ const QUALITIES = [
   { name: "Major 9th",      suffix: "maj9",  intervals: [0, 2, 4, 7, 11],  rank: 20 },
   { name: "7♭9",            suffix: "7♭9",   intervals: [0, 1, 4, 7, 10],  rank: 21 },
   { name: "7♯9",            suffix: "7♯9",   intervals: [0, 3, 4, 7, 10],  rank: 22 },
+  // m11 as charts voice it — 1 ♭3 4(11) 5 ♭7, the 9th omitted (the "So What" chord). Without
+  // it C#-E-F#-G#-B could only be named E6/9/C#. Highest rank: it never wins a tie in the
+  // oracle (E6/9 still does there); a vocabulary's bass-rooted tie-break picks it (C#m11).
+  { name: "Minor 11th",     suffix: "m11",   intervals: [0, 3, 5, 7, 10],  rank: 23 },
 ].map((q) => ({ ...q, mask: makeMask(q.intervals) }));
 
 /* ---- Chord VOCABULARIES for the AUDIO decoders ---------------------------
@@ -82,26 +86,29 @@ const QUALITIES = [
  *               the 6th in the audio, so a plain triad is never promoted. The written
  *               chord's voicing is the written quality's, so transpose/export agree.
  *               `opts.sixNine` overrides: "maj9" | "maj7" | "triad" (= don't detect them).
+ *               sus2 and add9 are written as the plain triad (the owner's rule: colour notes
+ *               the player adds, not chord names). In `recognise` a writeAs source must be
+ *               COMPLETE (no missing tone) — a 6 without its 5th is not renamed maj7.
  *
  * `chart` is the professional lead-sheet set and the Audio panel's default (measured in
  * docs/SYNHARMONICS-V2.md §9). `full` = every quality and every chord-tone inversion
  * (the pre-2026-10-25 behaviour). `basic` = triads and 7ths in root position. */
 const CHORD_VOCABULARIES = {
   chart: {
-    label: "Chart",
-    qualities: ["", "m", "7", "maj7", "m7", "m7♭5", "dim", "dim7", "sus4", "7sus4", "9", "m9", "maj9", "7♭9"],
+    label: "Pro",
+    qualities: ["", "m", "7", "maj7", "m7", "m7♭5", "dim", "dim7", "sus4", "7sus4", "9", "m9", "m11", "maj9", "7♭9"],
     inversions: { "": [4, 7], m: [3, 7], "7": [4, 10] },
     hidden: { "7": [7], maj7: [4, 7, 11], m7: [7, 10], "m7♭5": [6, 10], dim: [3, 6], sus4: [7], "7sus4": [7], "6": [4, 7] },
     foreign: { "": [2, 10], m: [10] },
-    writeAs: { "6/9": "maj9", "6": "maj7" },
+    writeAs: { "6/9": "maj9", "6": "maj7", sus2: "", add9: "" },
   },
   basic: {
     label: "Basic",
     qualities: ["", "m", "7", "maj7", "m7", "m7♭5", "dim7", "sus4"],
     inversions: {},
-    hidden: { "": [4, 7], m: [7], "7": [4, 7, 10], maj7: [4, 7, 11], m7: [7, 10], "m7♭5": [6, 10], sus4: [7], "6": [4, 7] },
+    hidden: { "": [4, 7], m: [3, 7], "7": [4, 7, 10], maj7: [4, 7, 11], m7: [7, 10], "m7♭5": [6, 10], sus4: [7], "6": [4, 7] },
     foreign: {},
-    writeAs: { "6/9": "maj7", "6": "maj7" },
+    writeAs: { "6/9": "maj7", "6": "maj7", sus2: "", add9: "" },
   },
   full: { label: "Full", qualities: null, inversions: null, hidden: null, foreign: null, writeAs: null },
 };
@@ -124,6 +131,18 @@ function resolveChordVocabulary(v, sixNine) {
     allow.add(from); writeAs[from] = q;
   }
   return { allow, inversions: V.inversions || {}, hidden: V.hidden || {}, foreign: V.foreign || {}, writeAs };
+}
+/* May quality q on `root` sound over this bass in this vocabulary (`recognise` only)? Root
+ * position always; a chord tone only when listed (written or hidden). A non-chord-tone bass
+ * under a TRIAD is allowed — written only when listed (F/G, Bb/C, D/C, Am/G), otherwise the
+ * triad is named and the unfamiliar bass dropped (F#-A-C# over G → F#m, not A7/G, which
+ * would invent an E). Under any other chord a foreign bass must be listed. */
+function _vocabBassOK(vocab, q, root, bassPc) {
+  const iv = (bassPc - root + 12) % 12;
+  if (iv === 0) return true;
+  const s = q.suffix;
+  if (q.intervals.indexOf(iv) >= 0) return (vocab.inversions[s] || []).indexOf(iv) >= 0 || (vocab.hidden[s] || []).indexOf(iv) >= 0;
+  return s === "" || s === "m" || (vocab.foreign[s] || []).indexOf(iv) >= 0;
 }
 
 const PRESETS = [
@@ -209,15 +228,26 @@ function recognise(chroma, chordMask, bassPc, opts = {}) {
       // only the audio path opts in (polyphonic vocal/instrument chroma over-labels
       // extensions — the 3 voices light 4+ pcs, so the scorer reaches for a 9th).
       if (opts.maxRank != null && q.rank > opts.maxRank) continue;
+      // a vocabulary also limits which bass a chord may have (root, a listed inversion, or a
+      // listed foreign bass) — so E6/9 over its 6th (C#) is not a candidate; C#m11 is
+      if (vocab && bassPc != null && !_vocabBassOK(vocab, q, root, bassPc)) continue;
       const inter = popcount(transposed & q.mask);
       const extra = popcount(transposed & ~q.mask & 0xfff);
       const missing = popcount(q.mask & ~transposed & 0xfff);
+      if (vocab && vocab.writeAs[q.suffix] && missing > 0) continue;   // rename only a complete 6 / 6/9 / sus2 / add9
       const score = inter - 0.8 * extra - 1.2 * missing;       // ranking
       const confidence = inter / (inter + extra + missing);    // displayed (Jaccard)
       candidates.push({ root, quality: q, transposed, inter, extra, missing, score, confidence });
     }
   }
-  candidates.sort((a, b) => (b.score - a.score) || (a.quality.rank - b.quality.rank));
+  // with a vocabulary, an equal fit is read FROM THE BASS (C#-E-F#-G#-B over C# → C#m11, not
+  // E6/9) before the rarity rank decides; without one the oracle's order is untouched
+  /* A vocabulary narrows the names, so a voicing may have no exact match left (C-D-G once sus2 is
+   * gone). Then the raw score prefers a big chord missing two notes (C9: C·D·G present, E·B♭
+   * missing) over a triad missing one — inventing two notes. Drop candidates missing ≥ 2 tones
+   * whenever a closer one exists. */
+  if (vocab && candidates.some((c) => c.missing <= 1)) for (let i = candidates.length - 1; i >= 0; i--) if (candidates[i].missing > 1) candidates.splice(i, 1);
+  candidates.sort((a, b) => (b.score - a.score) || (vocab ? (b.root === bassPc) - (a.root === bassPc) : 0) || (a.quality.rank - b.quality.rank));
   let best = candidates[0];
   /* NARROW bass-priority tie-break: m6 read as m7♭5 when the bass says so.
    *
@@ -235,8 +265,15 @@ function recognise(chroma, chordMask, bassPc, opts = {}) {
     if (alt) best = alt;
   }
   // a vocabulary's chart convention: a detected 6/9 / 6 is written as its maj9 / maj7
+  // a vocabulary writes a slash only where it lists one (C/E, C7/Bb, F/G); a hidden inversion
+  // reads in root position (Cmaj7 over B → "Cmaj7")
+  let isSlash = bassPc !== null && best.root !== bassPc;
+  if (vocab && isSlash) {
+    const iv = (bassPc - best.root + 12) % 12, suf = best.quality.suffix;
+    isSlash = (vocab.inversions[suf] || []).indexOf(iv) >= 0 || (best.quality.intervals.indexOf(iv) < 0 && (vocab.foreign[suf] || []).indexOf(iv) >= 0);
+  }
   if (vocab && best && vocab.writeAs[best.quality.suffix]) best = { ...best, quality: vocab.writeAs[best.quality.suffix], writtenFrom: best.quality.suffix };
-  return { best, candidates: candidates.slice(0, 4), isSlash: bassPc !== null && best.root !== bassPc, bassPc };
+  return { best, candidates: candidates.slice(0, 4), isSlash, bassPc };
 }
 /* ============================================================================
  *  Wave 3 #10 — chord-QUALITY classifier ("confidence-gated second opinion")
@@ -395,6 +432,35 @@ function symbolForMidis(midis, useSharp) {
   const notes = [...new Set(midis)].sort((a, b) => a - b).map((m) => ({ midi: m }));
   const norm = normalise(notes);
   return symbolOf(recognise(norm.chroma, norm.chordMask, norm.bassPc), useSharp);
+}
+/* Re-name every chord of a score with a chord VOCABULARY (CHORD_VOCABULARIES) — the naming
+ * pass for charts the audio decoder didn't name: PDF / Guitar Pro / MusicXML / Power Tab
+ * imports, Voices (ML), Guitar → Tab, Simplify, transpose. Each event is re-recognised from
+ * its own `midis` (lowest note = bass), so C#-E-F#-G#-B over C# reads C#m11 in Chart instead
+ * of the oracle's E6/9/C#. Pure: never mutates, keeps every other field, leaves single notes /
+ * rests / events without pitches alone. `full` (or no vocabulary) returns the score as written
+ * by the oracle. Idempotent — a chart the audio decoder already named in this vocabulary comes
+ * back unchanged (its voicings are the written chords) — so no "already named" flag is needed,
+ * and none could survive transposeScore, which re-names from the notes. */
+function respellScore(score, vocabulary, opts = {}) {
+  if (!score || !score.bars || !resolveChordVocabulary(vocabulary)) return score;
+  const useSharp = opts.useSharp !== false;
+  const ropts = { vocabulary, sixNine: opts.sixNine };
+  const bars = score.bars.map((b) => {
+    let changed = false;
+    const events = (b.events || []).map((e) => {
+      if (!e || e.reviewed) return e;                     // a person chose this name in the review list
+      const ms = Array.isArray(e.midis) ? [...new Set(e.midis)].sort((x, y) => x - y) : null;
+      if (!ms || new Set(ms.map((m) => ((m % 12) + 12) % 12)).size < 2) return e;
+      const norm = normalise(ms.map((m) => ({ midi: m })));
+      const sym = symbolOf(recognise(norm.chroma, norm.chordMask, norm.bassPc, ropts), useSharp);
+      if (sym === e.symbol) return e;
+      changed = true;
+      return { ...e, symbol: sym };
+    });
+    return changed ? { ...b, events } : b;
+  });
+  return { ...score, bars };
 }
 // frets (engine-keyed, standard tuning) → absolute MIDI list. Lets the PDF path
 // carry real pitches into export/playback the same way the MusicXML path does.
@@ -6468,14 +6534,14 @@ function audioEventsToScore(events, opts = {}) {
   const secPerBeat = 60 / bpm;
   const placed = (events || []).filter((e) => e.symbol).map((e) => {
     const onsetBeat = e.startSec / secPerBeat;                 // global beat position
-    return { symbol: e.symbol, midis: e.midis || [], onsetBeat: Math.max(0, onsetBeat), durBeat: Math.max(0.25, (e.durSec || secPerBeat) / secPerBeat), uncertain: !!e.ambiguous };
+    return { symbol: e.symbol, midis: e.midis || [], onsetBeat: Math.max(0, onsetBeat), durBeat: Math.max(0.25, (e.durSec || secPerBeat) / secPerBeat), uncertain: !!e.ambiguous, reviewed: !!e.reviewed };
   }).sort((a, b) => a.onsetBeat - b.onsetBeat);
   const barsMap = new Map();                                   // barIndex -> events
   for (const p of placed) {
     const bar = Math.floor(p.onsetBeat / beatsPerBar + 1e-6);
     const inBar = p.onsetBeat - bar * beatsPerBar;
     if (!barsMap.has(bar)) barsMap.set(bar, []);
-    barsMap.get(bar).push({ symbol: p.symbol, midis: p.midis, qbeat: Math.max(0, Math.min(beatsPerBar - 1e-6, inBar)), uncertain: p.uncertain });
+    barsMap.get(bar).push({ symbol: p.symbol, midis: p.midis, qbeat: Math.max(0, Math.min(beatsPerBar - 1e-6, inBar)), uncertain: p.uncertain, reviewed: p.reviewed });
   }
   const lastBar = barsMap.size ? Math.max(...barsMap.keys()) : -1;
   // A bar with no ONSET is not "no chord" — the previous chord is often still sounding
@@ -6490,7 +6556,7 @@ function audioEventsToScore(events, opts = {}) {
     const barStart = b * beatsPerBar;
     while (pi < placed.length && placed[pi].onsetBeat < barStart - 1e-6) heldEv = placed[pi++];
     if (!barsMap.has(b) && heldEv && heldEv.onsetBeat + heldEv.durBeat > barStart + 1e-6) {
-      barsMap.set(b, [{ symbol: heldEv.symbol, midis: heldEv.midis, qbeat: 0, held: true }]);
+      barsMap.set(b, [{ symbol: heldEv.symbol, midis: heldEv.midis, qbeat: 0, held: true, reviewed: heldEv.reviewed }]);
     }
   }
   const bars = [];
@@ -6500,7 +6566,7 @@ function audioEventsToScore(events, opts = {}) {
     for (let i = 1; i < evs.length; i++) if (evs[i].beat <= evs[i - 1].beat) evs[i].beat = Math.min(beatsPerBar - 1, evs[i - 1].beat + 1);
     evs.forEach((e, i) => { e.durBeats = (i + 1 < evs.length ? evs[i + 1].beat : beatsPerBar) - e.beat; });
     _fillTrueDur(evs, beatsPerBar);
-    bars.push({ number: b + 1, timeSig: [beatsPerBar, beatType], events: evs.map((e) => ({ symbol: e.symbol, midis: e.midis, beat: e.beat, durBeats: e.durBeats, qbeat: e.qbeat, qdur: e.qdur, ...(e.held ? { held: true } : {}), ...(e.uncertain ? { uncertain: true } : {}) })) });
+    bars.push({ number: b + 1, timeSig: [beatsPerBar, beatType], events: evs.map((e) => ({ symbol: e.symbol, midis: e.midis, beat: e.beat, durBeats: e.durBeats, qbeat: e.qbeat, qdur: e.qdur, ...(e.held ? { held: true } : {}), ...(e.uncertain ? { uncertain: true } : {}), ...(e.reviewed ? { reviewed: true } : {}) })) });
   }
   return { source: "audio", timeSig: [beatsPerBar, beatType], tempo: bpm, bars };
 }
@@ -7730,6 +7796,7 @@ export {
   QUALITIES,
   CHORD_VOCABULARIES,
   resolveChordVocabulary,
+  respellScore,
   PRESETS,
   parseTab,
   fretToMidi,

@@ -162,7 +162,10 @@ must stay byte-identical** (Blue Sky/Peg/Anthropology/Yardbird/… all did) AND 
 positive test for the new quality's canonical voicing + a guard that the plainer chord
 isn't over-labelled. Note an enharmonic gotcha the tests encode: a major-6 voicing
 `{C,E,G,A}` is the same pitch-set as `Am7` and `m7` (rank 3) out-ranks `6` (rank 9), so
-it reads as **`Am7/C`** — long-standing, not a bug.
+it reads as **`Am7/C`** — long-standing, not a bug. **`m11` added 2026-10-25** (`[0,3,5,7,10]`,
+the 9th omitted — the "So What" voicing; rank 23, the highest): diffed across all 78 GP/PTB files
+in the repo, **0 of 100,179 oracle chord names changed** (it never wins a tie there — `E6/9/C#`
+stays the oracle's name); it only wins through a chord vocabulary (see "Chord vocabulary").
 
 ## Invariant 2 — String mapping is POSITIONAL, never by label
 
@@ -2325,7 +2328,7 @@ separator and capture are browser glue (device check remains for the real model)
   stem import roles, batch commit, Auto persistence, fake-mic capture) — 17/17. The real SCNet
   run is the device check that remains (HF is unreachable from the dev sandbox).
 
-### Chord vocabulary — Chart / Basic / Full for audio decodes (2026-10-25)
+### Chord vocabulary — Pro / Basic / Full, for every chart (2026-10-25)
 
 **The report:** "every stem or audio file comes back 6/9, sus2 and slash chords with unfamiliar bass
 notes — I want maj7, maj9, m7♭5, 7♭9, dim7, what a professional chart uses." An outside diagnosis
@@ -2355,7 +2358,7 @@ sliding-window and `chartsFromStems` all honour it):
 - `foreign` — non-chord-tone basses charts actually write: major over the 2nd (`F/G`, `Bb/C`) and ♭7
   (`D/C`), minor over the ♭7 (`Am/G`).
 
-`chart` = `"" m 7 maj7 m7 m7♭5 dim dim7 sus4 7sus4 9 m9 maj9 7♭9` (no 6/9, sus2, add9, 6, m6, 5, aug,
+`chart` (UI label "Pro") = `"" m 7 maj7 m7 m7♭5 dim dim7 sus4 7sus4 9 m9 m11 maj9 7♭9` (no 6/9, sus2, add9, 6, m6, 5, aug,
 m(maj7), 7♯9). **6/9 → maj9 convention (owner's precedent, same day):** `writeAs` — qualities DETECTED but
 written under another name. Chart detects `6/9` and `6` and writes them `maj9` / `maj7` (the tonic-
 major chart convention: C6, C6/9, Cmaj7 are interchangeable tonic chords); Basic writes both `maj7`.
@@ -2401,9 +2404,48 @@ one tap; (4) "if no 7th, write maj7" for EVERY chord — invents a B on plain tr
 the owner's narrower precedent: only a DETECTED 6/9 / 6 is written maj9 / maj7 (writeAs above); (5) "group muddy slash chords as
 7♭9 / dim7" — invents a dominant function the audio doesn't support. Do not re-derive these.
 
+**Every chart, not just audio — `respellScore` (same day, the owner's screenshot).** A grid full
+of `E6/9/C#`, `Ab7sus4/C#`, `C#m9`, `C#m/E` — "E6/9/C# should just be C#m11 … it's all over the
+place". Pro mode cannot write `E6/9/C#`; it was the **notation oracle**, which names every chart the
+audio decoder didn't (PDF / GP / MusicXML / Power Tab imports, Voices (ML), Guitar → Tab, Simplify,
+transpose) and had no m11 to choose. Fix, three parts:
+- **`m11`** in QUALITIES (Invariant 1 note) and in the `chart` set.
+- **`recognise(…, {vocabulary})` rules** (the oracle without a vocabulary is untouched):
+  (1) **bass filter** `_vocabBassOK` — a candidate may sound over the bass only as root position,
+  a listed written/hidden inversion, or a foreign bass under a TRIAD (written only when listed —
+  F#-A-C# over G reads `F#m`, not `A7/G`, which would invent an E); so E6/9 over its 6th (C#) is
+  not a candidate and **C#-E-F#-G#-B over C# reads `C#m11`**; (2) equal fits are read **from the
+  bass** before rank; (3) once the vocabulary removes the exact name, candidates missing ≥ 2 tones
+  are dropped (C-D-G was scoring `C9`/`Cmaj9` — two invented notes); (4) a `writeAs` source must
+  be complete (a 6 without its 5th is not renamed maj7); (5) `isSlash` only where the vocabulary
+  writes one. `writeAs` also gained **`sus2 → triad`, `add9 → triad`** (the owner's "discard in
+  favour of the plain triad"), and Basic reads a minor triad over its 3rd as the triad.
+- **`respellScore(score, vocabulary, {sixNine, useSharp})`** (pure, engine): re-recognises every
+  event from its own `midis` (lowest note = bass); never mutates; `full` = identity; leaves single
+  notes, rests and **`reviewed`** events (a chord the user picked in the review list —
+  `audioEventsToScore` now carries the flag) alone. **Idempotent** on Pro-decoded audio charts
+  (11,416 / 11,422 events unchanged; the 6 are the same notes named more fully — `G/F` → `G7/F`),
+  so no "already named" flag (none could survive `transposeScore`, which re-names from the notes).
+- **UI:** `ChartPanel` runs `respellScore` LAST (after transpose — display, exports, key analysis
+  and the Pro handoff all read it) with a **"Chord names: Pro · Basic · Full" + "6/9 →"** picker in
+  its toolbar; the audio and stem charts hide theirs (`vocabPicker={false}`) since their pickers sit
+  above. The choice is ONE live preference (`_usePref` + `_prefListeners`, localStorage-guarded) so
+  every picker stays in step. The option is labelled **"Pro"**, not "Chart": the view switch beside it
+  is already "Chart · Grid · Tab".
+
+**Measured.** Re-named by Pro across the 78 corpus files: 2,858 of 12,654 chord events (23 %);
+slash chords 5,925 → 3,777; 6/9 / sus2 / add9-type names 1,416 → 362. Examples: `E6/9/C#` →
+`C#m11`, `G6/9/E` (So What) → `Em11`, `Am7/C` → `Cmaj7`, `Cmaj7/B` → `Cmaj7`, `G6/9/A` → `A7sus4`
+(really A9sus4), `D7♯9` → `D7`. Real app (`bench/vocab-e2e.mjs --gp`, Peg): Full 54 slashes + 25
+sus2/6/9 names → Pro 0 + 0. The audio decoder gained from the same rules (m11 + sus2/add9 states):
+at the vocabulary level Pro dev **79.2 / 79.6 / 73.1 / 68.1** (was 76.9 / 77.7 / 71.7 / 66.9),
+held-out **74.8 / 75.7 / 69.7 / 65.9** (was 73.7 / 74.7 / 68.6 / 65.4); vs the full oracle within ±0.4.
+
 **Honest limits:** chart still writes triad/7th inversions when the bass is sustained, which on a
 vocal stem can be the lowest singer — Basic is the no-slash choice for vocal harmony. Synthetic
-bench stems (deltas are the read). A pure C–D–G with zero 3rd reads `Gsus4` in chart (same notes).
+bench stems (deltas are the read). Re-naming a notated voicing changes the NAME, not the notes:
+exports still carry the voicing as written (a `Cmaj7` symbol over C-E-G-A notes). 3-note low-register
+clusters from bass tracks (C-C#-F#) get a nearest-fit name — no name is meaningful there.
 
 ### Key detection v2 — harmonic FUNCTION weights, not scale membership (2026-09-10)
 
@@ -3002,7 +3044,13 @@ accordingly.
   `Bb/C`, and `D7/C` = the oracle's name), short-gap carry vs long rest, posterior
   normalisation, the v2 default + `engine:"v1"` routing, and the UI glue (resampler, review
   strip, uncertain rendering). Accuracy itself is measured by `tests/bench` (dev/test split).
-- **Chord vocabulary** (`npm test`): no vocabulary = `full` = an unknown name (engine default unchanged);
+- **Chord vocabulary + respellScore** (`npm test`): the oracle is unchanged by m11 (`E6/9/C#`,
+  `G6/9/E`); respell: C#-E-F#-G#-B over C# → `C#m11` (Full `E6/9/C#`, Basic `C#m7`), So What → `Em11`,
+  C6 → `Cmaj7`, Cmaj7/B → `Cmaj7`, `C/E` / `C7/Bb` / `Bb/C` kept, F#m/G → `F#m`, C-D-G → `C`, add9 →
+  triad, never a 9th invented on a 3-note voicing; non-mutation, idempotence, Full identity, reviewed /
+  single / rest untouched, `reviewed` carried by `audioEventsToScore`; UI guards (ChartPanel respell +
+  picker, two hidden pickers, shared live preference). Mutation-tested (bass filter + reviewed skip → 6
+  failures). Plus the earlier vocabulary tests: no vocabulary = `full` = an unknown name (engine default unchanged);
   chart reads C6/9-over-C as `Cmaj9` (maj7 / triad settings → `Cmaj7` / `C`; Basic `Cmaj7`), A-C-E-G-
   over-C as `Cmaj7`, a plain triad stays a triad, Cmaj7-over-B as `Cmaj7`, Dsus4-over-A as `Dsus4` (hidden inversion),
   never names A-C-E-G-over-C from an A root, still writes `C/E`, `Bb/C`, `C7/Bb`, has no `F#m/G`; basic
