@@ -76,6 +76,12 @@ const QUALITIES = [
  *   foreign     per triad quality, bass intervals that are NOT chord tones but are
  *               standard chart slash chords: major over the 2nd (F/G, Bb/C — the sus
  *               dominant) and over the ♭7 (D/C); minor over the ♭7 (Am/G).
+ *   writeAs     qualities that are DETECTED but written under another chart name — the
+ *               tonic-major convention: a heard 6/9 is written maj9 (the 9th really sounds;
+ *               the 6 becomes the 7) and a heard 6 is written maj7. Detection still needs
+ *               the 6th in the audio, so a plain triad is never promoted. The written
+ *               chord's voicing is the written quality's, so transpose/export agree.
+ *               `opts.sixNine` overrides: "maj9" | "maj7" | "triad" (= don't detect them).
  *
  * `chart` is the professional lead-sheet set and the Audio panel's default (measured in
  * docs/SYNHARMONICS-V2.md §9). `full` = every quality and every chord-tone inversion
@@ -85,24 +91,39 @@ const CHORD_VOCABULARIES = {
     label: "Chart",
     qualities: ["", "m", "7", "maj7", "m7", "m7♭5", "dim", "dim7", "sus4", "7sus4", "9", "m9", "maj9", "7♭9"],
     inversions: { "": [4, 7], m: [3, 7], "7": [4, 10] },
-    hidden: { "7": [7], maj7: [4, 7, 11], m7: [7, 10], "m7♭5": [6, 10], dim: [3, 6], sus4: [7], "7sus4": [7] },
+    hidden: { "7": [7], maj7: [4, 7, 11], m7: [7, 10], "m7♭5": [6, 10], dim: [3, 6], sus4: [7], "7sus4": [7], "6": [4, 7] },
     foreign: { "": [2, 10], m: [10] },
+    writeAs: { "6/9": "maj9", "6": "maj7" },
   },
   basic: {
     label: "Basic",
     qualities: ["", "m", "7", "maj7", "m7", "m7♭5", "dim7", "sus4"],
     inversions: {},
-    hidden: { "": [4, 7], m: [7], "7": [4, 7, 10], maj7: [4, 7, 11], m7: [7, 10], "m7♭5": [6, 10], sus4: [7] },
+    hidden: { "": [4, 7], m: [7], "7": [4, 7, 10], maj7: [4, 7, 11], m7: [7, 10], "m7♭5": [6, 10], sus4: [7], "6": [4, 7] },
     foreign: {},
+    writeAs: { "6/9": "maj7", "6": "maj7" },
   },
-  full: { label: "Full", qualities: null, inversions: null, hidden: null, foreign: null },
+  full: { label: "Full", qualities: null, inversions: null, hidden: null, foreign: null, writeAs: null },
 };
-/* A vocabulary name or object → { allow:Set, inversions, hidden, foreign } (null = no limit).
- * Unknown names fall back to `full` so a typo can never empty the state space. */
-function resolveChordVocabulary(v) {
+/* A vocabulary name or object → { allow:Set, inversions, hidden, foreign, writeAs } (null =
+ * no limit). `allow` holds every DECODED quality (incl. writeAs sources); `writeAs` maps a
+ * decoded suffix to its written QUALITIES entry. `sixNine` ("maj9" | "maj7" | "triad")
+ * overrides the 6/9 target; a target the vocabulary doesn't write (maj9 in Basic) becomes
+ * maj7. Unknown names fall back to `full` so a typo can never empty the state space. */
+function resolveChordVocabulary(v, sixNine) {
   const V = typeof v === "string" ? CHORD_VOCABULARIES[v] : v;
   if (!V || !V.qualities) return null;
-  return { allow: new Set(V.qualities), inversions: V.inversions || {}, hidden: V.hidden || {}, foreign: V.foreign || {} };
+  const allow = new Set(V.qualities), writeAs = {};
+  const map = { ...(V.writeAs || {}) };
+  if (sixNine === "triad") { delete map["6/9"]; delete map["6"]; }
+  else if ((sixNine === "maj9" || sixNine === "maj7") && map["6/9"]) map["6/9"] = sixNine;
+  for (const [from, to0] of Object.entries(map)) {
+    const to = allow.has(to0) ? to0 : "maj7";
+    const q = QUALITIES.find((x) => x.suffix === to);
+    if (!q || !QUALITIES.some((x) => x.suffix === from)) continue;
+    allow.add(from); writeAs[from] = q;
+  }
+  return { allow, inversions: V.inversions || {}, hidden: V.hidden || {}, foreign: V.foreign || {}, writeAs };
 }
 
 const PRESETS = [
@@ -177,7 +198,7 @@ function recognise(chroma, chordMask, bassPc, opts = {}) {
   if (chroma.length === 0) return null;
   if (chroma.length === 1) return { roots: chroma[0], single: true, candidates: [], bassPc };
   const candidates = [];
-  const vocab = resolveChordVocabulary(opts.vocabulary);     // audio only; undefined = every quality
+  const vocab = resolveChordVocabulary(opts.vocabulary, opts.sixNine);     // audio only; undefined = every quality
   for (const root of chroma) {
     const transposed = rotateRight(chordMask, root);
     for (const q of QUALITIES) {
@@ -213,6 +234,8 @@ function recognise(chroma, chordMask, bassPc, opts = {}) {
     const alt = candidates.find((c) => c.root === bassPc && c.quality.suffix === "m7♭5");
     if (alt) best = alt;
   }
+  // a vocabulary's chart convention: a detected 6/9 / 6 is written as its maj9 / maj7
+  if (vocab && best && vocab.writeAs[best.quality.suffix]) best = { ...best, quality: vocab.writeAs[best.quality.suffix], writtenFrom: best.quality.suffix };
   return { best, candidates: candidates.slice(0, 4), isSlash: bassPc !== null && best.root !== bassPc, bassPc };
 }
 /* ============================================================================
@@ -4443,17 +4466,18 @@ function detectBeats(samples, sampleRate, opts = {}) {
  * filters to the plain triad/7th vocabulary (Simple mode) exactly as `recognise` does. */
 function chordStates(opts = {}) {
   const states = [];
-  const vocab = resolveChordVocabulary(opts.vocabulary);
+  const vocab = resolveChordVocabulary(opts.vocabulary, opts.sixNine);
   for (const q of QUALITIES) {
     if (opts.maxRank != null && q.rank > opts.maxRank) continue;
     if (vocab && !vocab.allow.has(q.suffix)) continue;
+    const wq = (vocab && vocab.writeAs[q.suffix]) || q;     // scored as q, named + voiced as wq
     for (let root = 0; root < 12; root++) {
       const vec = new Float64Array(12);
       for (const iv of q.intervals) vec[(root + iv) % 12] = 1;
       let n = 0; for (let p = 0; p < 12; p++) n += vec[p] * vec[p];
       n = Math.sqrt(n) || 1;
       for (let p = 0; p < 12; p++) vec[p] /= n;
-      states.push({ root, quality: q, vec });
+      states.push({ root, quality: wq, vec });
     }
   }
   return states;
@@ -5194,7 +5218,7 @@ function nnlsChromagram(samples, sampleRate, opts = {}) {
 function chordStatesV2(opts = {}) {
   const states = [];
   const inv = opts.inversions !== false;
-  const vocab = resolveChordVocabulary(opts.vocabulary);
+  const vocab = resolveChordVocabulary(opts.vocabulary, opts.sixNine);
   for (const q of QUALITIES) {
     if (opts.maxRank != null && q.rank > opts.maxRank) continue;
     if (vocab && !vocab.allow.has(q.suffix)) continue;
@@ -5205,12 +5229,13 @@ function chordStatesV2(opts = {}) {
     const shown = vocab ? (invertible ? vocab.inversions[q.suffix] || [] : []) : null;
     const invIv = !vocab ? (invertible ? q.intervals : [0]) : [0, ...shown, ...(invertible ? vocab.hidden[q.suffix] || [] : [])];
     const foreignIv = vocab ? vocab.foreign[q.suffix] || [] : null;
+    const writeQ = vocab && vocab.writeAs[q.suffix] ? vocab.writeAs[q.suffix] : null;   // detected q, written writeQ
     for (let root = 0; root < 12; root++) {
       const vec = new Float64Array(12);
       for (const iv of q.intervals) vec[(root + iv) % 12] = 1;
       const nrm = Math.sqrt(q.intervals.length);
       for (let p = 0; p < 12; p++) vec[p] /= nrm;
-      for (const iv of invIv) states.push({ root, quality: q, vec, bassPc: (root + iv) % 12, inversion: iv !== 0, showBass: iv !== 0 && (!shown || shown.indexOf(iv) >= 0) });
+      for (const iv of invIv) states.push({ root, quality: q, writeQ, vec, bassPc: (root + iv) % 12, inversion: iv !== 0, showBass: iv !== 0 && (!shown || shown.indexOf(iv) >= 0) });
       /* Triads over a FOREIGN bass — D/C, F/G, Bb/C (the sus-dominant voicing), F#m/G.
        * Everywhere in pop/jazz comping, and unrepresentable as a chord-tone inversion.
        * A separate, larger prior (`slashPenalty`) keeps a passing bass note from
@@ -5476,10 +5501,10 @@ function transcribeChordsV2(samples, sampleRate, opts = {}) {
   const { path, post } = hmmChordDecode(E, gated, opts);
   const S = states.length, K = S + 1;
   const useSharp = opts.useSharp !== false, names = useSharp ? NOTE_SHARP : NOTE_FLAT;
-  const symOf = (st) => names[st.root] + st.quality.suffix + (st.showBass ? "/" + names[st.bassPc] : "");
+  const symOf = (st) => names[st.root] + (st.writeQ || st.quality).suffix + (st.showBass ? "/" + names[st.bassPc] : "");
   // a playable voicing: chord tones from C3 up, the bass note an octave below when inverted
   // (a hidden inversion carries no bass note, so re-naming the midis — transpose — can't bring the slash back)
-  const midisOf = (st) => (st.showBass ? [36 + st.bassPc] : []).concat(st.quality.intervals.map((i) => 48 + st.root + i));
+  const midisOf = (st) => (st.showBass ? [36 + st.bassPc] : []).concat((st.writeQ || st.quality).intervals.map((i) => 48 + st.root + i));
   const logK = Math.log(K);
   // collapse runs of one state into events
   const events = [];
