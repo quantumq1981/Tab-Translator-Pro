@@ -97,8 +97,10 @@ const CHORD_VOCABULARIES = {
   chart: {
     label: "Pro",
     qualities: ["", "m", "7", "maj7", "m7", "m7♭5", "dim", "dim7", "sus4", "7sus4", "9", "m9", "m11", "maj9", "7♭9"],
-    inversions: { "": [4, 7], m: [3, 7], "7": [4, 10] },
-    hidden: { "7": [7], maj7: [4, 7, 11], m7: [7, 10], "m7♭5": [6, 10], dim: [3, 6], sus4: [7], "7sus4": [7], "6": [4, 7] },
+    // a minor triad over its 3rd or 5th is just that minor chord on a chart (C#-E-G# over E → C#m,
+    // the owner's call); major triads and dominant 7ths keep their bass-line slashes (C/E, C7/Bb)
+    inversions: { "": [4, 7], "7": [4, 10] },
+    hidden: { m: [3, 7], "7": [7], maj7: [4, 7, 11], m7: [7, 10], "m7♭5": [6, 10], dim: [3, 6], sus4: [7], "7sus4": [7], "6": [4, 7] },
     foreign: { "": [2, 10], m: [10] },
     writeAs: { "6/9": "maj9", "6": "maj7", sus2: "", add9: "" },
   },

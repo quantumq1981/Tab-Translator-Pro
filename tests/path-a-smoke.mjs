@@ -1357,7 +1357,10 @@ let synhSummary = "";
     expect(rs(M11, "chart") === "C#m11" && rs(M11, "full") === "E6/9/C#" && rs(M11, "basic") === "C#m7", `C#-E-F#-G#-B over C#: chart C#m11 · full E6/9/C# · basic C#m7 (got ${rs(M11, "chart")}, ${rs(M11, "full")}, ${rs(M11, "basic")})`);
     expect(rs(SOWHAT, "chart") === "Em11", `the So What voicing reads Em11 (got ${rs(SOWHAT, "chart")})`);
     const cases = [[[48, 52, 55, 57], "Cmaj7"], [[47, 48, 52, 55], "Cmaj7"], [[40, 48, 52, 55], "C/E"], [[46, 48, 52, 55], "C7/Bb"], [[36, 46, 50, 53], "Bb/C"],
-      [[43, 54, 57, 61], "F#m"], [[48, 50, 55], "C"], [[48, 52, 55, 62], "C"], [[52, 56, 59, 61, 66], "Emaj9"], [[49, 51, 54, 56], "C#sus4"], [[52, 56, 61], "C#m/E"]];
+      [[43, 54, 57, 61], "F#m"], [[48, 50, 55], "C"], [[48, 52, 55, 62], "C"], [[52, 56, 59, 61, 66], "Emaj9"], [[49, 51, 54, 56], "C#sus4"], [[52, 56, 61], "C#m"]];
+    // a minor triad over its 3rd or 5th is that minor chord on a chart (the owner's call); major triads keep C/E
+    expect(rs([52, 56, 61], "chart") === "C#m" && rs([44, 49, 52], "chart") === "C#m" && rs([40, 48, 52, 55], "chart") === "C/E" && !(eng.CHORD_VOCABULARIES.chart.inversions.m || []).length,
+      `chart writes C#m for C#m/E and C#m/G#, keeps C/E (got ${rs([52, 56, 61], "chart")}, ${rs([44, 49, 52], "chart")})`);
     for (const [ms, want] of cases) expect(rs(ms, "chart") === want, `chart respell of ${eng.symbolForMidis(ms, true)} → ${want} (got ${rs(ms, "chart")})`);
     expect(rs([52, 56, 61], "basic") === "C#m", `basic reads a minor triad over its 3rd as the triad, not E6→Emaj7 (got ${rs([52, 56, 61], "basic")})`);
     expect(rs([52, 56, 59, 61, 66], "chart", { sixNine: "maj7" }) === "Emaj7" && rs([52, 56, 59, 61, 66], "chart", { sixNine: "triad" }) === "E", "the 6/9 setting reaches respellScore");

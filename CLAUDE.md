@@ -2346,7 +2346,10 @@ sliding-window and `chartsFromStems` all honour it):
 - `qualities` — the names the decoder may choose. A left-out quality is NOT mapped to anything: the
   decoder picks the best-fitting chord that IS allowed (C6/9 over C → `C`; A7♭9 needs its A in the bass,
   otherwise it's the dim7 — the bass decides, no rule needed).
-- `inversions` — slashes that are WRITTEN (chart: `C/E`, `C/G`, `Cm/Eb`, `Cm/G`, `C7/E`, `C7/Bb`).
+- `inversions` — slashes that are WRITTEN (chart: `C/E`, `C/G`, `C7/E`, `C7/Bb`). **Minor triads are
+  never written inverted** (the owner, on `C#m/E` ×11 in a grid: "a voicing would never be written
+  like that … that's obviously a minor chord"): a minor triad over its 3rd or 5th is a hidden state,
+  so C#-E-G# over E reads `C#m`.
 - `hidden` — inversions DECODED but written in root position (`Cmaj7` over B reads `Cmaj7`). **Load-
   bearing:** with inversions simply removed from the state space, a 5th in the bass picked the wrong
   ROOT (`Dsus4/A` → `A7sus4`, −4.9 root on dev). Hidden states let the bass evidence point at the root
@@ -2441,8 +2444,8 @@ sus2/6/9 names → Pro 0 + 0. The audio decoder gained from the same rules (m11 
 at the vocabulary level Pro dev **79.2 / 79.6 / 73.1 / 68.1** (was 76.9 / 77.7 / 71.7 / 66.9),
 held-out **74.8 / 75.7 / 69.7 / 65.9** (was 73.7 / 74.7 / 68.6 / 65.4); vs the full oracle within ±0.4.
 
-**Honest limits:** chart still writes triad/7th inversions when the bass is sustained, which on a
-vocal stem can be the lowest singer — Basic is the no-slash choice for vocal harmony. Synthetic
+**Honest limits:** Pro still writes MAJOR-triad and dominant-7th inversions (C/E, C7/Bb) when the bass
+is sustained, which on a vocal stem can be the lowest singer — Basic is the no-slash choice. Synthetic
 bench stems (deltas are the read). Re-naming a notated voicing changes the NAME, not the notes:
 exports still carry the voicing as written (a `Cmaj7` symbol over C-E-G-A notes). 3-note low-register
 clusters from bass tracks (C-C#-F#) get a nearest-fit name — no name is meaningful there.
