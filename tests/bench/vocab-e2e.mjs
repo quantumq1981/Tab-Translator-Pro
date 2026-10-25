@@ -47,7 +47,7 @@ const settle = async (prev) => {   // wait for the re-analysis to land: "Analyzi
   await page.waitForTimeout(500);
   return chartSyms();
 };
-const stats = (s) => ({ chords: s.length, slash: s.filter((x) => /\/[A-G]/.test(x.replace("6/9", ""))).length, sus2_69_add9: s.filter((x) => /sus2|6\/9|add9/.test(x)).length, sample: s.slice(0, 14).join(" ") });
+const stats = (s) => ({ chords: s.length, slash: s.filter((x) => /\/[A-G]/.test(x.replace("6/9", ""))).length, sus2_69_add9: s.filter((x) => /sus2|6\/9|add9/.test(x)).length, maj7: s.filter((x) => /maj7/.test(x)).length, maj9: s.filter((x) => /maj9/.test(x)).length, sample: s.slice(0, 14).join(" ") });
 
 await page.goto(ORIGIN + "/"); await page.waitForTimeout(500);
 await page.getByRole("button", { name: "Audio 🎵" }).click({ timeout: 60000 });
@@ -55,6 +55,11 @@ await page.locator('label', { hasText: 'Upload audio' }).locator('input[type="fi
 const out = {};
 out.chart = stats(await settle());
 out.chartActive = await page.getByRole("button", { name: "Chart ✓" }).first().isVisible();
+const six = page.locator("label", { hasText: "6/9 →" }).locator("select").first();
+out.sixNineDefault = await six.inputValue();
+await six.selectOption("maj7");
+out.chartMaj7 = stats(await settle());
+out.sixNineStored = await page.evaluate(() => localStorage.getItem("ttp:sixNine"));
 await page.getByRole("button", { name: /^Full$/ }).first().click();
 out.full = stats(await settle());
 await page.getByRole("button", { name: /^Basic$/ }).first().click();

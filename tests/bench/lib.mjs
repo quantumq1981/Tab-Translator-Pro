@@ -376,7 +376,8 @@ export function relabelForVocabulary(eng, sym, vocab) {
    * Bm7♭5/D = Dm6) — in the corpus these are tonic I6 chords (Cheryl: Dm7 G7 "Am7/C" C7;
    * Anthropology: "Gm7/Bb" G7 Cm7 = B♭6 VI7 ii). The oracle only prefers the m7 name by rank,
    * so the vocabulary truth reads them from the bass, as the decoder does. */
-  if (iv === 3 && (q.suffix === "m7" || q.suffix === "m7♭5")) { root = l.bass; q = { suffix: q.suffix === "m7" ? "" : "m" }; iv = 0; }
+  // …and a vocabulary that writes the 6 chord under another name (writeAs: 6 → maj7) writes it that way
+  if (iv === 3 && (q.suffix === "m7" || q.suffix === "m7♭5")) { root = l.bass; q = { suffix: q.suffix === "m7" ? (V.writeAs["6"] ? V.writeAs["6"].suffix : "") : "m" }; iv = 0; }
   const show = iv !== 0 && ((V.inversions[q.suffix] || []).includes(iv) || (V.foreign[q.suffix] || []).includes(iv));
   return eng.NOTE_SHARP[root] + q.suffix + (show ? "/" + eng.NOTE_SHARP[l.bass] : "");
 }

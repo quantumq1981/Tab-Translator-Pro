@@ -2356,7 +2356,14 @@ sliding-window and `chartsFromStems` all honour it):
   (`D/C`), minor over the ♭7 (`Am/G`).
 
 `chart` = `"" m 7 maj7 m7 m7♭5 dim dim7 sus4 7sus4 9 m9 maj9 7♭9` (no 6/9, sus2, add9, 6, m6, 5, aug,
-m(maj7), 7♯9). `dim` stays: removing it cost −0.8 root (a real C° became Ab7/F#); `6`/`m6` measured +0.0
+m(maj7), 7♯9). **6/9 → maj9 convention (owner's precedent, same day):** `writeAs` — qualities DETECTED but
+written under another name. Chart detects `6/9` and `6` and writes them `maj9` / `maj7` (the tonic-
+major chart convention: C6, C6/9, Cmaj7 are interchangeable tonic chords); Basic writes both `maj7`.
+Detection still needs the 6th in the audio, so a plain triad is never promoted (tested; maj7+maj9
+time on the corpus 4.6 → 7.7 %, real stems +0–2 points). The written chord carries the written
+quality's voicing, so transpose/export agree. `opts.sixNine` = `maj9` (default) | `maj7` | `triad`
+(don't detect 6 / 6/9 → plain triad); UI: a "6/9 →" select beside the picker (`useSixNine`,
+`localStorage["ttp:sixNine"]`). A-C-E-G over C (the I6 voicing) now reads `Cmaj7`. `dim` stays: removing it cost −0.8 root (a real C° became Ab7/F#); `6`/`m6` measured +0.0
 and the owner didn't want them. `basic` = `"" m 7 maj7 m7 m7♭5 dim7 sus4`, never a slash. `full` = all
 qualities + every chord-tone inversion = **the engine default, byte-identical to before** (every pinned
 test unchanged). **The UI defaults to `chart`**: `ChordVocabPicker` ("Chord names: Chart · Basic ·
@@ -2369,14 +2376,17 @@ never re-runs the separator). A hidden inversion's event voicing carries no bass
 
 | truth named by | split | full | chart |
 |---|---|---|---|
-| full oracle | dev | 77.8 / 79.8 / 74.2 / 66.9 / 81.8 | 76.6 / 79.3 / 71.1 / 63.8 / 79.2 |
-| full oracle | test | 75.6 / 76.5 / 70.6 / 65.8 / 74.5 | 73.6 / 75.0 / 70.2 / 64.8 / 66.1 |
-| chart vocabulary | dev | 73.7 / 73.7 / 67.9 / 63.1 / 72.3 | **75.3 / 75.9 / 70.0 / 65.4 / 76.4** |
-| chart vocabulary | test | 74.9 / 75.2 / 68.4 / 65.4 / 60.6 | 73.7 / 74.5 / 68.4 / 65.4 / **69.3** |
+| full oracle | dev | 77.8 / 79.8 / 74.2 / 66.9 / 81.8 | 74.4 / 77.0 / 70.9 / 63.6 / 79.2 |
+| full oracle | test | 75.6 / 76.5 / 70.6 / 65.8 / 74.5 | 73.4 / 74.8 / 69.9 / 64.5 / 66.2 |
+| chart vocabulary | dev | 73.7 / 73.7 / 67.8 / 63.0 / 72.3 | **76.9 / 77.7 / 71.7 / 66.9 / 76.4** |
+| chart vocabulary | test | 74.9 / 75.1 / 68.3 / 65.4 / 60.6 | 73.7 / 74.7 / 68.6 / 65.4 / **69.3** |
 
 Against the full oracle chart "loses" 1–3 points, almost all renames to the same notes (`Bsus2` →
-`F#sus4`, `Cm6` → `Am7♭5`, `A6/9` → `F#m7`, `Am7/C` → `C`). Scored at the vocabulary level
-(`--gtvocab chart`, MIREX practice) it is a wash: dev +1.6…+2.3, held-out −1.2…0, written bass +4 / +9.
+`F#sus4`, `Cm6` → `Am7♭5`) or the convention itself (`Am7/C` → `Cmaj7`, `C6/9` → `Cmaj9`). Scored at
+the vocabulary level (`--gtvocab chart`, MIREX practice; the truth uses the same writeAs + bass-read
+rules) chart beats full on dev by +3.2…+4.0 and is even on held-out (root −1.2, majmin −0.4,
+sevenths +0.3), written bass +4 / +9. Versus `sixNine:"triad"` the convention is +1.6…+3.2 on dev and
++0…+0.4 held-out.
 The one real held-out loss is a Steely Dan `F#m/G` (a notated foreign slash chart doesn't write; it
 reads `Gmaj9`). **Real stems, share of decoded time that is a slash (full → chart → basic):** 25 or 6
 to 4 42.6 → 23.8 → 0 %, backing vocals 41.6 → 22.8 → 0, Peg vocals 39.5 → 21.2 → 0, Heart of Rock & Roll
@@ -2387,8 +2397,8 @@ survives a reload.
 **Rejected from the outside proposal, with reasons:** (1) an NNLS 9th-overtone penalty — 6/9/add9 were
 not the noise, and NNLS already attributes overtones; (2) filtering the voicing-modal alias map — it
 renders diagrams for a decided symbol; (3) a ">85 % confidence escape hatch" for extensions — Full is
-one tap; (4) "if no 7th, write maj7" (the 6/9 ban) — writes a B that isn't sounding and can clash with
-the melody's tonic; the chart writes the triad, the player colours it; (5) "group muddy slash chords as
+one tap; (4) "if no 7th, write maj7" for EVERY chord — invents a B on plain triads; what shipped instead is
+the owner's narrower precedent: only a DETECTED 6/9 / 6 is written maj9 / maj7 (writeAs above); (5) "group muddy slash chords as
 7♭9 / dim7" — invents a dominant function the audio doesn't support. Do not re-derive these.
 
 **Honest limits:** chart still writes triad/7th inversions when the bass is sustained, which on a
@@ -2993,7 +3003,8 @@ accordingly.
   normalisation, the v2 default + `engine:"v1"` routing, and the UI glue (resampler, review
   strip, uncertain rendering). Accuracy itself is measured by `tests/bench` (dev/test split).
 - **Chord vocabulary** (`npm test`): no vocabulary = `full` = an unknown name (engine default unchanged);
-  chart reads C6/9-over-C as `C`, Cmaj7-over-B as `Cmaj7`, Dsus4-over-A as `Dsus4` (hidden inversion),
+  chart reads C6/9-over-C as `Cmaj9` (maj7 / triad settings → `Cmaj7` / `C`; Basic `Cmaj7`), A-C-E-G-
+  over-C as `Cmaj7`, a plain triad stays a triad, Cmaj7-over-B as `Cmaj7`, Dsus4-over-A as `Dsus4` (hidden inversion),
   never names A-C-E-G-over-C from an A root, still writes `C/E`, `Bb/C`, `C7/Bb`, has no `F#m/G`; basic
   never writes a slash; vocabulary contents are real chord tones and exclude the bass-is-root inversions;
   hidden inversions carry no bass note; alternatives obey the vocabulary; `recognise` + `chartsFromStems`

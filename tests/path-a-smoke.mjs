@@ -1294,14 +1294,27 @@ let synhSummary = "";
    * "every stem comes back 6/9, sus2 and slash chords over unfamiliar bass notes". Measured on
    * the real stems: slash chords were 21–43 % of decoded time; 6/9 ≤ 1.3 %. */
   {
-    const dec = (ms, vocabulary) => majority(eng.transcribeChordsV2(chordSig(4, [[0, 4, ms]]), VSR, { beats: beatsOf(4), vocabulary }).events, 0.5, 3.5);
+    const dec = (ms, vocabulary, sixNine) => majority(eng.transcribeChordsV2(chordSig(4, [[0, 4, ms]]), VSR, { beats: beatsOf(4), vocabulary, sixNine }).events, 0.5, 3.5);
     const SIX9 = [36, 52, 55, 57, 62], AM7_C = [36, 57, 60, 64, 67], DSUS4_A = [45, 62, 67, 69], CMAJ7_B = [47, 60, 64, 67];
     const CE = [40, 60, 64, 67], BB_C = [36, 58, 62, 65], FSM_G = [43, 66, 69, 73], C7_BB = [46, 60, 64, 67];
     // the engine default is unchanged: no vocabulary = full = an unknown name
     for (const ms of [SIX9, CE, FSM_G, CMAJ7_B]) expect(dec(ms) === dec(ms, "full") && dec(ms) === dec(ms, "no-such-vocab"), `no vocabulary = "full" = an unknown name (${dec(ms)})`);
     expect(dec(SIX9) === "C6/9" && dec(CMAJ7_B) === "Cmaj7/B", `full keeps every quality and inversion (${dec(SIX9)}, ${dec(CMAJ7_B)})`);
     // chart: no 6/9, the 7th never written in the bass, and the bass still picks the root
-    expect(dec(SIX9, "chart") === "C", `chart: C6/9 over C reads C (got ${dec(SIX9, "chart")})`);
+    // the tonic-major convention (owner's precedent): a HEARD 6/9 is written maj9 (setting: maj7 / triad); a 6 is written maj7
+    expect(dec(SIX9, "chart") === "Cmaj9" && dec(SIX9, "chart", "maj7") === "Cmaj7" && dec(SIX9, "chart", "triad") === "C",
+      `chart: C6/9 over C reads Cmaj9 · maj7 setting Cmaj7 · triad setting C (got ${dec(SIX9, "chart")}, ${dec(SIX9, "chart", "maj7")}, ${dec(SIX9, "chart", "triad")})`);
+    expect(dec(SIX9, "basic") === "Cmaj7" && dec(SIX9, "basic", "maj9") === "Cmaj7", `basic writes a 6/9 as maj7 even when maj9 is asked (got ${dec(SIX9, "basic", "maj9")})`);
+    expect(dec(AM7_C, "chart") === "Cmaj7", `chart: A-C-E-G over C is a C6, written Cmaj7 (got ${dec(AM7_C, "chart")})`);
+    expect(dec([48, 52, 55], "chart") === "C" && dec([45, 57, 60, 64], "chart") === "Am", `a plain triad is never promoted to maj7 (got ${dec([48, 52, 55], "chart")}, ${dec([45, 57, 60, 64], "chart")})`);
+    const r69 = eng.resolveChordVocabulary("chart");
+    expect(r69.writeAs["6/9"]?.suffix === "maj9" && r69.writeAs["6"]?.suffix === "maj7" && r69.allow.has("6/9") && !eng.CHORD_VOCABULARIES.chart.qualities.includes("6/9"),
+      "chart detects 6/9 and 6 (writeAs) without listing them as written qualities");
+    expect(eng.resolveChordVocabulary("chart", "triad").allow.has("6/9") === false && eng.resolveChordVocabulary("full", "maj7") === null, "sixNine:triad stops detecting 6/9; full ignores the setting");
+    const ev9 = eng.transcribeChordsV2(chordSig(4, [[0, 4, SIX9]]), VSR, { beats: beatsOf(4), vocabulary: "chart" }).events.find((e) => e.symbol === "Cmaj9");
+    expect(ev9 && eng.symbolForMidis(ev9.midis, true) === "Cmaj9", `the written maj9 carries a maj9 voicing, so transpose/export agree (${ev9 && ev9.midis})`);
+    const rw = eng.recognise([0, 2, 4, 7, 9], eng.makeMask([0, 2, 4, 7, 9]), 0, { vocabulary: "chart" });
+    expect(rw && rw.best.quality.suffix === "maj9" && rw.writtenFrom === undefined && rw.best.writtenFrom === "6/9", `recognise applies the same convention (got ${rw && rw.best.quality.suffix})`);
     expect(dec(CMAJ7_B, "chart") === "Cmaj7", `chart: Cmaj7 over B reads Cmaj7, no slash (got ${dec(CMAJ7_B, "chart")})`);
     expect(dec(DSUS4_A, "chart") === "Dsus4", `chart: Dsus4 over A stays Dsus4 — a hidden inversion, not A7sus4 (got ${dec(DSUS4_A, "chart")})`);
     expect(!/^A/.test(dec(AM7_C, "chart")) || dec(AM7_C, "chart") === "Am/C", `chart: A-C-E-G over C is never a root-position A chord — the bass is the natural root (got ${dec(AM7_C, "chart")})`);
@@ -2197,8 +2210,9 @@ expect(!/^const\s+makeMask\b/m.test(uiSrc) && !/^function\s+buildChart\b/m.test(
 expect(uiSrc.includes('async function extractTokens'), "extractTokens (browser PDF seam) stays in the UI file");
 // chord vocabulary picker (2026-10-25): Chart by default, shared by the chord panel + stems, remembered per device
 expect(/function ChordVocabPicker/.test(uiSrc) && /function useChordVocab/.test(uiSrc) && /return "chart";/.test(uiSrc), "UI ships the chord-vocabulary picker, Chart by default");
-expect(/vocabulary: vocab \}/.test(uiSrc) && /chartsFromStemsOffThread\(byRole, asr, \{ useSharp, vocabulary: vocab/.test(uiSrc), "the chord decode and the stem charts both pass the chosen vocabulary");
+expect(/vocabulary: vocab, sixNine \}/.test(uiSrc) && /chartsFromStemsOffThread\(byRole, asr, \{ useSharp, vocabulary: vocab/.test(uiSrc), "the chord decode and the stem charts both pass the chosen vocabulary");
 expect(!/maxRank: 14/.test(uiSrc) && !/setSimple/.test(uiSrc), "the old △ Simple toggle (maxRank:14) is replaced by the picker");
+expect(/function useSixNine/.test(uiSrc) && /return "maj9";/.test(uiSrc) && /vocabulary: vocab, sixNine \}/.test(uiSrc) && /vocabulary: vocab, sixNine, fullRate/.test(uiSrc), "the 6/9 → maj9/maj7/triad setting defaults to maj9 and reaches both decodes");
 expect(/localStorage\.getItem\(_VOCAB_KEY\)/.test(uiSrc) && /try \{ localStorage\.setItem\(_VOCAB_KEY/.test(uiSrc), "the vocabulary choice is remembered per device, guarded by try/catch");
 expect(/from\s*\$\{engineUrl\}/.test(htmlSrc) || /engine\.tsx/.test(htmlSrc), "index.html loader must reference/wire engine.tsx");
 const pagesYml = fs.readFileSync(path.join(repo, ".github", "workflows", "pages.yml"), "utf8");
