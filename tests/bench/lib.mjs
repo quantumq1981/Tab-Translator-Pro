@@ -359,3 +359,24 @@ export const BASS_PART = {
   "huey-lewis-and-the-news-if_this_is_it.gp4": 6, "huey-lewis-and-the-news-power_of_love.gp4": 6,
   "Robben Ford - Aint Got Nothin But The Blues.gp": 2, "band-the_weight.gpx": 1,
 };
+
+/* Ground truth AT A VOCABULARY (MIREX practice: score a decoder against the names its own
+ * vocabulary can write). The notated voicing's pitch classes + bass are re-named by the
+ * engine's oracle restricted to `vocab`, and the slash is kept only where that vocabulary
+ * writes one. `full`/undefined → the label unchanged. */
+export function relabelForVocabulary(eng, sym, vocab) {
+  const V = vocab ? eng.resolveChordVocabulary(vocab) : null;
+  const l = parseLabel(sym, eng.QUALITIES);
+  if (!V || !l) return sym;
+  const pcs = [...new Set([...l.pcs, l.bass])].sort((a, b) => a - b);
+  const r = eng.recognise(pcs, eng.makeMask(pcs), l.bass, { vocabulary: vocab });
+  if (!r || r.single || !r.best) return sym;
+  let q = r.best.quality, root = r.best.root, iv = (l.bass - root + 12) % 12;
+  /* A m7 / m7♭5 over its own 3rd is the relative 6 chord read from the bass (Am7/C = C6,
+   * Bm7♭5/D = Dm6) — in the corpus these are tonic I6 chords (Cheryl: Dm7 G7 "Am7/C" C7;
+   * Anthropology: "Gm7/Bb" G7 Cm7 = B♭6 VI7 ii). The oracle only prefers the m7 name by rank,
+   * so the vocabulary truth reads them from the bass, as the decoder does. */
+  if (iv === 3 && (q.suffix === "m7" || q.suffix === "m7♭5")) { root = l.bass; q = { suffix: q.suffix === "m7" ? "" : "m" }; iv = 0; }
+  const show = iv !== 0 && ((V.inversions[q.suffix] || []).includes(iv) || (V.foreign[q.suffix] || []).includes(iv));
+  return eng.NOTE_SHARP[root] + q.suffix + (show ? "/" + eng.NOTE_SHARP[l.bass] : "");
+}

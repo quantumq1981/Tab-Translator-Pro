@@ -14,6 +14,10 @@ node bench/confusion.mjs clean,bleed                               # what the er
 node bench/inspect.mjs 11 clean                                    # GT vs decode timeline, one stem
 node bench/stems.mjs        # mix vs separated stems (+ leakage, bass fusion) and drum F-measure
 node bench/ambig.mjs test   # where the right answer sits for uncertain chords (Auto's ceiling)
+node bench/vocab.mjs clean --opts '{"vocabulary":"chart"}' --real   # what names a vocabulary writes (corpus + the repo's real audio)
+node bench/vocabdiff.mjs '{"vocabulary":"chart"}' clean dev        # where a vocabulary gains/loses root vs full
+node bench/run.mjs --split test --variants v2,v2chart --gtvocab chart --resample sinc   # score at the vocabulary level
+node bench/vocab-e2e.mjs --deps <dir> --audio <wav>                 # the Chart/Basic/Full picker in the real app
 node bench/fingering.mjs    # Stage 3: re-finger the GP corpus, % of notes on the written string
 ```
 

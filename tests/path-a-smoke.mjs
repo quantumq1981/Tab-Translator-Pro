@@ -1290,6 +1290,49 @@ let synhSummary = "";
     expect(eng.transcribeChordsV2(new Float32Array(VSR), VSR, {}).events.length === 0, "pure silence yields no chords, not a crash");
   }
 
+  /* Chord VOCABULARY (2026-10-25): which names an audio decode may write. The owner's report:
+   * "every stem comes back 6/9, sus2 and slash chords over unfamiliar bass notes". Measured on
+   * the real stems: slash chords were 21–43 % of decoded time; 6/9 ≤ 1.3 %. */
+  {
+    const dec = (ms, vocabulary) => majority(eng.transcribeChordsV2(chordSig(4, [[0, 4, ms]]), VSR, { beats: beatsOf(4), vocabulary }).events, 0.5, 3.5);
+    const SIX9 = [36, 52, 55, 57, 62], AM7_C = [36, 57, 60, 64, 67], DSUS4_A = [45, 62, 67, 69], CMAJ7_B = [47, 60, 64, 67];
+    const CE = [40, 60, 64, 67], BB_C = [36, 58, 62, 65], FSM_G = [43, 66, 69, 73], C7_BB = [46, 60, 64, 67];
+    // the engine default is unchanged: no vocabulary = full = an unknown name
+    for (const ms of [SIX9, CE, FSM_G, CMAJ7_B]) expect(dec(ms) === dec(ms, "full") && dec(ms) === dec(ms, "no-such-vocab"), `no vocabulary = "full" = an unknown name (${dec(ms)})`);
+    expect(dec(SIX9) === "C6/9" && dec(CMAJ7_B) === "Cmaj7/B", `full keeps every quality and inversion (${dec(SIX9)}, ${dec(CMAJ7_B)})`);
+    // chart: no 6/9, the 7th never written in the bass, and the bass still picks the root
+    expect(dec(SIX9, "chart") === "C", `chart: C6/9 over C reads C (got ${dec(SIX9, "chart")})`);
+    expect(dec(CMAJ7_B, "chart") === "Cmaj7", `chart: Cmaj7 over B reads Cmaj7, no slash (got ${dec(CMAJ7_B, "chart")})`);
+    expect(dec(DSUS4_A, "chart") === "Dsus4", `chart: Dsus4 over A stays Dsus4 — a hidden inversion, not A7sus4 (got ${dec(DSUS4_A, "chart")})`);
+    expect(!/^A/.test(dec(AM7_C, "chart")) || dec(AM7_C, "chart") === "Am/C", `chart: A-C-E-G over C is never a root-position A chord — the bass is the natural root (got ${dec(AM7_C, "chart")})`);
+    // chart keeps the slash chords charts actually write
+    expect(dec(CE, "chart") === "C/E" && dec(BB_C, "chart") === "Bb/C" && dec(C7_BB, "chart") === "C7/Bb", `chart writes C/E, Bb/C, C7/Bb (got ${dec(CE, "chart")}, ${dec(BB_C, "chart")}, ${dec(C7_BB, "chart")})`);
+    expect(dec(FSM_G, "chart") !== "F#m/G", "chart has no minor-over-the-♭2 foreign slash");
+    // basic: never a slash
+    for (const ms of [CE, BB_C, C7_BB, AM7_C, CMAJ7_B]) expect(!dec(ms, "basic").includes("/"), `basic never writes a slash (got ${dec(ms, "basic")})`);
+    // vocabulary contents + the written chord's voicing carries no hidden bass (transpose can't revive the slash)
+    const V = eng.CHORD_VOCABULARIES;
+    expect(!V.chart.qualities.some((q) => ["6/9", "sus2", "add9", "6", "m6", "5", "aug", "m(maj7)", "7♯9"].includes(q)) && ["maj7", "m7♭5", "dim7", "maj9", "7♭9"].every((q) => V.chart.qualities.includes(q)),
+      "chart = the pro set: no 6/9, sus2, add9, 6, m6, 5, aug; has maj7, m7♭5, dim7, maj9, 7♭9");
+    expect(Object.values(V).every((v) => !v.qualities || v.qualities.every((q) => eng.QUALITIES.some((x) => x.suffix === q))), "every vocabulary names real QUALITIES suffixes");
+    for (const [k, v] of Object.entries(V)) for (const part of ["inversions", "hidden"]) for (const [suf, ivs] of Object.entries(v[part] || {})) {
+      const q = eng.QUALITIES.find((x) => x.suffix === suf);
+      expect(q && ivs.every((iv) => q.intervals.includes(iv) && iv !== 0), `${k}.${part}.${suf || "maj"} lists chord tones only`);
+    }
+    expect(!(V.chart.hidden.m7 || []).includes(3) && !(V.chart.hidden["m7♭5"] || []).includes(3) && !(V.chart.hidden.sus4 || []).includes(5),
+      "the bass-is-the-natural-root inversions (m7/♭3 = 6 chord, sus4/4th = sus2) are not hidden states");
+    const ev = eng.transcribeChordsV2(chordSig(4, [[0, 4, CMAJ7_B]]), VSR, { beats: beatsOf(4), vocabulary: "chart" }).events.find((e) => e.symbol === "Cmaj7");
+    expect(ev && Math.min(...ev.midis) % 12 === 0 && eng.symbolForMidis(ev.midis, true) === "Cmaj7", `a hidden inversion's voicing has no bass note, so re-naming it gives the same chord (${ev && ev.midis})`);
+    expect(eng.transcribeChordsV2(chordSig(8, [[0, 4, SIX9], [4, 8, CMAJ7_B]]), VSR, { beats: beatsOf(8), vocabulary: "chart" }).events.every((e) => !e.alternatives.some((a) => /6\/9|sus2|maj7\/B/.test(a.symbol))),
+      "alternatives come from the same vocabulary");
+    // the v1 paths honour it too (recognise), and the stems path forwards it
+    expect(eng.symbolForMidis([48, 52, 55, 57, 62], true) === "C6/9", "the notation oracle is untouched (C6/9)");
+    const rv = eng.recognise([0, 2, 4, 7, 9], eng.makeMask([0, 2, 4, 7, 9]), 0, { vocabulary: "chart" });
+    expect(rv && !["6/9", "6", "add9"].includes(rv.best.quality.suffix), `recognise({vocabulary:"chart"}) never names a 6/9 (got ${rv && rv.best.quality.suffix})`);
+    const st = eng.chartsFromStems({ other: chordSig(6, [[0, 6, CMAJ7_B]]) }, VSR, { vocabulary: "chart", beats: beatsOf(6) });
+    expect(st.charts.length && st.charts[0].events.every((e) => !e.symbol.includes("/")), `chartsFromStems forwards the vocabulary (got ${st.charts[0] && st.charts[0].events.map((e) => e.symbol)})`);
+  }
+
   // Stage D · repetition smoothing is opt-in and shape-preserving
   {
     const segs = Array.from({ length: 40 }, (_, i) => ({ t0: i, t1: i + 1, chroma: Float64Array.from({ length: 12 }, (_, p) => ((p + i) % 4 === 0 ? 1 : 0.1)), bass: new Float64Array(12).fill(0.1), level: -20 }));
@@ -2152,6 +2195,11 @@ expect(missing.length === 0, `UI imports names engine.tsx does not export: ${mis
 expect(!/\bfrom\s*["']react["']/.test(engineSrc) && !/\buseState\s*\(/.test(engineSrc), "engine.tsx must stay React-free (pure module)");
 expect(!/^const\s+makeMask\b/m.test(uiSrc) && !/^function\s+buildChart\b/m.test(uiSrc), "UI must not re-define engine internals (engine moved to engine.tsx)");
 expect(uiSrc.includes('async function extractTokens'), "extractTokens (browser PDF seam) stays in the UI file");
+// chord vocabulary picker (2026-10-25): Chart by default, shared by the chord panel + stems, remembered per device
+expect(/function ChordVocabPicker/.test(uiSrc) && /function useChordVocab/.test(uiSrc) && /return "chart";/.test(uiSrc), "UI ships the chord-vocabulary picker, Chart by default");
+expect(/vocabulary: vocab \}/.test(uiSrc) && /chartsFromStemsOffThread\(byRole, asr, \{ useSharp, vocabulary: vocab/.test(uiSrc), "the chord decode and the stem charts both pass the chosen vocabulary");
+expect(!/maxRank: 14/.test(uiSrc) && !/setSimple/.test(uiSrc), "the old △ Simple toggle (maxRank:14) is replaced by the picker");
+expect(/localStorage\.getItem\(_VOCAB_KEY\)/.test(uiSrc) && /try \{ localStorage\.setItem\(_VOCAB_KEY/.test(uiSrc), "the vocabulary choice is remembered per device, guarded by try/catch");
 expect(/from\s*\$\{engineUrl\}/.test(htmlSrc) || /engine\.tsx/.test(htmlSrc), "index.html loader must reference/wire engine.tsx");
 const pagesYml = fs.readFileSync(path.join(repo, ".github", "workflows", "pages.yml"), "utf8");
 expect(/cp\s+engine\.tsx\s+_site/.test(pagesYml) && /cp\s+TabDecoderPro\.tsx\s+_site/.test(pagesYml),

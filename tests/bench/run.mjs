@@ -52,7 +52,10 @@ if (eng.analyzeAudioChordsV2) {
   VARIANTS.v2Simple = (x, sr) => eng.analyzeAudioChordsV2(x, sr, { maxRank: 14 });
   VARIANTS.v2nokey = (x, sr) => eng.analyzeAudioChordsV2(x, sr, { keyPrior: false });
   VARIANTS.v2rep = (x, sr) => eng.analyzeAudioChordsV2(x, sr, { repetition: true });
-  }
+  for (const v of ["chart", "basic", "full"]) VARIANTS["v2" + v] = (x, sr) => eng.analyzeAudioChordsV2(x, sr, { vocabulary: v });
+  // ad-hoc: --opts '{"vocabulary":"chart","inversionPenalty":0.06}'
+  VARIANTS.v2x = (x, sr) => eng.analyzeAudioChordsV2(x, sr, JSON.parse(args.opts || "{}"));
+}
 const names = (args.variants || Object.keys(VARIANTS).join(",")).split(",");
 const resample = args.resample === "sinc" && eng.resampleTo ? (a, sr) => { const o = sr / Math.max(1, Math.floor(sr / 16000)); return { audio: eng.resampleTo(a, sr, o), sr: o }; } : (a, sr) => L.boxDecimate(a, sr, 16000);
 
@@ -66,11 +69,13 @@ for (const cond of CONDS) {
     if (!it) continue;
     const ds = resample(it.audio, it.sr);
     const total = it.gt[it.gt.length - 1].t1;
+    // --gtvocab chart: score against the truth named in that vocabulary (else the full oracle)
+    const gt = args.gtvocab ? it.gt.map((g) => ({ ...g, label: L.relabelForVocabulary(eng, g.label, args.gtvocab) })) : it.gt;
     for (const v of names) {
       const t = Date.now();
       const r = VARIANTS[v](ds.audio, ds.sr);
       const ms = Date.now() - t;
-      const s = L.score(it.gt, r.events || [], eng.QUALITIES, total);
+      const s = L.score(gt, r.events || [], eng.QUALITIES, total);
       s.rtf = ms / 1000 / total;
       const k = `${v}|${cond}`;
       (agg[k] = agg[k] || []).push(s);
