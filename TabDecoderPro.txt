@@ -253,6 +253,15 @@ import {
   parseMidiFile,
   spellScoreForKey,
   keyNameForKey,
+  audioBeatTimeline,
+  estimateOnsetDelay,
+  quantizeStepFor,
+  timelineBarAt,
+  timelineNudge,
+  timelineSecondsAt,
+  scoreRecordingTimes,
+  timelineBeatsAt,
+  partsZip,
 } from "./engine.tsx";
 
 async function extractTokens(buf) {
@@ -1184,7 +1193,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
         const t = ctx.currentTime - s.startedAt;
         let key = "";
         if (segs) { for (const sg of segs) { if (sg.sec <= t) key = sg.key || ""; else break; } }   // DTW alignment
-        else { for (const ev of times) { if (t >= ev.start && t < ev.start + ev.dur) { key = ev.key; break; } } } // linear
+        else { const tc = t - (isFinite(tscore.audioOffset) ? tscore.audioOffset : 0); for (const ev of times) { if (tc >= ev.start && tc < ev.start + ev.dur) { key = ev.key; break; } } } // linear (an audio chart's bar 1 sits audioOffset s into its recording)
         setPlayKey(key);
         if (t <= s.buf.duration) s.raf = requestAnimationFrame(loop);
       };
@@ -1321,7 +1330,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
           <button onClick={togglePlay} title={playing ? "stop" : "play the chart"}
             style={{ ...chip(C), padding: "3px 10px", borderColor: playing ? C.green : C.border, color: playing ? C.green : C.amber }}>{playing ? "■ Stop" : "▶ Play"}</button>
           <button onClick={() => bumpBpm(-5)} style={{ ...chip(C), padding: "3px 8px" }}>−</button>
-          <span style={{ fontSize: 11, minWidth: 46, textAlign: "center", color: C.dim }}>♩={bpm}</span>
+          <span style={{ fontSize: 11, minWidth: 46, textAlign: "center", color: C.dim }} title={score.tempoMap ? "this chart follows the performance's tempo map; ♩= scales it" : undefined}>♩={score.tempoMap ? "~" : ""}{Math.round(bpm * 10) / 10}</span>
           <button onClick={() => bumpBpm(5)} style={{ ...chip(C), padding: "3px 8px" }}>+</button>
         </span>
         <span style={{ marginLeft: "auto", display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "flex-end", gap: 4 }}>
@@ -1914,7 +1923,7 @@ function ExportPanel({ exp, setExp, C, bpm, semis, copy, download, copied, downl
       </div>
       {exp.bytes ? (
         <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, padding: "12px 12px", fontSize: 12, color: C.dim, lineHeight: 1.6 }}>
-          🎹 Standard MIDI File · {exp.bytes.length.toLocaleString()} bytes · ♩={bpm}{semis ? ` · transposed ${semis > 0 ? "+" : ""}${semis} st` : ""}. Binary, so there's nothing to copy — hit <b style={{ color: C.cyan }}>⬇ download</b> to save the <b>.mid</b> and open it in any DAW or notation app.
+          🎹 Standard MIDI File · {exp.bytes.length.toLocaleString()} bytes · ♩={score.tempoMap ? "~" : ""}{Math.round(bpm * 10) / 10}{score.tempoMap ? ` (${score.tempoMap.length} tempo changes)` : ""}{semis ? ` · transposed ${semis > 0 ? "+" : ""}${semis} st` : ""}. Binary, so there's nothing to copy — hit <b style={{ color: C.cyan }}>⬇ download</b> to save the <b>.mid</b> and open it in any DAW or notation app.
         </div>
       ) : (
         <textarea readOnly value={exp.text} spellCheck={false} className="tdp-scroll"
@@ -2520,6 +2529,183 @@ function StaffView({ events, activeIdx, C, useSharp }) {
   );
 }
 
+/* ---- Beat grid for audio charts (Muscriptor v0.4 "Tempo & bars", rebuilt) --------------------
+ * Every chart made from one recording (the chord chart, Voices (ML), Guitar → Tab, the stem charts)
+ * is laid on ONE beat grid: the tracked beats → engine.audioBeatTimeline (regularised beats, exact
+ * least-squares tempo, bar 1 on a downbeat, a tempo map when the performance drifts) with the
+ * user's corrections on top. `useBeatGrid` owns that state; `TempoBarsPanel` is its pure view;
+ * `findBars` runs the optional learned beat + downbeat tracker (beat-model.js, beat_this). */
+const NO_TIMING = Object.freeze({ bpm: null, beatsPerBar: null, firstDownbeat: null, tempoMap: null, beatScale: 1 });
+function useBeatGrid(tracked, firstSound) {
+  const [timing, setTiming] = useState(NO_TIMING);
+  const [bpb, setBpb] = useState(4);                     // fallback meter (no downbeats → the user's pick)
+  const [learned, setLearned] = useState(null);          // { beats, downbeats } from beat_this
+  const [useLearned, setUseLearned] = useState(true);
+  const [prog, setProg] = useState(null);                // { done, total } while the beat model runs
+  const [err, setErr] = useState("");
+  const src = useMemo(() => (learned && useLearned ? learned : tracked && tracked.length ? { beats: tracked, downbeats: null } : null), [learned, useLearned, tracked]);
+  // tempo-map tolerance: Muscriptor's 25 ms for beat_this's precise beats, 50 ms for the built-in
+  // tracker's jittery ones (halves the spurious tempo changes; see audioBeatTimeline)
+  const tolerance = learned && useLearned ? 0.025 : 0.05;
+  const grid = useMemo(() => audioBeatTimeline(src && src.beats, timing, { downbeats: src && src.downbeats, beatsPerBar: bpb, firstSound, tolerance })
+    || audioBeatTimeline(null, { ...timing, bpm: timing.bpm || 120 }, { beatsPerBar: bpb, firstSound }), [src, timing, bpb, firstSound, tolerance]);
+  const reset = () => { setTiming(NO_TIMING); setLearned(null); setUseLearned(true); setErr(""); };
+  const setMeter = (n) => { setBpb(n); setTiming((t) => ({ ...t, beatsPerBar: n })); };
+  const bumpTempo = (d) => setTiming((t) => ({ ...t, bpm: Math.max(40, Math.min(240, Math.round(grid.bpm) + d)), tempoMap: false }));
+  /* The learned tracker on the ORIGINAL-rate mono audio (beat_this wants 22.05 kHz, and its mels run to
+   * 11 kHz — the 16 kHz analysis copy would starve its top band). Lazy: 22.5 MB on first use. */
+  const findBars = async (mono, sampleRate) => {
+    const model = typeof window !== "undefined" ? window.TTP_BEAT_MODEL : null;
+    if (typeof model !== "function") { setErr("The beat model (beat-model.js) isn't loaded on this build."); return; }
+    if (!mono || !mono.length) { setErr("Load audio first."); return; }
+    setErr(""); setProg({ done: 0, total: 0 });
+    try {
+      const r = await model(mono, sampleRate, { onProgress: (done, total) => setProg({ done, total }) });
+      if (!r || !r.beats || r.beats.length < 8) setErr("The beat model found too few beats in this audio.");
+      else { setLearned(r); setUseLearned(true); setTiming((t) => ({ ...t, firstDownbeat: null, beatScale: 1, beatsPerBar: null })); }
+    } catch (e) { setErr("Beat tracking failed: " + ((e && e.message) || e)); }
+    setProg(null);
+  };
+  return { grid, bpm: grid.bpm, meter: grid.beatsPerBar, timing, setTiming, bpb, setMeter, bumpTempo, learned, useLearned, setUseLearned, prog, err, findBars, reset };
+}
+/** Mono copy of an AudioBuffer at its own rate (for the beat model). */
+function monoOf(buf) {
+  if (!buf) return null;
+  const n = buf.length, ch = buf.numberOfChannels, out = new Float32Array(n);
+  for (let c = 0; c < ch; c++) { const d = buf.getChannelData(c); for (let i = 0; i < n; i++) out[i] += d[i] / ch; }
+  return out;
+}
+/** The options every note chart from this recording is built with: the shared timeline, the onset
+ *  delay measured against the tracked beats (estimateOnsetDelay) and a quantise step on the grid the
+ *  notes were measured to sit on (straight / triplet), 16ths otherwise. */
+function noteGridOpts(bg, notes, useSharp, extra = {}) {
+  const beats = bg.grid.detected && bg.grid.detected.beats;
+  const od = beats && notes && notes.length ? estimateOnsetDelay(notes.map((n) => n.startSec), beats) : null;
+  return { timeline: bg.grid.timeline, beatsPerBar: bg.meter, useSharp, onsetDelay: od ? od.seconds : 0, quantize: { step: quantizeStepFor(od && od.subdivision) }, ...extra };
+}
+function TempoBarsPanel({ C, bg, pos, onFindBars, canFindBars, label = "TEMPO & BARS" }) {
+  const { grid, timing, setTiming, bumpTempo, setMeter, learned, useLearned, setUseLearned, prog, err } = bg;
+  const set = (patch) => setTiming((t) => ({ ...t, ...patch }));
+  const scale = (f) => (timing.bpm != null ? set({ bpm: Math.max(20, Math.min(400, timing.bpm * f)) }) : set({ beatScale: Math.max(0.25, Math.min(4, (timing.beatScale || 1) * f)) }));
+  const canFollow = !!(grid.detected && grid.detected.beats && grid.detected.beats.length >= 2);
+  const fd = grid.firstDownbeat || 0;
+  const sec2 = (t) => `${Math.floor(t / 60)}:${(t % 60).toFixed(2).padStart(5, "0")}`;
+  const changed = JSON.stringify(timing) !== JSON.stringify(NO_TIMING);
+  const nMap = grid.tempoMap ? grid.tempoMap.length : 0;
+  const seg = (on) => ({ ...chip(C), padding: "3px 9px", borderColor: on ? C.cyan : C.border, color: on ? C.cyan : C.dim });
+  return (
+    <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 10, marginBottom: 10, fontSize: 11, color: C.dim }}>
+      <div style={{ letterSpacing: 2, marginBottom: 4 }}>{label}</div>
+      <div style={{ lineHeight: 1.6, marginBottom: 8 }}>
+        {!grid.detected ? <>No beat detected — set <b>♩=</b> so the bars line up.</>
+          : grid.follow ? <>The tempo varies (around <b style={{ color: C.amber }}>{Math.round(grid.bpm)} BPM</b>), so the bar lines follow the performance{nMap > 1 ? ` (${nMap} tempo changes, on bar lines)` : ""}.</>
+            : <>Detected <b style={{ color: C.green }}>{grid.bpm.toFixed(1)} BPM</b>{learned && useLearned && grid.grid && grid.grid.beatsPerBar ? `, ${grid.grid.beatsPerBar}/4` : ""}. Bars, playback and every export follow this grid.</>}
+        {" "}Fix it here if the bar lines are off.
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginBottom: 6 }}>
+        {canFollow && <>
+          <button onClick={() => set({ tempoMap: true, bpm: null })} title="a tempo change where the music needs one, so bar lines stay on the music when it speeds up or slows down" style={seg(grid.follow)}>Follow the performance</button>
+          <button onClick={() => set({ tempoMap: false })} title="one tempo for the whole chart, for apps that ignore tempo changes" style={seg(!grid.follow)}>One fixed tempo</button>
+        </>}
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 4, marginLeft: 4 }}>
+          {!grid.follow && <button onClick={() => bumpTempo(-1)} title="−1 BPM" style={{ ...chip(C), padding: "3px 8px" }}>−</button>}
+          <span style={{ minWidth: 60, textAlign: "center", color: C.amber }}>♩={grid.follow ? "~" + Math.round(grid.bpm) : +grid.bpm.toFixed(1)}</span>
+          {!grid.follow && <button onClick={() => bumpTempo(1)} title="+1 BPM" style={{ ...chip(C), padding: "3px 8px" }}>+</button>}
+          <button onClick={() => scale(0.5)} title="half the tempo: the tracker counted every eighth note" style={{ ...chip(C), padding: "3px 8px" }}>÷2</button>
+          <button onClick={() => scale(2)} title="double the tempo: the tracker counted every half note" style={{ ...chip(C), padding: "3px 8px" }}>×2</button>
+        </span>
+        <select value={grid.beatsPerBar} onChange={(e) => setMeter(+e.target.value)} title="beats per bar" style={{ ...chip(C), padding: "3px 8px", background: C.raised, cursor: "pointer" }}>
+          {[2, 3, 4, 5, 6, 7].map((n) => <option key={n} value={n}>{n === 6 ? "6/4 (6/8)" : `${n}/4`}</option>)}
+        </select>
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+        <span>Bar line at <b style={{ color: C.text }}>{sec2(fd)}</b></span>
+        <button onClick={() => set({ firstDownbeat: timelineNudge(grid.timeline, fd, -1) })} title="move the bar lines one beat earlier" style={{ ...chip(C), padding: "3px 8px" }}>◀ beat</button>
+        <button onClick={() => set({ firstDownbeat: timelineNudge(grid.timeline, fd, 1) })} title="move the bar lines one beat later" style={{ ...chip(C), padding: "3px 8px" }}>beat ▶</button>
+        {pos != null && <button onClick={() => set({ firstDownbeat: pos })} title="pause playback on a downbeat (the “1” of a bar), then tap" style={{ ...chip(C), padding: "3px 9px", color: C.amber }}>Bar 1 here ({sec2(pos)})</button>}
+        {learned ? (
+          <>
+            <button onClick={() => setUseLearned(true)} style={seg(useLearned)} title="beats + downbeats from the beat_this model">🥁 beat_this</button>
+            <button onClick={() => setUseLearned(false)} style={seg(!useLearned)} title="the built-in (no-model) beat tracker">built-in</button>
+          </>
+        ) : canFindBars && (
+          <button onClick={onFindBars} disabled={!!prog} title="learned beat + DOWNBEAT tracker (beat_this, ≈ 22 MB, downloaded once; runs on this device) — finds bar 1 and the meter by itself" style={{ ...chip(C), padding: "3px 10px", color: C.green }}>
+            {prog ? `🥁 Finding bars… ${prog.total ? `${prog.done}/${prog.total} × 30 s` : "loading the model"}` : "🥁 Find bar 1 (ML)"}
+          </button>
+        )}
+        {changed && <button onClick={() => setTiming(NO_TIMING)} style={{ ...chip(C), padding: "3px 9px" }}>↺ Back to the detected grid</button>}
+      </div>
+      {err && <div style={{ color: C.red || C.amber, marginTop: 6 }}>{err}</div>}
+    </div>
+  );
+}
+
+/* 🎧 Check by ear (Muscriptor's stereo split): the original recording hard LEFT, the chart's synth
+ * hard RIGHT, so a wrong chord or a bar line in the wrong place is heard at once. "Mix" puts both in
+ * the middle with a balance slider instead. The chart is played on the recording's clock
+ * (engine.scoreRecordingTimes: the chart's own timing + score.audioOffset), so it follows the tempo
+ * map. A stereo source hard-panned sums both channels into one, so it is halved there (as Muscriptor
+ * does). Browser-only. */
+function CheckByEar({ C, score, getBuffer, onStart }) {
+  const [on, setOn] = useState(false), [split, setSplit] = useState(true), [bal, setBal] = useState(0.5);
+  const st = useRef({});
+  const levels = (s, sp, b) => {
+    if (!s.ctx) return;
+    const t = s.ctx.currentTime, stereo = s.buf && s.buf.numberOfChannels > 1;
+    s.wavG.gain.setTargetAtTime(sp ? (stereo ? 0.5 : 1) : 1 - b, t, 0.01);
+    s.synG.gain.setTargetAtTime(sp ? 0.9 : b * 1.8, t, 0.01);
+    s.wavP.pan.setTargetAtTime(sp ? -1 : 0, t, 0.01);
+    s.synP.pan.setTargetAtTime(sp ? 1 : 0, t, 0.01);
+  };
+  const stop = () => {
+    const s = st.current;
+    if (s.timer) clearTimeout(s.timer);
+    try { s.src && s.src.stop(); } catch (_) {}
+    if (s.ctx && s.ctx.state !== "closed") { try { s.ctx.close(); } catch (_) {} }
+    st.current = {}; setOn(false);
+  };
+  useEffect(() => () => stop(), []);
+  useEffect(() => { stop(); }, [score]);
+  useEffect(() => { levels(st.current, split, bal); }, [split, bal]);
+  const start = () => {
+    if (on) { stop(); return; }
+    const buf = getBuffer && getBuffer();
+    if (!buf || !score) return;
+    if (onStart) onStart();
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext, ctx = new AC();
+      if (!ctx.createStereoPanner) { try { ctx.close(); } catch (_) {} return; }
+      const s = { ctx, buf };
+      s.wavG = ctx.createGain(); s.wavP = ctx.createStereoPanner(); s.wavG.connect(s.wavP); s.wavP.connect(ctx.destination);
+      s.synG = ctx.createGain(); s.synP = ctx.createStereoPanner(); s.synG.connect(s.synP); s.synP.connect(ctx.destination);
+      const t0 = ctx.currentTime + 0.1;
+      s.src = ctx.createBufferSource(); s.src.buffer = buf; s.src.connect(s.wavG); s.src.start(t0);
+      for (const ev of scoreRecordingTimes(score)) {
+        const st0 = t0 + ev.start, en = st0 + ev.dur;
+        if (en <= t0 || !ev.midis || !ev.midis.length) continue;
+        const vol = 0.22 / Math.max(1, ev.midis.length), a = Math.max(t0, st0);
+        for (const m of ev.midis) {
+          const o = ctx.createOscillator(); o.type = "triangle"; o.frequency.value = 440 * Math.pow(2, (m - 69) / 12);
+          const g = ctx.createGain();
+          g.gain.setValueAtTime(0, a); g.gain.linearRampToValueAtTime(vol, a + 0.012);
+          g.gain.setValueAtTime(vol, Math.max(a + 0.012, en - 0.06)); g.gain.linearRampToValueAtTime(0.0001, en);
+          o.connect(g); g.connect(s.synG); o.start(a); o.stop(en + 0.03);
+        }
+      }
+      s.src.onended = () => { if (st.current.src === s.src) stop(); };
+      st.current = s; levels(s, split, bal); setOn(true);
+    } catch (_) { stop(); }
+  };
+  return (
+    <span style={{ display: "inline-flex", flexWrap: "wrap", alignItems: "center", gap: 6, fontSize: 11, color: C.dim }}>
+      <button onClick={start} title="the recording in your LEFT ear, the chart in your RIGHT — hear a wrong chord or a bar line in the wrong place at once" style={{ ...chip(C), padding: "4px 12px", borderColor: on ? C.green : C.border, color: on ? C.green : C.cyan }}>{on ? "■ Stop check" : "🎧 Check by ear"}</button>
+      <button onClick={() => setSplit(true)} style={{ ...chip(C), padding: "3px 8px", borderColor: split ? C.cyan : C.border, color: split ? C.cyan : C.dim }} title="recording left, chart right">L | R</button>
+      <button onClick={() => setSplit(false)} style={{ ...chip(C), padding: "3px 8px", borderColor: !split ? C.cyan : C.border, color: !split ? C.cyan : C.dim }} title="both in the middle, with a balance slider">Mix</button>
+      {!split && <input type="range" min={0} max={1} step={0.05} value={bal} onChange={(e) => setBal(+e.target.value)} title="recording ↔ chart" style={{ width: 90 }} />}
+    </span>
+  );
+}
+
 /* ---- Audio import (Wave 3/4: chords/notes from an isolated stem) -----------
  * BROWSER-ONLY glue (engine stays pure): upload an audio file → Web Audio
  * `decodeAudioData` (the one step that needs the browser; handles MP3/M4A/WAV) →
@@ -2536,7 +2722,6 @@ function AudioImport({ C, useSharp }) {
   const [kind, setKind] = useState("chords");        // chords | notes
   const [isolate, setIsolate] = useState(false);     // center-channel (vocal) isolation before analysis
   const [ab, setAb] = useState(null);                // { mix, iso } harmonic-clarity A/B, or "busy"
-  const [mlScore, setMlScore] = useState(null);      // ML note-transcription result (basic-pitch), when a model is wired
   const [mlNotes, setMlNotes] = useState(null);      // raw ML notes, kept so voice-count/voice-index can re-derive without re-inference
   const [gtrNotes, setGtrNotes] = useState(null);    // guitar CRNN notes (🎸 Guitar → Tab), re-scored on ♩=/meter changes without re-inference
   const [gtrProg, setGtrProg] = useState(null);
@@ -2552,12 +2737,11 @@ function AudioImport({ C, useSharp }) {
   const [abcExt, setAbcExt] = useAbcExt();               // .abc vs .abc.txt (Apple reads .abc as Alembic 3D — see useAbcExt)
   const [abcCopied, setAbcCopied] = useState(false);
   const [raw, setRaw] = useState([]);                // raw engine events (chords: {symbol,midis,…}; notes: {note,…})
-  const [bpm, setBpm] = useState(120);
+  const [tracked, setTracked] = useState(null);      // the built-in tracker's beats (from the chord analysis)
   const [beatInfo, setBeatInfo] = useState(null);   // detected tempo readout
   const [sections, setSections] = useState([]);      // song structure (intro/verse/chorus…), editable
   const [secBusy, setSecBusy] = useState(false);
   const [secSens, setSecSens] = useState("balanced");// how finely to cut the song
-  const [bpb, setBpb] = useState(4);                 // beats per bar
   const [vocab, setVocab] = useChordVocab();          // which chord names the decode may write (Chart by default)
   const [sixNine, setSixNine] = useSixNine();        // how a detected 6/9 is written (maj9 by default)
   // ⚡ Auto: uncertain chords take the decoder's best match with nothing left pending (per device)
@@ -2569,6 +2753,11 @@ function AudioImport({ C, useSharp }) {
   const [pos, setPos] = useState(0);
   const ref = useRef({});                            // { audioBuf, ds, sr, ctx, src, raf, startedAt }
   const TARGET = 16000;
+  /* ONE beat grid for every chart from this recording (see useBeatGrid): bar 1 is the bar the first
+   * chord/note sounds in, so the chord chart, Voices (ML) and Guitar → Tab share bar numbers. */
+  const firstSound = useMemo(() => { const t = (raw || []).map((e) => e.startSec).filter((x) => isFinite(x)); return t.length ? Math.min(...t) : 0; }, [raw]);
+  const bg = useBeatGrid(tracked, firstSound);
+  const bpm = bg.bpm, bpb = bg.meter, tl = bg.grid.timeline;
 
   const stopPlay = () => {
     const s = ref.current;
@@ -2596,7 +2785,7 @@ function AudioImport({ C, useSharp }) {
           // root accuracy 25.8% -> 38.7%, coverage 61% -> 100%.
           const r = (await analyzeChordsOffThread(ds, sr, opts)) || {};
           setRaw(autoPickRef.current ? autoResolveChords(r.events || []) : (r.events || []));
-          if (r.bpm) setBpm(Math.round(r.bpm));
+          setTracked(r.beats && r.beats.length ? r.beats : null);
           setBeatInfo(r.bpm || r.tuning != null ? { bpm: r.bpm || 0, method: r.method, tuning: r.tuning, key: r.key } : null);
           // cache the beat grid: the structure pass reuses it instead of tracking twice
           ref.current.beats = r.beats && r.beats.length ? r.beats : null;
@@ -2607,7 +2796,7 @@ function AudioImport({ C, useSharp }) {
     }, 30);
   };
 
-  const resetFor = (label) => { setErr(""); setName(label); setBusy(true); setRaw([]); setOverrides({}); setAb(null); setMlScore(null); setMlNotes(null); setGtrNotes(null); setVoiceIdx(0); setSections([]); ref.current.mlRaw = null; stopPlay(); };
+  const resetFor = (label) => { setErr(""); setName(label); setBusy(true); setRaw([]); setTracked(null); bg.reset(); setOverrides({}); setAb(null); setMlNotes(null); setGtrNotes(null); setVoiceIdx(0); setSections([]); ref.current.mlRaw = null; stopPlay(); };
   const onFile = async (e) => {
     const f = e.target.files && e.target.files[0]; if (!f) return;
     resetFor(f.name);
@@ -2693,7 +2882,6 @@ function AudioImport({ C, useSharp }) {
     const notes = notesFromActivations(s.mlRaw.onsets, s.mlRaw.frames,
       { frameRate: s.mlRaw.frameRate, minMidi: s.mlRaw.minMidi, onsetThresh: th.onsetThresh, frameThresh: th.frameThresh });
     setMlNotes(notes);
-    setMlScore(polyNotesToScore(notes, { bpm, beatsPerBar: bpb, useSharp }));
     setVoiceIdx(0); setOverrides({});
     return notes;
   };
@@ -2701,7 +2889,7 @@ function AudioImport({ C, useSharp }) {
     const s = ref.current; if (!s.cur) { setErr("Upload audio first."); return; }
     const model = typeof window !== "undefined" ? window.TTP_NOTE_MODEL : null;
     if (typeof model !== "function") { setErr("Per-voice note transcription needs an ML note model (basic-pitch) — not configured on this build. See docs/ML-NOTES.md."); return; }
-    setBusy(true); setErr(""); setMlScore(null); setMlNotes(null); setVoiceIdx(0);
+    setBusy(true); setErr(""); setMlNotes(null); setVoiceIdx(0);
     try {
       // Run the model ONCE and cache its raw onset/frame matrices, so changing
       // sensitivity (a post-model threshold) re-derives notes without re-inference.
@@ -2734,9 +2922,9 @@ function AudioImport({ C, useSharp }) {
   };
   const gtrScore = useMemo(() => {
     if (!gtrNotes || !gtrNotes.length) return null;
-    const base = fingerScore(polyNotesToScore(gtrNotes, { bpm, beatsPerBar: bpb, useSharp }));
-    return sections.length ? applySectionsToScore(base, sections, { bpm, beatsPerBar: bpb }) : base;
-  }, [gtrNotes, bpm, bpb, useSharp, sections]);
+    const base = fingerScore(polyNotesToScore(gtrNotes, noteGridOpts(bg, gtrNotes, useSharp)));
+    return sections.length ? applySectionsToScore(base, sections, { beatsPerBar: bpb }) : base;
+  }, [gtrNotes, bg.grid, useSharp, sections]);
   /* Voice split — SATB heuristic (engine.tsx splitVoices) runs on the RAW ML notes,
    * so switching the voice count or the displayed voice is cheap: no re-inference,
    * no re-download. voiceCount === 1 shows the full polyphonic score (no split).
@@ -2748,21 +2936,26 @@ function AudioImport({ C, useSharp }) {
     if (voiceCount <= 1) return null;                              // no split — fall back to mlScore
     return splitVoices(mlNotes, { voices: voiceCount });
   }, [mlNotes, voiceCount]);
+  // the polyphonic ML score, on the shared beat grid (re-derived when the grid is corrected)
+  const mlScore = useMemo(() => (mlNotes && mlNotes.length ? polyNotesToScore(mlNotes, noteGridOpts(bg, mlNotes, useSharp)) : null), [mlNotes, bg.grid, useSharp]);
   const mlDisplayScore = useMemo(() => {
     const base = !mlVoiced ? mlScore                               // 1-voice = original polyphonic score
-      : (() => { const forVoice = mlVoiced.filter((n) => n.voice === voiceIdx); return forVoice.length ? polyNotesToScore(forVoice, { bpm, beatsPerBar: bpb, useSharp }) : null; })();
+      : (() => { const forVoice = mlVoiced.filter((n) => n.voice === voiceIdx); return forVoice.length ? polyNotesToScore(forVoice, noteGridOpts(bg, forVoice, useSharp)) : null; })();
     // same audio, same timeline → the detected structure applies to the ML score too
-    return base && sections.length ? applySectionsToScore(base, sections, { bpm, beatsPerBar: bpb }) : base;
-  }, [mlVoiced, voiceIdx, mlScore, bpm, bpb, useSharp, sections]);
+    return base && sections.length ? applySectionsToScore(base, sections, { beatsPerBar: bpb }) : base;
+  }, [mlVoiced, voiceIdx, mlScore, bg.grid, useSharp, sections]);
   /* The vocal SCORE — every separated line as a labelled part (range-named S/A/T/B,
    * or lead + harmonies), with its voice type, clef and range. Derived from the raw
    * ML notes, so naming/key/rhythm changes are instant (no re-inference). Shared by
    * the voice picker labels, the range check and every vocal-score export. */
   const vocalParts = useMemo(() => {
     if (!mlNotes || !mlNotes.length) return [];
-    try { return splitVoicesToScores(mlNotes, { voices: voiceCount, naming: partNaming, leadVoice, bpm, beatsPerBar: bpb, beatType: bpb === 6 ? 8 : 4, useSharp }); }
+    // The vocal score is written at one ♩ (the grid's), with bar 1 where the chord chart's bar 1 is.
+    const off = timelineSecondsAt(tl, 0);
+    const shifted = off ? mlNotes.map((n) => ({ ...n, startSec: Math.max(0, n.startSec - off) })) : mlNotes;
+    try { return splitVoicesToScores(shifted, { voices: voiceCount, naming: partNaming, leadVoice, bpm, beatsPerBar: bpb, beatType: bpb === 6 ? 8 : 4, useSharp }); }
     catch (e) { return []; }
-  }, [mlNotes, voiceCount, partNaming, leadVoice, bpm, bpb, useSharp]);
+  }, [mlNotes, voiceCount, partNaming, leadVoice, bpm, bpb, tl, useSharp]);
   const voiceSuggest = useMemo(() => (mlNotes && mlNotes.length ? suggestVoiceCount(mlNotes) : null), [mlNotes]);
   const autoVocalKey = useMemo(() => (mlNotes && mlNotes.length ? keyFromNotes(mlNotes) : null), [mlNotes]);
   const vocalKey = vsKey ? parseKeyName(vsKey) : autoVocalKey;
@@ -2843,8 +3036,7 @@ function AudioImport({ C, useSharp }) {
    * looked up somewhere else). The list feeds `applySectionsToScore`, so the labels
    * ride into CSMPN (`- Chorus`), ChordSlashML (`[Chorus]`), MusicXML rehearsal marks
    * and the Chord Sheet Maker Pro handoff with no extra plumbing. */
-  const secPerBar = (60 / Math.max(20, bpm)) * bpb;
-  const barOf = (sec) => Math.max(1, Math.round(sec / secPerBar) + 1);
+  const barOf = (sec) => timelineBarAt(tl, sec, bpb);
   const detectStructure = async () => {
     const s = ref.current; if (!s.cur) { setErr("Upload audio first."); return; }
     setSecBusy(true); setErr("");
@@ -2869,7 +3061,7 @@ function AudioImport({ C, useSharp }) {
   };
   const renameSection = (i, label) => setSections((ls) => ls.map((s, j) => (j === i ? { ...s, label } : s)));
   const removeSection = (i) => setSecs(sections.filter((_, j) => j !== i));      // merges into the one above
-  const nudgeSection = (i, bars) => { if (i === 0) return; setSecs(sections.map((s, j) => (j === i ? { ...s, startSec: s.startSec + bars * secPerBar } : s))); };
+  const nudgeSection = (i, bars) => { if (i === 0) return; setSecs(sections.map((s, j) => (j === i ? { ...s, startSec: timelineNudge(tl, s.startSec, bars * bpb) } : s))); };
   const addSectionAt = (t) => {
     const at = Math.max(0, Math.min(dur - 0.1, t));
     if (sections.some((s) => Math.abs(s.startSec - at) < 0.25)) return;
@@ -2881,9 +3073,10 @@ function AudioImport({ C, useSharp }) {
   // chords → a real score (re-quantised live as bpm / time-sig change); notes → a timeline
   const audioScore = useMemo(() => {
     if (!(kind === "chords" && raw.length)) return null;
-    const sc = audioEventsToScore(raw, { bpm, beatsPerBar: bpb, useSharp });
-    return sections.length ? applySectionsToScore(sc, sections, { bpm, beatsPerBar: bpb }) : sc;
-  }, [kind, raw, bpm, bpb, useSharp, sections]);
+    // chord events sit on the decoder's (half-)beat grid → quantise to half beats on the timeline
+    const sc = audioEventsToScore(raw, { timeline: tl, beatsPerBar: bpb, quantize: { step: 0.5 }, useSharp });
+    return sections.length ? applySectionsToScore(sc, sections, { beatsPerBar: bpb }) : sc;
+  }, [kind, raw, bg.grid, useSharp, sections]);
   const noteEvents = kind === "notes" ? raw.map((e) => ({ label: e.note, midi: e.midi, startSec: e.startSec, durSec: e.durSec })) : [];
   const fmt = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
   const activeIdx = noteEvents.findIndex((e) => pos >= e.startSec && pos < e.startSec + e.durSec);
@@ -2939,6 +3132,12 @@ function AudioImport({ C, useSharp }) {
         );
       })()}
 
+      {/* TEMPO & BARS → the one beat grid every chart below is laid on (Muscriptor's timing panel) */}
+      {!!ref.current.cur && (!!raw.length || !!mlNotes || !!gtrNotes) && (
+        <TempoBarsPanel C={C} bg={bg} pos={pos} canFindBars={!!ref.current.audioBuf}
+          onFindBars={() => { const b = ref.current.audioBuf; if (b) bg.findBars(monoOf(b), b.sampleRate); }} />
+      )}
+
       {/* VOICES (ML) → per-voice note transcription. Voice count controls the SATB
           split; picker chooses which line is displayed + exported. Split is derived
           from the same raw notes, so switching is instant (no re-inference). */}
@@ -2984,19 +3183,7 @@ function AudioImport({ C, useSharp }) {
           )}
           {mlNotes && mlNotes.length > 0 && (
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 8, fontSize: 11 }}>
-              <span style={{ color: C.dim }}>Tempo:</span>
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                <button onClick={() => setBpm((b) => Math.max(40, b - 1))} title="−1 BPM" style={{ ...chip(C), padding: "3px 8px" }}>−</button>
-                <span style={{ minWidth: 54, textAlign: "center", color: C.amber }}>♩={bpm}</span>
-                <button onClick={() => setBpm((b) => Math.min(240, b + 1))} title="+1 BPM" style={{ ...chip(C), padding: "3px 8px" }}>+</button>
-              </span>
-              <select value={bpb} onChange={(e) => setBpb(+e.target.value)} style={{ ...chip(C), padding: "3px 8px", background: C.raised, cursor: "pointer" }}>
-                <option value={4}>4/4</option><option value={3}>3/4</option><option value={6}>6/8</option>
-              </select>
-              {/* Tempo is a property of the PERFORMANCE, not the clip — a shorter
-                  excerpt has the same BPM, so set the song's real tempo here and the
-                  bars/note-values line up regardless of how much you trimmed. */}
-              <span style={{ color: C.dim }}>Set the song's real BPM — bars & note durations quantise to it. A shorter clip keeps the same tempo.</span>
+              <span style={{ color: C.dim }}>♩=<b style={{ color: C.amber }}>{bg.grid.follow ? "~" + Math.round(bpm) : +bpm.toFixed(1)}</b> · {bpb}/4 — set in <b>Tempo &amp; bars</b> above; the bars and note values of every chart from this recording follow it.</span>
             </div>
           )}
           {vocalParts.length > 0 && (
@@ -3065,6 +3252,7 @@ function AudioImport({ C, useSharp }) {
               </div>
             </div>
           )}
+          {mlDisplayScore && <div style={{ marginBottom: 6 }}><CheckByEar C={C} score={mlDisplayScore} getBuffer={() => ref.current.audioBuf} onStart={stopPlay} /></div>}
           {mlDisplayScore
             ? <ChartPanel score={mlDisplayScore}
                 title={(name || "Vocals") + (voiceCount > 1 ? ` · voice ${voiceIdx + 1}/${voiceCount}` : " · voices")}
@@ -3078,8 +3266,9 @@ function AudioImport({ C, useSharp }) {
       {gtrScore && (
         <div style={{ marginBottom: 14 }}>
           <div style={{ fontSize: 11, color: C.dim, marginBottom: 6, lineHeight: 1.6 }}>
-            🎸 <b style={{ color: C.text }}>{gtrNotes.length} notes</b> from the guitar model · strings <b>inferred</b> (fingerScore — playable, not necessarily the player's) · set ♩= and the meter above to line up the bars · <b>AlphaTex (tab)</b> exports every note with its string.
+            🎸 <b style={{ color: C.text }}>{gtrNotes.length} notes</b> from the guitar model · strings <b>inferred</b> (fingerScore — playable, not necessarily the player's) · bars come from <b>Tempo &amp; bars</b> above · <b>AlphaTex (tab)</b> exports every note with its string.
           </div>
+          <div style={{ marginBottom: 6 }}><CheckByEar C={C} score={gtrScore} getBuffer={() => ref.current.audioBuf} onStart={stopPlay} /></div>
           <ChartPanel score={gtrScore} title={(name || "Guitar") + " · tab"}
             meta={`${gtrScore.bars.length} bars · ${gtrNotes.length} notes · from the guitar ML model`}
             C={C} useSharp={useSharp} overrides={gtrOvr} setOverrides={setGtrOvr} selKey="" onPick={() => {}} autoSimplify={false} defaultView="tab" />
@@ -3103,23 +3292,16 @@ function AudioImport({ C, useSharp }) {
           <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10, marginBottom: 8, fontSize: 11, color: C.dim }}>
             <button onClick={() => play()} style={{ ...chip(C), padding: "4px 12px", borderColor: playing ? C.green : C.border, color: playing ? C.green : C.amber }}>{playing ? "■ Stop stem" : "▶ Play stem"}</button>
             <span>{fmt(pos)} / {fmt(dur)}</span>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-              <button onClick={() => setBpm((b) => Math.max(40, b - 5))} style={{ ...chip(C), padding: "3px 8px" }}>−</button>
-              <span style={{ minWidth: 54, textAlign: "center", color: C.amber }}>♩={bpm}</span>
-              <button onClick={() => setBpm((b) => Math.min(240, b + 5))} style={{ ...chip(C), padding: "3px 8px" }}>+</button>
-            </span>
-            <select value={bpb} onChange={(e) => setBpb(+e.target.value)} style={{ ...chip(C), padding: "3px 8px", background: C.raised, cursor: "pointer" }}>
-              <option value={4}>4/4</option><option value={3}>3/4</option><option value={6}>6/8</option>
-            </select>
+            <CheckByEar C={C} score={audioScore} getBuffer={() => ref.current.audioBuf} onStart={stopPlay} />
             <span style={{ color: C.dim }}>
-              {beatInfo && beatInfo.bpm ? <>detected <b style={{ color: C.green }}>♩={Math.round(beatInfo.bpm)}</b> from the audio — nudge if the bars drift</> : "set tempo so the bars line up"}
+              ♩={bg.grid.follow ? "~" + Math.round(bpm) : +bpm.toFixed(1)} · {bpb}/4 (Tempo &amp; bars above)
               {beatInfo && beatInfo.tuning != null && Math.abs(beatInfo.tuning) >= 5 && <> · tuning <b style={{ color: C.amber }}>{beatInfo.tuning > 0 ? "+" : ""}{Math.round(beatInfo.tuning)}¢</b> (compensated)</>}
             </span>
           </div>
           <ChordReview events={raw} C={C} fmt={fmt} onSeek={(t) => play(t)} onCommit={commitChoices} auto={autoPick} onAuto={toggleAuto} />
-          <ChartPanel score={audioScore} vocabPicker={false} title={name || "Audio stem"} meta={`${audioScore.bars.length} bars · ♩=${bpm} · from audio`} C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey="" onPick={() => {}} />
+          <ChartPanel score={audioScore} vocabPicker={false} title={name || "Audio stem"} meta={`${audioScore.bars.length} bars · ♩=${bg.grid.follow ? "~" + Math.round(bpm) + " (follows the performance)" : +bpm.toFixed(1)} · from audio`} C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey="" onPick={() => {}} />
           <div style={{ fontSize: 11, color: C.dim, marginTop: 10, lineHeight: 1.6 }}>
-            Decoded with <b>SynHarmonics v2</b> (note-level NNLS transcription, tuning compensation, inversions + slash chords, calibrated confidence). Faded chords with a <b style={{ color: C.amber }}>?</b> are the uncertain ones — fix them from the review list or <b>✎ Edit</b>, set <b>♩=</b> so bars align, then <b>CSMPN</b> / <b>→ Chord Sheet Maker Pro</b> to send it on. Dense voicings / heavy bleed still mislabel.
+            Decoded with <b>SynHarmonics v2</b> (note-level NNLS transcription, tuning compensation, inversions + slash chords, calibrated confidence). Faded chords with a <b style={{ color: C.amber }}>?</b> are the uncertain ones — fix them from the review list or <b>✎ Edit</b>, check the bar lines with <b>🎧 Check by ear</b>, then <b>CSMPN</b> / <b>→ Chord Sheet Maker Pro</b> to send it on. Dense voicings / heavy bleed still mislabel.
           </div>
         </>
       )}
@@ -3296,8 +3478,13 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, getSour
       setRecovered(`The last split didn't finish, even in low-memory mode — the browser reloaded the page${last.sec ? ` (${Math.round(last.sec / 60)} min of audio)` : ""}. Try a shorter clip, close other tabs, or import stems from Moises/Demucs.`);
     }
   }, []);
-  const [bpm, setBpm] = useState(120), [bpb, setBpb] = useState(4);
   const [ovr, setOvr] = useState({});                    // role → chord overrides
+  // ONE beat grid for every stem chart (chartsFromStems tracks it on the drum stem) — the same
+  // Tempo & bars corrections as the single-file panel, and bar 1 where the band first plays.
+  const stemFirst = useMemo(() => { const band = res && res.charts.find((c) => c.kind === "chords" && c.events && c.events.length); return band ? band.events[0].startSec : 0; }, [res]);
+  const bg = useBeatGrid(res && res.beats && res.beats.length ? res.beats : null, stemFirst);
+  const gridFor = useRef(null);                          // the stems the current corrections belong to
+  const bpm = bg.bpm, bpb = bg.meter;
   const [mute, setMute] = useState(() => new Set()), [solo, setSolo] = useState(() => new Set());
   const [playing, setPlaying] = useState(false), [pos, setPos] = useState(0);
   const [, setTick] = useState(0);
@@ -3330,7 +3517,9 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, getSour
       for (const role of Object.keys(full)) byRole[role] = await resampleOffThread(full[role], sr, asr);
       const r = await chartsFromStemsOffThread(byRole, asr, { useSharp, vocabulary: vocab, sixNine, fullRate: full.drums ? { drums: full.drums, sampleRate: sr } : undefined });
       setRes(r); setOvr({});
-      if (r.bpm) setBpm(Math.round(r.bpm));
+      // a NEW split/import starts from the detected grid; re-charting the same stems (a chord-
+      // vocabulary change) keeps the user's Tempo & bars corrections
+      if (gridFor.current !== t) { gridFor.current = t; bg.reset(); }
       setTab((cur) => (r.charts.some((c) => c.role === cur) ? cur : r.charts.length ? r.charts[0].role : "band"));
     } catch (e) { setErr("Charting the stems failed: " + ((e && e.message) || e)); }
     setBusy(""); setProg(null);
@@ -3471,12 +3660,54 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, getSour
   const chart = res && (res.charts.find((c) => c.role === tab) || res.charts[0]);
   const chartScore = useMemo(() => {
     if (!chart) return null;
-    if (chart.kind === "chords") return audioEventsToScore(chart.events, { bpm, beatsPerBar: bpb, useSharp });
+    if (chart.kind === "chords") return audioEventsToScore(chart.events, { timeline: bg.grid.timeline, beatsPerBar: bpb, quantize: { step: 0.5 }, useSharp });
     // a monophonic line: every note its own event (no 0.12 s onset grouping into "chords")
-    if (chart.kind === "notes") return chart.notes.length ? polyNotesToScore(chart.notes.map((n) => ({ midi: n.midi, startSec: n.startSec, durSec: n.durSec })), { bpm, beatsPerBar: bpb, useSharp, onsetGrid: 0.005 }) : null;
+    if (chart.kind === "notes") { const ns = chart.notes.map((n) => ({ midi: n.midi, startSec: n.startSec, durSec: n.durSec })); return ns.length ? polyNotesToScore(ns, noteGridOpts(bg, ns, useSharp, { onsetGrid: 0.005 })) : null; }
     return null;
-  }, [chart, bpm, bpb, useSharp]);
-  const groove = useMemo(() => (chart && chart.kind === "drums" ? drumPattern(chart.hits, { bpm, beatsPerBar: bpb }) : null), [chart, bpm, bpb]);
+  }, [chart, bg.grid, useSharp]);
+  // the drum grid reads hits from bar 1 of the shared timeline (one ♩: the grid's)
+  const drumOff = timelineSecondsAt(bg.grid.timeline, 0);
+  const drumHits = useMemo(() => (chart && chart.kind === "drums" ? chart.hits.map((h) => ({ ...h, t: h.t - drumOff })).filter((h) => h.t > -0.05) : null), [chart, drumOff]);
+  const groove = useMemo(() => (drumHits ? drumPattern(drumHits, { bpm, beatsPerBar: bpb }) : null), [drumHits, bpm, bpb]);
+  /* ⬇ All parts (zip) — every stem chart as files on the shared grid (engine.partsZip: per part
+   * .musicxml / .mid / .csmpn, an .alphatex for guitar + bass, full_score.musicxml and a
+   * multi-track score.mid with the drums on ch. 10), one STORED zip like Muscriptor's. */
+  const stemParts = () => {
+    if (!res) return [];
+    const tl = bg.grid.timeline, BASS = [null, null, 28, 33, 38, 43];
+    return res.charts.map((c) => {
+      if (c.kind === "chords" && c.events && c.events.length) return { name: c.name, score: audioEventsToScore(c.events, { timeline: tl, beatsPerBar: bpb, quantize: { step: 0.5 }, useSharp }), overrides: ovr[c.role] || {}, tuning: /^(other|guitar)$/.test(c.role) ? TUNINGS.Standard : null, program: /^(other|guitar)$/.test(c.role) ? 25 : 0 };
+      if (c.kind === "notes" && c.notes && c.notes.length) { const ns = c.notes.map((n) => ({ midi: n.midi, startSec: n.startSec, durSec: n.durSec })); return { name: c.name, score: polyNotesToScore(ns, noteGridOpts(bg, ns, useSharp, { onsetGrid: 0.005 })), overrides: ovr[c.role] || {}, tuning: c.role === "bass" ? BASS : null, program: c.role === "bass" ? 33 : c.role === "vocals" ? 53 : 0 }; }
+      if (c.kind === "drums" && c.hits && c.hits.length) return { name: c.name, role: c.role, drums: c.hits.map((h) => ({ type: h.type, beat: timelineBeatsAt(tl, h.t) })) };
+      return null;
+    }).filter(Boolean).map((p, i) => ({ ...p, role: p.role || res.charts[i] && res.charts[i].role }));
+  };
+  const stemKey = res && res.key && typeof res.key.tonic === "number" ? res.key : null;
+  /* → Chord Sheet Maker Pro (all parts): the csm:handoff:v1 envelope with the band chart as its
+   * `formats` (what an older receiver loads) + an optional `parts[]` of every pitched part's CSMPN,
+   * which the current receiver files in its song library (see chord-sheet-maker-pro handoffParts.js). */
+  const sendPartsToPro = () => {
+    const parts = stemParts().filter((p) => p.score);
+    if (!parts.length) { setErr("No chart to send yet."); return; }
+    try {
+      const csm = (p) => scoreToCSMPN(p.score, { overrides: p.overrides || {}, title: `${base} — ${p.name}`, tempo: bpm, key: stemKey, useSharp });
+      const primary = parts.find((p) => /band/i.test(p.name)) || parts[0];
+      const env = {
+        v: 1, source: "tab-translator-pro", createdAt: new Date().toISOString(), title: base,
+        enharmonic: useSharp ? "sharps" : "flats",
+        formats: { csmpn: csm(primary) },
+        parts: parts.map((p) => ({ name: p.name, role: p.role || "", formats: { csmpn: csm(p) } })),
+      };
+      localStorage.setItem("csm:handoff:v1", JSON.stringify(env));
+      window.location.assign(`${window.location.origin}/chord-sheet-maker-pro/?import=handoff`);
+    } catch (e) { setErr("Sending the parts failed: " + ((e && e.message) || e)); }
+  };
+  const saveAllParts = () => {
+    const parts = stemParts();
+    if (!parts.length) { setErr("No chart to save yet."); return; }
+    try { saveBytes(partsZip(parts, { title: base, tempo: bpm, key: stemKey, useSharp }), `${base}_parts.zip`, "application/zip"); }
+    catch (e) { setErr("Saving the parts failed: " + ((e && e.message) || e)); }
+  };
 
   return (
     <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 12, marginBottom: 14 }}>
@@ -3542,21 +3773,18 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, getSour
               <button key={c.role} onClick={() => setTab(c.role)} style={{ ...chip(C), padding: "4px 10px", borderColor: tab === c.role ? C.cyan : C.border, color: tab === c.role ? C.cyan : C.dim }}>{c.name}</button>
             ))}
             {setVocab && <ChordVocabPicker C={C} value={vocab} onChange={setVocab} sixNine={sixNine} onSixNine={setSixNine} disabled={!!busy} />}
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11 }}>
-              <button onClick={() => setBpm((b) => Math.max(40, b - 1))} style={{ ...chip(C), padding: "2px 8px" }}>−</button>
-              <span style={{ color: C.amber }}>♩={bpm}</span>
-              <button onClick={() => setBpm((b) => Math.min(240, b + 1))} style={{ ...chip(C), padding: "2px 8px" }}>+</button>
-              <select value={bpb} onChange={(ev) => setBpb(+ev.target.value)} style={{ ...chip(C), padding: "2px 6px", background: C.raised }}><option value={4}>4/4</option><option value={3}>3/4</option></select>
-              <span style={{ color: C.dim }}>shared by every chart</span>
-            </span>
+            <button onClick={saveAllParts} disabled={!!busy} title="every chart as files in one zip: MusicXML + MIDI + CSMPN per part, AlphaTex tab for guitar and bass, a full score and a multi-track MIDI" style={{ ...chip(C), padding: "4px 12px", color: C.green }}>⬇ All parts (zip)</button>
+            <button onClick={sendPartsToPro} disabled={!!busy} title="open the band chart in Chord Sheet Maker Pro and file every instrument's chart in its song library" style={{ ...chip(C), padding: "4px 12px", color: C.cyan }}>→ Chord Sheet Maker Pro (all parts)</button>
           </div>
+          <TempoBarsPanel C={C} bg={bg} label="TEMPO & BARS · shared by every stem chart" canFindBars={!!tracks}
+            onFindBars={() => { if (!tracks) return; const n = tracks.list[0].L.length, mix = new Float32Array(n); for (const tr of tracks.list) for (let i = 0; i < n; i++) mix[i] += 0.5 * (tr.L[i] + (tr.R ? tr.R[i] : tr.L[i])); bg.findBars(mix, tracks.sampleRate); }} />
           {!res.charts.length && <div style={{ fontSize: 11, color: C.dim }}>No instrument produced a chart.</div>}
           {chart && chart.kind === "notes" && (
             chart.notes.length ? <StaffView events={chart.notes.map((n) => ({ label: n.note, midi: n.midi, startSec: n.startSec, durSec: n.durSec }))} activeIdx={-1} C={C} useSharp={useSharp} />
               : <div style={{ fontSize: 11, color: C.dim }}>No clear notes in this stem.</div>
           )}
           {chartScore && (
-            <ChartPanel score={chartScore} vocabPicker={false} title={`${base} — ${chart.name}`} meta={`${chartScore.bars.length} bars · ♩=${bpm} · ${chart.name}${res.key && chart.role === "band" ? "" : ""}`}
+            <ChartPanel score={chartScore} vocabPicker={false} title={`${base} — ${chart.name}`} meta={`${chartScore.bars.length} bars · ♩=${bg.grid.follow ? "~" + Math.round(bpm) : +bpm.toFixed(1)} · ${chart.name}`}
               C={C} useSharp={useSharp} overrides={ovr[chart.role] || {}} setOverrides={(f) => setOvr((o) => ({ ...o, [chart.role]: typeof f === "function" ? f(o[chart.role] || {}) : f }))} selKey="" onPick={() => {}} />
           )}
           {groove && (
@@ -3571,7 +3799,7 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, getSour
                   </div>
                 ))}
               </div>
-              <button onClick={() => saveBytes(drumHitsToMidi(chart.hits, { bpm }), `${base}-drums.mid`, "audio/midi")} style={{ ...chip(C), padding: "4px 12px", marginTop: 8 }}>⬇ Drums MIDI</button>
+              <button onClick={() => saveBytes(drumHitsToMidi(drumHits || chart.hits, { bpm }), `${base}-drums.mid`, "audio/midi")} style={{ ...chip(C), padding: "4px 12px", marginTop: 8 }}>⬇ Drums MIDI</button>
               <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>H = hi-hat/cymbals · S = snare · K = kick, sixteenths per beat. Soft ghost notes are left out.</div>
             </div>
           )}

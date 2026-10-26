@@ -2610,13 +2610,29 @@ function _abcKeyName(key) {
   const p = _keySpeller(key)(60 + (((key.tonic % 12) + 12) % 12));
   return p.step + (p.alter === 1 ? "#" : p.alter === -1 ? "b" : "") + (key.mode === "minor" ? "m" : "");
 }
+/* The tempo at the start of every bar of a score whose clock follows a performance
+ * (`score.tempoMap`, from audioEventsToScore on a beat timeline), or null for a one-tempo score.
+ * `tempo` — the ♩= the chart is being played / exported at — scales the whole map by
+ * tempo / score.tempo, so nudging ♩= still speeds everything up in proportion. Tempo changes
+ * sit on bar lines (timelineSimplified puts them there), so a per-bar tempo is exact. */
+function scoreBarTempos(score, tempo) {
+  const map = score && score.tempoMap;
+  if (!map || !map.length || !score.bars || !score.bars.length) return null;
+  const base = score.tempo > 0 ? score.tempo : map[0].bpm, ratio = tempo > 0 ? tempo / base : 1;
+  const out = new Array(score.bars.length);
+  let cur = map[0].bpm, mi = 0;
+  score.bars.forEach((bar, i) => { while (mi < map.length && map[mi].bar <= bar.number) cur = map[mi++].bpm; out[i] = cur * ratio; });
+  return out;
+}
 function scoreToABC(score, opts = {}) {
   const ov = opts.overrides || {};
   const [b0, bt0] = score.timeSig;
   const key = opts.key && typeof opts.key.tonic === "number" ? opts.key : null;
   const out = [..._abcFileHeader(), "X:1", `T:${opts.title || "Tab Decoder chart"}`, `M:${b0}/${bt0}`, "L:1/4"];
-  if (opts.tempo) out.push(`Q:1/4=${Math.round(opts.tempo)}`);
+  const barTempos = scoreBarTempos(score, opts.tempo);
+  if (opts.tempo || barTempos) out.push(`Q:1/4=${Math.round(barTempos ? barTempos[0] : opts.tempo)}`);
   out.push(`K:${_abcKeyName(key)}`);
+  let curQ = barTempos ? Math.round(barTempos[0]) : null;
   /* Pitches are written RELATIVE TO K: with per-bar accidental carry (ABC semantics:
    * an unmarked note takes the key signature, an accidental holds to the end of the
    * bar for that pitch). The old writer emitted K:-blind sharps, so in K:E a G-natural
@@ -2630,6 +2646,7 @@ function scoreToABC(score, opts = {}) {
     let cell = "";
     acc.newBar();
     if (sig !== curSig) { cell += `[M:${sig}]`; curSig = sig; }
+    if (barTempos && Math.round(barTempos[bi]) !== curQ) { curQ = Math.round(barTempos[bi]); cell += `[Q:1/4=${curQ}]`; }
     bar.events.forEach((e) => {
       const dur = abcDur(e.qdur != null ? e.qdur : e.durBeats, bt); // TRUE duration (never 0)
       const inner = e.midis && e.midis.length ? `[${e.midis.map((m) => _abcPitch(spell(m), acc)).join("")}]${dur}` : `z${dur}`;
@@ -2717,6 +2734,14 @@ function scoreToCSMPN(score, opts = {}) {
   if (kn) out.push(`Key: ${kn}`);
   out.push(`Time: ${b}/${bt}`);
   if (opts.tempo) out.push(`Tempo: ${Math.round(opts.tempo)}`);
+  // A chart whose bar lines follow a recording carries its tempo map (bar=BPM where it changes,
+  // 0.1 BPM): Chord Sheet Maker Pro's playback and MusicXML export play each bar at its tempo.
+  const barTempos = scoreBarTempos(score, opts.tempo);
+  if (barTempos) {
+    const ch = []; let last = null;
+    score.bars.forEach((bar, i) => { const q = Math.round(barTempos[i] * 10) / 10; if (q !== last) { ch.push(`${i + 1}=${q}`); last = q; } });
+    if (ch.length > 1) out.push(`Tempo Map: ${ch.join(" ")}`);
+  }
   _csmPerfHeaders(score, opts).forEach((l) => out.push(l));
   out.push("");
   // CSMPN native (chordsheet.com) grammar: bars are delimited by explicit barline
@@ -2911,6 +2936,7 @@ function _xmlDivisions(score) {
 }
 function scoreToMusicXML(score, opts = {}) {
   const ov = opts.overrides || {}, useSharp = opts.useSharp !== false, div = _xmlDivisions(score);
+  const barTempos = scoreBarTempos(score, opts.tempo);
   const L = ['<?xml version="1.0" encoding="UTF-8"?>', '<score-partwise version="3.1">',
     "  <part-list><score-part id=\"P1\"><part-name>Chords</part-name></score-part></part-list>", '  <part id="P1">'];
   let prevSig = null, wroteDiv = false;
@@ -2925,7 +2951,8 @@ function scoreToMusicXML(score, opts = {}) {
       L.push("      </attributes>");
     }
     prevSig = [bb, bt];
-    if (bi === 0 && opts.tempo) L.push(`      <sound tempo="${opts.tempo}"/>`);
+    if (barTempos) { const q = +barTempos[bi].toFixed(2); if (bi === 0 || q !== +barTempos[bi - 1].toFixed(2)) L.push(`      <sound tempo="${q}"/>`); }
+    else if (bi === 0 && opts.tempo) L.push(`      <sound tempo="${opts.tempo}"/>`);
     /* Section label → a rehearsal mark, so structure survives the round trip:
      * `parseMusicXML` already READS <rehearsal> into bar.section, and this is the
      * matching write. MuseScore/Guitar Pro draw it as the boxed "Chorus" above the
@@ -4111,11 +4138,13 @@ function scoreToAlphaTex(score, opts = {}) {
   L.push(`  \\staff {${opts.notation === false ? "" : "score "}tabs}`);
   L.push(`    \\tuning (${keys.slice().reverse().map((k) => _atexPitch(tuning[k])).join(" ")})`);
   let lastSig = null, dropped = 0;
+  const barTempos = scoreBarTempos(sc, opts.tempo);
   sc.bars.forEach((bar, bi) => {
     const sig = bar.timeSig || sc.timeSig || [4, 4];
     const meta = [];
     if (!lastSig || sig[0] !== lastSig[0] || sig[1] !== lastSig[1]) meta.push(`\\ts (${sig[0]} ${sig[1]})`);
-    if (bi === 0 && (opts.tempo || sc.tempo)) meta.push(`\\tempo ${Math.round(opts.tempo || sc.tempo)}`);
+    if (barTempos) { const q = Math.round(barTempos[bi]); if (bi === 0 || q !== Math.round(barTempos[bi - 1])) meta.push(`\\tempo ${q}`); }
+    else if (bi === 0 && (opts.tempo || sc.tempo)) meta.push(`\\tempo ${Math.round(opts.tempo || sc.tempo)}`);
     if (bi === 0 && opts.key) meta.push(`\\ks ${_atexKey(opts.key)}`);
     if (bar.section) meta.push(`\\section ${_atexStr(bar.section)}`);
     if (bar.repeatStart) meta.push("\\ro");
@@ -4349,15 +4378,20 @@ function _midiVarLen(n) {
 }
 function scoreToMidi(score, opts = {}) {
   const PPQ = 480;
-  const bpm = Math.max(20, Math.min(400, Math.round(opts.tempo || score.tempo || 100)));
+  // An audio chart on a beat timeline keeps its exact tempo (rounding 117.7 to 118 drifts ~0.6 s
+  // off the recording over four minutes); every other chart writes a whole ♩= as before.
+  const rawBpm = opts.tempo || score.tempo || 100;
+  const bpm = Math.max(20, Math.min(400, score.timeline ? rawBpm : Math.round(rawBpm)));
   const evs = []; // { tick, order, bytes } — order breaks ties: meta < noteOff < noteOn < endOfTrack
-  const uspq = Math.round(60000000 / bpm);
-  evs.push({ tick: 0, order: 0, bytes: [0xFF, 0x51, 0x03, (uspq >> 16) & 0xff, (uspq >> 8) & 0xff, uspq & 0xff] });
+  const barTempos = scoreBarTempos(score, opts.tempo);
+  const tempoMeta = (tick, b) => { const uspq = Math.round(60000000 / b); evs.push({ tick, order: 0, bytes: [0xFF, 0x51, 0x03, (uspq >> 16) & 0xff, (uspq >> 8) & 0xff, uspq & 0xff] }); return uspq; };
+  let lastUs = tempoMeta(0, barTempos ? barTempos[0] : bpm);
   let tQ = 0, maxTick = 0, prevSig = null;
-  for (const bar of score.bars || []) {
+  (score.bars || []).forEach((bar, bi) => {
     const sig = bar.timeSig || score.timeSig || [4, 4];
     const bb = sig[0], bt = sig[1];
     const barTick = Math.round(tQ * PPQ);
+    if (barTempos && bi > 0 && Math.round(60000000 / barTempos[bi]) !== lastUs) lastUs = tempoMeta(barTick, barTempos[bi]);
     if (!prevSig || prevSig[0] !== bb || prevSig[1] !== bt) {
       evs.push({ tick: barTick, order: 0, bytes: [0xFF, 0x58, 0x04, bb & 0xff, Math.max(0, Math.round(Math.log2(bt))) & 0xff, 24, 8] });
       prevSig = [bb, bt];
@@ -4377,7 +4411,7 @@ function scoreToMidi(score, opts = {}) {
     }
     tQ += q(bb);
     if (Math.round(tQ * PPQ) > maxTick) maxTick = Math.round(tQ * PPQ);
-  }
+  });
   evs.push({ tick: maxTick, order: 3, bytes: [0xFF, 0x2F, 0x00] }); // end of track
   evs.sort((a, b) => a.tick - b.tick || a.order - b.order);
   const track = [];
@@ -4392,6 +4426,147 @@ function scoreToMidi(score, opts = {}) {
   return new Uint8Array(bytes);
 }
 
+/* ---- "⬇ All parts (zip)": every stem chart as files, the way Muscriptor ships its sheets ------
+ * A STORED (uncompressed) zip — exactly Muscriptor's layout — written with no dependency: local
+ * headers + a central directory + CRC-32. `_zipEntries`/`_zipRead` (the importer) read it back,
+ * which is the test. Per part: NN_<part>.musicxml (chords + voiced notes), .mid (follows the tempo
+ * map), .csmpn, and .alphatex for the fretted parts; plus full_score.musicxml (every part, one
+ * score) and score.mid (format 1: a conductor track + one named track per part, drums on ch. 10). */
+let _crcTable = null;
+function crc32(bytes) {
+  if (!_crcTable) { _crcTable = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; _crcTable[n] = c >>> 0; } }
+  let c = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) c = _crcTable[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+function _utf8(s) { if (typeof TextEncoder !== "undefined") return new TextEncoder().encode(s); const b = unescape(encodeURIComponent(s)); const u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; }
+/** [{ name, data: Uint8Array | string }] → a STORED zip (UTF-8 names, DOS date 1980-01-01). */
+function zipStore(entries) {
+  const files = (entries || []).map((e) => ({ name: _utf8(e.name), data: typeof e.data === "string" ? _utf8(e.data) : e.data }));
+  let size = 22; for (const f of files) size += 30 + f.name.length + f.data.length + 46 + f.name.length;
+  const out = new Uint8Array(size), dv = new DataView(out.buffer);
+  let p = 0; const offs = [];
+  for (const f of files) {
+    f.crc = crc32(f.data); offs.push(p);
+    dv.setUint32(p, 0x04034b50, true); dv.setUint16(p + 4, 20, true); dv.setUint16(p + 6, 0x0800, true); dv.setUint16(p + 8, 0, true);
+    dv.setUint16(p + 10, 0, true); dv.setUint16(p + 12, 0x21, true); dv.setUint32(p + 14, f.crc, true);
+    dv.setUint32(p + 18, f.data.length, true); dv.setUint32(p + 22, f.data.length, true); dv.setUint16(p + 26, f.name.length, true); dv.setUint16(p + 28, 0, true);
+    out.set(f.name, p + 30); out.set(f.data, p + 30 + f.name.length); p += 30 + f.name.length + f.data.length;
+  }
+  const cd = p;
+  files.forEach((f, i) => {
+    dv.setUint32(p, 0x02014b50, true); dv.setUint16(p + 4, 20, true); dv.setUint16(p + 6, 20, true); dv.setUint16(p + 8, 0x0800, true); dv.setUint16(p + 10, 0, true);
+    dv.setUint16(p + 12, 0, true); dv.setUint16(p + 14, 0x21, true); dv.setUint32(p + 16, f.crc, true); dv.setUint32(p + 20, f.data.length, true); dv.setUint32(p + 24, f.data.length, true);
+    dv.setUint16(p + 28, f.name.length, true); dv.setUint16(p + 30, 0, true); dv.setUint16(p + 32, 0, true); dv.setUint16(p + 34, 0, true); dv.setUint16(p + 36, 0, true);
+    dv.setUint32(p + 38, 0, true); dv.setUint32(p + 42, offs[i], true); out.set(f.name, p + 46); p += 46 + f.name.length;
+  });
+  dv.setUint32(p, 0x06054b50, true); dv.setUint16(p + 8, files.length, true); dv.setUint16(p + 10, files.length, true);
+  dv.setUint32(p + 12, p - cd, true); dv.setUint32(p + 16, cd, true);
+  return out;
+}
+
+/** Several charts as ONE MusicXML score (a part per chart, in order), each part exactly what
+ *  scoreToMusicXML writes for it alone. parts: [{ name, score, overrides }]; opts as scoreToMusicXML. */
+function scoresToMultipartMusicXML(parts, opts = {}) {
+  const list = (parts || []).filter((p) => p && p.score && p.score.bars && p.score.bars.length);
+  const body = [], heads = [];
+  list.forEach((p, i) => {
+    const one = scoreToMusicXML(p.score, { ...opts, overrides: p.overrides || {} });
+    const a = one.indexOf('<part id="P1">'), b = one.lastIndexOf("</part>");
+    if (a < 0 || b < 0) return;
+    heads.push(`    <score-part id="P${i + 1}"><part-name>${_xmlEsc(p.name || `Part ${i + 1}`)}</part-name></score-part>`);
+    body.push(`  <part id="P${i + 1}">` + one.slice(a + '<part id="P1">'.length, b) + "</part>");
+  });
+  return ['<?xml version="1.0" encoding="UTF-8"?>', '<score-partwise version="3.1">', ...(opts.title ? [`  <work><work-title>${_xmlEsc(opts.title)}</work-title></work>`] : []),
+    "  <part-list>", ...heads, "  </part-list>", ...body, "</score-partwise>", ""].join("\n");
+}
+
+/** Format-1 Standard MIDI File for several parts on one clock: a conductor track (tempo map from
+ *  the first score — scoreBarTempos — and its meters) + a named track per part. tracks:
+ *  [{ name, score, program } | { name, drums: [{ beat, type: "kick"|"snare"|"hat" }] }]; drum
+ *  beats are quarter beats from bar 1 and go on channel 10 (GM 36 / 38 / 42). PPQ 480. */
+function scoresToMidi(tracks, opts = {}) {
+  const PPQ = 480, list = (tracks || []).filter(Boolean);
+  // the clock: opts.clockScore (e.g. the band chart, for a drums-only file) or the first score
+  const ref = opts.clockScore || (list.find((t) => t.score && t.score.bars && t.score.bars.length) || {}).score;
+  const chunk = (evs) => {
+    evs.sort((a, b) => a.tick - b.tick || a.o - b.o);
+    const tr = []; let prev = 0;
+    for (const e of evs) { tr.push(..._midiVarLen(Math.max(0, e.tick - prev)), ...e.b); prev = e.tick; }
+    const n = tr.length;
+    return [0x4D, 0x54, 0x72, 0x6B, (n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff, ...tr];
+  };
+  const text = (type, s) => { const b = Array.from(_utf8(String(s || ""))); return [0xFF, type, ..._midiVarLen(b.length), ...b]; };
+  // conductor: tempo + meter per bar, end at the last bar line
+  const cond = [{ tick: 0, o: 0, b: text(0x03, opts.title || "Score") }];
+  let endTick = 0;
+  if (ref) {
+    const bt = scoreBarTempos(ref, opts.tempo), base = Math.max(20, Math.min(400, opts.tempo || ref.tempo || 100));
+    let tQ = 0, lastUs = null, prevSig = null;
+    ref.bars.forEach((bar, bi) => {
+      const sig = bar.timeSig || ref.timeSig || [4, 4], tick = Math.round(tQ * PPQ);
+      const us = Math.round(60000000 / (bt ? bt[bi] : base));
+      if (us !== lastUs) { cond.push({ tick, o: 0, b: [0xFF, 0x51, 0x03, (us >> 16) & 0xff, (us >> 8) & 0xff, us & 0xff] }); lastUs = us; }
+      if (!prevSig || prevSig[0] !== sig[0] || prevSig[1] !== sig[1]) { cond.push({ tick, o: 0, b: [0xFF, 0x58, 0x04, sig[0] & 0xff, Math.max(0, Math.round(Math.log2(sig[1]))) & 0xff, 24, 8] }); prevSig = sig; }
+      tQ += (sig[0] * 4) / sig[1];
+    });
+    endTick = Math.round(tQ * PPQ);
+  } else cond.push({ tick: 0, o: 0, b: [0xFF, 0x51, 0x03, 0x07, 0xA1, 0x20] });
+  const chunks = [];
+  let ch = 0;
+  const trackEnd = (evs) => { let m = endTick; for (const e of evs) if (e.tick > m) m = e.tick; evs.push({ tick: m, o: 3, b: [0xFF, 0x2F, 0x00] }); return evs; };
+  for (const t of list) {
+    const evs = [{ tick: 0, o: 0, b: text(0x03, t.name) }];
+    if (t.drums) {
+      const key = { kick: 36, snare: 38, hat: 42 };
+      for (const h of t.drums) { const n = key[h.type]; if (n == null || !(h.beat >= 0)) continue; const tick = Math.round(h.beat * PPQ); evs.push({ tick, o: 2, b: [0x99, n, 100] }, { tick: tick + 60, o: 1, b: [0x89, n, 0] }); }
+    } else if (t.score && t.score.bars) {
+      if (ch === 9) ch++;
+      const c = ch++ & 0x0f;
+      evs.push({ tick: 0, o: 0, b: [0xC0 | c, (t.program || 0) & 0x7f] });
+      let tQ = 0;
+      for (const bar of t.score.bars) {
+        const sig = bar.timeSig || t.score.timeSig || [4, 4], q = (v) => (v * 4) / sig[1];
+        for (const e of bar.events || []) {
+          const s0 = tQ + q(e.qbeat != null ? e.qbeat : e.beat), d = Math.max(0.0625, q(e.qdur != null ? e.qdur : e.durBeats));
+          const on = Math.round(s0 * PPQ), off = Math.max(on + 1, Math.round((s0 + d) * PPQ));
+          for (const m of e.midis || []) { const n = Math.max(0, Math.min(127, m | 0)); evs.push({ tick: on, o: 2, b: [0x90 | c, n, 80] }, { tick: off, o: 1, b: [0x80 | c, n, 0] }); }
+        }
+        tQ += q(sig[0]);
+      }
+    }
+    chunks.push(chunk(trackEnd(evs)));
+  }
+  const all = [chunk(trackEnd(cond)), ...chunks], n = all.length;
+  const head = [0x4D, 0x54, 0x68, 0x64, 0, 0, 0, 6, 0, 1, (n >> 8) & 0xff, n & 0xff, (PPQ >> 8) & 0xff, PPQ & 0xff];
+  return new Uint8Array([].concat(head, ...all));
+}
+
+/** The whole "All parts" bundle. parts: [{ name, score?, overrides?, drums?, tuning? (fretted: an
+ *  engine tuningMidi — gets an .alphatex), program? }], opts: { title, key, tempo, useSharp }.
+ *  → Uint8Array (a STORED zip). */
+function partsZip(parts, opts = {}) {
+  const slug = (s) => String(s || "part").replace(/[^\w.-]+/g, "_").replace(/^_+|_+$/g, "") || "part";
+  const entries = [], pitched = [];
+  const clock = ((parts || []).find((p) => p.score && p.score.bars && p.score.bars.length) || {}).score;
+  (parts || []).forEach((p, i) => {
+    const stem = `${String(i + 1).padStart(2, "0")}_${slug(p.name)}`;
+    if (p.drums) { entries.push({ name: `${stem}.mid`, data: scoresToMidi([{ name: p.name, drums: p.drums }], { ...opts, title: p.name, clockScore: clock }) }); return; }
+    if (!p.score || !p.score.bars || !p.score.bars.length) return;
+    const o = { ...opts, overrides: p.overrides || {} };
+    pitched.push(p);
+    entries.push({ name: `${stem}.musicxml`, data: scoreToMusicXML(p.score, o) });
+    entries.push({ name: `${stem}.mid`, data: scoreToMidi(p.score, o) });
+    entries.push({ name: `${stem}.csmpn`, data: scoreToCSMPN(p.score, { ...o, title: `${opts.title || "Song"} — ${p.name}` }) });
+    if (p.tuning) { try { entries.push({ name: `${stem}.alphatex`, data: scoreToAlphaTex(p.score, { ...o, tuning: p.tuning, trackName: p.name, title: opts.title }) }); } catch (_) { /* not writable as tab */ } }
+  });
+  if (pitched.length) entries.push({ name: "full_score.musicxml", data: scoresToMultipartMusicXML(pitched, opts) });
+  // score.mid: the drums need the pitched parts' clock, so they ride in the same file
+  const clockParts = (parts || []).filter((p) => (p.score && p.score.bars && p.score.bars.length) || p.drums);
+  if (clockParts.length) entries.push({ name: "score.mid", data: scoresToMidi(clockParts.map((p) => (p.drums ? { name: p.name, drums: p.drums } : { name: p.name, score: p.score, program: p.program })), opts) });
+  return zipStore(entries);
+}
+
 /* ---- playback: schedule a score on a wall-clock, then synth it ------------
  * scoreEventTimes is PURE (testable headlessly): it flattens the score into
  * timed chord events in SECONDS at `bpm` (a quarter-note BPM). A "beat" in our
@@ -4399,9 +4574,12 @@ function scoreToMidi(score, opts = {}) {
  * the same conversion the ABC exporter uses. Per-bar timeSig is honoured, so a
  * mid-tune meter change keeps the clock correct. ------------------------------ */
 function scoreEventTimes(score, bpm) {
-  const secPerQuarter = 60 / bpm;
-  let tQ = 0; const events = [];
-  for (const bar of score.bars) {
+  // A score that follows a performance (score.tempoMap) changes tempo on bar lines; `bpm`
+  // then scales the whole map (see scoreBarTempos). Otherwise one tempo, as always.
+  const barTempos = scoreBarTempos(score, bpm);
+  let t0 = 0; const events = [];
+  score.bars.forEach((bar, bi) => {
+    const secPerQuarter = 60 / (barTempos ? barTempos[bi] : bpm);
     const [bb, bt] = bar.timeSig || score.timeSig;
     const q = (v) => (v * 4) / bt; // beats → quarters
     bar.events.forEach((e) => {
@@ -4409,12 +4587,12 @@ function scoreEventTimes(score, bpm) {
       const durBeats = e.qdur != null ? e.qdur : e.durBeats;       // TRUE duration
       events.push({
         key: `${bar.number}.${e.beat}`, bar: bar.number, midis: e.midis || [],
-        start: (tQ + q(startBeat)) * secPerQuarter, dur: Math.max(0.05, q(durBeats) * secPerQuarter),
+        start: t0 + q(startBeat) * secPerQuarter, dur: Math.max(0.05, q(durBeats) * secPerQuarter),
       });
     });
-    tQ += q(bb);
-  }
-  return { events, duration: tQ * secPerQuarter };
+    t0 += q(bb) * secPerQuarter;
+  });
+  return { events, duration: t0 };
 }
 // Web Audio synth (browser only; no deps). Returns a controller with stop().
 function playScore(score, bpm, { onEvent, onEnd } = {}) {
@@ -4833,6 +5011,524 @@ function detectBeats(samples, sampleRate, opts = {}) {
   const t = estimateTempo(odf, frameRate, opts);
   const beats = trackBeats(odf, frameRate, t.periodFrames, opts);
   return { bpm: +t.bpm.toFixed(2), beats, strength: t.strength, frameRate };
+}
+
+/* ============================================================================
+ *  BEAT GRID → BAR LINES + A TEMPO MAP THAT FOLLOWS THE PERFORMANCE
+ *  ---------------------------------------------------------------------------
+ *  Ported from Muscriptor v0.4.0 (MIT, © 2026 Kyutai x Mirelo —
+ *  muscriptor/utils/beats.py + utils/midi.py, github.com/muscriptor/muscriptor).
+ *  Same algorithms and thresholds; plain JS, no numpy.
+ *
+ *  Before this, an audio chart's bar lines came from a fixed ♩= laid from t = 0: the
+ *  first bar started wherever the recording did (rarely on a beat), and any tempo drift
+ *  walked the bar lines off the music. Now:
+ *    • the tracked beats are cleaned (`regularizedBeats` puts back missed beats and drops
+ *      extra ones), the tempo is a least-squares fit (`fitTempo`), and a song whose beats
+ *      stray more than 5 % of a beat from that line is "not steady";
+ *    • a steady song gets ONE exact tempo, phase-locked to the first downbeat;
+ *    • an unsteady one gets a TEMPO MAP: the beats are smoothed (`smoothedBeats`, a
+ *      Savitzky–Golay quadratic over 9 beats, which keeps a ritardando exact) and the
+ *      map keeps only as many tempo changes as keep every beat within 25 ms, on bar lines
+ *      (`timelineSimplified`);
+ *    • the user can correct it like Muscriptor's "Tempo & bars" panel: ×2 / ÷2
+ *      (`rescaledBeats`, which keeps the bar lines' phase), beats per bar, a bar line at
+ *      any second, or one fixed tempo (`resolveBeatGrid`);
+ *    • note onsets are measured against the beats (`estimateOnsetDelay`): the circular
+ *      mean of each onset's position within the beat, over the subdivisions 1…24, gives
+ *      how late the transcription sits AND which grid it is on (straight or triplet).
+ *  A TIMELINE ({ times, positions }: seconds of the recording at whole beat positions
+ *  from bar 1, linear between and extrapolated beyond) carries all of it into the score,
+ *  so the chart, playback, MIDI / MusicXML / ABC / AlphaTex tempo and the section bars
+ *  read the same clock.
+ * ------------------------------------------------------------------------- */
+const BEAT_GRID = Object.freeze({
+  maxTempoResidual: 0.05,      // beat residual (fraction of a beat) above which the song is not steady
+  minMeterAgreement: 0.9,      // share of bars that must agree before a meter is written
+  minBeats: 8,
+  extraBeatSpacing: 0.7,       // a beat closer than this (× median spacing) to the previous one is extra
+  onsetSubdivisions: [1, 2, 3, 4, 6, 8, 12, 16, 24],
+  minOnsetConcentration: 0.5,
+  minOnsets: 40,
+  maxOnsetDelay: 0.04,         // seconds
+  tempoMapTolerance: 0.025,    // seconds a simplified map may put a beat off the tracked one
+  smoothingWindow: 9,
+  beatScaleMin: 0.25,
+  beatScaleMax: 4,
+});
+
+function _bgMedian(xs) { const s = xs.slice().sort((a, b) => a - b), n = s.length; return n ? (n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2) : 0; }
+function _bgNearest(beats, t) { let best = 0; for (let i = 1; i < beats.length; i++) if (Math.abs(beats[i] - t) < Math.abs(beats[best] - t)) best = i; return best; }
+function _bgMod(a, b) { return ((a % b) + b) % b; }
+
+/** Least-squares tempo through the beats: { bpm, residual } (residual = RMS seconds off the line).
+ *  A line through beat index vs time beats the median inter-beat interval: a tracker quantises
+ *  beats to its frame grid, which alone limits median-IBI resolution to a few BPM. */
+function fitTempo(beats) {
+  const n = beats ? beats.length : 0;
+  if (n < 2) return { bpm: 0, residual: 0 };
+  let si = 0, st = 0, sii = 0, sit = 0;
+  for (let i = 0; i < n; i++) { si += i; st += beats[i]; sii += i * i; sit += i * beats[i]; }
+  const slope = (n * sit - si * st) / (n * sii - si * si), icpt = (st - slope * si) / n;
+  let ss = 0, mean = 0;
+  const r = new Array(n);
+  for (let i = 0; i < n; i++) { r[i] = beats[i] - (icpt + slope * i); mean += r[i]; }
+  mean /= n;
+  for (let i = 0; i < n; i++) ss += (r[i] - mean) ** 2;
+  return { bpm: slope > 0 ? 60 / slope : 0, residual: Math.sqrt(ss / n) };
+}
+
+/** `beats` with the tracker's missed beats put back and its extra ones dropped, measured
+ *  against the median spacing: a gap of about n beats gets n−1 evenly spaced beats, and a
+ *  beat much closer than one spacing to the previous one is dropped. Without this one dropout
+ *  shifts every later beat index, so a steady song "misses" by a whole beat and a tempo map
+ *  halves or doubles for a moment. */
+function regularizedBeats(beats) {
+  const b = (beats || []).map(Number).filter(isFinite);
+  if (b.length < 3) return b;
+  const diffs = []; for (let i = 1; i < b.length; i++) diffs.push(b[i] - b[i - 1]);
+  const period = _bgMedian(diffs);
+  if (!(period > 0)) return b;
+  const kept = [b[0]];
+  for (let i = 1; i < b.length; i++) {
+    const last = kept[kept.length - 1], apart = (b[i] - last) / period;
+    if (apart < BEAT_GRID.extraBeatSpacing) continue;
+    const missing = Math.max(1, Math.round(apart));
+    for (let k = 1; k < missing; k++) kept.push(last + ((b[i] - last) * k) / missing);
+    kept.push(b[i]);
+  }
+  return kept;
+}
+
+/** Tracked beats with the tracker's frame jitter averaged out: each beat moves onto a
+ *  parabola fitted through its 9 neighbours (Savitzky–Golay). A plain average would pull the
+ *  beats of a ritardando off their real times; a quadratic keeps a steady acceleration exact. */
+function smoothedBeats(beats) {
+  const b = beats || [], n = b.length;
+  if (n < 4) return b.slice();
+  const width = Math.min(BEAT_GRID.smoothingWindow, n), out = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const lo = Math.min(Math.max(0, i - (width >> 1)), n - width);
+    // quadratic least squares y = c0 + c1 x + c2 x², x = index − i; we need c0 (the value at i)
+    let s0 = 0, s1 = 0, s2 = 0, s3 = 0, s4 = 0, t0 = 0, t1 = 0, t2 = 0;
+    for (let j = lo; j < lo + width; j++) {
+      const x = j - i, y = b[j], x2 = x * x;
+      s0 += 1; s1 += x; s2 += x2; s3 += x2 * x; s4 += x2 * x2; t0 += y; t1 += x * y; t2 += x2 * y;
+    }
+    const det3 = (a) => a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0]) + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
+    const M = [[s0, s1, s2], [s1, s2, s3], [s2, s3, s4]], D = det3(M);
+    out[i] = Math.abs(D) < 1e-12 ? b[i] : det3([[t0, s1, s2], [t1, s2, s3], [t2, s3, s4]]) / D;
+  }
+  return out;
+}
+
+/** `beats` with `scale` times as many beats per second (a power of two). Doubling puts a beat
+ *  halfway between each pair; halving keeps every other one, choosing the half that holds the
+ *  beat nearest `downbeat`, so the bar lines stay where they were. */
+function rescaledBeats(beats, scale, downbeat) {
+  let b = (beats || []).slice(), s = scale || 1;
+  while (s > 1 + 1e-9 && b.length >= 2) {
+    const d = [];
+    for (let i = 0; i < b.length; i++) { d.push(b[i]); if (i + 1 < b.length) d.push((b[i] + b[i + 1]) / 2); }
+    b = d; s /= 2;
+  }
+  while (s < 1 - 1e-9 && b.length >= 4) {
+    const start = _bgNearest(b, downbeat != null ? downbeat : b[0]) % 2;
+    b = b.filter((_, i) => i % 2 === start); s *= 2;
+  }
+  return b;
+}
+
+/** Beats per bar from the downbeats' spacing (counted in tracked beats, so tempo changes don't
+ *  matter), or null unless `minAgreement` of the bars agree — a wrong meter is worse than none. */
+function inferBeatsPerBar(beats, downbeats, minAgreement = BEAT_GRID.minMeterAgreement) {
+  if (!downbeats || downbeats.length < 3 || !beats || beats.length < 2) return null;
+  const idx = downbeats.map((d) => _bgNearest(beats, d));
+  const counts = [];
+  for (let i = 1; i < idx.length; i++) { const c = idx[i] - idx[i - 1]; if (c >= 2) counts.push(c); }
+  if (!counts.length) return null;
+  const tally = new Map();
+  for (const c of counts) tally.set(c, (tally.get(c) || 0) + 1);
+  let best = null, bestN = 0;
+  for (const [v, n] of [...tally].sort((a, b) => a[0] - b[0])) if (n > bestN) { best = v; bestN = n; }
+  return bestN / counts.length >= minAgreement ? best : null;
+}
+
+/** Onset times as positions in continuous beats (one per distinct millisecond, so a six-note
+ *  chord doesn't outvote six single notes); onsets outside the tracked span drop out. */
+function onsetBeatPhases(onsets, beats) {
+  if (!beats || beats.length < 2) return [];
+  const seen = new Set(), out = [];
+  const times = [...new Set((onsets || []).map((t) => Math.round(t * 1000) / 1000))].sort((a, b) => a - b);
+  let j = 0;
+  for (const t of times) {
+    if (t < beats[0] || t > beats[beats.length - 1] || seen.has(t)) continue;
+    seen.add(t);
+    while (j + 1 < beats.length - 1 && beats[j + 1] <= t) j++;
+    const span = beats[j + 1] - beats[j];
+    out.push(j + (span > 0 ? (t - beats[j]) / span : 0));
+  }
+  return out;
+}
+
+/** How late `onsets` sit against the subdivision of the beat they are on, or null when they sit
+ *  on none. Each onset is a unit vector at its position within the beat; their mean gives the
+ *  offset (angle) and how tightly they align (|R|), and the subdivision with the highest |R|
+ *  among 1, 2, 3, 4, 6, 8, 12, 16, 24 is the grid they are on — straight or triplet.
+ *  → { seconds, concentration, subdivision, nOnsets }. `seconds` > 0 = late; subtract it. */
+function estimateOnsetDelay(onsets, beats, opts = {}) {
+  if (!beats || beats.length < 2) return null;
+  const bpm = opts.bpm || fitTempo(beats).bpm;
+  if (!(bpm > 0)) return null;
+  const period = 60 / bpm;
+  const phases = onsetBeatPhases(onsets, beats);
+  const minOnsets = opts.minOnsets != null ? opts.minOnsets : BEAT_GRID.minOnsets;
+  if (phases.length < minOnsets) return null;
+  const maxDelay = opts.maxDelay != null ? opts.maxDelay : BEAT_GRID.maxOnsetDelay;
+  const cands = BEAT_GRID.onsetSubdivisions.filter((s) => period / (2 * s) >= maxDelay);
+  if (!cands.length) return null;
+  let best = null;
+  for (const s of cands) {
+    let re = 0, im = 0;
+    for (const p of phases) { const a = 2 * Math.PI * _bgMod(p * s, 1); re += Math.cos(a); im += Math.sin(a); }
+    re /= phases.length; im /= phases.length;
+    const conc = Math.hypot(re, im), delayBeats = Math.atan2(im, re) / (2 * Math.PI * s);
+    if (!best || conc > best.concentration + 1e-12) best = { concentration: conc, subdivision: s, delayBeats };
+  }
+  if (best.concentration < (opts.minConcentration != null ? opts.minConcentration : BEAT_GRID.minOnsetConcentration)) return null;
+  const seconds = best.delayBeats * period;
+  if (Math.abs(seconds) > maxDelay) return null;
+  return { seconds, concentration: best.concentration, subdivision: best.subdivision, nOnsets: phases.length };
+}
+
+/** The grid detected from tracked beats (+ optional downbeats from a learned tracker):
+ *  { bpm, beatsPerBar (null = unknown), firstDownbeat, beats, steady, residual } or null
+ *  when fewer than 8 beats survive. Our DSP tracker gives no downbeats, so the first bar line
+ *  goes on the first tracked beat (still phase-correct to the beat, unlike t = 0). */
+function makeBeatGrid(beats, opts = {}) {
+  const b = regularizedBeats(beats || []);
+  if (b.length < BEAT_GRID.minBeats) return null;
+  const { bpm, residual } = fitTempo(b);
+  if (!(bpm > 0)) return null;
+  const downbeats = (opts.downbeats || []).filter(isFinite);
+  return {
+    bpm, residual, beats: b,
+    steady: residual <= (BEAT_GRID.maxTempoResidual * 60) / bpm,
+    beatsPerBar: downbeats.length ? inferBeatsPerBar(b, downbeats) : null,
+    firstDownbeat: downbeats.length ? downbeats[0] : b[0],
+  };
+}
+
+/** The detected grid with the user's corrections applied (Muscriptor's resolve_grid):
+ *  timing = { bpm, beatsPerBar, firstDownbeat, tempoMap, beatScale } — null/undefined keeps
+ *  what was detected. A typed `bpm` means one fixed tempo. `tempoMap`: true follows the
+ *  tracked beats, false never does, null follows them only when they aren't steady.
+ *  `beatScale` (×2 / ÷2, a power of two) rescales the detected beats and re-reads the meter
+ *  (4/4 read twice as fast is 8/4). With no detected grid, a fixed `bpm` from bar line 0.
+ *  → { bpm, beatsPerBar, firstDownbeat, beats, steady, follow, detected } or null (no tempo). */
+function resolveBeatGrid(detected, timing = {}) {
+  const t = timing || {};
+  const scale = Math.max(BEAT_GRID.beatScaleMin, Math.min(BEAT_GRID.beatScaleMax, t.beatScale || 1));
+  if (!detected && !(t.bpm > 0)) return null;
+  const g = detected || { bpm: t.bpm, beatsPerBar: null, firstDownbeat: 0, beats: null, steady: true };
+  const scaledMeter = (bpb) => { if (bpb == null) return null; const s = bpb * scale; return s >= 1 && Number.isInteger(s) ? s : bpb; };
+  const beatsPerBar = t.beatsPerBar || scaledMeter(g.beatsPerBar);
+  const fd = t.firstDownbeat != null && isFinite(t.firstDownbeat) ? t.firstDownbeat : g.firstDownbeat;
+  const canFollow = !!(g.beats && g.beats.length >= 2);
+  const follow = !(t.bpm > 0) && canFollow && (t.tempoMap != null ? !!t.tempoMap : !g.steady);
+  if (follow) {
+    const beats = rescaledBeats(smoothedBeats(g.beats), scale, fd);
+    return { bpm: fitTempo(beats).bpm, beatsPerBar, firstDownbeat: beats[_bgNearest(beats, fd)], beats, steady: false, follow: true, detected: !!detected };
+  }
+  const bpm = t.bpm > 0 ? t.bpm : g.bpm * scale;
+  const retimed = Math.abs(bpm - g.bpm) > 1e-9;
+  return { bpm, beatsPerBar, firstDownbeat: fd, beats: retimed ? null : g.beats, steady: true, follow: false, detected: !!detected };
+}
+
+/* ---- Timeline: where moments of the recording fall in the score ---------------
+ * { times, positions }: seconds of the recording, increasing, at whole beat positions
+ * from the start of bar 1 (beat 0). Linear between, extrapolated at the end slopes. */
+function _tlExtrap(x, xp, fp) {
+  const n = xp.length;
+  if (n < 2) return fp[0] + (x - xp[0]);
+  if (x <= xp[0]) return fp[0] + ((x - xp[0]) * (fp[1] - fp[0])) / (xp[1] - xp[0]);
+  if (x >= xp[n - 1]) return fp[n - 1] + ((x - xp[n - 1]) * (fp[n - 1] - fp[n - 2])) / (xp[n - 1] - xp[n - 2]);
+  let lo = 0, hi = n - 1;
+  while (hi - lo > 1) { const m = (lo + hi) >> 1; if (xp[m] <= x) lo = m; else hi = m; }
+  return fp[lo] + ((x - xp[lo]) * (fp[hi] - fp[lo])) / (xp[hi] - xp[lo]);
+}
+function timelineBeatsAt(tl, sec) { return _tlExtrap(sec, tl.times, tl.positions); }
+function timelineSecondsAt(tl, beat) { return _tlExtrap(beat, tl.positions, tl.times); }
+function timelineShifted(tl, beats) { return { times: tl.times.slice(), positions: tl.positions.map((p) => p + beats) }; }
+
+/** The fewest tempo changes that keep every beat within `tolerance` s of the line through
+ *  them, changes only on bar lines: one tempo for a steady stretch, a change every bar or two
+ *  through an accelerando. Each stretch is pinned to tracked beats at both ends. */
+function timelineSimplified(tl, tolerance = BEAT_GRID.tempoMapTolerance, bar = 1) {
+  const { times, positions } = tl, last = times.length - 1;
+  if (last < 2) return { times: times.slice(), positions: positions.slice() };
+  const cands = [];
+  for (let i = 1; i < last; i++) if (_bgMod(positions[i], bar) === 0) cands.push(i);
+  cands.push(last);
+  const fits = (a, b) => {
+    for (let i = a; i <= b; i++) {
+      const line = times[a] + ((positions[i] - positions[a]) * (times[b] - times[a])) / (positions[b] - positions[a]);
+      if (Math.abs(times[i] - line) > tolerance) return false;
+    }
+    return true;
+  };
+  const kept = [0];
+  for (let i = 0; i < cands.length; i++) {
+    const b = cands[i];
+    if (b === last || !fits(kept[kept.length - 1], cands[i + 1])) kept.push(b);
+  }
+  return { times: kept.map((i) => times[i]), positions: kept.map((i) => positions[i]) };
+}
+
+/** [{ beat, bpm }] at every whole beat ≥ 0 where the tempo changes (the first holds from 0).
+ *  Tempo is compared in integer microseconds per beat, as a MIDI tempo meta stores it. */
+function timelineTempoChanges(tl) {
+  const { times, positions } = tl, out = [];
+  if (times.length < 2) return out;
+  for (let i = 0; i + 1 < times.length; i++) {
+    const us = Math.round(((times[i + 1] - times[i]) / (positions[i + 1] - positions[i])) * 1e6);
+    const beat = Math.max(0, Math.round(positions[i] * 1e6) / 1e6);
+    if (!out.length) { out.push({ beat: 0, us }); continue; }
+    if (us === out[out.length - 1].us) continue;
+    if (beat === out[out.length - 1].beat) out[out.length - 1].us = us;
+    else out.push({ beat, us });
+  }
+  return out.map((c) => ({ beat: c.beat, bpm: 60e6 / c.us }));
+}
+
+/** The timeline a resolved grid is written with: bar 1 starts at beat 0, the music delayed by
+ *  whole bars until `earliest` (seconds; usually 0 = the recording's start) falls at or after
+ *  it, keeping a bar line on the downbeat. Bars are single beats when there is no meter. */
+function timelineForGrid(grid, earliest = 0, beatsPerBar, tolerance = BEAT_GRID.tempoMapTolerance) {
+  const bar = beatsPerBar || grid.beatsPerBar || 1;
+  if (!grid.follow || !grid.beats || grid.beats.length < 2) {
+    const period = 60 / grid.bpm, step = period * bar;
+    let offset = _bgMod(step - _bgMod(grid.firstDownbeat, step), step);
+    const minShift = -earliest;
+    if (offset < minShift - 1e-9) offset += step * Math.ceil((minShift - offset) / step - 1e-9);
+    const start = -offset;
+    return { times: [start, start + period], positions: [0, 1] };
+  }
+  const b = grid.beats, d = _bgNearest(b, grid.firstDownbeat);
+  let tl = timelineSimplified({ times: b.slice(), positions: b.map((_, i) => i - d) }, tolerance, bar);
+  tl = timelineShifted(tl, bar * Math.ceil(-timelineBeatsAt(tl, earliest) / bar - 1e-9));
+  return tl;
+}
+
+/** Notes in beats `{ startBeat, endBeat }` moved `strength` of the way onto a `step`-beat grid
+ *  (1 = all the way; 0.5 keeps some of the feel). A note shorter than half a step keeps one step
+ *  instead of vanishing. */
+function quantizeBeatNotes(notes, step, strength = 1) {
+  if (!(step > 0)) return (notes || []).slice();
+  const snap = (t) => Math.round(t / step) * step, pull = (t, to) => t + strength * (to - t);
+  return (notes || []).map((n) => {
+    const on = snap(n.startBeat), off = Math.max(snap(n.endBeat), on + step);
+    return { ...n, startBeat: pull(n.startBeat, on), endBeat: pull(n.endBeat, off) };
+  });
+}
+
+/** Hold each note until the next onset (of any pitch) when the silence before it is at most
+ *  `maxGap` beats: a transcription ends notes where the sound fades, which notation writes as a
+ *  staccato rest before every note the player let ring. */
+function fillBeatNoteGaps(notes, maxGap) {
+  if (!(maxGap > 0)) return (notes || []).slice();
+  const onsets = [...new Set((notes || []).map((n) => n.startBeat))].sort((a, b) => a - b);
+  return (notes || []).map((n) => {
+    let lo = 0, hi = onsets.length;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (onsets[m] <= n.startBeat + 1e-6) lo = m + 1; else hi = m; }
+    if (lo < onsets.length) { const gap = onsets[lo] - n.endBeat; if (gap > 0 && gap <= maxGap + 1e-6) return { ...n, endBeat: onsets[lo] }; }
+    return n;
+  });
+}
+
+/** Beats of whole empty bars before the first note (`startBeat`s). */
+function leadingEmptyBeats(notes, beatsPerBar) {
+  if (!notes || !notes.length) return 0;
+  const first = Math.min(...notes.map((n) => n.startBeat)), bar = beatsPerBar || 1;
+  return Math.max(0, Math.floor((first + 1e-6) / bar)) * bar;
+}
+
+/** The quantise step (in beats) for a measured subdivision: the measured grid when it is one a
+ *  chart can show (straight up to 16ths, or 8th triplets), else 16ths. */
+function quantizeStepFor(subdivision) {
+  return [1, 2, 3, 4].includes(subdivision) ? 1 / subdivision : 1 / 4;
+}
+
+/* ---- beat_this (CPJKU, MIT): the learned beat + DOWNBEAT tracker — the pure half ---------
+ * Foscarin et al., "Beat this! Accurate beat tracking without DBN postprocessing" (ISMIR 2024),
+ * github.com/CPJKU/beat_this, code + weights MIT. The model (final0, ~20 M parameters) runs in
+ * the browser glue (beat-model-core.js, the same pinned ORT 1.23.2 rails as the guitar CRNN);
+ * this is everything around it, ported from beat_this/preprocessing.py + inference.py +
+ * model/postprocessor.py and held to torchaudio's output by tests/fixtures/beatthis-features.json:
+ *   • `beatThisLogMel`: 22.05 kHz mono → log1p(1000·mel) frames at 50 /s (n_fft 1024, hop 441,
+ *     periodic Hann, centre reflect-pad, |X|/√1024, 128 Slaney mels 30 Hz–11 kHz, no mel norm);
+ *   • `beatThisChunks` / `beatThisAggregate`: 1500-frame (30 s) windows overlapping by a 6-frame
+ *     border, the last one moved back to end on the piece, earlier windows winning (keep_first);
+ *   • `beatThisPeaks`: frames that are the max within ±3 frames with logit > 0, adjacent peaks
+ *     merged to their mean, each downbeat moved to the nearest beat.
+ * Measured on GuitarSet's SOLO recordings (not in beat_this's training data — it used only the
+ * comping takes): beat F 40.7 → 70.8 and downbeat F 48.7 vs none, against our DSP tracker. */
+const BEAT_THIS = Object.freeze({ sr: 22050, nFft: 1024, hop: 441, nMels: 128, fMin: 30, fMax: 11000, fps: 50, chunk: 1500, border: 6 });
+
+function _slaneyHzToMel(f) { const fsp = 200 / 3, minLogHz = 1000, minLogMel = minLogHz / fsp, step = Math.log(6.4) / 27; return f >= minLogHz ? minLogMel + Math.log(f / minLogHz) / step : f / fsp; }
+function _slaneyMelToHz(m) { const fsp = 200 / 3, minLogHz = 1000, minLogMel = minLogHz / fsp, step = Math.log(6.4) / 27; return m >= minLogMel ? minLogHz * Math.exp(step * (m - minLogMel)) : fsp * m; }
+let _btFb = null;
+/** The [513 × 128] mel filterbank, row-major (torchaudio melscale_fbanks, Slaney, norm None). */
+function beatThisMelFilterbank() {
+  if (_btFb) return _btFb;
+  const { sr, nFft, nMels, fMin, fMax } = BEAT_THIS, nFreq = nFft / 2 + 1;
+  const mMin = _slaneyHzToMel(fMin), mMax = _slaneyHzToMel(fMax), fPts = new Float64Array(nMels + 2);
+  for (let i = 0; i < nMels + 2; i++) fPts[i] = _slaneyMelToHz(mMin + ((mMax - mMin) * i) / (nMels + 1));
+  const fb = new Float32Array(nFreq * nMels);
+  for (let k = 0; k < nFreq; k++) {
+    const f = ((sr >> 1) * k) / (nFreq - 1);
+    for (let m = 0; m < nMels; m++) {
+      const down = (f - fPts[m]) / (fPts[m + 1] - fPts[m]), up = (fPts[m + 2] - f) / (fPts[m + 2] - fPts[m + 1]);
+      fb[k * nMels + m] = Math.max(0, Math.min(down, up));
+    }
+  }
+  return (_btFb = fb);
+}
+/** 22.05 kHz mono → { frames, data: Float32Array(frames × 128) } log-mel, as beat_this's LogMelSpect. */
+function beatThisLogMel(pcm) {
+  const { nFft, hop, nMels } = BEAT_THIS, half = nFft / 2, n = pcm.length;
+  const frames = 1 + Math.floor(n / hop), fb = beatThisMelFilterbank(), nFreq = half + 1;
+  const win = new Float64Array(nFft); for (let i = 0; i < nFft; i++) win[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / nFft);
+  const at = (j) => {                                    // centre reflect padding (numpy "reflect")
+    if (n <= 1) return n ? pcm[0] : 0;
+    let i = j - half;
+    while (i < 0 || i >= n) { if (i < 0) i = -i; if (i >= n) i = 2 * (n - 1) - i; }
+    return pcm[i];
+  };
+  const bands = new Int32Array(2 * nMels);              // each mel filter's non-zero bins [lo, hi)
+  for (let m = 0; m < nMels; m++) {
+    let lo = nFreq, hi = 0;
+    for (let k = 0; k < nFreq; k++) if (fb[k * nMels + m] > 0) { if (k < lo) lo = k; hi = k + 1; }
+    bands[2 * m] = lo; bands[2 * m + 1] = Math.max(lo, hi);
+  }
+  const out = new Float32Array(frames * nMels), re = new Float64Array(nFft), im = new Float64Array(nFft), mag = new Float64Array(nFreq);
+  const norm = 1 / Math.sqrt(nFft);
+  for (let t = 0; t < frames; t++) {
+    const s = t * hop;
+    for (let i = 0; i < nFft; i++) { re[i] = at(s + i) * win[i]; im[i] = 0; }
+    _fft(re, im);
+    for (let k = 0; k < nFreq; k++) mag[k] = Math.hypot(re[k], im[k]) * norm;
+    const o = t * nMels;
+    for (let m = 0; m < nMels; m++) {
+      let v = 0;
+      for (let k = bands[2 * m]; k < bands[2 * m + 1]; k++) v += mag[k] * fb[k * nMels + m];
+      out[o + m] = Math.log1p(1000 * v);
+    }
+  }
+  return { frames, data: out };
+}
+/** split_piece: window starts for `frames` (border 6, 1500 per window, the last moved to the end). */
+function beatThisChunks(frames, chunk = BEAT_THIS.chunk, border = BEAT_THIS.border) {
+  const starts = [];
+  for (let s = -border; s < frames - border; s += chunk - 2 * border) starts.push(s);
+  if (frames > chunk - 2 * border && starts.length) starts[starts.length - 1] = frames - (chunk - border);
+  return starts.length ? starts : [-border];
+}
+/** The spectrogram slice for one window start (zero-padded at the piece's ends, as split_piece). */
+function beatThisWindow(spec, start, chunk = BEAT_THIS.chunk, border = BEAT_THIS.border) {
+  const { frames, data } = spec, M = BEAT_THIS.nMels;
+  const lo = Math.max(start, 0), hi = Math.min(start + chunk, frames), left = Math.max(0, -start);
+  const right = Math.max(0, Math.min(border, start + chunk - frames));
+  const len = left + (hi - lo) + right, out = new Float32Array(len * M);
+  out.set(data.subarray(lo * M, hi * M), left * M);
+  return { frames: len, data: out };
+}
+/** aggregate_prediction (keep_first): per-window logits → whole-piece beat / downbeat logits. */
+function beatThisAggregate(preds, starts, frames, chunk = BEAT_THIS.chunk, border = BEAT_THIS.border) {
+  const beat = new Float32Array(frames).fill(-1000), down = new Float32Array(frames).fill(-1000);
+  for (let w = preds.length - 1; w >= 0; w--) {                 // earlier windows overwrite later ones
+    const s = starts[w], p = preds[w], n = p.beat.length;
+    for (let i = border; i < n - border; i++) { const f = s + i; if (f >= 0 && f < frames && f < s + chunk - border) { beat[f] = p.beat[i]; down[f] = p.downbeat[i]; } }
+  }
+  return { beat, downbeat: down };
+}
+function _btPeakFrames(logits) {
+  const n = logits.length, raw = [];
+  for (let t = 0; t < n; t++) {
+    const v = logits[t]; if (!(v > 0)) continue;
+    let mx = -Infinity; for (let k = Math.max(0, t - 3); k <= Math.min(n - 1, t + 3); k++) if (logits[k] > mx) mx = logits[k];
+    if (v === mx) raw.push(t);
+  }
+  const out = [];                                                // deduplicate_peaks(width = 1): running mean
+  for (let i = 0; i < raw.length; i++) {
+    let p = raw[i], c = 1;
+    while (i + 1 < raw.length && raw[i + 1] - raw[i] <= 1) { i++; c++; p += (raw[i] - p) / c; }
+    out.push(p);
+  }
+  return out;
+}
+/** Minimal post-processing → { beats, downbeats } in seconds (downbeats moved onto beats). */
+function beatThisPeaks(beatLogits, downLogits, fps = BEAT_THIS.fps) {
+  const beats = _btPeakFrames(beatLogits).map((f) => f / fps);
+  let downs = _btPeakFrames(downLogits).map((f) => f / fps);
+  if (beats.length) downs = downs.map((d) => beats[_bgNearest(beats, d)]);
+  return { beats, downbeats: [...new Set(downs)].sort((a, b) => a - b) };
+}
+/** The whole tracker over a pluggable model: `model({ frames, data }) → { beat, downbeat }` (logits
+ *  for one window, Float32Arrays of its length). pcm must be 22.05 kHz mono (`resampleTo` first).
+ *  opts.padShort (default true): a piece shorter than one window is zero-padded to the full 1500
+ *  frames, as beat_this was TRAINED ("pad if the piece is shorter than 30 s"); its own inference
+ *  runs such a piece as one shorter window instead. → { beats, downbeats } in seconds. */
+async function trackBeatsWithModel(pcm, model, opts = {}) {
+  if (typeof model !== "function") throw new Error("no beat model configured");
+  const spec = beatThisLogMel(pcm), starts = beatThisChunks(spec.frames), preds = [];
+  const pad = opts.padShort !== false && spec.frames < BEAT_THIS.chunk - 2 * BEAT_THIS.border;
+  for (let i = 0; i < starts.length; i++) {
+    let w = beatThisWindow(spec, starts[i]);
+    if (pad && w.frames < BEAT_THIS.chunk) { const d = new Float32Array(BEAT_THIS.chunk * BEAT_THIS.nMels); d.set(w.data); w = { frames: BEAT_THIS.chunk, data: d }; }
+    const p = await model(w);
+    preds.push(pad ? { beat: p.beat.subarray(0, Math.min(p.beat.length, beatThisWindow(spec, starts[i]).frames)), downbeat: p.downbeat.subarray(0, Math.min(p.downbeat.length, beatThisWindow(spec, starts[i]).frames)) } : p);
+    if (opts.onProgress) opts.onProgress(i + 1, starts.length);
+  }
+  const agg = beatThisAggregate(preds, starts, spec.frames);
+  return beatThisPeaks(agg.beat, agg.downbeat);
+}
+
+/** The ONE call the audio panels make: detected beats + the user's corrections → the grid, the
+ *  timeline and a description for the "Tempo & bars" readout.
+ *  opts: { downbeats, beatsPerBar (fallback meter), firstSound (s), tolerance (s) }. `tolerance` — how
+ *  far the tempo map may put a beat off the tracked one (Muscriptor's 25 ms suits a learned tracker;
+ *  the built-in DSP tracker's beats jitter more, and 50 ms there halves the tempo changes on
+ *  GuitarSet, 8.0 → 4.4 per track, for −0.6 beat F). `firstSound` — the first
+ *  thing heard — drops the whole empty bars before it, so bar 1 is the bar the music starts in
+ *  (Muscriptor's trim_leading_bars, done once on the shared timeline so every chart made from
+ *  the same recording keeps the same bar numbers).
+ *  → { detected, grid, timeline, beatsPerBar, bpm, steady, follow, tempoMap, firstDownbeat } or null. */
+function audioBeatTimeline(beats, timing = {}, opts = {}) {
+  const detected = beats && beats.length ? makeBeatGrid(beats, { downbeats: opts.downbeats }) : null;
+  const grid = resolveBeatGrid(detected, timing);
+  if (!grid) return null;
+  const beatsPerBar = grid.beatsPerBar || opts.beatsPerBar || 4;
+  let timeline = timelineForGrid(grid, 0, beatsPerBar, opts.tolerance > 0 ? opts.tolerance : BEAT_GRID.tempoMapTolerance);
+  if (opts.firstSound > 0) {
+    const empty = Math.max(0, Math.floor(timelineBeatsAt(timeline, opts.firstSound) / beatsPerBar + 1e-6)) * beatsPerBar;
+    if (empty > 0) timeline = timelineShifted(timeline, -empty);
+  }
+  const changes = timelineTempoChanges(timeline);
+  return { detected, grid, timeline, beatsPerBar, bpm: grid.bpm, steady: grid.steady, follow: grid.follow, firstDownbeat: grid.firstDownbeat, tempoMap: changes.length > 1 ? changes : null };
+}
+
+/** Bar number (1-based, rounded to the nearest bar line) of a second of the recording on a timeline. */
+function timelineBarAt(tl, sec, beatsPerBar) { return Math.max(1, Math.round(timelineBeatsAt(tl, sec) / beatsPerBar) + 1); }
+/** The second of the recording `beats` beats after `sec` on a timeline (bar / beat nudges). */
+function timelineNudge(tl, sec, beats) { return timelineSecondsAt(tl, timelineBeatsAt(tl, sec) + beats); }
+
+/** A score's events on the RECORDING's clock (for playing the chart against the original audio):
+ *  scoreEventTimes shifted by `score.audioOffset` (where bar 1 starts in the recording, 0 for a
+ *  chart that isn't from audio). → [{ key, bar, midis, start, dur }] with start in recording seconds. */
+function scoreRecordingTimes(score, bpm) {
+  const off = score && isFinite(score.audioOffset) ? score.audioOffset : 0;
+  return scoreEventTimes(score, bpm || score.tempo).events.map((e) => ({ ...e, start: e.start + off }));
 }
 
 /* ============================================================================
@@ -6586,8 +7282,11 @@ function applySectionsToScore(score, sections, opts = {}) {
     const secPerBar = (60 / bpm) * bpb;
     const offset = opts.offsetSec || 0;
     const used = new Set();
+    // A chart on a beat timeline maps seconds → bars through it (bar lines on the downbeats,
+    // following any tempo map); otherwise the fixed ♩= from t = 0, as before.
+    const tl = score.timeline && score.timeline.times && score.timeline.times.length >= 2 ? score.timeline : null;
     for (const s of [...list].sort((a, b) => a.startSec - b.startSec)) {
-      let bi = Math.round((s.startSec - offset) / secPerBar);
+      let bi = tl ? Math.round(timelineBeatsAt(tl, s.startSec) / bpb) : Math.round((s.startSec - offset) / secPerBar);
       if (!isFinite(bi)) continue;
       bi = Math.max(0, Math.min(bars.length - 1, bi));
       while (used.has(bi) && bi + 1 < bars.length) bi++;             // one label per bar
@@ -6858,15 +7557,36 @@ function reopenAutoChords(events) {
   return (events || []).map((e) => (e && e.autoResolved && !e.reviewed ? { ...e, ambiguous: true, autoResolved: false } : e));
 }
 
+/* Timed events → the shared score shape. Two clocks:
+ *  • opts.bpm alone (the original contract, pinned by tests): beat = seconds × bpm / 60, bar 1
+ *    from t = 0;
+ *  • opts.timeline (from `audioBeatTimeline`): beats come off the recording's own beat grid —
+ *    bar 1 on a downbeat, a tempo map when the performance drifts. Then also
+ *      opts.quantize = { step (beats), strength (0..1) } snaps onsets/ends toward the grid,
+ *      opts.trimLeadingBars drops whole empty bars before the first event,
+ *    and the score carries `timeline`, `tempoMap` ([{ bar, beat, bpm }], null when steady),
+ *    an exact `tempo`, and `audioOffset` (seconds of the recording at the start of bar 1). */
 function audioEventsToScore(events, opts = {}) {
-  const bpm = Math.max(20, Math.min(400, opts.bpm || 120));
+  let tl = opts.timeline && opts.timeline.times && opts.timeline.times.length >= 2 ? opts.timeline : null;
+  const tlBpm = tl ? 60 / ((timelineSecondsAt(tl, 1e4) - timelineSecondsAt(tl, 0)) / 1e4) : 0;
+  const bpm = tl ? (opts.bpm > 0 ? opts.bpm : tlBpm) : Math.max(20, Math.min(400, opts.bpm || 120));
   const beatsPerBar = opts.beatsPerBar || 4;
   const beatType = opts.beatType || 4;
   const secPerBeat = 60 / bpm;
-  const placed = (events || []).filter((e) => e.symbol).map((e) => {
-    const onsetBeat = e.startSec / secPerBeat;                 // global beat position
-    return { symbol: e.symbol, midis: e.midis || [], onsetBeat: Math.max(0, onsetBeat), durBeat: Math.max(0.25, (e.durSec || secPerBeat) / secPerBeat), uncertain: !!e.ambiguous, reviewed: !!e.reviewed };
+  let placed = (events || []).filter((e) => e.symbol).map((e) => {
+    const onsetBeat = tl ? timelineBeatsAt(tl, e.startSec) : e.startSec / secPerBeat;  // global beat position
+    const endBeat = tl ? timelineBeatsAt(tl, e.startSec + (e.durSec || secPerBeat)) : onsetBeat + (e.durSec || secPerBeat) / secPerBeat;
+    return { symbol: e.symbol, midis: e.midis || [], onsetBeat: Math.max(0, onsetBeat), durBeat: Math.max(0.25, endBeat - onsetBeat), uncertain: !!e.ambiguous, reviewed: !!e.reviewed };
   }).sort((a, b) => a.onsetBeat - b.onsetBeat);
+  if (tl && opts.quantize && opts.quantize.step > 0) {
+    placed = quantizeBeatNotes(placed.map((p) => ({ ...p, startBeat: p.onsetBeat, endBeat: p.onsetBeat + p.durBeat })), opts.quantize.step, opts.quantize.strength != null ? opts.quantize.strength : 1)
+      .map(({ startBeat, endBeat, ...p }) => ({ ...p, onsetBeat: Math.max(0, startBeat), durBeat: Math.max(0.25, endBeat - startBeat) }))
+      .sort((a, b) => a.onsetBeat - b.onsetBeat);
+  }
+  if (tl && opts.trimLeadingBars && placed.length) {
+    const empty = leadingEmptyBeats(placed.map((p) => ({ startBeat: p.onsetBeat })), beatsPerBar);
+    if (empty > 0) { tl = timelineShifted(tl, -empty); placed = placed.map((p) => ({ ...p, onsetBeat: p.onsetBeat - empty })); }
+  }
   const barsMap = new Map();                                   // barIndex -> events
   for (const p of placed) {
     const bar = Math.floor(p.onsetBeat / beatsPerBar + 1e-6);
@@ -6899,7 +7619,14 @@ function audioEventsToScore(events, opts = {}) {
     _fillTrueDur(evs, beatsPerBar);
     bars.push({ number: b + 1, timeSig: [beatsPerBar, beatType], events: evs.map((e) => ({ symbol: e.symbol, midis: e.midis, beat: e.beat, durBeats: e.durBeats, qbeat: e.qbeat, qdur: e.qdur, ...(e.held ? { held: true } : {}), ...(e.uncertain ? { uncertain: true } : {}), ...(e.reviewed ? { reviewed: true } : {}) })) });
   }
-  return { source: "audio", timeSig: [beatsPerBar, beatType], tempo: bpm, bars };
+  const score = { source: "audio", timeSig: [beatsPerBar, beatType], tempo: bpm, bars };
+  if (tl) {
+    score.timeline = { times: tl.times.slice(), positions: tl.positions.slice() };
+    score.audioOffset = timelineSecondsAt(tl, 0);
+    const changes = timelineTempoChanges(tl);
+    score.tempoMap = changes.length > 1 ? changes.map((c) => ({ bar: Math.floor(c.beat / beatsPerBar + 1e-6) + 1, beat: c.beat - Math.floor(c.beat / beatsPerBar + 1e-6) * beatsPerBar, bpm: c.bpm })) : null;
+  }
+  return score;
 }
 
 /* ============================================================================
@@ -6951,8 +7678,12 @@ function notesFromActivations(onsets, frames, opts = {}) {
  * fall within `onsetGrid` sec collapse into one simultaneous voicing (a beat's chord). */
 function polyNotesToScore(notes, opts = {}) {
   const grid = opts.onsetGrid || 0.12, useSharp = opts.useSharp !== false;
+  // opts.onsetDelay (seconds, from estimateOnsetDelay): how late the model's onsets sit against
+  // the tracked beats — moved back by that much so they land on the grid.
+  const lag = opts.onsetDelay || 0;
   const cols = [];
-  for (const n of (notes || []).slice().sort((a, b) => a.startSec - b.startSec)) {
+  for (const n0 of (notes || []).slice().sort((a, b) => a.startSec - b.startSec)) {
+    const n = lag ? { ...n0, startSec: n0.startSec - lag } : n0;
     let c = cols.length && Math.abs(cols[cols.length - 1].startSec - n.startSec) < grid ? cols[cols.length - 1] : null;
     if (!c) { c = { startSec: n.startSec, midis: [], durSec: 0 }; cols.push(c); }
     c.midis.push(n.midi); c.durSec = Math.max(c.durSec, n.durSec);
@@ -8439,4 +9170,42 @@ export {
   _exportKeyName,
   spellSymbolForKey,
   spellScoreForKey,
+  BEAT_GRID,
+  fitTempo,
+  regularizedBeats,
+  smoothedBeats,
+  rescaledBeats,
+  inferBeatsPerBar,
+  onsetBeatPhases,
+  estimateOnsetDelay,
+  makeBeatGrid,
+  resolveBeatGrid,
+  timelineBeatsAt,
+  timelineSecondsAt,
+  timelineShifted,
+  timelineSimplified,
+  timelineTempoChanges,
+  timelineForGrid,
+  quantizeBeatNotes,
+  fillBeatNoteGaps,
+  leadingEmptyBeats,
+  quantizeStepFor,
+  audioBeatTimeline,
+  scoreBarTempos,
+  BEAT_THIS,
+  beatThisMelFilterbank,
+  beatThisLogMel,
+  beatThisChunks,
+  beatThisWindow,
+  beatThisAggregate,
+  beatThisPeaks,
+  trackBeatsWithModel,
+  timelineBarAt,
+  timelineNudge,
+  scoreRecordingTimes,
+  crc32,
+  zipStore,
+  scoresToMultipartMusicXML,
+  scoresToMidi,
+  partsZip,
 };

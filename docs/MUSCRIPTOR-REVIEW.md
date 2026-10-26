@@ -114,3 +114,20 @@ and drums, from the notes' real lengths — named with the Pro vocabulary and sp
 F minor, `Fm9 | Bbm9 | Fm7 | Bbm7 | Eb/F | Bbm7 | Db | Bb7/Ab | …` (was `C#maj7` piano-only / `C7b9/Bb`
 whole-bar). Chord Sheet Maker Pro gets it through its vendored copy of this engine. Details: CLAUDE.md
 "Muscriptor zip + MIDI import, Harmony reading, key spelling".
+
+## 8. Update 2026-10-25 — P1–P5 built
+
+All five remaining items shipped the same day; details and measurements in CLAUDE.md
+"Beat grid, tempo map, learned downbeats, check by ear, All parts".
+
+| Item | What shipped | Measured |
+|---|---|---|
+| P2 | Muscriptor's beat-grid post-processing in `engine.tsx` (`audioBeatTimeline` + helpers); every audio chart on one timeline; tempo map in playback, MIDI, MusicXML, ABC, AlphaTex, CSMPN | = Muscriptor's Python to float noise (14 cases); GuitarSet beat F 38.9 → 41.9 (fixed ♩= → timeline) |
+| P3 | Tempo & bars panel (follow / fixed, ±, ÷2 ×2, meter, bar line nudges, Bar 1 here) in the audio and stems panels | ×2/÷2 recovers up to 58.3 beat F |
+| P1 | beat_this final0, exported from the official checkpoint (`scripts/beatthis_export.py`), int8 22.5 MB, on the pinned ORT 1.23.2 rails; on demand | **Real-audio gate passed** on GuitarSet held-out solos: beat F 46.9 → 75.6, downbeat F 54.1; padding short pieces as trained: +6.3 beat F |
+| P5 | 🎧 Check by ear: recording left / chart right, or a balance mix, on the recording's clock | browser-verified |
+| P4 | ⬇ All parts (zip) + → Chord Sheet Maker Pro (all parts) via an optional `parts[]` in `csm:handoff:v1` | browser-verified across both apps |
+
+Remaining: device checks (beat_this speed and memory on iPhone/iPad); beat_this on full mixes with drums
+is only measured synthetically; the canonical `chord-sheet-maker/docs/HANDOFF-CONTRACT.md` needs the
+`parts[]` note (documented here and in Chord Sheet Maker Pro).

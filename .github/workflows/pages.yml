@@ -77,6 +77,11 @@ jobs:
           cp guitar-model.js guitar-model-core.js guitar-worker.js _site/
           mkdir -p _site/models/guitar-crnn
           cp models/guitar-crnn/guitar-gaps.w8.onnx models/guitar-crnn/NOTICE _site/models/guitar-crnn/
+          # Learned beat + downbeat tracker (Tempo & bars): glue + the weight-only int8 beat_this final0
+          # (MIT, SHA-256 pinned in beat-model-core.js; scripts/beatthis_export.py rebuilds it).
+          cp beat-model.js beat-model-core.js beat-worker.js _site/
+          mkdir -p _site/models/beat-this
+          cp models/beat-this/beat_this_final0.w8.onnx models/beat-this/NOTICE _site/models/beat-this/
           # Tab viewer: alphaTab 1.8.4 (MPL-2.0), same-origin so its worker + worklet can load. The version
           # is in the folder name, so those files are never re-stamped and a cached copy is always the right one.
           cp tab-view.js _site/
@@ -92,6 +97,8 @@ jobs:
           grep -q "src=\"./stem-model.js?v=${BUILD}\"" _site/index.html
           sed -i "s#src=\"./guitar-model.js\"#src=\"./guitar-model.js?v=${BUILD}\"#" _site/index.html
           grep -q "src=\"./guitar-model.js?v=${BUILD}\"" _site/index.html
+          sed -i "s#src=\"./beat-model.js\"#src=\"./beat-model.js?v=${BUILD}\"#" _site/index.html
+          grep -q "src=\"./beat-model.js?v=${BUILD}\"" _site/index.html
           sed -i "s#src=\"./tab-view.js\"#src=\"./tab-view.js?v=${BUILD}\"#" _site/index.html
           grep -q "src=\"./tab-view.js?v=${BUILD}\"" _site/index.html
 

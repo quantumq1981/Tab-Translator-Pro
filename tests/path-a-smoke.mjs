@@ -3470,6 +3470,188 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
     "UI: spelling for the key by default (after naming, key read from the unspelled chart); a Harmony reading simplifies to one chord per bar");
 }
 
+/* ---- Beat grid → bar lines + tempo map (Muscriptor v0.4 port, MIT) ---------------------- */
+{
+  const near = (a, b, tol) => Math.abs(a - b) <= tol;
+  const onBar = (beat, bpb = 4) => { const r = ((beat % bpb) + bpb) % bpb; return Math.min(r, bpb - r) < 1e-6; };
+  // parity with Muscriptor's own Python (scripts/beatgrid_parity.py wrote the fixture from v0.4.0)
+  const par = JSON.parse(fs.readFileSync(path.join(here, "fixtures/beatgrid-parity.json"), "utf8"));
+  const md = (a, b) => (a.length !== b.length ? Infinity : a.reduce((m, v, i) => Math.max(m, Math.abs(v - b[i])), 0));
+  let worst = 0, meterOk = true, tempoOk = true;
+  for (const c of par) {
+    const reg = eng.regularizedBeats(c.beats), f = eng.fitTempo(reg);
+    worst = Math.max(worst, md(reg, c.reg), Math.abs(f.bpm - c.bpm), Math.abs(f.residual - c.res), md(eng.smoothedBeats(reg), c.smooth),
+      md(eng.rescaledBeats(reg, 2, reg[3]), c.x2), md(eng.rescaledBeats(reg, 0.5, reg[3]), c.half));
+    if (eng.inferBeatsPerBar(reg, c.downbeats) !== c.meter) meterOk = false;
+    const sp = eng.timelineSimplified({ times: reg, positions: reg.map((_, i) => i) }, 0.025, 4);
+    worst = Math.max(worst, md(sp.times, c.simpT), md(sp.positions, c.simpP));
+    const tc = eng.timelineTempoChanges(sp);
+    if (tc.length !== c.tempo.length || tc.some((t, i) => Math.round(60e6 / t.bpm) !== c.tempo[i][1] || Math.round(t.beat * 480) !== c.tempo[i][0])) tempoOk = false;
+    const ph = eng.onsetBeatPhases(c.onsets, reg);
+    for (const [k, [conc]] of Object.entries(c.subs)) {
+      let re = 0, im = 0; for (const p of ph) { const a = 2 * Math.PI * ((((p * +k) % 1) + 1) % 1); re += Math.cos(a); im += Math.sin(a); }
+      worst = Math.max(worst, Math.abs(Math.hypot(re / ph.length, im / ph.length) - conc));
+    }
+  }
+  expect(worst < 1e-9 && meterOk && tempoOk, `beat-grid port = Muscriptor v0.4 to float noise on ${par.length} seeded cases (worst ${worst.toExponential(1)}, meter ${meterOk}, tempo map ${tempoOk})`);
+
+  // regularise: a missed beat comes back, an extra one goes
+  const grid = Array.from({ length: 16 }, (_, i) => 0.37 + i * 0.5);
+  const holed = grid.filter((_, i) => i !== 6), extra = [...grid.slice(0, 5), grid[4] + 0.1, ...grid.slice(5)];
+  expect(eng.regularizedBeats(holed).length === 16 && near(eng.regularizedBeats(holed)[6], grid[6], 1e-9) && eng.regularizedBeats(extra).length === 16,
+    "regularizedBeats puts a missed beat back and drops an extra one");
+  const ft = eng.fitTempo(grid);
+  expect(near(ft.bpm, 120, 1e-9) && ft.residual < 1e-12, `fitTempo: an exact 120 BPM grid reads 120 with zero residual (${ft.bpm})`);
+  const rit = Array.from({ length: 20 }, (_, i) => 0.5 * i + 0.004 * i * i);
+  expect(md(eng.smoothedBeats(rit), rit) < 1e-9, "smoothedBeats keeps a steady ritardando exact (quadratic fit)");
+  expect(eng.rescaledBeats(grid, 2, grid[0]).length === 31 && eng.rescaledBeats(grid, 0.5, grid[1])[0] === grid[1], "×2 doubles the beats; ÷2 keeps the half that holds the downbeat");
+  const waltzBeats = Array.from({ length: 30 }, (_, i) => i * 0.5), waltzDown = waltzBeats.filter((_, i) => i % 3 === 0);
+  expect(eng.inferBeatsPerBar(waltzBeats, waltzDown) === 3 && eng.inferBeatsPerBar(waltzBeats, [0, 1.5, 3.5, 5, 7]) === null,
+    "inferBeatsPerBar: downbeats every 3 beats → 3; bars that disagree → null (no meter beats a wrong one)");
+
+  // onset delay + grid: eighth-note onsets 20 ms late on a 100 BPM grid
+  const beats100 = Array.from({ length: 40 }, (_, i) => 1 + i * 0.6);
+  const eighths = []; for (let i = 0; i < 38; i++) { eighths.push(beats100[i] + 0.02, beats100[i] + 0.3 + 0.02); }
+  const od = eng.estimateOnsetDelay(eighths, beats100);
+  expect(od && od.subdivision === 2 && near(od.seconds, 0.02, 1e-6) && od.concentration > 0.99, `estimateOnsetDelay: straight eighths 20 ms late → 1/2 grid, +20 ms (${od && od.subdivision}, ${od && od.seconds})`);
+  const trip = []; for (let i = 0; i < 38; i++) for (let k = 0; k < 3; k++) trip.push(beats100[i] + (k * 0.6) / 3);
+  const ot = eng.estimateOnsetDelay(trip, beats100);
+  expect(ot && ot.subdivision === 3 && near(ot.seconds, 0, 1e-9), `estimateOnsetDelay: eighth triplets → a 1/3 grid (${ot && ot.subdivision})`);
+  let seed = 3; const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  const scattered = Array.from({ length: 200 }, () => 1 + rnd() * 22);
+  expect(eng.estimateOnsetDelay(scattered, beats100) === null && eng.estimateOnsetDelay(eighths.slice(0, 30), beats100) === null,
+    "estimateOnsetDelay: onsets on no grid, or fewer than 40, → null");
+  expect(eng.quantizeStepFor(2) === 0.5 && eng.quantizeStepFor(3) === 1 / 3 && eng.quantizeStepFor(16) === 0.25 && eng.quantizeStepFor(null) === 0.25, "quantize step from the measured grid (16ths when it can't be shown)");
+
+  // steady song: one exact tempo, a bar line on the first beat, bar 1 at or before the recording's start
+  const tl = eng.audioBeatTimeline(grid, {}, { beatsPerBar: 4 });
+  const pos037 = eng.timelineBeatsAt(tl.timeline, 0.37);
+  expect(tl.steady && !tl.follow && !tl.tempoMap && near(tl.bpm, 120, 1e-9) && onBar(pos037) && eng.timelineSecondsAt(tl.timeline, 0) <= 1e-9,
+    `steady beats → one tempo, a bar line at the first beat (0.37 s at beat ${pos037}), bar 1 starting at or before 0 s`);
+  // an accelerando: a tempo map, every beat within 25 ms, changes only on bar lines
+  const acc = []; { let t = 0.2, p = 0.6; for (let i = 0; i < 64; i++) { acc.push(t); t += p; p *= 0.99; } }
+  const ta = eng.audioBeatTimeline(acc, {}, { beatsPerBar: 4 });
+  const worstBeat = acc.reduce((m, t) => { const b = eng.timelineBeatsAt(ta.timeline, t); return Math.max(m, Math.abs(eng.timelineSecondsAt(ta.timeline, Math.round(b)) - t)); }, 0);
+  expect(!ta.steady && ta.follow && ta.tempoMap && ta.tempoMap.length > 2 && ta.tempoMap.slice(1).every((c) => onBar(c.beat)) && worstBeat <= 0.025 + 1e-9,
+    `an accelerando → a tempo map (${ta.tempoMap && ta.tempoMap.length} tempi, on bar lines), every tracked beat within 25 ms (${(worstBeat * 1000).toFixed(1)} ms)`);
+  // corrections: ×2, one fixed tempo, a typed tempo, a bar line at a given second
+  const t2 = eng.audioBeatTimeline(grid, { beatScale: 2 }, { beatsPerBar: 4 }), tf = eng.audioBeatTimeline(acc, { tempoMap: false }, { beatsPerBar: 4 });
+  const ty = eng.audioBeatTimeline(grid, { bpm: 90 }, { beatsPerBar: 4 }), tb = eng.audioBeatTimeline(grid, { firstDownbeat: 1.37 }, { beatsPerBar: 4 });
+  expect(near(t2.bpm, 240, 1e-6) && tf.steady && !tf.tempoMap && near(ty.bpm, 90, 1e-9) && onBar(eng.timelineBeatsAt(tb.timeline, 1.37)) && eng.audioBeatTimeline([], {}, {}) === null,
+    "corrections: ×2 doubles the tempo, 'one fixed tempo' drops the map, a typed ♩= wins, a bar line goes where it is put; no beats + no ♩= → null");
+
+  // the score on a timeline: chords land on their beats, tempo map + offset ride along
+  const evts = [{ symbol: "C", midis: [48, 52, 55], startSec: 0.37, durSec: 2 }, { symbol: "G", midis: [43, 47, 50], startSec: 2.37, durSec: 2 }, { symbol: "Am", midis: [45, 48, 52], startSec: 4.37, durSec: 2 }];
+  const sc = eng.audioEventsToScore(evts, { timeline: tl.timeline, beatsPerBar: 4, quantize: { step: 0.5 }, trimLeadingBars: true });
+  const untrimmed = eng.audioEventsToScore(evts, { timeline: tl.timeline, beatsPerBar: 4 });
+  expect(untrimmed.bars.length === 4 && !untrimmed.bars[0].events.length && near(untrimmed.audioOffset, -1.63, 1e-9), "untrimmed, bar 1 is the lead-in bar before the first downbeat (starting 1.63 s before the recording)");
+  expect(sc.bars.map((b) => b.events.map((e) => `${e.symbol}@${e.qbeat}`).join(" ")).join(" | ") === "C@0 | G@0 | Am@0" && near(sc.audioOffset, 0.37, 1e-9) && sc.tempoMap === null && near(sc.tempo, 120, 1e-9),
+    `on the timeline each chord starts its bar (${sc.bars.map((b) => b.events.map((e) => e.symbol + "@" + e.qbeat).join(" ")).join(" | ")}), audioOffset 0.37 s`);
+  const old = eng.audioEventsToScore(evts, { bpm: 120, beatsPerBar: 4 });
+  expect(old.bars[0].events[0].qbeat === 0.74 && old.timeline === undefined && old.audioOffset === undefined, "without a timeline the old fixed-♩= placement is unchanged");
+  const lead = eng.audioEventsToScore(evts.map((e) => ({ ...e, startSec: e.startSec + 8 })), { timeline: tl.timeline, beatsPerBar: 4, trimLeadingBars: true });
+  expect(lead.bars.length === 3 && lead.bars[0].events[0].symbol === "C" && near(lead.audioOffset, 8.37, 1e-9), `trimLeadingBars drops the empty bars and moves audioOffset with them (${lead.bars.length} bars, ${lead.audioOffset})`);
+  // accelerando score: playback times, MIDI tempo metas, MusicXML/ABC/AlphaTex tempo changes
+  const accEv = acc.filter((_, i) => i % 4 === 0).map((t, i) => ({ symbol: ["C", "F", "G", "Am"][i % 4], midis: [[48, 52, 55], [41, 45, 48], [43, 47, 50], [45, 48, 52]][i % 4], startSec: t, durSec: 1 }));
+  const sa = eng.audioEventsToScore(accEv, { timeline: ta.timeline, beatsPerBar: 4, quantize: { step: 0.5 } });
+  const times = eng.scoreEventTimes(sa, sa.tempo).events;
+  const drift = accEv.reduce((m, e, i) => Math.max(m, Math.abs(times[i].start + sa.audioOffset - e.startSec)), 0);
+  expect(sa.tempoMap && sa.tempoMap.length > 2 && drift < 0.026, `playback follows the tempo map: every chord within 26 ms of the recording over ${accEv.length} bars (${(drift * 1000).toFixed(1)} ms)`);
+  const mid = eng.scoreToMidi(sa, { tempo: sa.tempo }); let metas = 0; for (let i = 0; i + 2 < mid.length; i++) if (mid[i] === 0xff && mid[i + 1] === 0x51 && mid[i + 2] === 0x03) metas++;
+  const mx = eng.scoreToMusicXML(sa, { tempo: sa.tempo }), abc = eng.scoreToABC(sa, { tempo: sa.tempo }), atx = eng.scoreToAlphaTex(sa, { tempo: sa.tempo });
+  expect(metas > 2 && (mx.match(/<sound tempo=/g) || []).length > 2 && /\[Q:1\/4=\d+\]/.test(abc) && (atx.match(/\\tempo \d+/g) || []).length > 2,
+    `the tempo map reaches MIDI (${metas} tempo metas), MusicXML (<sound tempo> per change), ABC ([Q:]) and AlphaTex (\\tempo)`);
+  const csTm = eng.scoreToCSMPN(sa, { tempo: sa.tempo });
+  expect(/^Tempo Map: 1=\d+(\.\d)? \d+=/m.test(csTm) && !/^Tempo Map:/m.test(eng.scoreToCSMPN(sc, { tempo: sc.tempo })), "CSMPN carries a `Tempo Map:` line for Chord Sheet Maker Pro (only when the tempo changes)");
+  const faster = eng.scoreEventTimes(sa, sa.tempo * 2);
+  expect(near(faster.duration, eng.scoreEventTimes(sa, sa.tempo).duration / 2, 1e-9), "♩= still scales a tempo-mapped chart in proportion");
+  const secd = eng.applySectionsToScore(sa, [{ label: "Verse", startSec: accEv[3].startSec }], { beatsPerBar: 4 });
+  const amBar = sa.bars.findIndex((b) => b.events.length && b.events[0].symbol === "Am");
+  expect(amBar > 0 && secd.bars[amBar].section === "Verse", `sections map seconds → bars through the timeline (the Am bar, ${amBar + 1})`);
+  // onset delay applied to ML notes
+  const ml = eng.polyNotesToScore([{ midi: 60, startSec: 0.39, durSec: 0.4 }, { midi: 64, startSec: 0.89, durSec: 0.4 }], { timeline: tl.timeline, beatsPerBar: 4, onsetDelay: 0.02, trimLeadingBars: true });
+  expect(near(ml.bars[0].events[0].qbeat, 0, 1e-9) && near(ml.bars[0].events[1].qbeat, 1, 1e-9), "polyNotesToScore moves the model's onsets back by the measured delay");
+  expect(eng.fillBeatNoteGaps([{ startBeat: 0, endBeat: 0.8 }, { startBeat: 1, endBeat: 2 }], 0.25)[0].endBeat === 1 && eng.leadingEmptyBeats([{ startBeat: 9 }], 4) === 8,
+    "fillBeatNoteGaps holds a note across a short silence; leadingEmptyBeats counts whole empty bars");
+}
+
+/* ---- beat_this front end, All-parts zip, check-by-ear clock, and the glue contracts ---------- */
+{
+  const near = (a, b, tol) => Math.abs(a - b) <= tol;
+  // features held to beat_this's own LogMelSpect (torchaudio), written by scripts/beatthis_export.py
+  const bf = JSON.parse(fs.readFileSync(path.join(here, "fixtures/beatthis-features.json"), "utf8"));
+  const fb = eng.beatThisMelFilterbank(); let fbErr = 0, melErr = 0;
+  for (const [k, row] of Object.entries(bf.fbRows)) for (let m = 0; m < 128; m++) fbErr = Math.max(fbErr, Math.abs(fb[+k * 128 + m] - row[m]));
+  const spec = eng.beatThisLogMel(Float32Array.from(bf.signal));
+  for (const [t, row] of Object.entries(bf.logmel)) for (let m = 0; m < 128; m++) melErr = Math.max(melErr, Math.abs(spec.data[+t * 128 + m] - row[m]));
+  expect(spec.frames === bf.nFrames && fbErr < 1e-5 && melErr < 1e-3, `beatThisLogMel = torchaudio LogMelSpect (${spec.frames} frames, filterbank ±${fbErr.toExponential(1)}, log-mel ±${melErr.toExponential(1)})`);
+  // windows + aggregation (split_piece / aggregate_prediction keep_first)
+  expect(JSON.stringify(eng.beatThisChunks(1000)) === "[-6]" && JSON.stringify(eng.beatThisChunks(3000)) === "[-6,1482,1506]", `split_piece starts (${JSON.stringify(eng.beatThisChunks(3000))})`);
+  const fakeModel = async (w) => { const beat = new Float32Array(w.frames).fill(-5), downbeat = new Float32Array(w.frames).fill(-5); for (let i = 0; i < w.frames; i++) { const g = i + w.start0; if (g % 25 === 0) beat[i] = 5; if (g % 100 === 0) downbeat[i] = 5; } return { beat, downbeat }; };
+  const pcm = new Float32Array(22050 * 40);
+  const starts = eng.beatThisChunks(eng.beatThisLogMel(pcm).frames);
+  let wi = 0;
+  const tracked = await eng.trackBeatsWithModel(pcm, (w) => fakeModel({ ...w, start0: starts[wi++] }));
+  expect(tracked.beats.length > 70 && tracked.beats.every((b, i) => i === 0 || near(b - tracked.beats[i - 1], 0.5, 1e-9)) && tracked.downbeats.every((d) => near((d * 50) % 100, 0, 1e-6)) && tracked.downbeats.length >= 19,
+    `trackBeatsWithModel stitches 30 s windows into one beat list (${tracked.beats.length} beats every 0.5 s, ${tracked.downbeats.length} downbeats on beats)`);
+  const pk = eng.beatThisPeaks(Float32Array.from([-1, 2, 2, -1, -1, -1, -1, 3, -1]), Float32Array.from([-1, -1, -1, -1, -1, -1, 4, -1, -1]));
+  expect(near(pk.beats[0], 1.5 / 50, 1e-9) && near(pk.beats[1], 7 / 50, 1e-9) && near(pk.downbeats[0], 7 / 50, 1e-9), "peaks: a plateau reads as its centre; a downbeat moves onto the nearest beat");
+  let shortLen = -1; await eng.trackBeatsWithModel(new Float32Array(22050 * 10), async (w) => { shortLen = w.frames; return { beat: new Float32Array(w.frames).fill(-5), downbeat: new Float32Array(w.frames).fill(-5) }; });
+  let shortLen2 = -1; await eng.trackBeatsWithModel(new Float32Array(22050 * 10), async (w) => { shortLen2 = w.frames; return { beat: new Float32Array(w.frames).fill(-5), downbeat: new Float32Array(w.frames).fill(-5) }; }, { padShort: false });
+  expect(shortLen === 1500 && shortLen2 === 513, `a piece shorter than 30 s is padded to a full window, as beat_this was trained (${shortLen}); padShort:false runs it short like its inference (${shortLen2})`);
+
+  // zip writer: our own reader opens it, CRC-32 is the standard one
+  expect(eng.crc32(new TextEncoder().encode("123456789")) === 0xcbf43926, "crc32('123456789') = cbf43926");
+  const z = eng.zipStore([{ name: "a.txt", data: "hello" }, { name: "dir/b.bin", data: new Uint8Array([1, 2, 3]) }]);
+  const ze = eng._zipEntries(z);
+  expect(ze.length === 2 && ze[0].name === "a.txt" && new TextDecoder().decode(await eng._zipRead(z, ze[0])) === "hello" && (await eng._zipRead(z, ze[1])).join() === "1,2,3", "zipStore writes a STORED zip our importer reads back");
+  // All parts: a chord part + a bass line + drums on the same grid
+  const grid = Array.from({ length: 33 }, (_, i) => 0.5 + i * 0.5);
+  const tl = eng.audioBeatTimeline(grid, {}, { beatsPerBar: 4 }).timeline;
+  const chordSc = eng.audioEventsToScore([{ symbol: "C", midis: [48, 52, 55], startSec: 0.5, durSec: 2 }, { symbol: "G", midis: [43, 47, 50], startSec: 2.5, durSec: 2 }], { timeline: tl, beatsPerBar: 4, quantize: { step: 0.5 }, trimLeadingBars: true });
+  const bassSc = eng.polyNotesToScore([{ midi: 36, startSec: 0.5, durSec: 0.4 }, { midi: 43, startSec: 2.5, durSec: 0.4 }], { timeline: tl, beatsPerBar: 4, onsetGrid: 0.005, trimLeadingBars: true });
+  const zp = eng.partsZip([{ name: "Band", score: chordSc }, { name: "Bass", score: bassSc, tuning: [null, null, 28, 33, 38, 43], program: 33 }, { name: "Drums", drums: [{ beat: 0, type: "kick" }, { beat: 1, type: "snare" }] }], { title: "Demo", tempo: chordSc.tempo });
+  const names = eng._zipEntries(zp).map((e) => e.name);
+  expect(["01_Band.musicxml", "01_Band.mid", "01_Band.csmpn", "02_Bass.musicxml", "02_Bass.mid", "02_Bass.csmpn", "02_Bass.alphatex", "03_Drums.mid", "full_score.musicxml", "score.mid"].every((n) => names.includes(n)) && !names.includes("01_Band.alphatex"),
+    `partsZip: per-part files, tab for the fretted part only, a full score and a multi-track MIDI (${names.join(", ")})`);
+  const full = new TextDecoder().decode(await eng._zipRead(zp, eng._zipEntries(zp).find((e) => e.name === "full_score.musicxml")));
+  const fullDoc = new globalThis.DOMParser().parseFromString(full, "application/xml");
+  expect(fullDoc.getElementsByTagName("score-part").length === 2 && fullDoc.getElementsByTagName("part").length === 2 && /<part-name>Bass<\/part-name>/.test(full) && fullDoc.getElementsByTagName("parsererror").length === 0,
+    "full_score.musicxml: one well-formed score, a named part per chart");
+  const sm = await eng._zipRead(zp, eng._zipEntries(zp).find((e) => e.name === "score.mid"));
+  const smf = eng._readSmf(sm);
+  expect(smf && smf.format === 1 && smf.tracks.length === 4 && smf.tracks[3].notes.some((n) => n.ch === 9 && n.midi === 36) && smf.tracks[2].name === "Bass" && smf.metas.tempo.length >= 1,
+    `score.mid is format 1: conductor + 3 named tracks, the kick on channel 10 (${smf && smf.tracks.length} tracks)`);
+  const reparsed = eng.parseMusicXML(full, true, 0);
+  expect(reparsed.parts.length === 2 && reparsed.bars[0].events[0].symbol === "C", "the full score re-imports through our own MusicXML reader");
+
+  // check-by-ear clock: the chart on the RECORDING's seconds
+  const rt = eng.scoreRecordingTimes(chordSc);
+  expect(near(rt[0].start, 0.5, 1e-6) && near(rt[1].start, 2.5, 1e-6), `scoreRecordingTimes puts the chart back on the recording's clock (${rt.map((e) => e.start.toFixed(2)).join(", ")} s)`);
+  expect(eng.timelineBarAt(tl, 0.5, 4) === 2 && eng.timelineBarAt(tl, 2.5, 4) === 3 && near(eng.timelineNudge(tl, 0.5, 4), 2.5, 1e-9), "timelineBarAt / timelineNudge for the section editor");
+
+  // glue contracts: the committed model, its pin, the runtime rails, the deploy
+  const repoRoot = path.join(here, "..");
+  const coreSrc = fs.readFileSync(path.join(repoRoot, "beat-model-core.js"), "utf8"), glue = fs.readFileSync(path.join(repoRoot, "beat-model.js"), "utf8"), wk = fs.readFileSync(path.join(repoRoot, "beat-worker.js"), "utf8");
+  const pin = (coreSrc.match(/sha256: "([0-9a-f]{64})"/) || [])[1];
+  const onnxBytes = fs.readFileSync(path.join(repoRoot, "models/beat-this/beat_this_final0.w8.onnx"));
+  const sha = (await import("node:crypto")).createHash("sha256").update(onnxBytes).digest("hex");
+  expect(pin && pin === sha && fs.existsSync(path.join(repoRoot, "models/beat-this/NOTICE")) && /MIT/.test(fs.readFileSync(path.join(repoRoot, "models/beat-this/NOTICE"), "utf8")),
+    `beat model: the pinned SHA-256 is the committed file's (${sha.slice(0, 12)}…), NOTICE carries the MIT licence`);
+  expect(/stem-model-core\.js/.test(coreSrc) && /capWasmMemory\(\)/.test(coreSrc) && /ORT_WASM_PATHS \+ "ort\.wasm\.min\.mjs"/.test(coreSrc) && /numThreads = 1/.test(coreSrc) && /trackBeatsWithModel/.test(coreSrc) && /resampleTo\(pcm, sampleRate, BEAT_MODEL\.sampleRate\)/.test(coreSrc),
+    "beat-model-core.js: the stem separator's pinned ORT 1.23.2 + WASM cap, one thread, the engine's front end, resampled to 22.05 kHz");
+  expect(/window\.TTP_BEAT_MODEL = trackBeatsAudio/.test(glue) && /new Worker\(WORKER_URL, \{ type: "module" \}\)/.test(glue) && /w\.terminate\(\)/.test(glue) && /self\.onmessage/.test(wk) && /trackBeatsPcm/.test(wk),
+    "beat-model.js publishes TTP_BEAT_MODEL, runs a module worker, ends it after each job");
+  const html = fs.readFileSync(path.join(repoRoot, "index.html"), "utf8"), pages = fs.readFileSync(path.join(repoRoot, ".github/workflows/pages.yml"), "utf8");
+  expect(/<script type="module" src="\.\/beat-model\.js"><\/script>/.test(html) && /cp beat-model\.js beat-model-core\.js beat-worker\.js _site\//.test(pages) && /beat_this_final0\.w8\.onnx models\/beat-this\/NOTICE/.test(pages) && /beat-model\.js\?v=\$\{BUILD\}/.test(pages),
+    "index.html loads beat-model.js; pages.yml ships the glue + model + NOTICE and stamps it");
+  const uiSrc2 = fs.readFileSync(UI, "utf8");
+  expect(/function useBeatGrid\(/.test(uiSrc2) && /function TempoBarsPanel\(/.test(uiSrc2) && /function CheckByEar\(/.test(uiSrc2) && /audioBeatTimeline\(src && src\.beats, timing/.test(uiSrc2)
+    && /timeline: tl, beatsPerBar: bpb, quantize: \{ step: 0\.5 \}/.test(uiSrc2) && /noteGridOpts\(bg, gtrNotes, useSharp\)/.test(uiSrc2) && /bg\.findBars\(monoOf\(b\), b\.sampleRate\)/.test(uiSrc2)
+    && /createStereoPanner/.test(uiSrc2) && /scoreRecordingTimes\(score\)/.test(uiSrc2) && /partsZip\(parts, \{ title: base, tempo: bpm, key: stemKey, useSharp \}\)/.test(uiSrc2) && /sendPartsToPro/.test(uiSrc2) && /parts: parts\.map\(\(p\) => \(\{ name: p\.name, role: p\.role/.test(uiSrc2) && /timelineBarAt\(tl, sec, bpb\)/.test(uiSrc2),
+    "UI: one beat grid (useBeatGrid → audioBeatTimeline) under every audio chart, Tempo & bars, 🥁 Find bar 1 on the original-rate audio, 🎧 Check by ear (StereoPanner, recording clock), ⬇ All parts, sections on the timeline");
+}
+
 if (fails.length) {
   console.error("\nFAIL:\n  " + fails.join("\n  "));
   console.error("\nRe-run with --log-tokens to dump the raw extractTokens() stream and diff against the reference.");

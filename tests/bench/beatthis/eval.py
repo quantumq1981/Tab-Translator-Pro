@@ -1,6 +1,11 @@
 # Usage: python -I eval.py <renderDir> <model.onnx> <mel-filterbank.bin>  — see README.md
-import json, sys, time, resource, numpy as np, soundfile as sf, onnxruntime as ort
-S = sys.argv[1]; MODEL = sys.argv[2]; FB = np.fromfile(sys.argv[3], dtype=np.float32).reshape(513, 128)
+#        python -I eval.py --dump <wavDir> <outDir> <model.onnx> <mel-filterbank.bin>
+#        (writes <track>.beats.json = { beats, downbeats } per 22.05 kHz <track>.wav, for beatgrid.mjs --learned)
+import json, os, sys, time, resource, numpy as np, soundfile as sf, onnxruntime as ort
+DUMP = sys.argv[1] == "--dump"
+if DUMP: _, _, WAVS, OUT, MODEL, FBF = sys.argv[:6]
+else: S = sys.argv[1]; MODEL = sys.argv[2]; FBF = sys.argv[3]
+FB = np.fromfile(FBF, dtype=np.float32).reshape(513, 128)
 def logmel(x):
     n, hop = 1024, 441
     x = np.pad(x, (n // 2, n // 2), mode="reflect")
@@ -50,6 +55,16 @@ def bpb(beats, downs):
 def tempo(b): 
     if len(b) < 3: return None
     s = np.polyfit(np.arange(len(b)), b, 1)[0]; return 60 / s
+if DUMP:
+    os.makedirs(OUT, exist_ok=True); t_all = dur_all = 0
+    for f in sorted(os.listdir(WAVS)):
+        if not f.endswith(".wav"): continue
+        x, sr = sf.read(os.path.join(WAVS, f), dtype="float32"); assert sr == 22050
+        if x.ndim > 1: x = x.mean(axis=1)
+        t0 = time.perf_counter(); bt, dt = track(x); t_all += time.perf_counter() - t0; dur_all += len(x) / sr
+        json.dump({"beats": [float(v) for v in bt], "downbeats": [float(v) for v in dt]}, open(os.path.join(OUT, f[:-4] + ".beats.json"), "w"))
+    print("dumped; realtime factor %.3f, peak RSS %d MB" % (t_all / max(dur_all, 1e-9), resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024))
+    sys.exit(0)
 truth = json.load(open(S + "/truth.json")); rows = []; t_all = 0; dur_all = 0
 for m in truth:
     x, sr = sf.read(f"{S}/{m['name']}.wav", dtype="float32"); assert sr == 22050
