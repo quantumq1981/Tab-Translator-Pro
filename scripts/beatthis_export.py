@@ -10,6 +10,14 @@ Source (all MIT, © 2024 Institute of Computational Perception, JKU Linz):
     which are byte-identical to each other. The checksum is asserted below.
 
 Steps:
+  0. Slice the TIME-directed attention (`slice_time_attention`): the frontend's three partial
+     transformers attend over all 1500 frames separately for each of 32 / 16 / 8 frequency rows,
+     and the six main layers over 16 heads — each a 1500 × 1500 score matrix. One
+     scaled_dot_product_attention over all of them at once is what made one window need ~1 GB
+     of WASM memory (enough to get an iPhone tab killed next to a decoded song). The same
+     attention, one (batch × head) slice at a time, gives the SAME logits (int8 output
+     bit-identical to the unsliced export) at ~half the memory (onnxruntime-web 1.23.2, Node,
+     one 1500-frame window: 1,008 → 502 MB peak RSS; same run time; session creation 0.9 → 3.8 s).
   1. Export the model's fixed 1500-frame window (30 s at 50 frames/s) to ONNX, opset 17:
      log-mel spectrogram [1, 1500, 128] in → beat and downbeat logits [1, 1500] out. The
      spectrogram is NOT in the graph — engine.tsx `beatThisLogMel` computes it (an STFT op in
@@ -19,14 +27,15 @@ Steps:
   3. Write tests/fixtures/beatthis-features.json: a test signal, its torchaudio log-mel frames
      and a few filterbank rows, so `npm test` can hold the JS front end to beat_this's own.
 
-Usage (Python with torch, torchaudio, einops, rotary-embedding-torch, onnx, onnxruntime, numpy, soundfile):
+Usage (Python with torch, torchaudio, einops, rotary-embedding-torch, onnx, onnxruntime, numpy, soundfile;
+pass `-` as the fixture to rebuild only the model — torchaudio is then not needed):
   git clone https://github.com/CPJKU/beat_this /tmp/bt && git -C /tmp/bt checkout b95c8ab0c58c2d9fcfd40508ae8dffbc05ac4f5c
   HF_HUB_DISABLE_XET=1 hf download oulianov/beat_this final0.ckpt --local-dir /tmp/btck
   python scripts/beatthis_export.py /tmp/bt /tmp/btck/final0.ckpt models/beat-this/beat_this_final0.w8.onnx \\
       tests/fixtures/beatthis-features.json [some.wav …]
 
 The committed file's SHA-256 is pinned in beat-model-core.js; the bytes depend on the torch /
-onnx versions (built with torch 2.14.1, onnx 1.23.2), so a rebuild must re-pin it.
+onnx versions (built with torch 2.14.1, onnx 1.23.2, rotary-embedding-torch 0.9.1), so a rebuild must re-pin it.
 """
 import json
 import os
@@ -50,6 +59,38 @@ def sha256(path):
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+class SlicedAttend(torch.nn.Module):
+    """beat_this's Attend (scaled_dot_product_attention, no dropout at inference), computed `group`
+    (batch × head) slices at a time, so only one slice's score matrix is alive at once."""
+
+    def __init__(self, group=1):
+        super().__init__()
+        self.group = group
+
+    def forward(self, q, k, v):
+        import torch.nn.functional as F
+        b, h = q.shape[0], q.shape[1]
+        qf, kf, vf = q.flatten(0, 1), k.flatten(0, 1), v.flatten(0, 1)
+        outs = [F.scaled_dot_product_attention(qf[i:i + self.group], kf[i:i + self.group], vf[i:i + self.group])
+                for i in range(0, b * h, self.group)]
+        return torch.cat(outs, 0).unflatten(0, (b, h))
+
+
+def slice_time_attention(model):
+    """Every attention over the time axis → SlicedAttend (frequency attention is short: ≤ 32 tokens)."""
+    from beat_this.model.beat_tracker import PartialFTTransformer
+    n = 0
+    for m in model.modules():
+        if isinstance(m, PartialFTTransformer):
+            m.attnT.attend = SlicedAttend()
+            n += 1
+    for attn, _ff in model.transformer_blocks.layers:
+        attn.attend = SlicedAttend()
+        n += 1
+    assert n == 9, f"expected 3 frontend + 6 main time attentions, patched {n}"
+    print(f"sliced {n} time-directed attentions (one batch × head score matrix at a time)")
 
 
 def export_fp32(model, out):
@@ -124,15 +165,24 @@ def main():
     got = sha256(ckpt)
     assert got == CKPT_SHA256, f"final0.ckpt SHA-256 {got} ≠ pinned {CKPT_SHA256}"
     sys.path.insert(0, bt_dir)
+    if fixture == "-":                      # model only: torchaudio is used for audio I/O + the fixture, not the model
+        try:
+            import torchaudio  # noqa: F401
+        except ImportError:
+            import unittest.mock
+            sys.modules["torchaudio"] = unittest.mock.MagicMock()
     from beat_this.inference import load_model
-    from beat_this.preprocessing import LogMelSpect
     model = load_model(ckpt, "cpu")
-    lm = LogMelSpect()
+    slice_time_attention(model)
 
     with tempfile.TemporaryDirectory() as tmp:
         fp32 = os.path.join(tmp, "beat_this_final0.onnx")
         export_fp32(model, fp32)
         weight_only_int8(fp32, out)
+    if fixture == "-":
+        return
+    from beat_this.preprocessing import LogMelSpect
+    lm = LogMelSpect()
 
     # the JS front end's reference: a chirp + clicks, its torchaudio log-mel, and filterbank rows
     sr = 22050

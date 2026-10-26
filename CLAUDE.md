@@ -2287,8 +2287,8 @@ separator and capture are browser glue (device check remains for the real model)
     - **Device check that remains:** a real iPhone and iPad (iPadOS reports a Mac UA; `isAppleMobile` catches it via touch points, so low-memory mode is on by default there too). Any failure screenshot now carries
       the `[stems … · Safari … · iOS …]` label — read it before theorising. If "Could not find OrtValue" ever
       appears with `ORT 1.23.2` in the label, the #33426 diagnosis is wrong for that device (update iOS, and
-      compare the Safari version against 17.5). If a long song still dies there, the next levers are Int16
-      stem storage (halves the stems); WebGPU on WebKit stays off until measured on a device (#26827).
+      compare the Safari version against 17.5). Int16 stem storage shipped 2026-10-26 (see "Phone memory" below);
+      WebGPU on WebKit stays off until measured on a device (#26827).
     - **Device report after #113 (2026-10-25): iPhone ✅ (slow but works); first-generation iPad Pro ❌ "freezes,
       then times out".** That iPad (A9X, 2015/16) is stuck on **iPadOS 16.7 = Safari 16.6**. Checked, not assumed:
       ORT 1.23.2 is built with **Emscripten 4.0.8** (`build_args.py`), whose `MIN_SAFARI_VERSION` is **15.0**, with no
@@ -3062,7 +3062,8 @@ on ONE beat grid instead of a fixed ♩= laid from t = 0. Engine (pure, headless
   Cache API + SHA-256, worker ended after each job). Model: official `final0.ckpt` (SHA-256 `8c328b45…8331`;
   the official host is blocked, so taken from two byte-identical independent HF re-uploads) →
   `scripts/beatthis_export.py`: fp32 ONNX, **dynamic time axis** (= PyTorch to 2.2e-6 at 1500/1129/64 frames)
-  → weight-only int8 **22.5 MB** (548/557 beats within one frame of PyTorch). The log-mel is in JS
+  → weight-only int8 **24.1 MB** (548/557 beats within one frame of PyTorch; since 2026-10-26 the time attention
+  is sliced, ~half the memory, same logits — see "Phone memory" below). The log-mel is in JS
   (`beatThisLogMel`, = torchaudio to 1.5e-4, `tests/fixtures/beatthis-features.json`); windows /
   aggregation / peaks ported (`beatThisChunks`, `beatThisAggregate`, `beatThisPeaks`,
   `trackBeatsWithModel`). Runs on the ORIGINAL-rate mono audio resampled to 22.05 kHz (its mels reach 11 kHz).
@@ -3089,10 +3090,57 @@ on ONE beat grid instead of a fixed ♩= laid from t = 0. Engine (pure, headless
   both apps on one origin (`parts-e2e.mjs`).
 
 **Honest limits:** the built-in tracker is the ceiling without the model (~42–47 beat F on real guitar);
-beat_this is on demand (22.5 MB) and only downbeat-tested on guitar takes — full mixes with drums were only
+beat_this is on demand (24.1 MB) and only downbeat-tested on guitar takes — full mixes with drums were only
 measured synthetically (where our tracker won on beats); WebKit speed/memory unmeasured (device check).
-The vocal score stays one-tempo. `parts[]` is documented in both repos; the canonical
-`chord-sheet-maker/docs/HANDOFF-CONTRACT.md` (third repo, not in this session) still needs the same note.
+The vocal score stays one-tempo. `parts[]` is documented in all three repos (the canonical
+`chord-sheet-maker/docs/HANDOFF-CONTRACT.md` since 2026-10-26).
+
+## Phone memory — Adelaide on an iPhone (2026-10-26)
+
+**Report:** a 3:24 song ("Adelaide", Joe Robinson: voice + guitar) on an iPhone. The tab was killed twice: once
+after running everything (A/B clarity, 🥁 Find bar 1 (ML)), and once at the end of a Low-memory + Faster split,
+just before the charts appeared. iOS kills the whole page process, workers included. Headless Chromium also runs
+workers inside the renderer, so the **largest process's PSS** is the number to watch.
+`tests/bench/split-mem-e2e.mjs` (real app, real mp3, iPhone UA, `--pre ab,beat`, PSS every 250 ms → `mem.json`)
+measures it phase by phase; `--repo <checkout>` runs an older commit for before/after.
+
+**1. Stems (#129, merged):** 16-bit stems end to end (page → worker as Int16, the core returns Int16 via
+`output: "int16"`, `toI16` = encodeWav16's rounding). Streaming block output: everything before the next block's
+start is final, so only the 1.5 s cross-fade tail is carried (no whole-song float accumulators; bit-identical in
+float). Charting runs **one instrument at a time**, transferring each resampled stem to the engine worker
+(`_engineRPC(fn, args, transfer)`; a detached buffer skips the main-thread fallback). Largest process, old → new:
+charting **1070 → 641 MB**, after the charts **999 → 551 MB**.
+
+**2. beat_this (this change):** one 1500-frame window needed **~1 GB** of WASM memory (onnxruntime-web 1.23.2,
+Node; arena / mem-pattern / optimiser level all 975–1002 MB, so ORT has no lever). The cause is the model: the
+frontend attends over TIME separately for each of 32 / 16 / 8 frequency rows (and the 6 main layers over 16
+heads). Each is a 1500 × 1500 score matrix, ~288 MB per frontend block before softmax copies.
+`scripts/beatthis_export.py` step 0 (`SlicedAttend`) now computes the same attention one (batch × head) slice at
+a time: **peak 1,008 → 502 MB**, same run time, session creation 0.9 → 3.8 s, model 22.5 → 24.1 MB
+(SHA-256 `b3288b0e…1892`, rebuilt twice byte-identically). Outputs are **identical**: max |Δ logit| = 0 on a
+1500-frame input, and identical beats + downbeats on 50/50 GuitarSet solos (`js-eval.mjs`, RSS 1,082 → 521 MB,
+0.44× → 0.40× real time). Real app on Adelaide: the beat_this step's largest process **1,301 → 761 MB**.
+- **Rejected — shorter windows.** `trackBeatsWithModel(…, { chunk })` exists for benches (memory 1500 → ~1 GB,
+  1000 → 664 MB, 750 → 549 MB), but accuracy drops on the 50 solos: beat F **68.0 / 61.5 / 59.9**, downbeat F
+  50.1 / 43.9 / 41.4, Acc1 72 / 66 / 60 %. The app keeps 1500 frames; don't trade accuracy for memory here.
+- Don't "fix" the model with a frequency-time split of the frontend: its partial transformers attend over time,
+  so the frontend is not time-local and can't be run in time pieces with the same result.
+
+**Where it stands (largest process, MB, Adelaide, iPhone UA, Low-memory + Faster):**
+
+| phase | before #129 | #129 | + sliced beat model |
+|---|---|---|---|
+| decode + chords | 501 | 484 | 484 |
+| A/B clarity | 485 | 464 | 474 |
+| 🥁 beat_this | 1213 | 1301 | **761** |
+| separating | 1275 | 1216 | 1154 |
+| charting | 1070 | 641 | 652 |
+| done | 999 | 551 | 552 |
+
+The split is now the peak: the compact SCNet working set (~650 MB) plus the page (decoded song, analysis copies,
+the growing 16-bit stems). Next levers if a phone still dies there: stream finished blocks to the page while
+splitting (the worker would no longer hold whole stems), and drop the page's own float copy of the decoded song
+during the split. **Device check remaining:** re-run Adelaide on the iPhone.
 
 ## Path B (scans / photos) — OUT OF SCOPE
 

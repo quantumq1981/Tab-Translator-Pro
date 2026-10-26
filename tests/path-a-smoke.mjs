@@ -3621,6 +3621,13 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   let shortLen = -1; await eng.trackBeatsWithModel(new Float32Array(22050 * 10), async (w) => { shortLen = w.frames; return { beat: new Float32Array(w.frames).fill(-5), downbeat: new Float32Array(w.frames).fill(-5) }; });
   let shortLen2 = -1; await eng.trackBeatsWithModel(new Float32Array(22050 * 10), async (w) => { shortLen2 = w.frames; return { beat: new Float32Array(w.frames).fill(-5), downbeat: new Float32Array(w.frames).fill(-5) }; }, { padShort: false });
   expect(shortLen === 1500 && shortLen2 === 513, `a piece shorter than 30 s is padded to a full window, as beat_this was trained (${shortLen}); padShort:false runs it short like its inference (${shortLen2})`);
+  // shorter windows (phones): the same stitched beat list, every window no longer than the chunk
+  const starts750 = eng.beatThisChunks(eng.beatThisLogMel(pcm).frames, 750); let wj = 0, maxWin = 0;
+  const tracked750 = await eng.trackBeatsWithModel(pcm, (w) => { maxWin = Math.max(maxWin, w.frames); return fakeModel({ ...w, start0: starts750[wj++] }); }, { chunk: 750 });
+  expect(starts750.length === 3 && maxWin <= 750 && JSON.stringify(tracked750.beats) === JSON.stringify(tracked.beats) && JSON.stringify(tracked750.downbeats) === JSON.stringify(tracked.downbeats),
+    `opts.chunk 750: ${starts750.length} windows of ≤ ${maxWin} frames stitch to the same ${tracked750.beats.length} beats as 1500-frame windows`);
+  let shortLen3 = -1; await eng.trackBeatsWithModel(new Float32Array(22050 * 10), async (w) => { shortLen3 = w.frames; return { beat: new Float32Array(w.frames).fill(-5), downbeat: new Float32Array(w.frames).fill(-5) }; }, { chunk: 750 });
+  expect(shortLen3 === 750, `a short piece is padded to the CHOSEN window, not to 1500 (${shortLen3})`);
 
   // zip writer: our own reader opens it, CRC-32 is the standard one
   expect(eng.crc32(new TextEncoder().encode("123456789")) === 0xcbf43926, "crc32('123456789') = cbf43926");
@@ -3660,6 +3667,11 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   const sha = (await import("node:crypto")).createHash("sha256").update(onnxBytes).digest("hex");
   expect(pin && pin === sha && fs.existsSync(path.join(repoRoot, "models/beat-this/NOTICE")) && /MIT/.test(fs.readFileSync(path.join(repoRoot, "models/beat-this/NOTICE"), "utf8")),
     `beat model: the pinned SHA-256 is the committed file's (${sha.slice(0, 12)}…), NOTICE carries the MIT licence`);
+  { // the time attention is sliced (beatthis_export.py step 0): ~500 MB per window instead of ~1 GB — an unsliced
+    // export has 12 attention softmaxes (its bytes name "Softmax" 48 times), the sliced one 195
+    let nSm = 0; for (let i = onnxBytes.indexOf("Softmax"); i >= 0; i = onnxBytes.indexOf("Softmax", i + 7)) nSm++;
+    expect(nSm > 300, `beat model: time attention computed one batch × head slice at a time ("Softmax" named ${nSm}× in the graph)`);
+  }
   expect(/stem-model-core\.js/.test(coreSrc) && /capWasmMemory\(\)/.test(coreSrc) && /ORT_WASM_PATHS \+ "ort\.wasm\.min\.mjs"/.test(coreSrc) && /numThreads = 1/.test(coreSrc) && /trackBeatsWithModel/.test(coreSrc) && /resampleTo\(pcm, sampleRate, BEAT_MODEL\.sampleRate\)/.test(coreSrc),
     "beat-model-core.js: the stem separator's pinned ORT 1.23.2 + WASM cap, one thread, the engine's front end, resampled to 22.05 kHz");
   expect(/window\.TTP_BEAT_MODEL = trackBeatsAudio/.test(glue) && /new Worker\(WORKER_URL, \{ type: "module" \}\)/.test(glue) && /w\.terminate\(\)/.test(glue) && /self\.onmessage/.test(wk) && /trackBeatsPcm/.test(wk),

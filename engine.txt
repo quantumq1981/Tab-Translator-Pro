@@ -5478,19 +5478,25 @@ function beatThisPeaks(beatLogits, downLogits, fps = BEAT_THIS.fps) {
  *  for one window, Float32Arrays of its length). pcm must be 22.05 kHz mono (`resampleTo` first).
  *  opts.padShort (default true): a piece shorter than one window is zero-padded to the full 1500
  *  frames, as beat_this was TRAINED ("pad if the piece is shorter than 30 s"); its own inference
- *  runs such a piece as one shorter window instead. → { beats, downbeats } in seconds. */
+ *  runs such a piece as one shorter window instead.
+ *  opts.chunk (default 1500 = 30 s): window length in frames — for benches. Shorter windows cost
+ *  accuracy (GuitarSet solos, beat F: 1500 → 68.0, 1000 → 61.5, 750 → 59.9), so the app keeps 1500;
+ *  its memory is held down in the model instead (scripts/beatthis_export.py, sliced attention).
+ *  → { beats, downbeats } in seconds. */
 async function trackBeatsWithModel(pcm, model, opts = {}) {
   if (typeof model !== "function") throw new Error("no beat model configured");
-  const spec = beatThisLogMel(pcm), starts = beatThisChunks(spec.frames), preds = [];
-  const pad = opts.padShort !== false && spec.frames < BEAT_THIS.chunk - 2 * BEAT_THIS.border;
+  const B = BEAT_THIS.border, chunk = Math.max(4 * B + 1, Math.round(opts.chunk > 0 ? opts.chunk : BEAT_THIS.chunk));
+  const spec = beatThisLogMel(pcm), starts = beatThisChunks(spec.frames, chunk), preds = [];
+  const pad = opts.padShort !== false && spec.frames < chunk - 2 * B;
   for (let i = 0; i < starts.length; i++) {
-    let w = beatThisWindow(spec, starts[i]);
-    if (pad && w.frames < BEAT_THIS.chunk) { const d = new Float32Array(BEAT_THIS.chunk * BEAT_THIS.nMels); d.set(w.data); w = { frames: BEAT_THIS.chunk, data: d }; }
+    const raw = beatThisWindow(spec, starts[i], chunk);
+    let w = raw;
+    if (pad && w.frames < chunk) { const d = new Float32Array(chunk * BEAT_THIS.nMels); d.set(w.data); w = { frames: chunk, data: d }; }
     const p = await model(w);
-    preds.push(pad ? { beat: p.beat.subarray(0, Math.min(p.beat.length, beatThisWindow(spec, starts[i]).frames)), downbeat: p.downbeat.subarray(0, Math.min(p.downbeat.length, beatThisWindow(spec, starts[i]).frames)) } : p);
+    preds.push(pad ? { beat: p.beat.subarray(0, Math.min(p.beat.length, raw.frames)), downbeat: p.downbeat.subarray(0, Math.min(p.downbeat.length, raw.frames)) } : p);
     if (opts.onProgress) opts.onProgress(i + 1, starts.length);
   }
-  const agg = beatThisAggregate(preds, starts, spec.frames);
+  const agg = beatThisAggregate(preds, starts, spec.frames, chunk);
   return beatThisPeaks(agg.beat, agg.downbeat);
 }
 
