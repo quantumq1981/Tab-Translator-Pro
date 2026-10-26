@@ -9,7 +9,8 @@
  * The core is imported with this worker's own ?v=<build> query (stem-model.js passes
  * the deploy stamp on), so a device never mixes a fresh worker with a cached core.
  *
- * Message in : { id, left, right, sampleRate, opts:{ device, step, blockSec, compact } }
+ * Message in : { id, left, right, sampleRate, opts:{ device, step, blockSec, compact, output } }
+ *               (left/right: Int16Array from stem-model.js — the same array twice for a mono song)
  * (stage = "library" | "model" | "runtime" | "separating", so a slow device can say what it is doing)
  * Messages out: { id, type:"stage", stage } / { id, type:"progress", done, total } … then
  *               { id, type:"result", sampleRate, stems:{ vocals:[L,R], drums, bass, other } }
@@ -29,7 +30,7 @@ self.onmessage = async (ev) => {
       onStage: (stage) => self.postMessage({ id, type: "stage", stage }),
     });
     const transfer = [];
-    for (const k of Object.keys(res.stems)) for (const ch of res.stems[k]) transfer.push(ch.buffer);
+    for (const k of Object.keys(res.stems)) for (const ch of res.stems[k]) if (!transfer.includes(ch.buffer)) transfer.push(ch.buffer);
     self.postMessage({ id, type: "result", sampleRate: res.sampleRate, stems: res.stems, device: res.device, compact: res.compact }, transfer);
   } catch (err) {
     self.postMessage({ id, type: "error", message: String((err && err.message) || err) });

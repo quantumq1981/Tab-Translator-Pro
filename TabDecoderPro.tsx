@@ -393,7 +393,7 @@ function _getEngineWorker() {
       "import * as E from " + JSON.stringify(engineUrl) + ";\n" +
       "self.onmessage = async (ev) => {\n" +
       "  const { id, fn, args } = ev.data;\n" +
-      "  try { const result = await E[fn](...args); self.postMessage({ id, ok: true, result }); }\n" +
+      "  try { const result = await E[fn](...args); self.postMessage({ id, ok: true, result }, result && ArrayBuffer.isView(result) ? [result.buffer] : []); }\n" +
       "  catch (err) { self.postMessage({ id, ok: false, error: String((err && err.message) || err) }); }\n" +
       "};";
     const w = new Worker(URL.createObjectURL(new Blob([code], { type: "text/javascript" })), { type: "module" });
@@ -408,15 +408,19 @@ function _getEngineWorker() {
     return w;
   } catch (_) { _engineWorkerDead = true; return null; }
 }
-function _engineRPC(fn, args) {
+// transfer: buffers the caller hands over (moved, not copied — a 3½-minute song is ~36 MB per mono channel,
+// and on a phone two copies of every stem is what pushed the page over). They are unusable here afterwards.
+function _engineRPC(fn, args, transfer) {
   return new Promise((resolve, reject) => {
     const w = _getEngineWorker();
     if (!w) { reject(new Error("no engine worker")); return; }
     const id = ++_rpcSeq;
     _rpcPending.set(id, { resolve, reject });
-    try { w.postMessage({ id, fn, args }); } catch (err) { _rpcPending.delete(id); reject(err); }
+    try { w.postMessage({ id, fn, args }, transfer || []); } catch (err) { _rpcPending.delete(id); reject(err); }
   });
 }
+// a buffer handed to the worker is detached: the main-thread fallback can't use it
+const _detached = (a) => !!a && a.buffer && a.buffer.byteLength === 0 && a.length === 0;
 // True only for DOMParser-free formats the worker can actually parse.
 function _workerableBytes(bytes) {
   try { const head = new TextDecoder("latin1").decode(bytes.subarray(0, 32)); return head.includes("FICHIER GUITAR PRO") || head.startsWith("ptab"); }
@@ -454,14 +458,36 @@ async function analyzeChordsOffThread(samples, sr, opts = {}) {
 /* Anti-aliased (Kaiser-windowed sinc) resampling off-thread, main-thread fallback. The
  * decode used to box-average down to the analysis rate, which lets cymbal/hat energy
  * above the new Nyquist fold straight into the chroma band. */
-async function resampleOffThread(samples, srIn, srOut) {
-  try { return await _engineRPC("resampleTo", [samples, srIn, srOut]); }
-  catch (_) { return resampleTo(samples, srIn, srOut); }
+async function resampleOffThread(samples, srIn, srOut, { transfer = false } = {}) {
+  try { return await _engineRPC("resampleTo", [samples, srIn, srOut], transfer ? [samples.buffer] : undefined); }
+  catch (e) { if (_detached(samples)) throw e; return resampleTo(samples, srIn, srOut); }
 }
 /* Stems → per-instrument charts off-thread (several decodes + YIN + drum NMF), main-thread fallback. */
-async function chartsFromStemsOffThread(stems, sr, opts = {}) {
-  try { return await _engineRPC("chartsFromStems", [stems, sr, opts]); }
-  catch (_) { return chartsFromStems(stems, sr, opts); }
+async function chartsFromStemsOffThread(stems, sr, opts = {}, { transfer = false } = {}) {
+  const bufs = [];
+  if (transfer) {
+    for (const a of [...Object.values(stems), opts.fullRate && opts.fullRate.drums]) if (a && a.buffer && !bufs.includes(a.buffer)) bufs.push(a.buffer);
+  }
+  try { return await _engineRPC("chartsFromStems", [stems, sr, opts], bufs); }
+  catch (e) { if (Object.values(stems).some(_detached)) throw e; return chartsFromStems(stems, sr, opts); }
+}
+/* Stems arrive from the separator as 16-bit (Int16Array) channels; imported stems are the decoder's float.
+ * These read either. */
+const _stemGain = (a) => (a instanceof Int16Array ? 1 / 32768 : 1);
+function stemF32(ch) {
+  if (!(ch instanceof Int16Array)) return ch;
+  const o = new Float32Array(ch.length);
+  for (let i = 0; i < ch.length; i++) o[i] = ch[i] / 32768;
+  return o;
+}
+// mono sum of one or more stereo tracks (0.5·(L+R) each), as float
+function stemMono(tracks) {
+  const n = Math.max(0, ...tracks.map((x) => x.L.length)), mono = new Float32Array(n);
+  for (const tr of tracks) {
+    const L = tr.L, R = tr.R || tr.L, gl = 0.5 * _stemGain(L), gr = 0.5 * _stemGain(R);
+    for (let i = 0; i < L.length; i++) mono[i] += gl * L[i] + gr * (R[i] || 0);
+  }
+  return mono;
 }
 /* DTW audio↔score alignment off-thread (heavy: FFTs + DP), main-thread fallback. */
 async function alignPcmToScoreOffThread(samples, sr, score, opts = {}) {
@@ -3508,14 +3534,16 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, getSour
     setBusy("Charting every instrument…"); setErr(""); setRes(null); setProg(null);   // the separator's countdown no longer applies
     try {
       const sr = t.sampleRate, factor = Math.max(1, Math.floor(sr / 16000)), asr = sr / factor;
-      const byRole = {}, full = {};
-      for (const tr of t.list) {
-        const mono = new Float32Array(tr.L.length);
-        for (let i = 0; i < mono.length; i++) mono[i] = 0.5 * (tr.L[i] + (tr.R ? tr.R[i] : tr.L[i]));
-        full[tr.role] = full[tr.role] ? Float32Array.from(full[tr.role], (v, i) => v + (mono[i] || 0)) : mono;
+      // One instrument at a time, each full-rate mono handed to the worker (moved, not copied): a 3½-minute song
+      // is ~36 MB per mono stem, and building all of them at once next to the stems is what a phone couldn't hold.
+      // Only the drums keep a full-rate copy (hi-hats live above the analysis rate's Nyquist).
+      const byRole = {}; let drumsFull = null;
+      for (const role of [...new Set(t.list.map((x) => x.role))]) {
+        const mono = stemMono(t.list.filter((x) => x.role === role));
+        if (role === "drums") drumsFull = mono;
+        byRole[role] = await resampleOffThread(mono, sr, asr, { transfer: role !== "drums" });
       }
-      for (const role of Object.keys(full)) byRole[role] = await resampleOffThread(full[role], sr, asr);
-      const r = await chartsFromStemsOffThread(byRole, asr, { useSharp, vocabulary: vocab, sixNine, fullRate: full.drums ? { drums: full.drums, sampleRate: sr } : undefined });
+      const r = await chartsFromStemsOffThread(byRole, asr, { useSharp, vocabulary: vocab, sixNine, fullRate: drumsFull ? { drums: drumsFull, sampleRate: sr } : undefined }, { transfer: true });
       setRes(r); setOvr({});
       // a NEW split/import starts from the detected grid; re-charting the same stems (a chord-
       // vocabulary change) keeps the user's Tempo & bars corrections
@@ -3636,7 +3664,7 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, getSour
       const t0 = ctx.currentTime + 0.08, srcs = [], gains = [];
       for (const tr of tracks.list) {
         const b = ctx.createBuffer(2, tr.L.length, tracks.sampleRate);
-        b.copyToChannel(tr.L, 0); b.copyToChannel(tr.R || tr.L, 1);
+        b.copyToChannel(stemF32(tr.L), 0); b.copyToChannel(stemF32(tr.R || tr.L), 1);
         const src = ctx.createBufferSource(), g = ctx.createGain();
         src.buffer = b; g.gain.value = audible(tr.role) ? 1 : 0; src.connect(g); g.connect(ctx.destination); src.start(t0);
         srcs.push(src); gains.push([tr.role, g]);
@@ -3777,7 +3805,7 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, getSour
             <button onClick={sendPartsToPro} disabled={!!busy} title="open the band chart in Chord Sheet Maker Pro and file every instrument's chart in its song library" style={{ ...chip(C), padding: "4px 12px", color: C.cyan }}>→ Chord Sheet Maker Pro (all parts)</button>
           </div>
           <TempoBarsPanel C={C} bg={bg} label="TEMPO & BARS · shared by every stem chart" canFindBars={!!tracks}
-            onFindBars={() => { if (!tracks) return; const n = tracks.list[0].L.length, mix = new Float32Array(n); for (const tr of tracks.list) for (let i = 0; i < n; i++) mix[i] += 0.5 * (tr.L[i] + (tr.R ? tr.R[i] : tr.L[i])); bg.findBars(mix, tracks.sampleRate); }} />
+            onFindBars={() => { if (!tracks) return; bg.findBars(stemMono(tracks.list), tracks.sampleRate); }} />
           {!res.charts.length && <div style={{ fontSize: 11, color: C.dim }}>No instrument produced a chart.</div>}
           {chart && chart.kind === "notes" && (
             chart.notes.length ? <StaffView events={chart.notes.map((n) => ({ label: n.note, midi: n.midi, startSec: n.startSec, durSec: n.durSec }))} activeIdx={-1} C={C} useSharp={useSharp} />

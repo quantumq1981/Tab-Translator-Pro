@@ -240,6 +240,20 @@ export async function wasmSession(bytes, { frames = COMPACT_MODEL.frames, graphO
  * software WebGPU adapter: the session fails at run time on an f16 Cast). WASM is the measured path. */
 export function deviceFor(compact, picked) { return compact ? "wasm" : picked; }
 
+/* Input may be Float32 or 16-bit (stem-model.js sends 16-bit to halve the copy the worker holds): the library
+ * gets a float view/copy of one block at a time. */
+function blockF32(x, a, b) {
+  if (!(x instanceof Int16Array)) return x.subarray(a, b);
+  const o = new Float32Array(b - a);
+  for (let i = a; i < b; i++) o[i - a] = x[i] / 32768;
+  return o;
+}
+/* float → 16-bit, the same rounding as encodeWav16 (so a stem saved as WAV is unchanged) */
+export function toI16(v) {
+  const x = v > 1 ? 1 : v < -1 ? -1 : v || 0;
+  return x < 0 ? Math.round(x * 32768) : Math.round(x * 32767);
+}
+
 export async function separateInBlocks(left, right, sampleRate, opts = {}) {
   const compact = !!opts.compact;
   const device = deviceFor(compact, await pickDevice(opts.device));
@@ -285,12 +299,21 @@ async function separateOn(device, left, right, sampleRate, opts) {
   const pad = Math.round((opts.padSec != null ? opts.padSec : 1.5) * sampleRate);
   const starts = [];
   for (let s = 0; s < n; s += block) starts.push(s);
-  const out = Object.fromEntries(STEM_NAMES.map((k) => [k, [new Float32Array(n), new Float32Array(n)]]));
-  const weight = new Float32Array(n);
+  // The stems are written as each block finishes: the blocks overlap by 2·pad, and everything before the NEXT
+  // block's start can't change any more, so it is normalised and stored right away; only the overlap tail is
+  // carried, as float, into the next block. Same arithmetic in the same order as accumulating whole-song float
+  // arrays (bit-identical float output), without a second song-length buffer per stem. opts.output "int16"
+  // stores 16-bit stems (half the memory of float — what a phone's page keeps for playback and charting).
+  const int16 = opts.output === "int16";
+  const Arr = int16 ? Int16Array : Float32Array;
+  const out = Object.fromEntries(STEM_NAMES.map((k) => [k, [new Arr(n), new Arr(n)]]));
+  const sameLR = right === left;
+  let carry = null;                                // { len, w, acc:{ k: [L, R] } } for [a of this block, a + len)
   try {
     for (let bi = 0; bi < starts.length; bi++) {
-      const a = Math.max(0, starts[bi] - pad), b = Math.min(n, starts[bi] + block + pad);
-      const res = await separate([left.subarray(a, b), right.subarray(a, b)], {
+      const a = Math.max(0, starts[bi] - pad), b = Math.min(n, starts[bi] + block + pad), len = b - a;
+      const inL = blockF32(left, a, b), inR = sameLR ? inL : blockF32(right, a, b);
+      const res = await separate([inL, inR], {
         sampleRate, model: STEM_MODEL, device, wasmPaths: ORT_LIB_PATHS,    // only used when the library loads ORT itself (WebGPU)
         step: opts.step != null ? opts.step : 0.5,                 // 0.5: half the compute of 0.25 for ~0.1 dB; FAST_STEP for slow devices
         session,                                                   // our pinned WASM session, or the test seam (the library's own session hook)
@@ -300,24 +323,41 @@ async function separateOn(device, left, right, sampleRate, opts) {
         // on single-thread WASM) ahead of the work actually done.
         progress: opts.onProgress ? (p) => opts.onProgress(bi + (p.chunk - 1) / p.totalChunks, starts.length) : undefined,
       });
+      const w = new Float32Array(len), acc = {};
+      for (const k of STEM_NAMES) acc[k] = [new Float32Array(len), new Float32Array(len)];
+      if (carry) {                                 // the previous block's overlap tail starts exactly at this a
+        w.set(carry.w);
+        for (const k of STEM_NAMES) { acc[k][0].set(carry.acc[k][0]); acc[k][1].set(carry.acc[k][1]); }
+      }
       // linear cross-fade over the padded overlap so block seams are inaudible
       for (let i = a; i < b; i++) {
         const fadeIn = starts[bi] > 0 ? Math.min(1, (i - a) / Math.max(1, 2 * pad)) : 1;
         const fadeOut = b < n ? Math.min(1, (b - i) / Math.max(1, 2 * pad)) : 1;
-        const w = Math.min(fadeIn, fadeOut);
-        weight[i] += w;
+        const wt = Math.min(fadeIn, fadeOut);
+        w[i - a] += wt;
         for (const k of STEM_NAMES) {
           const st = res.stems[k];
           if (!st) continue;
-          out[k][0][i] += w * (st[0][i - a] || 0);
-          out[k][1][i] += w * ((st[1] || st[0])[i - a] || 0);
+          acc[k][0][i - a] += wt * (st[0][i - a] || 0);
+          acc[k][1][i - a] += wt * ((st[1] || st[0])[i - a] || 0);
         }
       }
+      // everything before the next block's start is final
+      const fe = bi + 1 < starts.length ? Math.max(a, starts[bi + 1] - pad) : n;
+      for (const k of STEM_NAMES) for (let c = 0; c < 2; c++) {
+        const src = acc[k][c], dst = out[k][c];
+        for (let i = a; i < fe; i++) {
+          let v = src[i - a];
+          const wi = w[i - a];
+          if (wi > 0 && wi !== 1) v /= wi;
+          dst[i] = int16 ? toI16(v) : v;
+        }
+      }
+      carry = fe < b ? { w: w.slice(fe - a), acc: Object.fromEntries(STEM_NAMES.map((k) => [k, [acc[k][0].slice(fe - a), acc[k][1].slice(fe - a)]])) } : null;
       if (opts.onProgress) opts.onProgress(bi + 1, starts.length);
     }
   } finally {
     if (own) { try { (await own).release(); } catch (_) { /* creation failed: nothing to release */ } }
   }
-  for (let i = 0; i < n; i++) if (weight[i] > 0 && weight[i] !== 1) for (const k of STEM_NAMES) { out[k][0][i] /= weight[i]; out[k][1][i] /= weight[i]; }
   return { sampleRate, stems: out, device, compact };
 }

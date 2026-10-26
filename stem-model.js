@@ -98,10 +98,21 @@ export function isAppleMobile(nav = typeof navigator !== "undefined" ? navigator
   return /iPhone|iPad|iPod/.test(ua) || (/Mac/.test(plat || ua) && (nav.maxTouchPoints || 0) > 1);
 }
 
+/* float → 16-bit, the same rounding as encodeWav16 / the core's toI16 */
+export function toInt16(x) {
+  const o = new Int16Array(x.length);
+  for (let i = 0; i < x.length; i++) { const v = x[i] > 1 ? 1 : x[i] < -1 ? -1 : x[i] || 0; o[i] = v < 0 ? Math.round(v * 32768) : Math.round(v * 32767); }
+  return o;
+}
+
 async function separateStems(left, right, sampleRate, opts = {}) {
   if (!left || !left.length) throw new Error("no audio to separate");
   opts = { ...opts, compact: opts.compact != null ? !!opts.compact : isAppleMobile() };
-  const L = Float32Array.from(left), R = Float32Array.from(right || left);   // copies: we transfer them
+  // 16-bit copies of the song (half the memory of float) are what the worker holds; it returns 16-bit stems
+  // too (opts.output "int16"). A phone's tab is killed for its total footprint, worker included, and the end
+  // of a split — the model's heap + the stems + the page's own audio — is where it peaked.
+  const L = toInt16(left), R = right && right !== left ? toInt16(right) : L;
+  opts = { ...opts, output: opts.output || "int16" };
   const w = getWorker();
   if (!w) return onMainThread(L, R, sampleRate, opts);
   // No main-thread retry once the worker exists: a split is minutes of WebAssembly, and running it on the page's
@@ -110,7 +121,7 @@ async function separateStems(left, right, sampleRate, opts = {}) {
   return new Promise((resolve, reject) => {
     const id = ++_seq;
     _pending.set(id, { resolve, reject, onProgress: opts.onProgress, onStage: opts.onStage });
-    w.postMessage({ id, left: L, right: R, sampleRate, opts: { device: opts.device, blockSec: opts.blockSec, step: opts.step, compact: opts.compact } }, [L.buffer, R.buffer]);
+    w.postMessage({ id, left: L, right: R, sampleRate, opts: { device: opts.device, blockSec: opts.blockSec, step: opts.step, compact: opts.compact, output: opts.output } }, R === L ? [L.buffer] : [L.buffer, R.buffer]);
   });
 }
 
