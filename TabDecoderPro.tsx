@@ -194,6 +194,9 @@ import {
   scoreToMusicXML,
   transposeScore,
   fingerScore,
+  GUITAR_TUNINGS,
+  guitarTuning,
+  suggestGuitarTuning,
   scoreToAlphaTex,
   alphaTexFromBytes,
   ARRANGE_TEMPLATES,
@@ -2751,6 +2754,8 @@ function AudioImport({ C, useSharp }) {
   const [mlNotes, setMlNotes] = useState(null);      // raw ML notes, kept so voice-count/voice-index can re-derive without re-inference
   const [gtrNotes, setGtrNotes] = useState(null);    // guitar CRNN notes (🎸 Guitar → Tab), re-scored on ♩=/meter changes without re-inference
   const [gtrProg, setGtrProg] = useState(null);
+  const [gtrTuning, setGtrTuning] = useState("standard"); // the guitar's tuning for Guitar → Tab (GUITAR_TUNINGS id)
+  const [gtrCapo, setGtrCapo] = useState(0);          // capo fret: frets are written relative to it (sounding = tuning + capo + fret)
   const [gtrOvr, setGtrOvr] = useState({});         // the tab's own chord edits (its "bar.beat" keys aren't the chord chart's)      // { done, total } windows while the guitar model runs
   const [voiceCount, setVoiceCount] = useState(3);   // SATB split target (1 = no split, 2 = duet, 3 = SAT, 4 = SATB)
   const [voiceIdx, setVoiceIdx] = useState(0);       // which voice slot is displayed (0 = highest / soprano)
@@ -2946,11 +2951,24 @@ function AudioImport({ C, useSharp }) {
     } catch (e) { setErr("Guitar transcription failed: " + (e && e.message ? e.message : "unknown")); }
     setGtrProg(null); setBusy(false);
   };
-  const gtrScore = useMemo(() => {
+  const gtrPoly = useMemo(() => (gtrNotes && gtrNotes.length ? polyNotesToScore(gtrNotes, noteGridOpts(bg, gtrNotes, useSharp)) : null), [gtrNotes, bg.grid, useSharp]);
+  /* Tuning suggestion from the pitches alone — only when standard can't reach some of them (notes
+   * below its low E): on the GP corpus that rule flagged 0 of 192 standard-tuned parts and named the
+   * right tuning for 12 of 18 others (tests/bench/tuning.mjs). The rest never go below E2, so the
+   * picker is the way. Suggested, never applied. */
+  const gtrSuggest = useMemo(() => {
     if (!gtrNotes || !gtrNotes.length) return null;
-    const base = fingerScore(polyNotesToScore(gtrNotes, noteGridOpts(bg, gtrNotes, useSharp)));
+    try { return suggestGuitarTuning(polyNotesToScore(gtrNotes, { bpm: 120 })); } catch (_) { return null; }
+  }, [gtrNotes]);
+  const gtrScore = useMemo(() => {
+    if (!gtrPoly) return null;
+    // Finger on the chosen tuning (+ capo): on the GP corpus, fingering a non-standard part in its real
+    // tuning puts 62.6 % of notes on the written string vs 43.8 % in standard (tests/bench/tuning.mjs).
+    const t = guitarTuning(gtrTuning);
+    const fingered = fingerScore(gtrPoly, { tuning: t.midi, capo: gtrCapo });
+    const base = { ...fingered, tuningMidi: t.midi, tuning: t.name, soundingCapo: gtrCapo, capo: gtrCapo };
     return sections.length ? applySectionsToScore(base, sections, { beatsPerBar: bpb }) : base;
-  }, [gtrNotes, bg.grid, useSharp, sections]);
+  }, [gtrPoly, gtrTuning, gtrCapo, sections]);
   /* Voice split — SATB heuristic (engine.tsx splitVoices) runs on the RAW ML notes,
    * so switching the voice count or the displayed voice is cheap: no re-inference,
    * no re-download. voiceCount === 1 shows the full polyphonic score (no split).
@@ -3294,9 +3312,27 @@ function AudioImport({ C, useSharp }) {
           <div style={{ fontSize: 11, color: C.dim, marginBottom: 6, lineHeight: 1.6 }}>
             🎸 <b style={{ color: C.text }}>{gtrNotes.length} notes</b> from the guitar model · strings <b>inferred</b> (fingerScore — playable, not necessarily the player's) · bars come from <b>Tempo &amp; bars</b> above · <b>AlphaTex (tab)</b> exports every note with its string.
           </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 6, fontSize: 11, color: C.dim }}>
+            <select value={gtrTuning} onChange={(e) => setGtrTuning(e.target.value)} title="the guitar's tuning — the tab is fingered and labelled on it"
+              style={{ ...chip(C), padding: "3px 9px", borderColor: gtrTuning !== "standard" ? C.amber : C.border, color: gtrTuning !== "standard" ? C.amber : C.dim, background: C.raised, cursor: "pointer" }}>
+              {GUITAR_TUNINGS.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
+            </select>
+            <span>Capo</span>
+            <button onClick={() => setGtrCapo((c) => Math.max(0, c - 1))} disabled={!gtrCapo} style={{ ...chip(C), padding: "2px 9px" }} aria-label="capo down">−</button>
+            <span style={{ minWidth: 18, textAlign: "center", color: gtrCapo ? C.amber : C.dim }}>{gtrCapo || "—"}</span>
+            <button onClick={() => setGtrCapo((c) => Math.min(12, c + 1))} disabled={gtrCapo >= 12} style={{ ...chip(C), padding: "2px 9px" }} aria-label="capo up">+</button>
+            {gtrCapo > 0 && <span>frets relative to the capo</span>}
+          </div>
+          {gtrSuggest && gtrSuggest.id !== gtrTuning && (
+            <div style={{ fontSize: 11, color: C.amber, border: `1px dashed ${C.amber}`, borderRadius: 6, padding: "5px 8px", marginBottom: 6, lineHeight: 1.5 }}>
+              {gtrSuggest.standard.unplayable} note{gtrSuggest.standard.unplayable === 1 ? "" : "s"} sit below standard tuning's low E — this sounds like <b>{gtrSuggest.label}</b>.{" "}
+              <button onClick={() => setGtrTuning(gtrSuggest.id)} style={{ ...chip(C), padding: "2px 9px", borderColor: C.amber, color: C.amber }}>Use {gtrSuggest.name}</button>
+              <span style={{ color: C.dim }}> (a full mix's bass can do this too — keep standard if the guitar is in standard)</span>
+            </div>
+          )}
           <div style={{ marginBottom: 6 }}><CheckByEar C={C} score={gtrScore} getBuffer={() => ref.current.audioBuf} onStart={stopPlay} /></div>
           <ChartPanel score={gtrScore} title={(name || "Guitar") + " · tab"}
-            meta={`${gtrScore.bars.length} bars · ${gtrNotes.length} notes · from the guitar ML model`}
+            meta={`${gtrScore.bars.length} bars · ${gtrNotes.length} notes · from the guitar ML model · ${guitarTuning(gtrTuning).name}${gtrCapo ? ` · capo ${gtrCapo}` : ""}`}
             C={C} useSharp={useSharp} overrides={gtrOvr} setOverrides={setGtrOvr} selKey="" onPick={() => {}} autoSimplify={false} defaultView="tab" />
         </div>
       )}

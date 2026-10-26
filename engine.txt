@@ -4070,7 +4070,11 @@ function fingerSequence(events, tuning = TUNINGS.Standard, opts = {}) {
  *  are inferred, so the UI and the exporters can tell a guess from a written tab. */
 function fingerScore(score, opts = {}) {
   if (!score || !score.bars) return score;
-  const tuning = opts.tuning || score.tuningMidi || TUNINGS[score.tuning] || TUNINGS.Standard;
+  // opts.capo (else score.soundingCapo): the events carry SOUNDING pitches and the frets are written
+  // relative to a capo at that fret — the hand plays on the open tuning raised by the capo.
+  const capo = opts.capo != null ? opts.capo : (score.soundingCapo || 0);
+  const tuning = capoTuning(opts.tuning || score.tuningMidi || TUNINGS[score.tuning] || TUNINGS.Standard, capo);
+  if (capo) opts = { ...opts, maxFret: (opts.maxFret != null ? opts.maxFret : FINGER_DEFAULTS.maxFret) - capo };
   const flat = [];
   score.bars.forEach((b, bi) => (b.events || []).forEach((e, ei) => flat.push({ bi, ei, e })));
   const need = (e) => opts.overwrite || !e.frets || !Object.keys(e.frets).length;
@@ -4091,6 +4095,97 @@ function fingerScore(score, opts = {}) {
     bars[bi].events[ei] = { ...bars[bi].events[ei], frets, fingered: true };
   });
   return { ...score, bars };
+}
+
+/* ---- Guitar tunings + capo for the tab path (Guitar → Tab, AlphaTex) -------------
+ * Open-string MIDI in engine order (0 = lowest string). Separate from TUNINGS on purpose: that
+ * table names the tuning of IMPORTED files (_tuningName), and new names there would rename pinned
+ * outputs. A capo raises every open string; frets are then written relative to it (the tab
+ * convention, and alphaTab's: sounding = tuning + capo + fret). */
+const GUITAR_TUNINGS = [
+  { id: "standard",  name: "Standard",         label: "Standard (E A D G B E)",  midi: [40, 45, 50, 55, 59, 64] },
+  { id: "halfDown",  name: "Half step down",   label: "Half step down (Eb)",     midi: [39, 44, 49, 54, 58, 63] },
+  { id: "wholeDown", name: "Whole step down",  label: "Whole step down (D)",     midi: [38, 43, 48, 53, 57, 62] },
+  { id: "dropD",     name: "Drop D",           label: "Drop D (D A D G B E)",    midi: [38, 45, 50, 55, 59, 64] },
+  { id: "dropCs",    name: "Drop C#",          label: "Drop C# (half step down, dropped)", midi: [37, 44, 49, 54, 58, 63] },
+  { id: "dropC",     name: "Drop C",           label: "Drop C (whole step down, dropped)", midi: [36, 43, 48, 53, 57, 62] },
+  { id: "dadgad",    name: "DADGAD",           label: "DADGAD",                   midi: [38, 45, 50, 55, 57, 62] },
+  { id: "openG",     name: "Open G",           label: "Open G (D G D G B D)",    midi: [38, 43, 50, 55, 59, 62] },
+  { id: "openD",     name: "Open D",           label: "Open D (D A D F# A D)",   midi: [38, 45, 50, 54, 57, 62] },
+  { id: "openE",     name: "Open E",           label: "Open E (E B E G# B E)",   midi: [40, 47, 52, 56, 59, 64] },
+];
+/* How common each tuning is, as a per-note cost added by rankGuitarTunings (a prevalence prior:
+ * among tunings that explain the same low notes, prefer the one players actually use — Drop D
+ * over DADGAD). Small next to the unplayable charge, so it only breaks near-ties. */
+const GUITAR_TUNING_PRIOR = { standard: 0, halfDown: 0, dropD: 0, wholeDown: 0.15, dropCs: 0.15, dropC: 0.15, dadgad: 0.3, openG: 0.3, openD: 0.3, openE: 0.3 };
+const guitarTuning = (id) => GUITAR_TUNINGS.find((t) => t.id === id) || GUITAR_TUNINGS[0];
+const capoTuning = (tuning, capo) => (capo ? tuning.map((m) => (m == null ? null : m + capo)) : tuning);
+
+/** Which tuning (and capo) best explains a set of SOUNDING pitches, judged the way a player would:
+ *  how cheaply `fingerSequence` can play them, plus a heavy charge for every pitch the tuning can't
+ *  reach at all (a D2 in standard). Returns every candidate ranked, cheapest first:
+ *  [{ id, name, label, midi, capo, cost, perNote, unplayable }].
+ *  `cost` = fingering cost per playable note + `unplayableCost` × the unplayable share.
+ *  opts: tunings (ids), capos ([0]), maxEvents (600 — the first N chordal events are enough),
+ *  unplayableCost (40), and any fingerSequence weight. Pure; the UI suggests, never applies. */
+function rankGuitarTunings(score, opts = {}) {
+  if (!score || !score.bars) return [];
+  const seq = [];
+  let lastEnd = null;
+  const maxEvents = opts.maxEvents != null ? opts.maxEvents : 600;
+  for (let bi = 0; bi < score.bars.length && seq.length < maxEvents; bi++) {
+    const b = score.bars[bi], bpb = (b.timeSig || score.timeSig || [4, 4])[0];
+    for (const e of b.events || []) {
+      if (!e.midis || !e.midis.length || seq.length >= maxEvents) continue;
+      const on = bi * bpb + (e.qbeat ?? e.beat ?? 0), dur = e.qdur ?? e.durBeats ?? 1;
+      seq.push({ midis: e.midis, gap: lastEnd == null ? 0 : Math.max(0, on - lastEnd) });
+      lastEnd = on + dur;
+    }
+  }
+  const total = seq.reduce((a, e) => a + e.midis.length, 0);
+  if (!total) return [];
+  const ids = opts.tunings || GUITAR_TUNINGS.map((t) => t.id);
+  const capos = opts.capos || [0];
+  const unCost = opts.unplayableCost != null ? opts.unplayableCost : 40;
+  const out = [];
+  for (const id of ids) {
+    const t = guitarTuning(id);
+    for (const capo of capos) {
+      const tun = capoTuning(t.midi, capo);
+      const w = { ...opts, maxFret: (opts.maxFret != null ? opts.maxFret : FINGER_DEFAULTS.maxFret) - capo };
+      let unplayable = 0;
+      for (const e of seq) for (const m of e.midis) if (!fingerCandidates(m, tun, w.maxFret).length) unplayable++;
+      const { shapes, cost: path } = fingerSequence(seq, tun, w);
+      const played = shapes.reduce((a, sh) => a + (sh ? sh.length : 0), 0);
+      const perNote = played ? path / played : 0;
+      const prior = opts.prior === false ? 0 : (GUITAR_TUNING_PRIOR[t.id] || 0);
+      out.push({ id: t.id, name: t.name, label: t.label, midi: t.midi, capo, perNote, unplayable, cost: perNote + prior + unCost * (unplayable / total) });
+    }
+  }
+  return out.sort((a, b) => a.cost - b.cost);
+}
+
+/** A tuning worth SUGGESTING over standard, or null.
+ *  Gated on pitches standard CAN'T play: at least `minUnplayable` notes (2) and `minShare` (0.5 %) of
+ *  them below its low E (or above its top fret). Fingering cost alone does not separate neighbouring
+ *  tunings — measured on the repo's GP corpus (tests/bench/tuning.mjs), a cost-only rule flagged 14 of
+ *  199 standard tracks (mostly as Open E), while standard music, by definition, has no unreachable
+ *  notes, so this gate cannot fire on it. Among the tunings that reach more of the notes, the cheapest
+ *  to finger wins (`margin` per note over standard, default 0). Returns the winning row of
+ *  rankGuitarTunings plus `standard` (its row) and `margin`; the UI suggests, never applies.
+ *  Honest limit: a full mix's bass notes also sit below E2 — the suggestion says why, the user decides. */
+function suggestGuitarTuning(score, opts = {}) {
+  const ranked = rankGuitarTunings(score, opts);
+  if (!ranked.length) return null;
+  const std = ranked.find((r) => r.id === "standard" && !r.capo);
+  if (!std) return null;
+  const total = score.bars.reduce((a, b) => a + (b.events || []).reduce((x, e) => x + ((e.midis && e.midis.length) || 0), 0), 0);
+  const minN = opts.minUnplayable != null ? opts.minUnplayable : 2, minShare = opts.minShare != null ? opts.minShare : 0.005;
+  if (std.unplayable < minN || std.unplayable < minShare * Math.min(total, opts.maxEvents != null ? opts.maxEvents * 6 : total)) return null;
+  const best = ranked.find((r) => r.unplayable < std.unplayable);
+  const margin = opts.margin != null ? opts.margin : 0;
+  if (!best || std.cost - best.cost < margin) return null;
+  return { ...best, standard: std, margin: std.cost - best.cost };
 }
 
 /* ---- AlphaTex export (scoreToAlphaTex) -----------------------------------------
@@ -4123,20 +4218,25 @@ const _ATEX_NOTE_TECH = { hammer: "h", slide: "sl", harmonic: "nh", palmMute: "p
 
 function scoreToAlphaTex(score, opts = {}) {
   if (!score || !score.bars) return "";
-  const tuning = opts.tuning || score.tuningMidi || TUNINGS[score.tuning] || TUNINGS.Standard;
+  const open = opts.tuning || score.tuningMidi || TUNINGS[score.tuning] || TUNINGS.Standard;
   // A GP percussion track tunes every "string" to 0 — its numbers are drum keys, not frets.
-  if (isPercussionTuning(tuning)) throw new Error("This is a drum/percussion track — it has no strings to write as tab.");
+  if (isPercussionTuning(open)) throw new Error("This is a drum/percussion track — it has no strings to write as tab.");
+  // A capo (opts.capo, else score.soundingCapo — set only where the pitches are SOUNDING, i.e. audio
+  // tabs) writes `\capo n` and frets relative to it; GP files keep their own convention (no capo here).
+  const capo = opts.capo != null ? opts.capo : (score.soundingCapo || 0);
+  const tuning = capoTuning(open, capo);
   // alphaTex string 1 = the highest string the instrument HAS (null slots are skipped).
   const keys = tuning.map((m, k) => (m == null ? -1 : k)).filter((k) => k >= 0);
   const atexString = (k) => keys.filter((x) => x > +k).length + 1;
-  const sc = opts.finger === false ? score : fingerScore(score, { tuning });
-  const refingered = opts.finger === false ? null : fingerScore(score, { tuning, overwrite: true });
+  const sc = opts.finger === false ? score : fingerScore(score, { tuning: open, capo });
+  const refingered = opts.finger === false ? null : fingerScore(score, { tuning: open, capo, overwrite: true });
   const L = [];
   if (opts.title) L.push(`\\title ${_atexStr(opts.title)}`);
   if (opts.composer) L.push(`\\artist ${_atexStr(opts.composer)}`);
   L.push(`\\track (${_atexStr(opts.trackName || "Guitar")})`);
   L.push(`  \\staff {${opts.notation === false ? "" : "score "}tabs}`);
-  L.push(`    \\tuning (${keys.slice().reverse().map((k) => _atexPitch(tuning[k])).join(" ")})`);
+  L.push(`    \\tuning (${keys.slice().reverse().map((k) => _atexPitch(open[k])).join(" ")})`);
+  if (capo) L.push(`    \\capo ${capo}`);
   let lastSig = null, dropped = 0;
   const barTempos = scoreBarTempos(sc, opts.tempo);
   sc.bars.forEach((bar, bi) => {
@@ -6314,7 +6414,16 @@ function nnlsChromagram(samples, sampleRate, opts = {}) {
  * chord tone in the bass. The treble template is the chord's pitch-class set (unit
  * norm); the bass "template" is one pitch class. C/E and Em share a bass but not a
  * treble, so the joint model separates them where the old post-hoc relabel could not. */
+/* Per-scale-degree template weights (opts.toneWeights = { root, third, fifth, seventh, color }, each
+ * default 1): the "guide tones" idea — a chord's 3rd and 7th say what it is, its perfect 5th says
+ * little. Roles by interval above the root: 0 root · 3/4 third · 7 fifth · 10/11 seventh · every
+ * other tone (2, 5 in sus, ♭5/♯5, 6, 9ths) colour. Absent → the uniform template, byte-identical. */
+const _toneWeight = (tw, iv) => {
+  const k = iv === 0 ? "root" : iv === 3 || iv === 4 ? "third" : iv === 7 ? "fifth" : iv === 10 || iv === 11 ? "seventh" : "color";
+  return tw[k] != null ? tw[k] : 1;
+};
 function chordStatesV2(opts = {}) {
+  const tw = opts.toneWeights || null;
   const states = [];
   const inv = opts.inversions !== false;
   const vocab = resolveChordVocabulary(opts.vocabulary, opts.sixNine);
@@ -6331,9 +6440,16 @@ function chordStatesV2(opts = {}) {
     const writeQ = vocab && vocab.writeAs[q.suffix] ? vocab.writeAs[q.suffix] : null;   // detected q, written writeQ
     for (let root = 0; root < 12; root++) {
       const vec = new Float64Array(12);
-      for (const iv of q.intervals) vec[(root + iv) % 12] = 1;
-      const nrm = Math.sqrt(q.intervals.length);
-      for (let p = 0; p < 12; p++) vec[p] /= nrm;
+      if (tw) {
+        let ss = 0;
+        for (const iv of q.intervals) { const w = _toneWeight(tw, iv); vec[(root + iv) % 12] = w; ss += w * w; }
+        const nrm = Math.sqrt(ss) || 1;
+        for (let p = 0; p < 12; p++) vec[p] /= nrm;
+      } else {
+        for (const iv of q.intervals) vec[(root + iv) % 12] = 1;
+        const nrm = Math.sqrt(q.intervals.length);
+        for (let p = 0; p < 12; p++) vec[p] /= nrm;
+      }
       for (const iv of invIv) states.push({ root, quality: q, writeQ, vec, bassPc: (root + iv) % 12, inversion: iv !== 0, showBass: iv !== 0 && (!shown || shown.indexOf(iv) >= 0) });
       /* Triads over a FOREIGN bass — D/C, F/G, Bb/C (the sus-dominant voicing), F#m/G.
        * Everywhere in pop/jazz comping, and unrepresentable as a chord-tone inversion.
@@ -9217,4 +9333,10 @@ export {
   scoresToMultipartMusicXML,
   scoresToMidi,
   partsZip,
+  GUITAR_TUNINGS,
+  GUITAR_TUNING_PRIOR,
+  guitarTuning,
+  capoTuning,
+  rankGuitarTunings,
+  suggestGuitarTuning,
 };

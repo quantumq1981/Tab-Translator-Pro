@@ -2047,6 +2047,13 @@ longer sends them.
 - **Stage D repetition smoothing (`repetition:true`) stays OPT-IN**: ~+1 sevenths but −1.0…−1.3
   seg on BOTH splits; its first, short-context version cost a 12-bar blues 6 points (bars
   sharing a groove but not a chord borrow each other's evidence).
+- **Guide-tone template weights do NOT help — measured 2026-10-26** (`opts.toneWeights`, opt-in,
+  absent = byte-identical). DEV, root / majmin / sevenths, baseline 77.8 / 79.5 / 73.6: 3rd+7th ×1.2 &
+  5th ×0.7 → 67.5 / 69.2 / 63.3; 5th ×0.7 alone → 70.6; 3rd+7th ×1.2 → 75.6; 7th ×1.25 → 76.1 (sevenths
+  −3.4); root ×1.2 → 75.6; colour ×0.8 → 77.4. The other direction, 5th ×1.15, won +0.4 root on dev and
+  LOST −0.4 on the held-out half (76.3 → 75.9). The perfect 5th is the most robust spectral evidence (the
+  root's 3rd harmonic reinforces it) and it is what separates C from Em/Am; the 3rd and 7th are where the
+  audio is noisiest. Uniform stays. Re-check only on real recordings (`docs/CALIBRATION-AUDIO.md` S4).
 - Chordino's spectral **whitening** cost 6–8 majmin here (default off, `whitenBins`); its
   **phase tuning estimator** had a −11¢ bias from the linear→log fold (replaced); a
   **frame-grid** (beatless) decoder lost ~1 point to the subdivided beat grid; Ellis **TPS2/
@@ -2897,6 +2904,36 @@ wrote a tab it could not show. Now it shows it: **notation + tablature, with pla
   view draws (12 bars, E♭ major signature on the E♭ track).
 - **Device check remaining:** first view + playback on a real iPad/iPhone (Safari audio unlock, memory on a
   long score). Not built: print/PDF of the tab (alphaTab's `print()` opens a popup — iOS-hostile).
+
+### Guitar → Tab: alternate tunings + capo (2026-10-26)
+
+From the review of an outside "altered chord matrix" spec (`docs/` not kept; verdict in the PR): its
+tuning table was the one idea the tab path lacked. Guitar → Tab used to finger every take in standard
+tuning with no capo.
+
+- **Engine (pure, tested):** `GUITAR_TUNINGS` (10 presets: standard, half/whole step down, Drop D/C#/C,
+  DADGAD, open G/D/E; ids + labels + open-string MIDI low→high) — kept SEPARATE from `TUNINGS`, which
+  names imported files' tunings (`_tuningName`); new names there would rename pinned outputs.
+  `capoTuning(t, n)`. `fingerScore(score, { tuning, capo })` fingers on tuning + capo with frets written
+  relative to the capo (falls back to `score.soundingCapo`). `scoreToAlphaTex` writes the OPEN tuning +
+  `\capo n` and checks frets against tuning + capo — alphaTab's own convention (verified: `\capo 2`,
+  fret 0 on low E → realValue 42). **`soundingCapo`** marks a chart whose `midis` are SOUNDING pitches
+  (audio tabs); GP imports never get it (their `midi = tuning + fret` ignores `score.capo`, pinned), so
+  no GP tab gains a `\capo` line.
+- **Detector:** `rankGuitarTunings(score)` = per-note `fingerSequence` cost + a prevalence prior
+  (`GUITAR_TUNING_PRIOR`: Drop D over DADGAD) + 40 × the share of notes the tuning can't reach.
+  `suggestGuitarTuning` fires ONLY when standard can't reach ≥ 2 notes (≥ 0.5 %). A cost-only rule
+  was measured first and flagged 14/199 standard parts (mostly as Open E) — don't go back to it.
+- **Measured (`tests/bench/tuning.mjs`, GP corpus):** fingering a non-standard part in its real tuning
+  puts **62.6 %** of notes on the written string vs **43.8 %** in standard (18 tracks, 10,559 notes).
+  Detector: **0/192** standard parts flagged; **12/18** others named (dev 4/4, test 8/14) — every miss is
+  a part that never goes below standard's low E (pitch alone can't see that tuning). 26 ms for 4,000 events.
+- **UI (`AudioImport`):** tuning `<select>` + capo −/+ above the 🎸 tab chart; the chart is fingered,
+  labelled (`tuning`, `capo` → CSMPN `Tuning:`/`Capo:`, AlphaTex `\tuning`/`\capo`, meta line) on them;
+  a dashed suggestion line ("N notes sit below standard's low E — sounds like Drop D · Use Drop D") —
+  suggested, never applied (a full mix's bass also sits below E2).
+- **Honest limit:** tuning detection from audio (open-string resonance) is not built; recordings for it
+  are specified in `docs/CALIBRATION-AUDIO.md` (S3).
 
 ## Chord-voicing modal — guitar diagrams for lead-sheet chords (2026-10-24)
 
