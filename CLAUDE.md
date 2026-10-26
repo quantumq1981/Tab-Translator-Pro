@@ -1986,9 +1986,9 @@ shifts every bar in the chart.
 chroma), not DSP heuristics, and that is why. If downbeats are wanted, that is the route —
 along the same seam as the `basic-pitch` note model. Do not bolt a phase-guesser onto the
 beat tracker.
-**Candidate found (2026-10-25):** `beat_this` (CPJKU, **MIT code + weights**), the tracker Muscriptor
-v0.4.0 uses. Measured on synthetic GP renders, it beats `detectBeats` without drums but not with them,
-and it gives downbeats. Not shipped yet; see "Muscriptor v0.4.0 review" below.
+**Shipped (2026-10-25) as the learned route:** `beat_this` (CPJKU, **MIT code + weights**), the tracker
+Muscriptor v0.4.0 uses — the on-demand **🥁 Find bar 1 (ML)** in Tempo & bars. Passed the real-audio gate
+on GuitarSet's held-out solos (beat F 46.9 → 75.6, downbeat F 54.1). See "Beat grid, tempo map, …" below.
 
 **Honest limits.** This does not rescue a dense full mix — the Wagner prelude labels 96%
 of its duration but the vocabulary histogram still reads like mush being force-named.
@@ -2980,7 +2980,8 @@ Full write-up: **`docs/MUSCRIPTOR-REVIEW.md`**. Bench: `tests/bench/beatthis/`.
   post-processing (auto grid/triplet choice, tempo map in MIDI/MusicXML/playback) → P5 stereo-split
   check-by-ear playback → P4 "⬇ All parts (zip)" from `chartsFromStems` (STORED zip + CRC32, no dep) →
   P1 `beat_this` behind the real-audio gate, as a fallback-safe second tracker → P6 import Muscriptor
-  zips + add SMF import (**P6 built 2026-10-25** — next section).
+  zips + add SMF import (**P6 built 2026-10-25** — next section; **P1–P5 built the same day** — "Beat grid,
+  tempo map, …" below).
 
 ## Muscriptor zip + MIDI import, Harmony reading, key spelling (2026-10-25, built)
 
@@ -3019,6 +3020,79 @@ score.musicxml, STORED like Muscriptor; PDFs dropped). E2E: `tests/bench/muscrip
   (`_exportKeyName`). **Parsers keep the family table**, so every pinned importer output is unchanged —
   this bends the "always C#" rule only on screen and in exports, by the owner's decision.
 - Found, not fixed (pre-existing): at 390 px the mode-tab row (Manual … Tuner) is wider than the screen.
+
+## Beat grid, tempo map, learned downbeats, check by ear, All parts (2026-10-25, built — Muscriptor P1–P5)
+
+Every chart made from one recording (chord chart, Voices (ML), Guitar → Tab, every stem chart) now sits
+on ONE beat grid instead of a fixed ♩= laid from t = 0. Engine (pure, headless-tested); UI glue in
+`TabDecoderPro.tsx`. Benches: `tests/bench/beatgrid.mjs`, `tests/bench/beatthis/`, `tempo-e2e.mjs`,
+`parts-e2e.mjs`.
+
+- **P2 — Muscriptor's grid post-processing, ported** (MIT, `utils/beats.py` + `utils/midi.py`):
+  `fitTempo` (least squares), `regularizedBeats`, `smoothedBeats` (Savitzky–Golay quadratic, 9),
+  `rescaledBeats` (×2/÷2 keeping the bar phase), `inferBeatsPerBar` (90 % agreement or null),
+  `estimateOnsetDelay` (circular mean over subdivisions 1…24 → lag + straight/triplet grid),
+  `makeBeatGrid` / `resolveBeatGrid` (the user's corrections), the timeline (`timelineSimplified` = fewest
+  tempo changes within the tolerance, on bar lines; `timelineTempoChanges`; `timelineForGrid`),
+  `quantizeBeatNotes` (strength), `fillBeatNoteGaps`, `leadingEmptyBeats`. **Equal to Muscriptor's own
+  Python to float noise** on 14 seeded cases (`tests/fixtures/beatgrid-parity.json`, written by
+  `scripts/beatgrid_parity.py` from v0.4.0's functions).
+- **`audioBeatTimeline(beats, timing, { downbeats, beatsPerBar, firstSound, tolerance })`** is the one
+  call the UI makes. `audioEventsToScore(events, { timeline, quantize, trimLeadingBars })` and
+  `polyNotesToScore(…, { onsetDelay })` lay a score on it; the score carries `timeline`, `tempoMap`
+  ([{ bar, beat, bpm }], null when steady), an exact `tempo` and `audioOffset` (recording seconds at bar 1).
+  **Without `opts.timeline` the old fixed-♩= placement is unchanged** (pinned by the existing tests).
+- **The tempo map reaches everything**: `scoreBarTempos` → `scoreEventTimes` (playback), `scoreToMidi`
+  (tempo metas; exact tempo for timeline charts), `scoreToMusicXML` (`<sound tempo>` per change),
+  `scoreToABC` (`[Q:]`), `scoreToAlphaTex` (`\tempo`), `scoreToCSMPN` (`Tempo Map: 1=117.6 9=119.2 …`,
+  read by Chord Sheet Maker Pro), `applySectionsToScore` (seconds → bars via the timeline). Changes sit on
+  bar lines, so a per-bar tempo is exact. ♩= still scales a mapped chart in proportion.
+- **Measured (GuitarSet, 200 tracks, ±70 ms; GuitarSet starts every take on a beat, which flatters the old
+  t = 0 grid):** beat F fixed ♩= 38.9 → timeline **41.9**, tracker ceiling 42.2; ×2/÷2 recovers up to 58.3
+  (our tracker reads ~30 % of tracks at half/double speed). **Tempo-map tolerance:** Muscriptor's 25 ms for
+  beat_this; **50 ms for our DSP tracker** (its jitter otherwise becomes 8 tempo changes per 30 s take; 50 ms
+  → 4.4 for −0.6 F). One fixed tempo scores 36.6, so "follow" stays the default when not steady.
+- **P3 — Tempo & bars panel** (`useBeatGrid` + `TempoBarsPanel`; single-file panel AND stems panel): Follow
+  the performance / One fixed tempo, ♩= ±1, ÷2 / ×2, meter 2–7/4, bar line ◀ beat / beat ▶ / **Bar 1 here**
+  (at the playhead), back to detected. Bar 1 = the bar the first chord/note sounds in (`firstSound`), shared
+  by every chart from that recording, so bar numbers agree. Vocal-score export keeps one ♩ but starts at
+  the grid's bar 1.
+- **P1 — beat_this (learned beats + DOWNBEATS)**, on demand: `beat-model.js` → `beat-worker.js` →
+  `beat-model-core.js`, the guitar CRNN's rails (pinned ORT 1.23.2 plain WASM, `capWasmMemory`, one thread,
+  Cache API + SHA-256, worker ended after each job). Model: official `final0.ckpt` (SHA-256 `8c328b45…8331`;
+  the official host is blocked, so taken from two byte-identical independent HF re-uploads) →
+  `scripts/beatthis_export.py`: fp32 ONNX, **dynamic time axis** (= PyTorch to 2.2e-6 at 1500/1129/64 frames)
+  → weight-only int8 **22.5 MB** (548/557 beats within one frame of PyTorch). The log-mel is in JS
+  (`beatThisLogMel`, = torchaudio to 1.5e-4, `tests/fixtures/beatthis-features.json`); windows /
+  aggregation / peaks ported (`beatThisChunks`, `beatThisAggregate`, `beatThisPeaks`,
+  `trackBeatsWithModel`). Runs on the ORIGINAL-rate mono audio resampled to 22.05 kHz (its mels reach 11 kHz).
+  - **Pad short pieces (default `padShort: true`)**: beat_this was TRAINED with sub-30 s pieces padded to
+    30 s, but its own inference runs them as a short window. Padding: solo beat F 69.6 → 75.9, tempo Acc1
+    59.5 → 81 % (42 solos) — equal to a padded fp32 reference (76.0). Don't remove it.
+  - **Real-audio gate (GuitarSet SOLO takes — beat_this trained only on the comping takes, so solos are held
+    out), 44 tracks:** beat F built-in 46.9 → **75.6**, tempo Acc1 75 → **80 %**, downbeat F **54.1** (none
+    before). Comping takes read 99.6 but are training data — don't quote them. Meter inference (90 %
+    agreement) rarely fires on solos → falls back to the meter picker. Speed: ~0.5× real time single-thread
+    WASM (Node, 4-core container; ~2 min per 4-min song); app run: 17 s for a 30 s take.
+  - Browser-verified (`tempo-e2e.mjs`): loads only `beat-model.js`, `beat-worker.js`, `beat-model-core.js`, the
+    model and ORT 1.23.2's three files.
+- **P5 — 🎧 Check by ear** (`CheckByEar`, Muscriptor's stereo split): recording hard left, chart synth hard
+  right (stereo source halved, as Muscriptor), or Mix with a balance slider; the chart plays on the
+  recording's clock (`scoreRecordingTimes` = chart time + `audioOffset`), so it follows the tempo map. On the
+  chord chart, Voices (ML) and Guitar → Tab. ChartPanel's reference-audio highlight now honours `audioOffset`.
+- **P4 — ⬇ All parts (zip)** (stems panel; `partsZip`, `zipStore` STORED + `crc32`, `scoresToMultipartMusicXML`,
+  `scoresToMidi` format 1): per part `NN_<part>.musicxml / .mid / .csmpn`, `.alphatex` for guitar/other
+  (standard) and bass (4-string), plus `full_score.musicxml` and `score.mid` (conductor + named tracks, drums
+  ch. 10). Our own zip reader and MusicXML parser read it back (tested). **→ Chord Sheet Maker Pro (all
+  parts)**: the `csm:handoff:v1` envelope with the band chart as `formats` + optional `parts[]` (one CSMPN
+  per pitched part); CSMP files each part in its library (`handoffParts.js` there). Browser-verified across
+  both apps on one origin (`parts-e2e.mjs`).
+
+**Honest limits:** the built-in tracker is the ceiling without the model (~42–47 beat F on real guitar);
+beat_this is on demand (22.5 MB) and only downbeat-tested on guitar takes — full mixes with drums were only
+measured synthetically (where our tracker won on beats); WebKit speed/memory unmeasured (device check).
+The vocal score stays one-tempo. `parts[]` is documented in both repos; the canonical
+`chord-sheet-maker/docs/HANDOFF-CONTRACT.md` (third repo, not in this session) still needs the same note.
 
 ## Path B (scans / photos) — OUT OF SCOPE
 
@@ -3208,6 +3282,17 @@ accordingly.
   triad, shell and as-written groups, finger assignment (F barre, open C, 5-finger rejection), the svguitar
   payload, substitutions (incl. the 6-chord case), the ≥ 12-shapes coverage of chords.json, the pinned
   svguitar file + licences, and the UI/pages wiring. Rendering: `tests/bench/voicings-e2e.mjs`.
+- **Beat grid / beat_this / All parts** (`npm test`): the port equals Muscriptor v0.4's Python on 14
+  seeded cases; regularise / fit / smooth / ×2÷2 / meter / onset-delay (straight 8ths +20 ms, triplets,
+  scattered → null) unit cases; a steady grid puts a bar line on the first beat, an accelerando gives an
+  on-bar-line tempo map with every beat within 25 ms; corrections (×2, fixed, typed ♩=, bar line); scores on
+  the timeline (chords start their bars, `audioOffset`, lead-in trimmed, old fixed-♩= path unchanged);
+  playback within 26 ms of the recording through a tempo map; the map in MIDI / MusicXML / ABC / AlphaTex /
+  CSMPN; sections via the timeline; onset delay on ML notes; beat_this log-mel = torchaudio (fixture),
+  split_piece starts, window stitching, peaks, short-piece padding; `zipStore` read back + CRC-32;
+  `partsZip` file list, a well-formed multi-part `full_score.musicxml` that re-imports, format-1
+  `score.mid` with the kick on ch. 10; `scoreRecordingTimes`; the beat model's SHA-256 pin = the committed
+  file, NOTICE, glue / worker / loader / pages.yml contracts, and the UI wiring.
 - **Lyrics import (`parseLyrics`)**: `npm test` asserts the strict chord matcher accepts
   real chords and rejects note-letter lyric words (Add/Cab/Bad/Fed/Gem/Bee/Ace), the
   line-level `isChordLine` catches chord lines but spares lyric/blank lines, a full

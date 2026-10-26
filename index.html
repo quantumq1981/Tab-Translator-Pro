@@ -45,6 +45,12 @@
   -->
   <script type="module" src="./guitar-model.js"></script>
   <!--
+    Optional learned beat + downbeat tracker ("Tempo & bars" → 🥁 Find bar 1 (ML)): beat_this
+    (CPJKU, MIT) as a 22.5 MB same-origin ONNX model on the same pinned runtime, in a module Worker
+    that imports this page's engine. Nothing is fetched until the button is pressed. See beat-model.js.
+  -->
+  <script type="module" src="./beat-model.js"></script>
+  <!--
     Tab viewer (ChartPanel's "Tab" view + opening a saved .alphatex): alphaTab 1.8.4 (MPL-2.0),
     vendored same-origin in vendor/alphatab-1.8.4/ so its render worker and audio worklet load.
     Nothing is fetched until a tab is first shown. See tab-view.js.

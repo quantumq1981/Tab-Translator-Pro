@@ -1,0 +1,41 @@
+beat_this_final0.w8.onnx — learned beat + downbeat tracker, converted for in-browser inference.
+Log-mel spectrogram in ([1, frames ≤ 1500, 128]: 22.05 kHz, 50 frames/s, 128 Slaney mels 30 Hz–11 kHz,
+log1p(1000·x)); beat and downbeat logits out ([1, frames]). The spectrogram is computed outside the graph
+(engine.tsx beatThisLogMel, held to beat_this's own LogMelSpect by tests/fixtures/beatthis-features.json).
+
+Model:          beat_this "final0" — Francesco Foscarin, Jan Schlüter, Gerhard Widmer, "Beat this! Accurate
+                beat tracking without DBN postprocessing" (ISMIR 2024, arXiv:2407.21658);
+                code https://github.com/CPJKU/beat_this (commit b95c8ab0c58c2d9fcfd40508ae8dffbc05ac4f5c).
+Weights:        final0.ckpt, 81,058,141 bytes, SHA-256
+                8c328b45f59d8dd3dff219253ff6a8d6482be57d0133a29140e2febbf8eb8331. The official host
+                (cloud.cp.jku.at) was not reachable from the build environment; the file was taken from two
+                independent Hugging Face re-uploads (oulianov/beat_this, teamup-tech/Beat-This-weights),
+                which are byte-identical. License: MIT (code and published weights, per the README).
+Conversion:     scripts/beatthis_export.py — fp32 ONNX, opset 17, dynamic time axis (matches PyTorch to 2.2e-6
+                at 1500 / 1129 / 64 frames), then weight-only int8 (per-channel scale + DequantizeLinear;
+                activations stay fp32). On 12 GuitarSet recordings the int8 file puts 548 of 557 beats and
+                265 of 268 downbeats within one frame of PyTorch.
+
+This file:      SHA-256 3db6008b626c18ecbbb452e413bcda8b833645fcddcf6f3f0f8a0e882dba2981
+
+MIT License
+
+Copyright (c) 2024 Institute of Computational Perception, JKU Linz, Austria
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
