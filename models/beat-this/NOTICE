@@ -14,9 +14,10 @@ Weights:        final0.ckpt, 81,058,141 bytes, SHA-256
 Conversion:     scripts/beatthis_export.py — fp32 ONNX, opset 17, dynamic time axis (matches PyTorch to 2.2e-6
                 at 1500 / 1129 / 64 frames), then weight-only int8 (per-channel scale + DequantizeLinear;
                 activations stay fp32). On 12 GuitarSet recordings the int8 file puts 548 of 557 beats and
-                265 of 268 downbeats within one frame of PyTorch.
+                265 of 268 downbeats within one frame of PyTorch. The time-directed attentions are computed one
+                (batch × head) slice at a time (same weights and logits; about half the inference memory).
 
-This file:      SHA-256 3db6008b626c18ecbbb452e413bcda8b833645fcddcf6f3f0f8a0e882dba2981
+This file:      SHA-256 b3288b0eaac973763ee3fe06e7907630b5c00fee2276e299b991f55e90271892
 
 MIT License
 

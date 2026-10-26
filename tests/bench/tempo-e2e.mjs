@@ -1,5 +1,5 @@
 /* Tempo & bars end-to-end: the REAL app in headless Chromium, a real GuitarSet recording, the REAL
- * beat_this worker + 22.5 MB model + ONNX Runtime Web 1.23.2 (jsDelivr) — no stubs. Dev-only.
+ * beat_this worker + 24.1 MB model + ONNX Runtime Web 1.23.2 (jsDelivr) — no stubs. Dev-only.
  *
  *   node bench/tempo-e2e.mjs --deps <dir> --gs <dir with <track>.wav + .json> [--track 05_SS3-98-C_solo] [--shot out.png]
  *

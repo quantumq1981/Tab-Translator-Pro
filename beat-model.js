@@ -3,7 +3,7 @@
  * → Promise<{ beats, downbeats }> (seconds) for the Audio panel's "Tempo & bars".
  *
  * The learned beat + downbeat tracker beat_this (CPJKU, MIT; final0, converted with
- * scripts/beatthis_export.py). Loaded at boot but does nothing until called: the 22.5 MB
+ * scripts/beatthis_export.py). Loaded at boot but does nothing until called: the 24.1 MB
  * model and ONNX Runtime are fetched on first use only. Runs in a module Worker
  * (beat-worker.js) that imports the app's own transpiled engine
  * (window.__TTP_ENGINE_URL__), so the spectrogram, windows and peak picking are the SAME

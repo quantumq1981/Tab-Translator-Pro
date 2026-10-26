@@ -7,9 +7,12 @@
  * Model: the official final0 checkpoint (SHA-256 8c328b45…8331, two independent HF
  * re-uploads byte-identical), converted with scripts/beatthis_export.py: fp32 ONNX with a
  * dynamic time axis (matches PyTorch to 2e-6 at 1500, 1129 and 64 frames) → weight-only
- * int8 (per-channel, DequantizeLinear; activations fp32) = 22.5 MB, same-origin,
+ * int8 (per-channel, DequantizeLinear; activations fp32) = 24.1 MB, same-origin,
  * SHA-256 pinned, Cache-API cached. Input: log-mel [1, frames ≤ 1500, 128];
- * output: beat and downbeat logits [1, frames].
+ * output: beat and downbeat logits [1, frames]. Its time attention is computed one (batch ×
+ * head) slice at a time (beatthis_export.py step 0): one 30 s window needs ~500 MB of WASM memory
+ * instead of ~1 GB, with the same logits — the full window keeps the accuracy (shorter windows cost
+ * 6–8 beat-F points on GuitarSet solos).
  *
  * Runtime: the SAME pinned ONNX Runtime Web build and iOS rails as the stem separator and
  * the guitar CRNN (imported from stem-model-core.js): plain WASM 1.23.2 (ORT ≥ 1.24 breaks
@@ -22,7 +25,7 @@ const stemCore = () => _stemCore || (_stemCore = import(/* @vite-ignore */ STEM_
 
 export const BEAT_MODEL = {
   url: new URL("./models/beat-this/beat_this_final0.w8.onnx", import.meta.url).href,
-  sha256: "3db6008b626c18ecbbb452e413bcda8b833645fcddcf6f3f0f8a0e882dba2981",
+  sha256: "b3288b0eaac973763ee3fe06e7907630b5c00fee2276e299b991f55e90271892",
   sampleRate: 22050,
   mels: 128,
 };

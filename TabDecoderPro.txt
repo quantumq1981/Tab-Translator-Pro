@@ -2579,7 +2579,7 @@ function useBeatGrid(tracked, firstSound) {
   const setMeter = (n) => { setBpb(n); setTiming((t) => ({ ...t, beatsPerBar: n })); };
   const bumpTempo = (d) => setTiming((t) => ({ ...t, bpm: Math.max(40, Math.min(240, Math.round(grid.bpm) + d)), tempoMap: false }));
   /* The learned tracker on the ORIGINAL-rate mono audio (beat_this wants 22.05 kHz, and its mels run to
-   * 11 kHz — the 16 kHz analysis copy would starve its top band). Lazy: 22.5 MB on first use. */
+   * 11 kHz — the 16 kHz analysis copy would starve its top band). Lazy: 24.1 MB on first use. */
   const findBars = async (mono, sampleRate) => {
     const model = typeof window !== "undefined" ? window.TTP_BEAT_MODEL : null;
     if (typeof model !== "function") { setErr("The beat model (beat-model.js) isn't loaded on this build."); return; }

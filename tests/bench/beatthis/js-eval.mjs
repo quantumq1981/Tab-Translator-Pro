@@ -4,7 +4,7 @@
  * `bench/beatgrid.mjs <gs dir> --learned <out>`, and reports speed + memory. Dev-only.
  *
  *   node bench/beatthis/js-eval.mjs <22.05 kHz wav dir> <out dir> --ort <dir with onnxruntime-web@1.23.2> [--model m.onnx]
- *        [--match solo] [--every N] [--limit N] [--no-pad]   (single-thread WASM is ~0.5× real time: subsample for a quick read)
+ *        [--match solo] [--every N] [--limit N] [--no-pad] [--chunk frames]   (single-thread WASM is ~0.5× real time: subsample for a quick read)
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -41,7 +41,7 @@ for (const f of files) {
   const { sr, x } = readWav(path.join(inDir, f));
   const pcm = sr === 22050 ? x : eng.resampleTo(x, sr, 22050);
   const t0 = performance.now();
-  const r = await eng.trackBeatsWithModel(pcm, model, { padShort: !argv.includes("--no-pad") });
+  const r = await eng.trackBeatsWithModel(pcm, model, { padShort: !argv.includes("--no-pad"), chunk: +(flag("--chunk") || 0) || undefined });
   secRun += (performance.now() - t0) / 1000; secAudio += pcm.length / 22050;
   peak = Math.max(peak, process.memoryUsage().rss);
   fs.writeFileSync(path.join(outDir, f.replace(/\.wav$/, ".beats.json")), JSON.stringify(r));
