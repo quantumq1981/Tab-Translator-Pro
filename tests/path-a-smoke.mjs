@@ -3245,7 +3245,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   expect(/window\.__TTP_ENGINE_URL__/.test(gm) && /import\(\/\* @vite-ignore \*\/ engineUrl\)/.test(gw) && /transcribeGuitarPcm/.test(gw), "the worker runs the page's own engine (one engine, no copy)");
   expect(/<script type="module" src="\.\/guitar-model\.js"><\/script>/.test(html), "index.html loads guitar-model.js");
   expect(/cp guitar-model\.js guitar-model-core\.js guitar-worker\.js _site\//.test(pages) && /cp models\/guitar-crnn\/guitar-gaps\.w8\.onnx models\/guitar-crnn\/NOTICE _site\/models\/guitar-crnn\//.test(pages) && /guitar-model\.js\?v=\$\{BUILD\}/.test(pages), "Pages ships the guitar glue + model, deploy-stamped");
-  expect(/window\.TTP_GUITAR_MODEL/.test(ui) && /fingerScore\(polyNotesToScore\(gtrNotes/.test(ui) && /🎸 Guitar → Tab \(ML\)/.test(ui), "the Audio panel's 🎸 Guitar → Tab button runs the model and fingers the notes");
+  expect(/window\.TTP_GUITAR_MODEL/.test(ui) && /polyNotesToScore\(gtrNotes, noteGridOpts/.test(ui) && /fingerScore\(gtrPoly, /.test(ui) && /🎸 Guitar → Tab \(ML\)/.test(ui), "the Audio panel's 🎸 Guitar → Tab button runs the model and fingers the notes");
   expect(/\["alphatex", "AlphaTex \(tab\)"\]/.test(ui) && /scoreToAlphaTex\(tabScore/.test(ui) && /alphatex: "alphatex"/.test(ui), "ChartPanel exports AlphaTex (tab)");
   // the tab chart must not auto-Simplify (a guitar line is "melodic" → one chord per bar → notes lost
   // from the AlphaTex export: the real-app run exported 87 of 117 notes before this) nor share the
@@ -3684,6 +3684,80 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
     && /timeline: tl, beatsPerBar: bpb, quantize: \{ step: 0\.5 \}/.test(uiSrc2) && /noteGridOpts\(bg, gtrNotes, useSharp\)/.test(uiSrc2) && /bg\.findBars\(monoOf\(b\), b\.sampleRate\)/.test(uiSrc2)
     && /createStereoPanner/.test(uiSrc2) && /scoreRecordingTimes\(score\)/.test(uiSrc2) && /partsZip\(parts, \{ title: base, tempo: bpm, key: stemKey, useSharp \}\)/.test(uiSrc2) && /sendPartsToPro/.test(uiSrc2) && /parts: parts\.map\(\(p\) => \(\{ name: p\.name, role: p\.role/.test(uiSrc2) && /timelineBarAt\(tl, sec, bpb\)/.test(uiSrc2),
     "UI: one beat grid (useBeatGrid → audioBeatTimeline) under every audio chart, Tempo & bars, 🥁 Find bar 1 on the original-rate audio, 🎧 Check by ear (StereoPanner, recording clock), ⬇ All parts, sections on the timeline");
+}
+
+/* ---- Guitar → Tab: alternate tunings + capo (2026-10-26) ------------------------------
+ * GUITAR_TUNINGS + capoTuning + capo-aware fingerScore / scoreToAlphaTex + suggestGuitarTuning.
+ * Measured by bench/tuning.mjs (GP corpus): fingering in the real tuning 62.6 % of notes on the
+ * written string vs 43.8 % in standard; the detector flags 0/192 standard parts, names 12/18 others. */
+{
+  const T = eng.GUITAR_TUNINGS;
+  expect(T.length >= 10 && T.every((t) => t.midi.length === 6 && t.midi.every((m, i) => !i || m > t.midi[i - 1])) && new Set(T.map((t) => t.id)).size === T.length,
+    "GUITAR_TUNINGS: unique ids, six strings each, low → high");
+  expect(eng.guitarTuning("standard").midi.join() === eng.TUNINGS.Standard.join() && eng.guitarTuning("dropD").midi.join() === eng.TUNINGS["Drop D"].join()
+    && eng.guitarTuning("halfDown").midi.join() === "39,44,49,54,58,63" && eng.guitarTuning("nope").id === "standard", "presets agree with TUNINGS; an unknown id falls back to standard");
+  expect(eng.capoTuning([40, 45, null], 2).join() === "42,47," && eng.capoTuning(eng.TUNINGS.Standard, 0) === eng.TUNINGS.Standard, "capoTuning raises every present string; capo 0 is the same array");
+  // a sounding-pitch chart (what Guitar → Tab produces), fingered on Eb and with a capo
+  const notes = [[39, 46, 51], [44, 51, 56], [51, 55, 58, 63], [42, 49, 54], [63], [66], [68], [70], [63, 58]];
+  const sc = eng.audioEventsToScore(notes.map((m, i) => ({ symbol: "—", midis: m, startSec: i * 0.5, durSec: 0.5 })), { bpm: 120, beatsPerBar: 4 });
+  const frozen = JSON.stringify(sc);
+  const eb = eng.guitarTuning("halfDown").midi;
+  const fEb = eng.fingerScore(sc, { tuning: eb });
+  const evs = (s) => s.bars.flatMap((b) => b.events).filter((e) => e.midis && e.midis.length);
+  expect(JSON.stringify(sc) === frozen, "fingerScore with a tuning/capo never mutates its input");
+  expect(evs(fEb).every((e) => Object.keys(e.frets).length === e.midis.length && Object.entries(e.frets).every(([k, f]) => e.midis.includes(eb[+k] + f))), "every note fingered on E♭ tuning reconstructs its pitch (tuning + fret)");
+  expect(evs(fEb)[0].frets[0] === 0, "E♭2 — unplayable in standard — is the open low string in half-step-down");
+  const fCapo = eng.fingerScore(sc, { tuning: eng.TUNINGS.Standard.map((m) => m - 3), capo: 2 });
+  expect(evs(fCapo).every((e) => Object.entries(e.frets).every(([k, f]) => f >= 0 && e.midis.includes(eng.TUNINGS.Standard[+k] - 3 + 2 + f))), "with a capo, frets are relative to it: sounding = tuning + capo + fret, never below 0");
+  const viaScore = eng.fingerScore({ ...sc, tuningMidi: eb.map((m) => m - 2), soundingCapo: 2 });
+  expect(evs(viaScore).every((e) => Object.entries(e.frets).every(([k, f]) => e.midis.includes(eb[+k] - 2 + 2 + f))), "fingerScore reads score.soundingCapo when no opts.capo is given");
+  // AlphaTex: \tuning is the OPEN tuning, \capo n, and alphaTab sounds exactly the chart's pitches
+  const alphaTab = await import("@coderline/alphatab");
+  const readTex = (tex) => { const imp = new alphaTab.importer.AlphaTexImporter(); imp.initFromString(tex, new alphaTab.Settings()); return { s: imp.readScore(), w: (imp.diagnostics?.items || []).length }; };
+  const want = notes.flat().sort((a, b) => a - b).join();
+  for (const [label, score] of [["E♭", { ...sc, tuningMidi: eb }], ["standard + capo 3", { ...sc, tuningMidi: eng.TUNINGS.Standard.map((m) => m - 4), soundingCapo: 3 }]]) {
+    const tex = eng.scoreToAlphaTex(score);
+    const { s, w } = readTex(tex);
+    const st = s.tracks[0].staves[0];
+    const got = st.bars.flatMap((b) => b.voices.flatMap((v) => v.beats.flatMap((bt) => bt.notes.map((n) => n.realValue)))).sort((a, b) => a - b).join();
+    expect(w === 0 && got === want, `AlphaTex (${label}): alphaTab parses it cleanly and sounds exactly the chart's pitches (got ${got})`);
+    if (score.soundingCapo) expect(/\\capo 3/.test(tex) && st.capo === 3 && st.tuning.join() === score.tuningMidi.slice().reverse().join(), "AlphaTex writes \\capo and the OPEN tuning (alphaTab adds the capo)");
+  }
+  const gpTex = eng.scoreToAlphaTex(eng.parseGP345(new Uint8Array(fs.readFileSync(path.join(repo, "Guns N' Roses - Sweet Child O' Mine.gp5"))), true, 2));
+  expect(!/\\capo/.test(gpTex), "an imported GP part never gains a \\capo line (only sounding-pitch charts carry soundingCapo)");
+  // the detector: suggests only when standard can't reach the notes
+  const riff = (ms) => eng.audioEventsToScore(ms.map((m, i) => ({ symbol: "—", midis: m, startSec: i * 0.5, durSec: 0.5 })), { bpm: 120, beatsPerBar: 4 });
+  const stdRiff = riff([[40, 47, 52], [45, 52, 57], [43, 50, 55], [40, 47, 52], [64], [67], [69], [40, 47]]);
+  expect(eng.suggestGuitarTuning(stdRiff) === null, "a standard-range riff gets no suggestion");
+  // low D under open-position chords on the top strings: Drop D's signature (whole-step-down needs fretted tops)
+  const dropRiff = riff([[38, 45, 50], [38, 45, 50, 55, 59, 64], [38, 45, 50], [43, 50, 55, 59, 64], [38], [64], [59], [38, 45, 50, 57, 62, 66], [38]]);
+  const sD = eng.suggestGuitarTuning(dropRiff);
+  expect(sD && sD.id === "dropD" && sD.standard.unplayable >= 5, `low-D power chords suggest Drop D (got ${sD && sD.id}), naming how many notes standard can't reach`);
+  const ebRiff = riff([[39, 46, 51], [39, 46, 51], [44, 51, 56], [42, 49, 54], [39], [39], [46, 51], [39, 46]]);
+  const sE = eng.suggestGuitarTuning(ebRiff);
+  expect(sE && sE.id === "halfDown", `E♭ power chords suggest half step down (got ${sE && sE.id})`);
+  expect(eng.rankGuitarTunings(dropRiff).length === eng.GUITAR_TUNINGS.length && eng.suggestGuitarTuning({ bars: [] }) === null, "rankGuitarTunings ranks every preset; an empty chart is safe");
+  // UI wiring
+  const ui = fs.readFileSync(UI, "utf8");
+  expect(/GUITAR_TUNINGS,\n  guitarTuning,\n  suggestGuitarTuning,/.test(ui) && /fingerScore\(gtrPoly, \{ tuning: t\.midi, capo: gtrCapo \}\)/.test(ui) && /soundingCapo: gtrCapo/.test(ui)
+    && /GUITAR_TUNINGS\.map\(\(t\) => <option/.test(ui) && /setGtrCapo/.test(ui) && /suggestGuitarTuning\(polyNotesToScore\(gtrNotes/.test(ui) && /Use \{gtrSuggest\.name\}/.test(ui),
+    "UI: Guitar → Tab has a tuning picker + capo stepper, fingers on them, and offers (never applies) the suggestion");
+}
+
+/* ---- v2 guide-tone template weights: measured, NOT a default (2026-10-26) -------------
+ * opts.toneWeights reweights chordStatesV2's templates by scale degree. tests/bench (dev): every
+ * guide-tone setting lost (3rd/7th ×1.2 + 5th ×0.7: root 77.8 → 67.5); 5th ×1.15 won +0.4 root on dev
+ * but lost −0.4 on the held-out half. So absent = the uniform template, byte-identical. */
+{
+  const st0 = eng.chordStatesV2({}), st1 = eng.chordStatesV2({ toneWeights: { root: 1, third: 1, fifth: 1, seventh: 1, color: 1 } });
+  expect(st0.length === st1.length && st0.every((s, i) => s.vec.every((v, p) => v === st1[i].vec[p])), "toneWeights all 1 ≡ no toneWeights (bit-identical templates)");
+  const w = eng.chordStatesV2({ toneWeights: { third: 1.5, fifth: 0.5 } }).find((s) => s.root === 0 && s.quality.suffix === "maj7" && !s.inversion);
+  const n = Math.sqrt(1 + 1.5 * 1.5 + 0.25 + 1);
+  expect(w && Math.abs(w.vec[4] - 1.5 / n) < 1e-12 && Math.abs(w.vec[7] - 0.5 / n) < 1e-12 && Math.abs(w.vec[11] - 1 / n) < 1e-12, "toneWeights scale the 3rd / 5th / 7th of a template, L2-normalised");
+  const sr = 16000, tone = new Float32Array(sr * 4);
+  for (let i = 0; i < tone.length; i++) { const t = i / sr; for (const f of [130.81, 164.81, 196.0]) tone[i] += 0.2 * Math.sin(2 * Math.PI * f * t); }
+  const a = eng.transcribeChordsV2(tone, sr, {}), b = eng.transcribeChordsV2(tone, sr, { toneWeights: {} });
+  expect(JSON.stringify(a.events) === JSON.stringify(b.events), "transcribeChordsV2 with empty toneWeights decodes identically");
 }
 
 if (fails.length) {

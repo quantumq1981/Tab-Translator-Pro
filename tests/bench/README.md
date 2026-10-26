@@ -125,6 +125,31 @@ node bench/fingering.mjs --gs /tmp/gs_ex --sweep      # coordinate search on the
 node bench/fingering.mjs --gs /tmp/gs_ex --learn-prior --prior-parts cell,move   # regenerate FINGER_PRIOR
 ```
 
+### `tuning.mjs` — alternate tunings for Guitar → Tab
+
+Every GP track states its tuning. (1) For the non-standard 6-string guitar tracks, strip the
+fingering and re-finger the pitches in the real tuning vs in standard. (2) Run
+`suggestGuitarTuning` on every guitar track whose tuning is a `GUITAR_TUNINGS` preset (parts
+their own tuning can't play — keyboard/vocal tracks stored with a guitar tuning — are skipped).
+
+```sh
+node bench/tuning.mjs            # both questions, dev + test
+node bench/tuning.mjs --sweep    # detector margin on DEV
+```
+
+2026-10-26: real tuning **62.6 %** of notes on the written string vs **43.8 %** in standard
+(18 tracks, 10,559 notes). Detector: **0/192** standard parts flagged; **12/18** non-standard
+named correctly (dev 4/4, test 8/14) — every miss is a part that never goes below standard's
+low E, which pitch alone can't tell apart.
+
+`tuning-e2e.mjs` drives the real app (headless Chromium, `--deps` as in `scnet-e2e.mjs`) with a stub
+guitar model that returns a Drop-D riff: the suggestion appears, "Use Drop D" re-fingers the tab, the
+capo stepper writes `\capo`, and alphaTab sounds the riff's exact pitches in every state.
+
+```sh
+node bench/tuning-e2e.mjs --deps $D/out [--shot tab.png]
+```
+
 ### `guitarset.mjs` — real recorded guitar, with the string annotated
 
 GuitarSet (CC-BY 4.0, hexaphonic pickup → every note's string). Get it with
