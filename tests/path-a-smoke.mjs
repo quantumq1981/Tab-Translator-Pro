@@ -1499,6 +1499,8 @@ let synhSummary = "";
       "encodeWav16 writes a 16-bit stereo RIFF/WAVE header");
     expect(v.getUint32(40, true) === 16 && w.length === 60 && v.getInt16(44 + 2 * 2, true) === 16384 && v.getInt16(44 + 4 * 2, true) === -32768 && v.getInt16(44 + 7 * 2, true) === 32767,
       "samples are interleaved, scaled to 16 bits and clipped at ±1");
+    const w16 = eng.encodeWav16([Int16Array.from([0, 16384, -32768, 32767]), Int16Array.from([0, -16384, 32767, 32767])], 44100);
+    expect(w16.length === w.length && w16.every((x, i) => x === w[i]), "16-bit stem channels are written as they are (same bytes as the float stem they came from)");
   }
 
   synhSummary = `SynHarmonics v2: C G Am F ✓ · C/E vs Em ✓ · F#m/G + Bb/C ✓ · +35¢ read as ${tuneSharp.toFixed(0)}¢ · Bb 3rd-harmonic F suppressed · 15 kHz alias −40 dB+`;
@@ -2676,7 +2678,7 @@ expect(/mode === "lyrics" \? <LyricsPanel\b/.test(uiSrc), "the Lyrics mode rende
 
 /* SynHarmonics v2 UI glue — the decoder is the pure engine (tested above); the UI only
  * resamples properly, routes to the default (v2) entry point, and surfaces uncertainty. */
-expect(/resampleOffThread/.test(uiSrc) && /catch \(_\) \{ return resampleTo\(samples, srIn, srOut\); \}/.test(uiSrc),
+expect(/resampleOffThread/.test(uiSrc) && /catch \(e\) \{ if \(_detached\(samples\)\) throw e; return resampleTo\(samples, srIn, srOut\); \}/.test(uiSrc),
   "the decode resamples with the anti-aliased resampleTo (off-thread, main-thread fallback)");
 expect(!/const dsChan = \(d\) =>/.test(uiSrc), "the box-average decimator (aliasing) is gone from the decode path");
 expect(/function ChordReview\(/.test(uiSrc) && /<ChordReview\b/.test(uiSrc), "the Audio panel ships the uncertain-chord review strip (v2 §7 overlay)");
@@ -2708,10 +2710,16 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   expect(/<script type="module" src="\.\/stem-model\.js"><\/script>/.test(html), "index.html loads stem-model.js");
   expect(/cp stem-model\.js stem-model-core\.js stem-worker\.js _site\//.test(pages) && /cp vendor\/neural-separate\.mjs vendor\/NOTICE-neural-separate\.txt _site\/vendor\//.test(pages), "Pages ships the separator files");
   const sp = uiSrc.slice(uiSrc.indexOf("function StemsPanel("), uiSrc.indexOf("function ChordReview("));
-  expect(/<StemsPanel\b/.test(uiSrc) && /chartsFromStemsOffThread/.test(sp) && /catch \(_\) \{ return chartsFromStems\(stems, sr, opts\); \}/.test(uiSrc), "the Stems panel charts off-thread with a main-thread fallback");
+  expect(/<StemsPanel\b/.test(uiSrc) && /chartsFromStemsOffThread/.test(sp) && /if \(Object\.values\(stems\)\.some\(_detached\)\) throw e; return chartsFromStems\(stems, sr, opts\); \}/.test(uiSrc), "the Stems panel charts off-thread with a main-thread fallback (unless its buffers were already handed over)");
   expect(/<input type="file" multiple onChange=\{importStems\}/.test(sp) && !/<input type="file" multiple[^>]*accept=/.test(sp), "stem import takes several files and has NO accept filter (iOS UTI lesson)");
   expect(/stemRoleFromName\(f\.name\)/.test(sp) && /encodeWav16\(/.test(sp) && /drumHitsToMidi\(/.test(sp), "roles come from file names; every stem downloads as WAV; drums as MIDI");
-  expect(/fullRate: full\.drums/.test(sp), "drums are transcribed from the FULL-rate stem (hats live above the analysis Nyquist)");
+  expect(/fullRate: drumsFull \? \{ drums: drumsFull, sampleRate: sr \}/.test(sp), "drums are transcribed from the FULL-rate stem (hats live above the analysis Nyquist)");
+  // Memory (Adelaide on an iPhone: the tab was killed right as a 3½-minute split finished): one instrument's
+  // full-rate mono at a time, moved to the worker, not copied; stems played/saved straight from 16-bit.
+  expect(/stemMono\(t\.list\.filter\(\(x\) => x\.role === role\)\)/.test(sp) && /resampleOffThread\(mono, sr, asr, \{ transfer: role !== "drums" \}\)/.test(sp) && /\{ transfer: true \}\);/.test(sp) && !/const full = \{\}/.test(sp),
+    "the stems are charted one instrument at a time, each mono buffer moved to the worker (no copy of every stem at once)");
+  expect(/copyToChannel\(stemF32\(tr\.L\), 0\)/.test(sp) && /bg\.findBars\(stemMono\(tracks\.list\)/.test(sp), "playback and Find bar 1 read 16-bit stems (stemF32 / stemMono)");
+  expect(/postMessage\(\{ id, fn, args \}, transfer \|\| \[\]\)/.test(uiSrc) && /ArrayBuffer\.isView\(result\) \? \[result\.buffer\] : \[\]/.test(uiSrc), "the engine RPC moves buffers both ways (a typed-array result comes back without a copy)");
   const lc = uiSrc.slice(uiSrc.indexOf("function LiveCapture("), uiSrc.indexOf("function StemsPanel("));
   expect(/<LiveCapture\b/.test(uiSrc) && /md\.getDisplayMedia/.test(lc) && /md\.getUserMedia/.test(lc), "live capture offers tab audio (getDisplayMedia) and the microphone");
   expect(/const canTab = !!\(md && md\.getDisplayMedia\)/.test(lc) && /if \(!canTab && !canMic\) return null;/.test(lc), "capture is feature-detected (hidden where the browser can't do it)");
@@ -2791,6 +2799,17 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
     for (let c = 0; c < 2; c++) { const inp = c ? R : L; let e = 0, p = 0; for (let i = 0; i < n; i++) { let s = 0; for (const k of SRC) s += res.stems[k][c][i]; e += (s - inp[i]) ** 2; p += inp[i] ** 2; } worstSum = Math.max(worstSum, Math.sqrt(e / p)); }
     expect(worst < 1e-4, `each stem = mask × input through STFT/ISTFT and our block seams (worst rel. error ${worst.toExponential(1)})`);
     expect(worstSum < 1e-4, `the stems sum back to the mix — the 1.5 s cross-fades are seamless (rel. error ${worstSum.toExponential(1)})`);
+    // 16-bit in and out (what a phone runs): the worker holds the song and the stems at half the memory of float.
+    // The stems are written block by block; float output is the same numbers the old whole-song accumulation gave.
+    Object.defineProperty(process, "release", { value: { name: "browser-test" }, configurable: true });
+    let q = null, qe = "";
+    try { q = await core.separateInBlocks(Int16Array.from(L, core.toI16), Int16Array.from(R, core.toI16), sr, { session, blockSec: 10, output: "int16" }); }
+    catch (e) { qe = String(e && e.message || e); }
+    finally { if (relDesc) Object.defineProperty(process, "release", relDesc); }
+    let qd = 0;
+    if (q) for (const k of SRC) for (let c = 0; c < 2; c++) for (let i = 0; i < n; i++) qd = Math.max(qd, Math.abs(q.stems[k][c][i] / 32768 - res.stems[k][c][i]));
+    expect(q && SRC.every((k) => q.stems[k][0] instanceof Int16Array && q.stems[k][1].length === n) && qd < 1e-4, `16-bit input and output: Int16Array stems within ${qd.toExponential(1)} of the float run` + (qe ? " — " + qe : ""));
+    expect(core.toI16(0.5) === 16384 && core.toI16(-1) === -32768 && core.toI16(1.5) === 32767 && core.toI16(NaN) === 0, "toI16 rounds like encodeWav16 and clips");
   }
 
   // ── Phones: the compact model (2.8 s window). The full graph's single run needs ~1.3 GB, so iOS
@@ -3024,7 +3043,10 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
     expect(A({ userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", platform: "MacIntel", maxTouchPoints: 5 }), "iPadOS desktop-class UA (Mac + touch) → low-memory by default");
     expect(!A({ userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", platform: "MacIntel", maxTouchPoints: 0 }) && !A({ userAgent: "Mozilla/5.0 (X11; Linux x86_64)", platform: "Linux x86_64", maxTouchPoints: 0 }) && !A(null), "a Mac / Linux desktop keeps the full model");
     const smSrc = fs.readFileSync(path.join(repo, "stem-model.js"), "utf8");
-    expect(/compact: opts\.compact != null \? !!opts\.compact : isAppleMobile\(\)/.test(smSrc) && /compact: opts\.compact \}/.test(smSrc), "stem-model.js defaults compact from the device and forwards it to the worker");
+    expect(/compact: opts\.compact != null \? !!opts\.compact : isAppleMobile\(\)/.test(smSrc) && /compact: opts\.compact, output: opts\.output \}/.test(smSrc), "stem-model.js defaults compact from the device and forwards it (and the 16-bit output) to the worker");
+    expect(/const L = toInt16\(left\), R = right && right !== left \? toInt16\(right\) : L;/.test(smSrc) && /R === L \? \[L\.buffer\] : \[L\.buffer, R\.buffer\]/.test(smSrc) && /output: opts\.output \|\| "int16"/.test(smSrc), "the worker gets the song as 16-bit (a mono song once) and returns 16-bit stems");
+    const t16 = sm.toInt16(Float32Array.from([0, 0.5, -1, 1, 2, -2, NaN]));
+    expect(t16 instanceof Int16Array && [...t16].join() === "0,16384,-32768,32767,32767,-32768,0", "toInt16 rounds like encodeWav16 and clips (NaN → 0)");
     expect(/TTP_STEM_COMPACT_DEFAULT = isAppleMobile\(\)/.test(smSrc), "the page learns the device default (for the UI toggle)");
     expect(/if \(!_pending\.size\) \{ try \{ w\.terminate\(\); \} catch \(_\) \{\} if \(_worker === w\) _worker = null; \}/.test(smSrc), "the stem worker is ended once its split settles (a WASM heap never shrinks; charting ran ~650 MB higher with it alive)");
     // a deploy must reach the device: the page stamps stem-model.js?v=<commit>, and the stamp rides on down the graph

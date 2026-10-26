@@ -6869,8 +6869,11 @@ function encodeWav16(channels, sampleRate) {
   v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, nc, true);
   v.setUint32(24, sampleRate, true); v.setUint32(28, sampleRate * nc * 2, true); v.setUint16(32, nc * 2, true); v.setUint16(34, 16, true);
   str(36, "data"); v.setUint32(40, data, true);
+  // a channel may already be 16-bit (the stem separator's Int16Array): written as is
+  const i16 = chs.map((c) => c instanceof Int16Array);
   let o = 44;
   for (let i = 0; i < n; i++) for (let c = 0; c < nc; c++) {
+    if (i16[c]) { v.setInt16(o, chs[c][i], true); o += 2; continue; }
     const x = Math.max(-1, Math.min(1, chs[c] ? chs[c][i] : 0));
     v.setInt16(o, x < 0 ? Math.round(x * 32768) : Math.round(x * 32767), true); o += 2;
   }
