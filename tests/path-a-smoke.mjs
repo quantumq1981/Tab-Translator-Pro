@@ -17,7 +17,7 @@
  * ==========================================================================*/
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
@@ -3672,9 +3672,9 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
     let nSm = 0; for (let i = onnxBytes.indexOf("Softmax"); i >= 0; i = onnxBytes.indexOf("Softmax", i + 7)) nSm++;
     expect(nSm > 300, `beat model: time attention computed one batch × head slice at a time ("Softmax" named ${nSm}× in the graph)`);
   }
-  expect(/stem-model-core\.js/.test(coreSrc) && /capWasmMemory\(\)/.test(coreSrc) && /ORT_WASM_PATHS \+ "ort\.wasm\.min\.mjs"/.test(coreSrc) && /numThreads = 1/.test(coreSrc) && /trackBeatsWithModel/.test(coreSrc) && /resampleTo\(pcm, sampleRate, BEAT_MODEL\.sampleRate\)/.test(coreSrc),
+  expect(/stem-model-core\.js/.test(coreSrc) && /capWasmMemory\(\)/.test(coreSrc) && /ORT_WASM_PATHS \+ "ort\.wasm\.min\.mjs"/.test(coreSrc) && /numThreads = 1/.test(coreSrc) && /trackBeatsFromSpec/.test(coreSrc) && /resampleTo\(x, job\.sampleRate, BEAT_MODEL\.sampleRate\)/.test(coreSrc),
     "beat-model-core.js: the stem separator's pinned ORT 1.23.2 + WASM cap, one thread, the engine's front end, resampled to 22.05 kHz");
-  expect(/window\.TTP_BEAT_MODEL = trackBeatsAudio/.test(glue) && /new Worker\(WORKER_URL, \{ type: "module" \}\)/.test(glue) && /w\.terminate\(\)/.test(glue) && /self\.onmessage/.test(wk) && /trackBeatsPcm/.test(wk),
+  expect(/window\.TTP_BEAT_MODEL = trackBeatsAudio/.test(glue) && /new Worker\(WORKER_URL, \{ type: "module" \}\)/.test(glue) && /w\.terminate\(\)/.test(glue) && /self\.onmessage/.test(wk) && /trackBeatsJob\(job, engine/.test(wk) && !/\{[^}]*\bpcm\b[^}]*\} = ev\.data/.test(wk),
     "beat-model.js publishes TTP_BEAT_MODEL, runs a module worker, ends it after each job");
   const html = fs.readFileSync(path.join(repoRoot, "index.html"), "utf8"), pages = fs.readFileSync(path.join(repoRoot, ".github/workflows/pages.yml"), "utf8");
   expect(/<script type="module" src="\.\/beat-model\.js"><\/script>/.test(html) && /cp beat-model\.js beat-model-core\.js beat-worker\.js _site\//.test(pages) && /beat_this_final0\.w8\.onnx models\/beat-this\/NOTICE/.test(pages) && /beat-model\.js\?v=\$\{BUILD\}/.test(pages),
@@ -3758,6 +3758,34 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   for (let i = 0; i < tone.length; i++) { const t = i / sr; for (const f of [130.81, 164.81, 196.0]) tone[i] += 0.2 * Math.sin(2 * Math.PI * f * t); }
   const a = eng.transcribeChordsV2(tone, sr, {}), b = eng.transcribeChordsV2(tone, sr, { toneWeights: {} });
   expect(JSON.stringify(a.events) === JSON.stringify(b.events), "transcribeChordsV2 with empty toneWeights decodes identically");
+}
+
+/* ---- Find bar 1 on a phone: release memory before the model loads (2026-10-27) ----------
+ * Report: on an iPhone the page reloads a few windows into 🥁 Find bar 1. Measured (bench/split-mem-e2e.mjs
+ * --pre beat --no-split, 4-min MP3, iPhone UA): the peak is the model LOAD, not a per-window climb. The idle
+ * engine worker, a second full-length copy of the song on the page and the worker holding the audio for the
+ * whole run all sat under it. These guards pin the fixes. */
+{
+  const core = await import(pathToFileURL(path.join(repo, "beat-model-core.js")).href);
+  const sr = 44100, pcm = new Float32Array(sr * 3);
+  for (let i = 0; i < pcm.length; i++) pcm[i] = Math.sin(2 * Math.PI * 220 * i / sr) * (i % 22050 < 2000 ? 1 : 0.1);
+  const want = eng.beatThisLogMel(eng.resampleTo(pcm, sr, 22050));
+  const job = { pcm, sampleRate: sr };
+  const spec = core.beatSpecOf(job, eng);
+  expect(job.pcm === null && spec.frames === want.frames && spec.data.every((v, i) => v === want.data[i]), "beatSpecOf: the job's audio is taken and cleared, and the log-mel is exactly the old path's");
+  let threw = false; try { core.beatSpecOf({ pcm: new Float32Array(0), sampleRate: sr }, eng); } catch (e) { threw = /no audio/.test(e.message); }
+  expect(threw, "beatSpecOf refuses empty audio with a readable message");
+  // trackBeatsFromSpec (spectrogram first) = trackBeatsWithModel (the old one-call path), same fake model
+  const fake = async (w) => { const b = new Float32Array(w.frames), d = new Float32Array(w.frames); for (let i = 0; i < w.frames; i++) { b[i] = i % 25 === 0 ? 3 : -3; d[i] = i % 100 === 0 ? 3 : -3; } return { beat: b, downbeat: d }; };
+  const long = new Float32Array(22050 * 70); for (let i = 0; i < long.length; i++) long[i] = Math.sin(i * 0.05) * 0.2;
+  const a = await eng.trackBeatsWithModel(long, fake), b = await eng.trackBeatsFromSpec(eng.beatThisLogMel(long), fake);
+  expect(JSON.stringify(a) === JSON.stringify(b) && a.beats.length > 50, "trackBeatsFromSpec(spec) gives exactly trackBeatsWithModel(pcm)'s beats + downbeats");
+  const glue = fs.readFileSync(path.join(repo, "beat-model.js"), "utf8"), ui = fs.readFileSync(UI, "utf8");
+  expect(/opts\.transfer \? pcm : Float32Array\.from\(pcm\)/.test(glue) && /m\.type === "stage"/.test(glue), "beat-model.js: copies the audio only when the caller doesn't hand it over; relays the stage");
+  expect(/function _releaseEngineWorker\(\)/.test(ui) && /if \(!_engineWorker \|\| _rpcPending\.size\) return false/.test(ui) && (ui.match(/_releaseEngineWorker\(\);/g) || []).length >= 3,
+    "UI: the idle engine worker is ended before Find bar 1, Guitar → Tab and Split (never with calls in flight)");
+  expect(/transfer: true,\n\s*onStage:/.test(ui) && /BEAT_INFLIGHT = "ttp:beat:inflight"/.test(ui) && /localStorage\.removeItem\(BEAT_INFLIGHT\)/.test(ui) && /didn't finish — the page reloaded while/.test(ui),
+    "UI: Find bar 1 hands its fresh mono copy over, shows the stage, and leaves a crash-rail mark the next load reports");
 }
 
 if (fails.length) {

@@ -3174,6 +3174,23 @@ a time: **peak 1,008 → 502 MB**, same run time, session creation 0.9 → 3.8 s
 | charting | 1070 | 641 | 652 |
 | done | 999 | 551 | 552 |
 
+**3. Find bar 1 still killed the page on an iPhone (2026-10-27)** — "a few windows in" after uploading an MP3.
+Measured (`split-mem-e2e.mjs --pre beat --no-split 1` now records a phase per beat window; 4-min Peg MP3, iPhone
+UA): the peak is the model LOAD + first window, not a per-window climb (831 MB; windows 2–8 flat at ~628). In Node,
+the beat worker's own WASM heap is only ~160 MB and window length barely moves it (1500 / 1000 / 750 frames →
+162 / 135 / 113 MB), so shorter windows are still not worth their accuracy. With V8's optimising compiler off
+(`--liftoff-only`) the worker's RSS falls 473 → 234 MB: about half the worker is the engine COMPILING ORT's WASM,
+which Safari's JSC also does (OMG tier-up, after a few windows of warm-up), and the page can't control. What the page
+CAN control, now done: (1) `_releaseEngineWorker()` ends the idle engine worker (its heap keeps what the chord
+analysis grew) before Find bar 1, Guitar → Tab and Split — −82 MB at the beat peak; it is recreated on the next RPC
+and never ended with calls in flight; (2) the fresh mono copy is handed over (`TTP_BEAT_MODEL(…, { transfer: true })`),
+not copied again; (3) the worker builds the log-mel first (`beatSpecOf` takes and clears `job.pcm`;
+`engine.trackBeatsFromSpec`, = `trackBeatsWithModel` exactly) and only then loads the model, and no variable holds
+the weights after the session is made. Together: peak **831 → 679 MB**, windows 628 → 549, page after 344 → 278.
+Plus stages in the chip (analysing the audio → loading the model → starting the AI runtime → tracking the first
+30 s → k/N) and a crash rail (`ttp:beat:inflight`): if iOS ends the page mid-run, the next load says where it was.
+**Device check remaining:** Find bar 1 on the iPhone; if it still dies, the crash-rail message names the stage.
+
 The split is now the peak: the compact SCNet working set (~650 MB) plus the page (decoded song, analysis copies,
 the growing 16-bit stems). Next levers if a phone still dies there: stream finished blocks to the page while
 splitting (the worker would no longer hold whole stems), and drop the page's own float copy of the decoded song

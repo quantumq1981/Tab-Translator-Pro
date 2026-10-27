@@ -5585,8 +5585,14 @@ function beatThisPeaks(beatLogits, downLogits, fps = BEAT_THIS.fps) {
  *  → { beats, downbeats } in seconds. */
 async function trackBeatsWithModel(pcm, model, opts = {}) {
   if (typeof model !== "function") throw new Error("no beat model configured");
+  return trackBeatsFromSpec(beatThisLogMel(pcm), model, opts);
+}
+/** trackBeatsWithModel from a ready log-mel ({ frames, data }, beatThisLogMel's output) — so a caller can
+ *  build the spectrogram, let go of the audio, and only then load the model (the phone's peak). */
+async function trackBeatsFromSpec(spec, model, opts = {}) {
+  if (typeof model !== "function") throw new Error("no beat model configured");
   const B = BEAT_THIS.border, chunk = Math.max(4 * B + 1, Math.round(opts.chunk > 0 ? opts.chunk : BEAT_THIS.chunk));
-  const spec = beatThisLogMel(pcm), starts = beatThisChunks(spec.frames, chunk), preds = [];
+  const starts = beatThisChunks(spec.frames, chunk), preds = [];
   const pad = opts.padShort !== false && spec.frames < chunk - 2 * B;
   for (let i = 0; i < starts.length; i++) {
     const raw = beatThisWindow(spec, starts[i], chunk);
@@ -9325,6 +9331,7 @@ export {
   beatThisAggregate,
   beatThisPeaks,
   trackBeatsWithModel,
+  trackBeatsFromSpec,
   timelineBarAt,
   timelineNudge,
   scoreRecordingTimes,

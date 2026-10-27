@@ -58,8 +58,9 @@ export async function beatModelBytes(model = BEAT_MODEL, scope = globalThis) {
 
 /* One session for the whole recording. Returns `run(window) → { beat, downbeat }` — exactly
  * the per-window model contract the engine's `trackBeatsWithModel` takes. */
-export async function beatSession(bytes, ortImport = (u) => import(/* @vite-ignore */ u)) {
+export async function beatSession(bytes, ortImport = (u) => import(/* @vite-ignore */ u), onRuntime) {
   const { ORT_WASM_PATHS, capWasmMemory } = await stemCore();
+  if (onRuntime) onRuntime();
   capWasmMemory();
   const mod = await ortImport(ORT_WASM_PATHS + "ort.wasm.min.mjs");
   const ort = mod.default || mod;
@@ -75,14 +76,35 @@ export async function beatSession(bytes, ortImport = (u) => import(/* @vite-igno
   };
 }
 
-/* The whole job: resample to 22.05 kHz (the engine's anti-aliased resampleTo) → weights →
- * session → engine.trackBeatsWithModel → { beats, downbeats }. */
+/* The spectrogram, built in its own call so nothing in the long-running job below keeps the audio:
+ * `job.pcm` is taken and cleared, and the original-rate and 22.05 kHz copies are garbage once this
+ * returns — before the model is downloaded and ONNX Runtime starts (the phone's peak). */
+export function beatSpecOf(job, engine) {
+  let x = job.pcm;
+  job.pcm = null;
+  if (!x || !x.length) throw new Error("no audio to track");
+  if (job.sampleRate !== BEAT_MODEL.sampleRate) x = engine.resampleTo(x, job.sampleRate, BEAT_MODEL.sampleRate);
+  return engine.beatThisLogMel(x);
+}
+
+/* The whole job: { pcm, sampleRate } → resample to 22.05 kHz (the engine's anti-aliased resampleTo) →
+ * log-mel → (audio released) → weights → session → engine.trackBeatsFromSpec → { beats, downbeats }.
+ * `opts.onStage(stage)`: "spectrogram" → "model" → "runtime" → "tracking". */
+export async function trackBeatsJob(job, engine, opts = {}) {
+  const stage = (s) => { try { if (opts.onStage) opts.onStage(s); } catch (_) { /* never break the job */ } };
+  stage("spectrogram");
+  const spec = beatSpecOf(job, engine);
+  stage("model");
+  // the weights go straight into ONNX Runtime (which keeps its own copy): no variable here holds them
+  const sess = await beatSession(await beatModelBytes(), undefined, () => stage("runtime"));
+  stage("tracking");
+  try {
+    return await engine.trackBeatsFromSpec(spec, (w) => sess.run(w), { onProgress: opts.onProgress });
+  } finally { sess.release(); }
+}
+
+/* Kept for callers that hold their own copy of the audio (benches): same job, same result. */
 export async function trackBeatsPcm(pcm, sampleRate, engine, opts = {}) {
   if (!pcm || !pcm.length) throw new Error("no audio to track");
-  const x = sampleRate === BEAT_MODEL.sampleRate ? pcm : engine.resampleTo(pcm, sampleRate, BEAT_MODEL.sampleRate);
-  const bytes = await beatModelBytes();
-  const sess = await beatSession(bytes);
-  try {
-    return await engine.trackBeatsWithModel(x, (w) => sess.run(w), { onProgress: opts.onProgress });
-  } finally { sess.release(); }
+  return trackBeatsJob({ pcm, sampleRate }, engine, opts);
 }

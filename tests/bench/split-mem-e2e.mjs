@@ -1,7 +1,7 @@
 /* Memory curve of a REAL split of a REAL recording — where does the page peak?
  *
  *   node bench/split-mem-e2e.mjs --deps <dir> --input song.mp3 [--ua "<UA>"] [--compact 1] [--fast 1]
- *                                [--pre ab,beat] [--out <dir>] [--timeout 60]
+ *                                [--pre ab,beat] [--no-split 1] [--out <dir>] [--timeout 60]
  *
  * Boots the real app in headless Chromium (as scnet-e2e.mjs does: only the boot CDNs are served
  * locally), uploads --input in Audio mode, optionally runs what a user does first (--pre ab = ⚖ A/B
@@ -73,7 +73,27 @@ await waitText(/TEMPO\s*&\s*BARS/i, 10);
 await page.waitForTimeout(3000);
 for (const p of PRE) {
   if (p === "ab") { phase = "ab-clarity"; await page.getByRole("button", { name: /A\/B clarity/ }).click(); await waitText(/Harmony clarity/, 10); }
-  if (p === "beat") { phase = "beat_this"; await page.getByRole("button", { name: /Find bar 1/ }).click(); await waitText(/beat_this/, 20); await page.waitForTimeout(2000); }
+  if (p === "beat") {
+    phase = "beat_this"; await page.getByRole("button", { name: /Find bar 1/ }).click();
+    // phase per beat_this window ("Finding bars… k/N × 30 s"), so a per-window climb shows in mem.json
+    const end = Date.now() + 20 * 60000;
+    while (Date.now() < end) {
+      const t = await text(), m = /Finding bars… (\d+)\/(\d+)/.exec(t);
+      const st = /Finding bars… ([A-Za-z][A-Za-z0-9 ]*)/.exec(t);
+      if (m) phase = `beat_this w${m[1]}/${m[2]}`; else if (st) phase = `beat_this ${st[1]}`;
+      if (/beat_this/.test(t) && !/Finding bars…/.test(t)) break;
+      await page.waitForTimeout(250);
+    }
+    phase = "beat_this done"; await page.waitForTimeout(2000);
+  }
+}
+if (arg("no-split", null) !== null) {
+  phase = "idle"; await page.waitForTimeout(3000);
+  clearInterval(timer); clearInterval(flush); await browser.close(); server.close();
+  const pk = {}; for (const s of line) { pk[s.phase] = Math.max(pk[s.phase] || 0, s.maxProcMB); }
+  fs.writeFileSync(path.join(OUT, "mem.json"), JSON.stringify(line)); fs.writeFileSync(path.join(OUT, "console.log"), logs.join("\n"));
+  console.log(JSON.stringify({ largestProcessMB: pk, out: OUT, lastLogs: logs.slice(-6) }, null, 1));
+  process.exit(0);
 }
 phase = "separating"; const tSplit = Date.now();
 await page.getByRole("button", { name: "✂ Split this mix into stems" }).click();
