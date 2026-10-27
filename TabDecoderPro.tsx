@@ -411,6 +411,16 @@ function _getEngineWorker() {
     return w;
   } catch (_) { _engineWorkerDead = true; return null; }
 }
+/* End the idle engine worker before a heavy model job (🥁 Find bar 1, 🎸 Guitar → Tab, ✂ Split). The
+ * worker lives for the whole session, and its heap keeps what the last analysis grew (a worker's memory
+ * isn't returned until the worker ends) — on a phone that sat under the model's own peak. The next
+ * _engineRPC starts a fresh one. A worker with calls in flight is left alone. */
+function _releaseEngineWorker() {
+  if (!_engineWorker || _rpcPending.size) return false;
+  try { _engineWorker.terminate(); } catch (_) { /* already gone */ }
+  _engineWorker = null;
+  return true;
+}
 // transfer: buffers the caller hands over (moved, not copied — a 3½-minute song is ~36 MB per mono channel,
 // and on a phone two copies of every stem is what pushed the page over). They are unusable here afterwards.
 function _engineRPC(fn, args, transfer) {
@@ -2565,13 +2575,28 @@ function StaffView({ events, activeIdx, C, useSharp }) {
  * user's corrections on top. `useBeatGrid` owns that state; `TempoBarsPanel` is its pure view;
  * `findBars` runs the optional learned beat + downbeat tracker (beat-model.js, beat_this). */
 const NO_TIMING = Object.freeze({ bpm: null, beatsPerBar: null, firstDownbeat: null, tempoMap: null, beatScale: 1 });
+const BEAT_INFLIGHT = "ttp:beat:inflight";
+// what the beat model was doing, in words (the progress chip and the crash-rail message)
+function beatStageText(p) {
+  if (!p) return "";
+  if (p.total) return `${p.done}/${p.total} × 30 s`;
+  return { spectrogram: "analysing the audio", model: "loading the model", runtime: "starting the AI runtime", tracking: "tracking the first 30 s" }[p.stage] || "loading the model";
+}
 function useBeatGrid(tracked, firstSound) {
   const [timing, setTiming] = useState(NO_TIMING);
   const [bpb, setBpb] = useState(4);                     // fallback meter (no downbeats → the user's pick)
   const [learned, setLearned] = useState(null);          // { beats, downbeats } from beat_this
   const [useLearned, setUseLearned] = useState(true);
-  const [prog, setProg] = useState(null);                // { done, total } while the beat model runs
-  const [err, setErr] = useState("");
+  const [prog, setProg] = useState(null);                // { done, total, stage } while the beat model runs
+  // Crash rail (as the stem split's): a run marks itself in flight; if iOS ends the page mid-run, the next
+  // load finds the mark and says where it stopped, instead of the user just seeing the page reload.
+  const [err, setErr] = useState(() => {
+    let last = null;
+    try { last = JSON.parse(localStorage.getItem(BEAT_INFLIGHT) || "null"); localStorage.removeItem(BEAT_INFLIGHT); } catch (_) { last = null; }
+    if (!last || !(Date.now() - (last.t || 0) < 6 * 3600e3)) return "";
+    return `Last time, 🥁 Find bar 1 didn't finish — the page reloaded while ${beatStageText(last)}${last.sec ? ` (${(last.sec / 60).toFixed(1)} min of audio)` : ""}. ` +
+      "On an iPhone or iPad that is iOS ending the page for memory. Try it right after loading the song, before ✂ Split, ⚖ A/B clarity or 🎸 Guitar → Tab — or on a shorter clip.";
+  });
   const src = useMemo(() => (learned && useLearned ? learned : tracked && tracked.length ? { beats: tracked, downbeats: null } : null), [learned, useLearned, tracked]);
   // tempo-map tolerance: Muscriptor's 25 ms for beat_this's precise beats, 50 ms for the built-in
   // tracker's jittery ones (halves the spurious tempo changes; see audioBeatTimeline)
@@ -2587,12 +2612,22 @@ function useBeatGrid(tracked, firstSound) {
     const model = typeof window !== "undefined" ? window.TTP_BEAT_MODEL : null;
     if (typeof model !== "function") { setErr("The beat model (beat-model.js) isn't loaded on this build."); return; }
     if (!mono || !mono.length) { setErr("Load audio first."); return; }
-    setErr(""); setProg({ done: 0, total: 0 });
+    setErr(""); setProg({ done: 0, total: 0, stage: "start" });
+    _releaseEngineWorker();
+    const mark = { t: Date.now(), sec: mono.length / sampleRate, stage: "start", done: 0, total: 0 };
+    const save = (o) => { Object.assign(mark, o); try { localStorage.setItem(BEAT_INFLIGHT, JSON.stringify(mark)); } catch (_) { /* private mode */ } };
+    save({});
     try {
-      const r = await model(mono, sampleRate, { onProgress: (done, total) => setProg({ done, total }) });
+      // mono is made for this call (monoOf / stemMono), so it is handed over, not copied
+      const r = await model(mono, sampleRate, {
+        transfer: true,
+        onStage: (stage) => { save({ stage }); setProg((p) => ({ ...(p || { done: 0, total: 0 }), stage })); },
+        onProgress: (done, total) => { save({ done, total }); setProg((p) => ({ ...(p || {}), done, total })); },
+      });
       if (!r || !r.beats || r.beats.length < 8) setErr("The beat model found too few beats in this audio.");
       else { setLearned(r); setUseLearned(true); setTiming((t) => ({ ...t, firstDownbeat: null, beatScale: 1, beatsPerBar: null })); }
     } catch (e) { setErr("Beat tracking failed: " + ((e && e.message) || e)); }
+    try { localStorage.removeItem(BEAT_INFLIGHT); } catch (_) { /* private mode */ }
     setProg(null);
   };
   return { grid, bpm: grid.bpm, meter: grid.beatsPerBar, timing, setTiming, bpb, setMeter, bumpTempo, learned, useLearned, setUseLearned, prog, err, findBars, reset };
@@ -2659,7 +2694,7 @@ function TempoBarsPanel({ C, bg, pos, onFindBars, canFindBars, label = "TEMPO & 
           </>
         ) : canFindBars && (
           <button onClick={onFindBars} disabled={!!prog} title="learned beat + DOWNBEAT tracker (beat_this, ≈ 22 MB, downloaded once; runs on this device) — finds bar 1 and the meter by itself" style={{ ...chip(C), padding: "3px 10px", color: C.green }}>
-            {prog ? `🥁 Finding bars… ${prog.total ? `${prog.done}/${prog.total} × 30 s` : "loading the model"}` : "🥁 Find bar 1 (ML)"}
+            {prog ? `🥁 Finding bars… ${beatStageText(prog)}` : "🥁 Find bar 1 (ML)"}
           </button>
         )}
         {changed && <button onClick={() => setTiming(NO_TIMING)} style={{ ...chip(C), padding: "3px 9px" }}>↺ Back to the detected grid</button>}
@@ -2943,6 +2978,7 @@ function AudioImport({ C, useSharp }) {
     const model = typeof window !== "undefined" ? window.TTP_GUITAR_MODEL : null;
     if (typeof model !== "function") { setErr("Guitar → Tab needs the guitar note model (guitar-model.js) — not loaded on this build."); return; }
     setBusy(true); setErr(""); setGtrNotes(null); setGtrProg({ done: 0, total: 0 });
+    _releaseEngineWorker();
     try {
       const pcm = s.sr === 16000 ? s.cur : resampleTo(s.cur, s.sr, 16000);
       const { notes } = await model(pcm, { onProgress: (done, total) => setGtrProg({ done, total }) });
@@ -3618,6 +3654,7 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, getSour
     // a long song takes a while to decode: say so instead of claiming nothing was uploaded
     if (!src) { setErr(loading && sourceName ? "The song is still loading — try again in a moment." : "Upload a song above first."); return; }
     if (typeof window === "undefined" || typeof window.TTP_STEM_MODEL !== "function") { setErr("The stem separator isn't loaded (it needs a connection the first time) — reload the page and try again."); return; }
+    _releaseEngineWorker();
     holdAwake();
     // a section: [from, from + length) of the song, clamped to it
     const total = src.length, sr0 = src.sampleRate;

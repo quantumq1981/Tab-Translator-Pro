@@ -1,5 +1,5 @@
 /* ==========================================================================
- * beat-model.js — publishes window.TTP_BEAT_MODEL(pcm, sampleRate, { onProgress })
+ * beat-model.js — publishes window.TTP_BEAT_MODEL(pcm, sampleRate, { onProgress, onStage, transfer })
  * → Promise<{ beats, downbeats }> (seconds) for the Audio panel's "Tempo & bars".
  *
  * The learned beat + downbeat tracker beat_this (CPJKU, MIT; final0, converted with
@@ -17,14 +17,16 @@ const CORE_URL = new URL("./beat-model-core.js" + BUILD_QS, import.meta.url).hre
 
 async function onMainThread(pcm, sampleRate, engineUrl, opts) {
   const [core, engine] = await Promise.all([import(/* @vite-ignore */ CORE_URL), import(/* @vite-ignore */ engineUrl)]);
-  return core.trackBeatsPcm(pcm, sampleRate, engine, opts);
+  return core.trackBeatsJob({ pcm, sampleRate }, engine, opts);
 }
 
 async function trackBeatsAudio(pcm, sampleRate, opts = {}) {
   if (!pcm || !pcm.length) throw new Error("no audio to track");
   const engineUrl = typeof window !== "undefined" && window.__TTP_ENGINE_URL__;
   if (!engineUrl) throw new Error("the engine isn't loaded yet — try again in a moment");
-  const copy = Float32Array.from(pcm);                         // a copy: it is transferred
+  // The audio is transferred to the worker. opts.transfer: the caller made `pcm` for this call and hands
+  // it over (it is unusable afterwards) — no second full-length copy on the page. Otherwise a copy.
+  const copy = opts.transfer ? pcm : Float32Array.from(pcm);
   let w = null;
   try { w = new Worker(WORKER_URL, { type: "module" }); } catch (_) { w = null; }
   if (!w) return onMainThread(copy, sampleRate, engineUrl, opts);
@@ -33,6 +35,7 @@ async function trackBeatsAudio(pcm, sampleRate, opts = {}) {
       w.onmessage = (ev) => {
         const m = ev.data || {};
         if (m.type === "progress") { if (opts.onProgress) opts.onProgress(m.done, m.total); return; }
+        if (m.type === "stage") { if (opts.onStage) opts.onStage(m.stage); return; }
         if (m.type === "result") resolve({ beats: m.beats, downbeats: m.downbeats });
         else reject(new Error(m.message || "beat tracking failed"));
       };
