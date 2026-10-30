@@ -2454,6 +2454,19 @@ sus2/6/9 names → Pro 0 + 0. The audio decoder gained from the same rules (m11 
 at the vocabulary level Pro dev **79.2 / 79.6 / 73.1 / 68.1** (was 76.9 / 77.7 / 71.7 / 66.9),
 held-out **74.8 / 75.7 / 69.7 / 65.9** (was 73.7 / 74.7 / 68.6 / 65.4); vs the full oracle within ±0.4.
 
+**Lite (2026-10-30, the owner on a phone: "a basic mode that gets close without using up the
+browser's memory").** `lite` = `"" m 7 maj7 m7`, root position only: no written, hidden or foreign
+basses and **no `writeAs`** — `resolveChordVocabulary` adds every writeAs SOURCE to the decoded set,
+so a rename map would put those qualities back into the HMM as states. An extension simply decodes to
+its nearest core chord (C6/9 → `C`, the owner's example). HMM chord states: **lite 60 · basic 348 ·
+chart 504 · full 936** (the forward-backward/Viterbi arrays are T × states). Measured with
+`analyzeAudioChordsV2` on a 4-min synthetic C6/9 · Gm7 · Am · Fmaj7 loop (Node, peak RSS of the whole
+process incl. the signal): **lite 100 MB / 2.2 s · basic 118 / 2.6 · chart 130 / 2.5 · full 151 / 2.7**;
+lite reads `C Gm7 Am Fmaj7`. The front end (log-freq spectrogram, HPSS, NNLS) is unchanged, so Lite
+trims the decoder, not the whole analysis — stems and the ML models are separate memory. UI: a "Lite"
+chip in `ChordVocabPicker` (the 6/9 → select hides for it). Tests pin the 60 states, the ignored 6/9
+setting and the six root-position readings. Not measured on the bench or on a device yet.
+
 **Honest limits:** Pro still writes MAJOR-triad and dominant-7th inversions (C/E, C7/Bb) when the bass
 is sustained, which on a vocal stem can be the lowest singer — Basic is the no-slash choice. Synthetic
 bench stems (deltas are the read). Re-naming a notated voicing changes the NAME, not the notes:

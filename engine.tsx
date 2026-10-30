@@ -112,6 +112,17 @@ const CHORD_VOCABULARIES = {
     foreign: {},
     writeAs: { "6/9": "maj7", "6": "maj7", sus2: "", add9: "" },
   },
+  // phones: 5 qualities × 12 roots, root position only = 61 HMM states (memory ∝ states). No
+  // writeAs on purpose — every writeAs source is decoded as its own state; an extended chord
+  // simply decodes to its nearest core chord (C6/9 → C).
+  lite: {
+    label: "Lite",
+    qualities: ["", "m", "7", "maj7", "m7"],
+    inversions: {},
+    hidden: {},
+    foreign: {},
+    writeAs: {},
+  },
   full: { label: "Full", qualities: null, inversions: null, hidden: null, foreign: null, writeAs: null },
 };
 /* A vocabulary name or object → { allow:Set, inversions, hidden, foreign, writeAs } (null =

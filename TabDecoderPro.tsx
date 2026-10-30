@@ -1890,6 +1890,7 @@ const _VOCAB_KEY = "ttp:chordVocab";
 const VOCAB_CHOICES = [
   ["chart", "Pro", "professional chart names: triads, 7ths, maj7, m7, m7♭5, dim7, sus4, 9ths, m11, 7♭9 — a 6/9 is written maj9 (or maj7), sus2/add9 as the triad, a chord is read from its bass (C#m11, not E6/9/C#); slash only for C/E, C/G, C7/B♭, F/G, D/C, Am/G"],
   ["basic", "Basic", "triads, 7ths, maj7, m7, m7♭5, dim7, sus4 — never a slash; for dense vocal harmony"],
+  ["lite", "Lite", "for phones: only triads, 7, maj7, m7 in root position — extensions and slashes fall to the nearest plain chord (C6/9 → C); the lightest analysis"],
   ["full", "Full", "every chord the engine knows (6/9, add9, sus2, altered…) and every inversion as a slash"],
 ];
 /* One live, per-device preference shared by every component that reads it — the Audio panel's
@@ -1936,7 +1937,7 @@ function ChordVocabPicker({ C, value, onChange, sixNine, onSixNine, disabled }) 
         <button key={k} onClick={() => value !== k && onChange(k)} disabled={disabled} title={tip}
           style={{ ...chip(C), padding: "4px 9px", borderColor: value === k ? C.cyan : C.border, color: value === k ? C.cyan : C.dim }}>{lbl}{value === k ? " ✓" : ""}</button>
       ))}
-      {onSixNine && value !== "full" && (
+      {onSixNine && value !== "full" && value !== "lite" && (
         <label title="a heard 6/9 is written as… (a 6 is written maj7) — the tonic-major chart convention; triad = don't detect 6 or 6/9" style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
           6/9 →
           <select value={sixNine} onChange={(ev) => onSixNine(ev.target.value)} disabled={disabled} style={{ ...chip(C), padding: "3px 6px", background: C.raised }}>

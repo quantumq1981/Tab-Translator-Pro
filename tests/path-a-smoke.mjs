@@ -1344,6 +1344,19 @@ let synhSummary = "";
     expect(rv && !["6/9", "6", "add9"].includes(rv.best.quality.suffix), `recognise({vocabulary:"chart"}) never names a 6/9 (got ${rv && rv.best.quality.suffix})`);
     const st = eng.chartsFromStems({ other: chordSig(6, [[0, 6, CMAJ7_B]]) }, VSR, { vocabulary: "chart", beats: beatsOf(6) });
     expect(st.charts.length && st.charts[0].events.every((e) => !e.symbol.includes("/")), `chartsFromStems forwards the vocabulary (got ${st.charts[0] && st.charts[0].events.map((e) => e.symbol)})`);
+
+    /* Lite (2026-10-30, phones): 5 qualities in root position = 60 chord states + N.C. The HMM's
+     * arrays are T × states, so this is the decoder's memory lever. No writeAs: every writeAs
+     * source would be decoded as its own state again. */
+    const nSt = (v) => eng.chordStatesV2({ vocabulary: v }).length;
+    expect(nSt("lite") === 60 && nSt("lite") * 4 < nSt("basic") && nSt("lite") * 8 < nSt("full"),
+      `lite has 60 chord states, far fewer than basic/full (lite ${nSt("lite")}, basic ${nSt("basic")}, chart ${nSt("chart")}, full ${nSt("full")})`);
+    expect(eng.resolveChordVocabulary("lite", "maj9").allow.size === 5, "lite ignores the 6/9 setting (no writeAs states sneak back in)");
+    const lite = [[SIX9, "C"], [CE, "C"], [CMAJ7_B, "Cmaj7"], [C7_BB, "C7"], [BB_C, "Bb"], [FSM_G, "F#m"]].map(([ms, want]) => [dec(ms, "lite"), want]);
+    expect(lite.every(([got, want]) => got === want), `lite: C6/9→C, C/E→C, Cmaj7/B→Cmaj7, C7/Bb→C7, Bb/C→Bb, F#m/G→F#m (got ${lite.map(([g]) => g).join(", ")})`);
+    const evL = eng.transcribeChordsV2(chordSig(8, [[0, 4, SIX9], [4, 8, AM7_C]]), VSR, { beats: beatsOf(8), vocabulary: "lite" }).events;
+    expect(evL.every((e) => !e.symbol.includes("/") && [e, ...(e.alternatives || [])].every((a) => !/6|9|sus|dim|aug|\//.test(a.symbol))),
+      `lite never writes a slash or an extension, alternatives included (got ${evL.map((e) => e.symbol)})`);
   }
 
   /* respellScore (2026-10-25): the vocabulary names EVERY chart, not just audio decodes. The
