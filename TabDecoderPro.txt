@@ -295,6 +295,11 @@ import {
   scoreToLyricsSheet,
   scoreToChordProWithLyrics,
   lyricSheetRows,
+  INSTRUMENTS,
+  INSTRUMENT_ORDER,
+  voicingsForInstrument,
+  ARRANGEMENT_LEVELS,
+  arrangementLevels,
 } from "./engine.tsx";
 
 async function extractTokens(buf) {
@@ -1164,8 +1169,17 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
   const [simplify, setSimplify] = useState(() => autoSimplify && (isMelodicScore(rawScore) || !!rawScore.merged));
   const [arrange, setArrange] = useState("off"); // off | block | quarters | eighths | shuffle
 
-  const simp = useMemo(() => (simplify ? simplifyScore(score, useSharp) : score), [simplify, score, useSharp]);
-  const base = useMemo(() => (arrange === "off" ? simp : arrangeScore(simp, arrange)), [simp, arrange]);
+  // WO-4 arrangement level: a chart at a playing level (Beginner / Intermediate / Advanced), derived
+  // from the same engine passes; "" = as written (the simplify / arrange controls below apply)
+  const [level, setLevel] = useState("");
+  const localKeyOvRef = useRef("");
+  const lvl = useMemo(() => {
+    if (!level) return null;
+    const manual = parseKeyName(keyOverride !== undefined ? keyOverride : localKeyOvRef.current);
+    return arrangementLevels(score, level, { useSharp, key: manual || undefined });
+  }, [level, score, useSharp, keyOverride]); // eslint-disable-line
+  const simp = useMemo(() => (lvl ? lvl.score : simplify ? simplifyScore(score, useSharp) : score), [lvl, simplify, score, useSharp]);
+  const base = useMemo(() => (lvl || arrange === "off" ? simp : arrangeScore(simp, arrange)), [lvl, simp, arrange]);
   /* Chord NAMES follow the shared Chart / Basic / Full setting for every chart, not just audio
    * decodes: a PDF / Guitar Pro / MusicXML voicing C#-E-F#-G#-B over C# reads C#m11 in Chart
    * (the oracle's literal E6/9/C# in Full). Last in the chain, because transpose re-names from
@@ -1173,7 +1187,7 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
    * (nscore spelled for the key, below). */
   const [vocab, setVocab] = useChordVocab();
   const [sixNine, setSixNine] = useSixNine();
-  const nscore = useMemo(() => respellScore(transposeScore(base, semis, useSharp), vocab, { sixNine, useSharp }), [base, semis, useSharp, vocab, sixNine]);
+  const nscore = useMemo(() => respellScore(transposeScore(base, semis, useSharp), lvl ? lvl.vocabulary : vocab, { sixNine, useSharp }), [base, semis, useSharp, vocab, sixNine, lvl]);
   // The TAB (Tab view + AlphaTex export) skips Simplify: Simplify replaces a melodic line with one
   // inferred chord per bar, which is right for a chord chart and wrong for a tab — a tab must show
   // the notes that are actually played. Arrange and transpose still apply.
@@ -1185,6 +1199,7 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
    * be persisted in the session), uncontrolled otherwise. The override names the
    * key of the UNTRANSPOSED music, so transposing moves it with the chart. */
   const [localKeyOv, setLocalKeyOv] = useState("");
+  localKeyOvRef.current = localKeyOv;
   const keyOv = keyOverride !== undefined ? keyOverride : localKeyOv;
   const setKeyOv = setKeyOverride || setLocalKeyOv;
   const keyCands = useMemo(() => analyzeKeyCandidates(nscore, { limit: 5 }), [nscore]);
@@ -1214,6 +1229,11 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
   // summary (complexity + human tags) of whatever the chart currently is (post
   // simplify/arrange/transpose). Pure metadata; never touches recognition.
   const describe = useMemo(() => describeScore(tscore, { useSharp, title, key }), [tscore, useSharp, title, key]);
+  // the chart's chords in order (repeats collapsed), for the voicing modal's ◀ / ▶
+  const chordSeq = useMemo(() => {
+    const out = []; for (const b of tscore.bars) for (const e of b.events) { const sym = symOfRaw(b, e); if (!sym || sym === "—" || (out.length && out[out.length - 1].symbol === sym)) continue; out.push({ symbol: sym, frets: e.frets }); }
+    return out;
+  }, [tscore, overrides]); // eslint-disable-line
 
   useEffect(() => { setBpm(score.tempo || 100); }, [score.tempo]);
   // Re-apply the melodic auto-default whenever a new score loads (upload / part switch /
@@ -1294,6 +1314,7 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
   };
   const bumpBpm = (d) => setBpm((b) => Math.max(40, Math.min(240, b + d)));
   const symOf = (bar, e) => { const v = overrides[`${bar.number}.${e.beat}`]; return v != null ? v : e.symbol; };
+  function symOfRaw(bar, e) { const v = overrides[`${bar.number}.${e.beat}`]; return v != null ? v : e.symbol; }
   // The tab as AlphaTex: what the Tab view draws AND what the AlphaTex export writes, so the two can
   // never disagree. Computed only while one of them is showing (it fingers every note).
   const wantTex = view === "tab" || (exp && exp.fmt === "alphatex");
@@ -1404,7 +1425,13 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
             <option value="family">Spell C# Eb F# Ab Bb</option>
           </select>
         )}
-        <select value={arrange} onChange={(e) => setArrange(e.target.value)} title="stamp a strum/comping rhythm across each bar (exports as CSMPN/CSML slash-rhythm)"
+        <select value={level} onChange={(e) => setLevel(e.target.value)} title="a playing level: Beginner = triads, one chord per bar, quarter strums, open-chord key (+ capo) · Intermediate = 7ths + inversions, eighths · Advanced = the full Pro chart"
+          style={{ ...chip(C), padding: "3px 9px", borderColor: level ? C.amber : C.border, color: level ? C.amber : C.dim, background: C.raised, cursor: "pointer" }}>
+          <option value="">Level: as written</option>
+          {ARRANGEMENT_LEVELS.map((l) => <option key={l} value={l}>Level: {l[0].toUpperCase() + l.slice(1)}</option>)}
+        </select>
+        {lvl && lvl.capo > 0 && <span style={{ fontSize: 11, color: C.amber }} title="these are the shapes; put a capo here to sound like the record">capo {lvl.capo} to play along</span>}
+        <select value={arrange} disabled={!!lvl} onChange={(e) => setArrange(e.target.value)} title="stamp a strum/comping rhythm across each bar (exports as CSMPN/CSML slash-rhythm)"
           style={{ ...chip(C), padding: "3px 9px", borderColor: arrange !== "off" ? C.cyan : C.border, color: arrange !== "off" ? C.cyan : C.dim, background: C.raised, cursor: "pointer" }}>
           <option value="off">Arrange…</option>
           <option value="block">↳ Block (sustain)</option>
@@ -1477,7 +1504,7 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
             editKey={editKey} setEditKey={setEditKey} draft={draft} setDraft={setDraft} selKey={selKey}
             playKey={playKey} showRoman={showRoman} musicKey={key} onPick={onPick} symOf={symOf} onVoicings={setVoicingChoices} />
         : <GridView score={tscore} C={C} symOf={symOf} selKey={selKey} onPick={onPick} onVoicings={setVoicingChoices} />}
-      {voicingChoices && <ChordVoicingModal key={voicingChoices.map((c) => c.symbol).join("|")} choices={voicingChoices} onClose={() => setVoicingChoices(null)} C={C} useSharp={useSharp} />}
+      {voicingChoices && <ChordVoicingModal key={voicingChoices.map((c) => c.symbol).join("|")} choices={voicingChoices} onClose={() => setVoicingChoices(null)} C={C} useSharp={useSharp} sequence={chordSeq} />}
 
       <ExportPanel exp={exp} setExp={setExp} C={C} bpm={bpm} semis={semis} score={tscore}
         copy={copy} download={download} copied={copied} downloaded={downloaded} extOf={(f) => (f === "abc" ? abcExt : _EXPORT_EXT[f] || "txt")}
@@ -2560,16 +2587,16 @@ const _VOICING_MODE_KEY = "ttp:voicingMode";
 const _VC_DOT = "#f1c40f", _VC_DOT_TEXT = "#0b1220";
 
 /* One diagram. SVGuitar renders into the div; re-drawn when the voicing or mode changes. */
-function VoicingDiagram({ v, mode, lib, C }) {
+function VoicingDiagram({ v, mode, lib, C, leftHanded }) {
   const ref = useRef(null);
   useEffect(() => {
     const el = ref.current;
     if (!el || !lib) return;
     el.innerHTML = "";
     try {
-      const p = voicingToSVGuitar(v, mode);
+      const p = voicingToSVGuitar(v, mode, { leftHanded });
       new lib.SVGuitarChord(el).configure({
-        strings: 6, frets: p.frets, position: p.position, noPosition: true,   // the tile's badge names the fret
+        strings: v.frets.length, frets: p.frets, position: p.position, noPosition: true,   // the tile's badge names the fret
         color: C.text, fingerColor: _VC_DOT, fingerTextColor: _VC_DOT_TEXT, fingerSize: 0.72, fingerTextSize: 24,
         emptyStringIndicatorSize: 0.55, strokeWidth: 2, nutWidth: 9, sidePadding: 0.18, showFretMarkers: false,
         fontFamily: "'IBM Plex Mono', ui-monospace, monospace",
@@ -2579,17 +2606,49 @@ function VoicingDiagram({ v, mode, lib, C }) {
     } catch (err) {
       el.textContent = "diagram unavailable";
     }
-  }, [v, mode, lib, C.text]);
+  }, [v, mode, lib, C.text, leftHanded]);
   return <div ref={ref} style={{ minHeight: 120 }} />;
 }
+/* WO-4 · a piano voicing on a small keyboard: left hand cyan, right hand amber; labels are the
+ * chord's intervals (or note names). Pure SVG, no library. */
+function KeyboardDiagram({ v, mode, C }) {
+  const lo = Math.min(...v.midi), hi = Math.max(...v.midi);
+  const start = Math.max(21, lo - ((lo % 12) === 0 ? 0 : (lo % 12)) - (lo % 12 > 4 ? 0 : 0)), first = start - (start % 12 === 1 || start % 12 === 3 || start % 12 === 6 || start % 12 === 8 || start % 12 === 10 ? 1 : 0);
+  const last = Math.max(hi + 2, first + 14);
+  const black = (m) => [1, 3, 6, 8, 10].includes(m % 12);
+  const whites = []; for (let m = first; m <= last; m++) if (!black(m)) whites.push(m);
+  const W = 15, H = 62, BW = 9, BH = 38, xOf = (m) => whites.indexOf(m) * W;
+  const lh = new Set(v.hands ? v.hands.left : []), names = NOTE_SHARP;
+  const lab = (m) => (mode === "intervals" ? v.labels[v.midi.indexOf(m)] : names[m % 12]);
+  const dot = (m) => (lh.has(m) ? C.cyan : _VC_DOT);
+  return (
+    <svg viewBox={`0 0 ${whites.length * W} ${H + 14}`} style={{ width: "100%", height: "auto" }} role="img" aria-label={`keys ${v.midi.join(" ")}`}>
+      {whites.map((m) => <rect key={m} x={xOf(m)} y={0} width={W - 1} height={H} rx={2} fill={v.midi.includes(m) ? dot(m) : "#e8e6df"} stroke="#555" strokeWidth={0.6} />)}
+      {whites.map((m) => black(m + 1) && m + 1 <= last ? <rect key={"b" + m} x={xOf(m) + W - BW / 2 - 0.5} y={0} width={BW} height={BH} rx={1.5} fill={v.midi.includes(m + 1) ? dot(m + 1) : "#1b1b22"} /> : null)}
+      {v.midi.map((m) => { const x = black(m) ? xOf(m - 1) + W - 0.5 : xOf(m) + W / 2 - 0.5; return <text key={"t" + m} x={x} y={H + 11} fontSize={8} textAnchor="middle" fill={C.text}>{lab(m)}</text>; })}
+      {whites.filter((m) => m % 12 === 0).map((m) => <text key={"c" + m} x={xOf(m) + 2} y={H - 4} fontSize={6} fill="#555">C{Math.floor(m / 12) - 1}</text>)}
+    </svg>
+  );
+}
 
-function ChordVoicingModal({ choices, start = 0, onClose, C, useSharp }) {
+const _INST_KEY = "ttp:instrument", _LEFT_KEY = "ttp:leftHanded";
+function ChordVoicingModal({ choices, start = 0, onClose, C, useSharp, sequence }) {
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
   // choices: [{ symbol, frets? }] — the chord(s) tapped (a grid bar can hold several)
   const [idx, setIdx] = useState(start);
   const [stack, setStack] = useState([]);              // substitution taps: symbols opened from this chord
-  const base = choices[Math.min(idx, choices.length - 1)] || { symbol: "" };
+  // WO-4: instrument, left-handed diagrams, capo — remembered per device
+  const [instrument, setInstrumentState] = useState(() => { try { const v = localStorage.getItem(_INST_KEY); return INSTRUMENTS[v] ? v : "guitar"; } catch (_) { return "guitar"; } });
+  const setInstrument = (v) => { setInstrumentState(v); try { localStorage.setItem(_INST_KEY, v); } catch (_) {} };
+  const [leftHanded, setLeftState] = useState(() => { try { return localStorage.getItem(_LEFT_KEY) === "1"; } catch (_) { return false; } });
+  const setLeftHanded = (v) => { setLeftState(v); try { localStorage.setItem(_LEFT_KEY, v ? "1" : "0"); } catch (_) {} };
+  const [capo, setCapo] = useState(0);
+  // the chart's chord sequence: ◀ / ▶ walk it, and the next chord's voicings rank by voice-leading
+  const [seqIdx, setSeqIdx] = useState(() => (sequence && choices[0] ? Math.max(0, sequence.findIndex((x) => x.symbol === choices[0].symbol)) : -1));
+  const [walked, setWalked] = useState(false);          // true once ◀ / ▶ moved off the tapped chord
+  const [prevVoicing, setPrevVoicing] = useState(null);
+  const base = walked && sequence && sequence[seqIdx] ? sequence[seqIdx] : choices[Math.min(idx, choices.length - 1)] || { symbol: "" };
   const cur = stack.length ? { symbol: stack[stack.length - 1] } : base;
   const [mode, setModeState] = useState(() => { try { return localStorage.getItem(_VOICING_MODE_KEY) === "intervals" ? "intervals" : "fingers"; } catch (_) { return "fingers"; } });
   const setMode = (m) => { setModeState(m); try { localStorage.setItem(_VOICING_MODE_KEY, m); } catch (_) {} };
@@ -2613,7 +2672,17 @@ function ChordVoicingModal({ choices, start = 0, onClose, C, useSharp }) {
   }, []);
   useEffect(() => { if (body.current) body.current.scrollTop = 0; }, [cur.symbol]);
 
-  const data = useMemo(() => (dict === undefined ? null : chordVoicings(dict, cur.symbol, { played: cur.frets })), [dict, cur.symbol, cur.frets]);
+  const fretted = INSTRUMENTS[instrument] && INSTRUMENTS[instrument].kind === "fretted";
+  const data = useMemo(() => {
+    if (instrument === "guitar" && !capo) return dict === undefined ? null : chordVoicings(dict, cur.symbol, { played: cur.frets });
+    return voicingsForInstrument(cur.symbol, instrument, { capo: fretted ? capo : 0, previous: prevVoicing || undefined });
+  }, [dict, cur.symbol, cur.frets, instrument, capo, prevVoicing, fretted]);
+  const step = (d) => {
+    if (!sequence || !sequence.length) return;
+    const first = data && data.ok && data.groups[0] && data.groups[0].voicings[0];
+    setPrevVoicing(first ? first.midi : null);
+    setStack([]); setWalked(true); setSeqIdx((i) => Math.max(0, Math.min(sequence.length - 1, (i < 0 ? 0 : i) + d)));
+  };
   const subs = useMemo(() => chordSubstitutions(cur.symbol, useSharp), [cur.symbol, useSharp]);
   const title = data && data.ok ? data.parsed.display : cur.symbol;
 
@@ -2622,7 +2691,7 @@ function ChordVoicingModal({ choices, start = 0, onClose, C, useSharp }) {
     const midis = v.midi.slice().sort((a, b) => a - b);
     const score = { timeSig: [4, 4], bars: [{ number: 1, events: [{ symbol: title, beat: 0, durBeats: 3, qbeat: 0, qdur: 3, midis }] }] };
     player.current = playScore(score, 100, { onEnd: () => setHeard("") });
-    setHeard(v.frets.join(","));
+    setHeard((v.frets || v.midi).join(","));
   };
   const badge = (v) => (v.baseFret <= 1 ? "open" : `${v.baseFret}fr`);
 
@@ -2638,10 +2707,26 @@ function ChordVoicingModal({ choices, start = 0, onClose, C, useSharp }) {
               <button onClick={() => setStack((s) => s.slice(0, -1))} style={{ ...chip(C), padding: "2px 9px" }}>← {stack.length > 1 ? stack[stack.length - 2] : base.symbol}</button>
             )}
           </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginTop: 8 }}>
+            {INSTRUMENT_ORDER.slice(0, 5).map((id) => (
+              <button key={id} onClick={() => setInstrument(id)} style={{ ...chip(C), padding: "2px 9px", borderColor: instrument === id ? C.cyan : C.border, color: instrument === id ? C.cyan : C.dim }}>{INSTRUMENTS[id].name}</button>
+            ))}
+            {fretted && <>
+              <button onClick={() => setLeftHanded(!leftHanded)} title="mirror the diagrams for a left-handed player" style={{ ...chip(C), padding: "2px 9px", borderColor: leftHanded ? C.amber : C.border, color: leftHanded ? C.amber : C.dim }}>{leftHanded ? "left-handed ✓" : "left-handed"}</button>
+              <span style={{ fontSize: 11, color: C.dim }}>capo</span>
+              <button onClick={() => setCapo((c) => Math.max(0, c - 1))} style={{ ...chip(C), padding: "2px 8px" }}>−</button>
+              <b style={{ fontSize: 12, color: capo ? C.amber : C.dim, minWidth: 12, textAlign: "center" }}>{capo}</b>
+              <button onClick={() => setCapo((c) => Math.min(7, c + 1))} style={{ ...chip(C), padding: "2px 8px" }}>+</button>
+            </>}
+            {sequence && sequence.length > 1 && <span style={{ marginLeft: "auto", display: "inline-flex", gap: 4, alignItems: "center" }}>
+              <button onClick={() => step(-1)} disabled={seqIdx <= 0} style={{ ...chip(C), padding: "2px 9px", opacity: seqIdx <= 0 ? 0.4 : 1 }}>◀ {seqIdx > 0 ? sequence[seqIdx - 1].symbol : ""}</button>
+              <button onClick={() => step(1)} disabled={seqIdx >= sequence.length - 1} style={{ ...chip(C), padding: "2px 9px", opacity: seqIdx >= sequence.length - 1 ? 0.4 : 1 }}>next {seqIdx < sequence.length - 1 ? sequence[Math.max(0, seqIdx) + 1].symbol : ""} ▶</button>
+            </span>}
+          </div>
           {choices.length > 1 && !stack.length && (
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
               {choices.map((c, i) => (
-                <button key={i} onClick={() => setIdx(i)} style={{ ...chip(C), padding: "2px 10px", borderColor: i === idx ? C.amber : C.border, color: i === idx ? C.amber : C.dim, fontWeight: 700 }}>{c.symbol}</button>
+                <button key={i} onClick={() => { setIdx(i); setWalked(false); setPrevVoicing(null); }} style={{ ...chip(C), padding: "2px 10px", borderColor: i === idx ? C.amber : C.border, color: i === idx ? C.amber : C.dim, fontWeight: 700 }}>{c.symbol}</button>
               ))}
             </div>
           )}
@@ -2676,14 +2761,14 @@ function ChordVoicingModal({ choices, start = 0, onClose, C, useSharp }) {
               <div style={{ fontSize: 11, color: C.dim, margin: "2px 0 10px", lineHeight: 1.5 }}>{g.blurb}</div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 10 }}>
                 {g.voicings.map((v, i) => {
-                  const on = heard === v.frets.join(",");
+                  const on = heard === (v.frets || v.midi).join(",");
                   return (
                     <button key={g.id + i} onClick={() => audition(v)} title="tap to hear it"
                       style={{ position: "relative", background: C.bg, border: `1.5px solid ${on ? C.green : C.border}`, borderRadius: 12, padding: "10px 8px 6px", cursor: "pointer", textAlign: "center", color: C.text }}>
-                      <span style={{ position: "absolute", top: 7, right: 7, background: C.chord, color: C.bg, borderRadius: 8, padding: "1px 7px", font: "700 11px 'Space Mono', monospace" }}>{badge(v)}</span>
-                      <div style={{ fontSize: 11, color: C.cyan, minHeight: 28, padding: "0 40px 0 4px", textAlign: "left", lineHeight: 1.3 }}>{v.title}{v.rootless ? " · rootless" : ""}</div>
-                      <VoicingDiagram v={v} mode={mode} lib={lib} C={C} />
-                      <div style={{ fontSize: 10, color: C.dim, letterSpacing: 1 }}>{v.frets.map((f) => (f < 0 ? "x" : f)).join(" ")}</div>
+                      {v.frets && <span style={{ position: "absolute", top: 7, right: 7, background: C.chord, color: C.bg, borderRadius: 8, padding: "1px 7px", font: "700 11px 'Space Mono', monospace" }}>{badge(v)}</span>}
+                      <div style={{ fontSize: 11, color: C.cyan, minHeight: 28, padding: v.frets ? "0 40px 0 4px" : "0 4px", textAlign: "left", lineHeight: 1.3 }}>{v.title || v.label || ""}{v.rootless ? " · rootless" : ""}{prevVoicing && v.distance != null ? ` · ${v.distance} st move` : ""}</div>
+                      {v.frets ? <VoicingDiagram v={v} mode={mode} lib={lib} C={C} leftHanded={leftHanded} /> : <KeyboardDiagram v={v} mode={mode} C={C} />}
+                      <div style={{ fontSize: 10, color: C.dim, letterSpacing: 1 }}>{v.frets ? (leftHanded ? v.frets.slice().reverse() : v.frets).map((f) => (f < 0 ? "x" : f)).join(" ") + (v.capo ? ` · capo ${v.capo}` : "") : v.hands && v.hands.left.length && v.hands.right.length ? "LH · RH" : v.hands && v.hands.left.length ? "left hand" : "right hand"}</div>
                     </button>
                   );
                 })}
@@ -2707,7 +2792,7 @@ function ChordVoicingModal({ choices, start = 0, onClose, C, useSharp }) {
             </section>
           )}
           <div style={{ fontSize: 10, color: C.dim, marginTop: 14, lineHeight: 1.5 }}>
-            Standard tuning. Tap a diagram to hear it. Library shapes: tombatossals/chords-db (MIT), checked against each chord's notes; the rest are derived from the chord's intervals.
+            {instrument === "guitar" ? "Standard tuning." : instrument === "piano" ? "Each hand within a 9th; ◀ / ▶ walk the chart and rank the next chord's voicings by how little the hands move." : `${INSTRUMENTS[instrument].name} in ${INSTRUMENTS[instrument].strings.map((m) => NOTE_SHARP[m % 12]).join(" ")}${capo ? `, capo ${capo} (frets above the capo)` : ""}. Every grip fits the hand (a "stretch" adds one fret).`} Tap a diagram to hear it. Guitar library shapes: tombatossals/chords-db (MIT), checked against each chord's notes; the rest are derived from the chord's intervals.
           </div>
         </div>
       </div>

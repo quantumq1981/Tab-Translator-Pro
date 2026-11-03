@@ -2264,7 +2264,7 @@ expect(!/maxRank: 14/.test(uiSrc) && !/setSimple/.test(uiSrc), "the old △ Simp
 expect(/function useSixNine/.test(uiSrc) && /_usePref\(_SIX9_KEY, "maj9"/.test(uiSrc) && /vocabulary: vocab, sixNine \}/.test(uiSrc) && /vocabulary: vocab, sixNine, fullRate/.test(uiSrc), "the 6/9 → maj9/maj7/triad setting defaults to maj9 and reaches both decodes");
 expect(/function _usePref/.test(uiSrc) && /try \{ const x = localStorage\.getItem\(key\)/.test(uiSrc) && /try \{ localStorage\.setItem\(key, x\); \} catch/.test(uiSrc) && /_prefListeners/.test(uiSrc), "the vocabulary choices are shared live between pickers and remembered per device, guarded by try/catch");
 // every chart (PDF / GP / MusicXML / ML / guitar tab) is named by the same vocabulary
-expect(/respellScore\(transposeScore\(base, semis, useSharp\), vocab, \{ sixNine, useSharp \}\)/.test(uiSrc) && /vocabPicker && <ChordVocabPicker/.test(uiSrc), "ChartPanel names every chart with the shared vocabulary and shows the picker");
+expect(/respellScore\(transposeScore\(base, semis, useSharp\), lvl \? lvl\.vocabulary : vocab, \{ sixNine, useSharp \}\)/.test(uiSrc) && /vocabPicker && <ChordVocabPicker/.test(uiSrc), "ChartPanel names every chart with the shared vocabulary (or the arrangement level's) and shows the picker");
 expect((uiSrc.match(/vocabPicker=\{false\}/g) || []).length === 2, "the audio and stem charts hide the duplicate picker (theirs sits above)");
 expect(/from\s*\$\{engineUrl\}/.test(htmlSrc) || /engine\.tsx/.test(htmlSrc), "index.html loader must reference/wire engine.tsx");
 const pagesYml = fs.readFileSync(path.join(repo, ".github", "workflows", "pages.yml"), "utf8");

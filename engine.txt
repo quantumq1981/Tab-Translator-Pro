@@ -8567,9 +8567,9 @@ function normalizeDictPosition(pos) {
  * when there aren't enough fingers). Returns { fingers:[6], barres:[{fret,from,to}] }
  * or null when the shape needs more than four fingers — i.e. it isn't a grip. */
 function assignChordFingers(frets) {
-  const fingers = [0, 0, 0, 0, 0, 0], barres = [];
+  const n = frets.length || 6, fingers = new Array(n).fill(0), barres = [];
   const fretted = [];
-  for (let s = 0; s < 6; s++) if (frets[s] > 0) fretted.push(s);
+  for (let s = 0; s < n; s++) if (frets[s] > 0) fretted.push(s);
   if (!fretted.length) return { fingers, barres };
   const minF = Math.min(...fretted.map((s) => frets[s]));
   if (Math.max(...fretted.map((s) => frets[s])) - minF > 4) return null;
@@ -8912,10 +8912,11 @@ function _vcValidRootless(frets, rootPc, formula) {
 /* A voicing → the svguitar `chord()` payload. Strings are numbered 1 = high e; frets
  * are RELATIVE to the diagram window when it starts above the nut. mode "fingers"
  * labels each fretted dot with its finger, "intervals" with its chord degree. */
-function voicingToSVGuitar(v, mode = "fingers") {
-  const fingers = [];
-  for (let s = 0; s < 6; s++) {
-    const f = v.frets[s], str = 6 - s;
+function voicingToSVGuitar(v, mode = "fingers", opts = {}) {
+  const fingers = [], n = v.frets.length;
+  for (let s = 0; s < n; s++) {
+    // svguitar string 1 is drawn on the right: the lowest string on the left, mirrored for left-handers
+    const f = v.frets[s], str = opts.leftHanded ? s + 1 : n - s;
     if (f < 0) { fingers.push([str, "x"]); continue; }
     if (f === 0) { fingers.push([str, 0]); continue; }
     const rel = v.baseFret > 1 ? f - v.baseFret + 1 : f;
@@ -9954,6 +9955,269 @@ function scoreToChordProWithLyrics(score, map, opts = {}) {
   return L.join("\n").replace(/\n{3,}/g, "\n\n").replace(/^\n+/, "") + "\n";
 }
 
+/* ============================================================================
+ *  WORKBENCH · WO-4 — INSTRUMENT COVERAGE + ARRANGEMENT LEVELS
+ *  ---------------------------------------------------------------------------
+ *  The chord-voicing modal was guitar-only. These voice any chord symbol the voicing
+ *  grammar reads (voicingFormula) on:
+ *    - FRETTED instruments of any string count and tuning — ukulele (re-entrant GCEA),
+ *      baritone uke, mandolin (GDAE, fifths), 4/5-string bass (double-stops), guitar —
+ *      by enumerating every playable grip inside a hand span (a HARD constraint; open
+ *      strings free), keeping only grips whose every note is a chord tone and that hold
+ *      the required tones. On 4 strings a 5-note chord drops its 5th, then its root
+ *      (marked rootless), exactly as players do. Ranked by position, span, mutes and
+ *      open strings; fingered by the same finger model as the guitar modal.
+ *    - PIANO: close position + inversions, shells, rootless A/B (jazz), open/spread
+ *      and two-hand voicings, each hand within a 9th (14 semitones), ranked by
+ *      voice-leading distance to the previous chord when given.
+ *  arrangementLevels(score, "beginner" | "intermediate" | "advanced") derives a chart at a
+ *  playing level from the same engine passes (simplify, respell with a vocabulary,
+ *  arrangeScore, transpose) — never mutates the source; re-applying a level is stable.
+ * ------------------------------------------------------------------------- */
+const INSTRUMENTS = {
+  guitar: { id: "guitar", name: "Guitar", kind: "fretted", strings: [40, 45, 50, 55, 59, 64], maxFret: 15, maxSpan: 4, minNotes: 3, maxMute: 2 },
+  ukulele: { id: "ukulele", name: "Ukulele", kind: "fretted", strings: [67, 60, 64, 69], maxFret: 15, maxSpan: 4, minNotes: 3, maxMute: 1, reentrant: true },
+  baritone: { id: "baritone", name: "Baritone uke", kind: "fretted", strings: [50, 55, 59, 64], maxFret: 15, maxSpan: 4, minNotes: 3, maxMute: 1 },
+  mandolin: { id: "mandolin", name: "Mandolin", kind: "fretted", strings: [55, 62, 69, 76], maxFret: 15, maxSpan: 5, minNotes: 3, maxMute: 1 },
+  bass4: { id: "bass4", name: "Bass (4)", kind: "fretted", strings: [28, 33, 38, 43], maxFret: 12, maxSpan: 4, minNotes: 2, maxNotes: 3, bass: true },
+  bass5: { id: "bass5", name: "Bass (5)", kind: "fretted", strings: [23, 28, 33, 38, 43], maxFret: 12, maxSpan: 4, minNotes: 2, maxNotes: 3, bass: true },
+  piano: { id: "piano", name: "Piano", kind: "keyboard" },
+};
+const INSTRUMENT_ORDER = ["guitar", "piano", "ukulele", "mandolin", "bass4", "baritone", "bass5"];
+/** Generic N-string grip enumerator → voicings in the guitar modal's shape
+ *  ({ frets, fingers, barres, baseFret, fretCount, labels, midi, title, group, rootless }). */
+function fretVoicings(rootPc, formula, inst, opts = {}) {
+  const capo = opts.capo || 0, open = inst.strings.map((m) => m + capo), n = open.length;
+  const maxFret = Math.max(4, (opts.maxFret || inst.maxFret || 12) - capo), span = opts.handSpan || inst.maxSpan || 4;
+  const pcs = new Set(formula.tones.map((t) => (rootPc + t.semi) % 12));
+  const bassPc = opts.bassPc != null ? opts.bassPc : null;
+  if (bassPc != null) pcs.add(bassPc);
+  // required pitch classes, shed to fit the string count: 5th first, then the root
+  let req = formula.required.slice();
+  const cap = inst.maxNotes || n;
+  if (req.length > cap && req.includes(7)) req = req.filter((x) => x !== 7);
+  let rootlessOK = false;
+  // an extended chord (5+ tones) on 4 strings may leave the root to the bass player, as uke and
+  // mandolin players do; the cost below still prefers a grip that keeps it
+  if (req.includes(0) && (req.length > cap || (cap <= 4 && req.length >= cap && formula.tones.length >= 5))) { req = req.filter((x) => x !== 0); rootlessOK = true; }
+  if (inst.bass) req = [0];
+  const reqPc = req.map((x) => (rootPc + x) % 12);
+  const out = new Map();
+  const frets = new Array(n).fill(-1);
+  const consider = () => {
+    const sounding = frets.map((f, s) => (f >= 0 ? s : -1)).filter((s) => s >= 0);
+    if (sounding.length < Math.min(inst.minNotes || 2, formula.tones.length <= 2 ? 2 : 9) || sounding.length > (inst.maxNotes || n)) return;
+    if (n - sounding.length > (inst.maxMute != null ? inst.maxMute : n)) return;
+    const fr = sounding.map((s) => frets[s]).filter((f) => f > 0);
+    if (fr.length && Math.max(...fr) - Math.min(...fr) > span - 1) return;
+    const midi = sounding.map((s) => open[s] + frets[s]), have = new Set(midi.map((m) => m % 12));
+    for (const p of reqPc) if (!have.has(p)) return;
+    if (formula.requireAny && !formula.requireAny.some((x) => have.has((rootPc + x) % 12))) return;
+    if (!have.has(rootPc) && !rootlessOK && !inst.bass) return;
+    const low = Math.min(...midi), lowPc = low % 12;
+    if (inst.bass) { if (lowPc !== (bassPc != null ? bassPc : rootPc)) return; if (sounding.some((s, i) => i > 0 && s - sounding[i - 1] > 2)) return; }
+    if (bassPc != null && !inst.reentrant && lowPc !== bassPc) return;
+    const fg = assignChordFingers(frets);
+    if (!fg) return;
+    const sig = frets.join(",");
+    if (out.has(sig)) return;
+    const minF = fr.length ? Math.min(...fr) : 0, maxF = fr.length ? Math.max(...fr) : 0;
+    const baseFret = maxF <= 4 ? 1 : minF;
+    const rootLow = lowPc === rootPc, missingOpt = formula.tones.filter((t) => !have.has((rootPc + t.semi) % 12)).length;
+    const opens = frets.filter((f) => f === 0).length, mutes = n - sounding.length;
+    const cost = minF * 0.55 + (fr.length ? maxF - minF : 0) * 0.35 + mutes * (inst.reentrant ? 2 : 0.9) + missingOpt * 0.45 - opens * 0.3
+      + (!inst.reentrant && !rootLow ? 1.2 : 0) + (have.has(rootPc) ? 0 : 0.8) + (fg.barres.length ? 0.25 : 0);
+    const labels = frets.map((f, s) => (f < 0 ? null : _vcLabel(formula, rootPc, (open[s] + f) % 12)));
+    const title = inst.bass ? sounding.map((s) => labels[s]).join(" + ") : !rootLow && !inst.reentrant ? `${labels[sounding[0]]} in the bass` : "";
+    out.set(sig, { frets: frets.slice(), fingers: fg.fingers.slice(), barres: fg.barres, baseFret, fretCount: Math.max(4, maxF - baseFret + 1), labels, midi: midi.slice().sort((a, b) => a - b),
+      title, group: maxF <= 5 ? "low" : "up", source: "gen", rootless: !have.has(rootPc), rootLow, cost, capo });
+  };
+  const rec = (s) => {
+    if (s === n) { consider(); return; }
+    frets[s] = -1; rec(s + 1);
+    for (let f = 0; f <= maxFret; f++) {
+      if (!pcs.has((open[s] + f) % 12)) continue;
+      if (f > 0) { const fr = frets.slice(0, s).filter((x) => x > 0); if (fr.length && (Math.max(f, ...fr) - Math.min(f, ...fr) > span - 1)) continue; }
+      frets[s] = f; rec(s + 1);
+    }
+    frets[s] = -1;
+  };
+  rec(0);
+  return [...out.values()].sort((a, b) => a.cost - b.cost);
+}
+/* ---- piano ---- */
+const _pnRaise = (m, floor) => { while (m < floor) m += 12; return m; };
+function _pnVoicing(midis, label, group, hands) {
+  const sorted = midis.slice().sort((a, b) => a - b);
+  return { midi: sorted, label, group, hands: hands || { left: [], right: sorted }, span: sorted[sorted.length - 1] - sorted[0] };
+}
+/** Voice-leading distance between two voicings: notes paired in order (the shorter list against
+ *  the nearest notes of the longer), summed semitones. */
+function voiceLeadingDistance(a, b) {
+  if (!a || !b || !a.length || !b.length) return 0;
+  const A = a.slice().sort((x, y) => x - y), B = b.slice().sort((x, y) => x - y);
+  const [S, Lg] = A.length <= B.length ? [A, B] : [B, A];
+  let d = 0; for (const x of S) d += Math.min(...Lg.map((y) => Math.abs(x - y)));
+  return d + 2 * (Lg.length - S.length);
+}
+/** Piano voicings for a parsed chord: close position + inversions, shells, rootless A/B,
+ *  open/spread, two hands. Each hand ≤ `handSpan` (14 = a 9th). opts.previous (a midi list)
+ *  ranks every group by voice-leading distance. */
+function pianoVoicings(rootPc, formula, opts = {}) {
+  const span = opts.handSpan || 14, center = opts.center || 60, out = [];
+  const tones = formula.tones.map((t) => t.semi).sort((a, b) => a - b);
+  const has = (x) => tones.includes(x);
+  const third = has(4) ? 4 : has(3) ? 3 : has(5) ? 5 : has(2) ? 2 : null;
+  const seventh = has(11) ? 11 : has(10) ? 10 : has(9) && !has(4) && tones.length === 4 && has(3) && has(6) ? 9 : has(9) ? 9 : null;
+  const fifth = has(7) ? 7 : has(6) ? 6 : has(8) ? 8 : null;
+  const exts = tones.filter((x) => [1, 2, 3, 5, 6, 8, 9].includes(x) && x !== third && x !== fifth && x !== seventh);
+  const rootMidi = _pnRaise(48 + rootPc, center - 12);                // LH root around C3
+  // close position + inversions (right hand) over the bass root
+  const core = [0, third, fifth, seventh].filter((x) => x != null);
+  const coreNotes = core.length >= 3 ? core : tones.slice(0, 4);
+  for (let inv = 0; inv < coreNotes.length; inv++) {
+    const ord = coreNotes.slice(inv).concat(coreNotes.slice(0, inv)), m = [];
+    let prev = _pnRaise(rootPc + ord[0] + 48, center - 5);
+    m.push(prev);
+    for (let k = 1; k < ord.length; k++) { let x = rootPc + ord[k] + 48; while (x <= prev) x += 12; m.push(x); prev = x; }
+    if (m[m.length - 1] - m[0] <= span) out.push(_pnVoicing(m, inv === 0 ? "root position" : `${["", "1st", "2nd", "3rd"][inv]} inversion`, "close", { left: [], right: m }));
+  }
+  // full chord close (with extensions) when it fits a hand
+  if (tones.length > coreNotes.length) {
+    const m = []; let prev = _pnRaise(rootPc + 48, center - 5); m.push(prev);
+    for (const x0 of tones.slice(1)) { let x = rootPc + x0 + 48; while (x <= prev) x += 12; m.push(x); prev = x; }
+    if (m[m.length - 1] - m[0] <= span) out.push(_pnVoicing(m, "all tones, close", "close"));
+  }
+  // shells: R-3-7 and R-7-3 (left hand), the 7th chord's skeleton
+  if (third != null && seventh != null) {
+    const r = rootMidi;
+    out.push(_pnVoicing([r, r + third, r + seventh], "shell R–3–7", "shell", { left: [r, r + third, r + seventh], right: [] }));
+    out.push(_pnVoicing([r, r + seventh, r + 12 + third], "shell R–7–3", "shell", { left: [r], right: [r + seventh, r + 12 + third] }));   // the 10th is split across the hands
+  }
+  // rootless A (3-5-7-9) and B (7-9-3-5) — the jazz pianist's left hand; the bass plays the root
+  if (third != null && seventh != null && !exts.some((x) => x === 1 || x === 2 || x === 3)) {
+    // no written 9th: rootless 3·5·7 / 7·3·5 (chord tones only — adding a 9 is the player's call)
+    const b3 = _pnRaise(rootPc + third + 48, center - 10), a = [b3, b3 + ((fifth != null ? fifth : 9) - third + 12) % 12, b3 + ((seventh - third + 12) % 12)].sort((x, y) => x - y);
+    out.push(_pnVoicing(a, "rootless 3·5·7", "rootless", { left: a, right: [] }));
+    const b7 = _pnRaise(rootPc + seventh + 48, center - 10), bb = [b7, b7 + ((third - seventh + 24) % 12), b7 + ((third - seventh + 24) % 12) + (((fifth != null ? fifth : 9) - third + 12) % 12)];
+    if (bb[2] - bb[0] <= span) out.push(_pnVoicing(bb, "rootless 7·3·5", "rootless", { left: bb, right: [] }));
+  }
+  if (third != null && seventh != null && exts.some((x) => x === 1 || x === 2 || x === 3)) {
+    const nine = exts.includes(2) ? 2 : exts.includes(1) ? 1 : 3, five = exts.includes(9) && !has(7) ? 9 : fifth != null ? fifth : 9;
+    const base = _pnRaise(rootPc + third + 48, center - 10);
+    const a = [base], up = (x) => { let v = rootPc + x + 48; while (v <= a[a.length - 1]) v += 12; a.push(v); };
+    up(five); up(seventh); up(nine);
+    if (a[3] - a[0] <= span) out.push(_pnVoicing(a, "rootless A (3·5·7·9)", "rootless", { left: a, right: [] }));
+    const bb = [_pnRaise(rootPc + seventh + 48, center - 10)], upb = (x) => { let v = rootPc + x + 48; while (v <= bb[bb.length - 1]) v += 12; bb.push(v); };
+    upb(nine); upb(third); upb(five);
+    if (bb[3] - bb[0] <= span) out.push(_pnVoicing(bb, "rootless B (7·9·3·5)", "rootless", { left: bb, right: [] }));
+  }
+  // open / spread: root + 5th low, 3rd (+7th) an octave up
+  if (third != null) {
+    const r = rootMidi, f = fifth != null ? r + fifth : r + 12;
+    const right = [r + 12 + third].concat(seventh != null ? [r + 12 + seventh] : [r + 24]).concat(exts.length ? [r + 12 + exts[exts.length - 1] + (exts[exts.length - 1] < third ? 12 : 0)] : []);
+    const rs = right.sort((x, y) => x - y);
+    if (rs[rs.length - 1] - rs[0] <= span) out.push(_pnVoicing([r, f, ...rs], "open (spread)", "open", { left: [r, f], right: rs }));
+  }
+  // two hands: LH root + 7th (or 5th), RH guide tones + colour
+  {
+    const r = rootMidi, lh = [r, r + (seventh != null ? seventh : fifth != null ? fifth : 12)];
+    const rhT = [third, seventh != null ? null : fifth, ...exts, seventh != null ? (fifth != null ? fifth : null) : null].filter((x) => x != null && x !== 0);
+    const rh = []; let prev = _pnRaise(rootPc + (rhT[0] != null ? rhT[0] : 7) + 48, center);
+    if (rhT.length) { rh.push(prev); for (const x0 of rhT.slice(1)) { let x = rootPc + x0 + 48; while (x <= prev) x += 12; if (x - rh[0] <= span) { rh.push(x); prev = x; } } }
+    if (rh.length >= 2) out.push(_pnVoicing([...lh, ...rh], "two hands", "hands", { left: lh, right: rh }));
+  }
+  // more inversions of the full tone set, up an octave (so there are always ≥ 6 shapes)
+  for (let inv = 0; inv < tones.length && out.length < 8; inv++) {
+    const ord = tones.slice(inv).concat(tones.slice(0, inv)), m = []; let prev = _pnRaise(rootPc + ord[0] + 48, center + 2);
+    m.push(prev); for (const x0 of ord.slice(1)) { let x = rootPc + x0 + 48; while (x <= prev) x += 12; m.push(x); prev = x; }
+    const sig = m.join(",");
+    if (m[m.length - 1] - m[0] <= span && !out.some((v) => v.midi.join(",") === sig)) out.push(_pnVoicing(m, "upper register", "close"));
+  }
+  // small chords (a power chord): octave doublings so there are still a handful of shapes
+  for (const v of out.slice()) { if (out.length >= 6) break; const m = v.midi.concat([v.midi[0] + 12]); if (m[m.length - 1] - m[0] <= span) out.push(_pnVoicing(m, `${v.label} + octave`, v.group)); }
+  if (out.length < 6) { const r = rootMidi; for (const m of [[r - 12, r, r + 7], [r, r + 7, r + 12, r + 19], [r - 12, r + 7, r + 12]]) if (out.length < 6) out.push(_pnVoicing(m, "two hands, doubled", "hands", { left: m.filter((x) => x < r + 1), right: m.filter((x) => x > r) })); }
+  // labels + voice-leading rank
+  out.forEach((v) => { v.labels = v.midi.map((m) => _vcLabel(formula, rootPc, m % 12)); v.distance = opts.previous ? voiceLeadingDistance(opts.previous, v.midi) : 0; });
+  if (opts.previous) out.sort((a, b) => a.distance - b.distance);
+  const seen = new Set();
+  return out.filter((v) => { const k = v.midi.join(","); if (seen.has(k)) return false; seen.add(k); return true; });
+}
+const _INST_GROUPS = {
+  low: ["Common shapes", "Grips in the first five frets."],
+  up: ["Up the neck", "The same chord higher up."],
+  close: ["Close position + inversions", "One hand, notes as close as they go."],
+  shell: ["Shells", "Root, 3rd and 7th — the skeleton, left hand."],
+  rootless: ["Rootless (A / B)", "Left hand without the root — the bass player has it."],
+  open: ["Open / spread", "Root and 5th low, the colour an octave up."],
+  hands: ["Two hands", "Left hand bass, right hand guide tones and colour."],
+};
+/** Voicings of a chord symbol on an instrument → { ok, parsed, instrument, groups, total }.
+ *  Guitar with a chord dictionary goes through chordVoicings (opts.dict); every other instrument
+ *  (and guitar without a dictionary) through the generic voicers above. */
+function voicingsForInstrument(symbol, instrumentId = "guitar", opts = {}) {
+  const inst = INSTRUMENTS[instrumentId] || INSTRUMENTS.guitar;
+  if (inst.id === "guitar" && opts.dict !== undefined && !opts.capo) return { ...chordVoicings(opts.dict, symbol, opts), instrument: inst.id };
+  const parsed = parseChordSymbolForVoicings(symbol);
+  if (!parsed.ok) return { ok: false, parsed, instrument: inst.id, groups: [], total: 0 };
+  const groups = [];
+  if (inst.kind === "keyboard") {
+    const vs = pianoVoicings(parsed.rootPc, parsed.formula, { previous: opts.previous, handSpan: opts.handSpan });
+    if (parsed.bassPc != null) vs.forEach((v) => { const b = _pnRaise(36 + parsed.bassPc, 36); if (!v.hands.left.length || v.hands.left[0] % 12 !== parsed.bassPc) { v.hands = { left: [b], right: v.hands.right.length ? v.hands.right : v.hands.left }; v.midi = [b, ...v.midi.filter((m) => m !== b)].sort((x, y) => x - y); v.labels = v.midi.map((m) => _vcLabel(parsed.formula, parsed.rootPc, m % 12)); } });
+    for (const g of ["close", "shell", "rootless", "open", "hands"]) { const list = vs.filter((v) => v.group === g); if (list.length) groups.push({ id: g, title: _INST_GROUPS[g][0], blurb: _INST_GROUPS[g][1], voicings: list }); }
+  } else {
+    const max = opts.max || 12, fo = { capo: opts.capo, maxFret: opts.maxFret, handSpan: opts.handSpan, bassPc: parsed.bassPc };
+    let vs = fretVoicings(parsed.rootPc, parsed.formula, inst, fo);
+    if (vs.length < 6 && !opts.handSpan) {                  // too few inside the hand: allow a one-fret stretch, marked
+      const seen = new Set(vs.map((v) => v.frets.join(",")));
+      vs = vs.concat(fretVoicings(parsed.rootPc, parsed.formula, inst, { ...fo, handSpan: (inst.maxSpan || 4) + 1 }).filter((v) => !seen.has(v.frets.join(","))).map((v) => ({ ...v, title: v.title ? `${v.title} · stretch` : "stretch", stretch: true, cost: v.cost + 1.5 })));
+    }
+    if (opts.previous) vs.forEach((v) => { v.distance = voiceLeadingDistance(opts.previous, v.midi); });
+    for (const g of ["low", "up"]) { const list = vs.filter((v) => v.group === g).slice(0, max); if (list.length) groups.push({ id: g, title: _INST_GROUPS[g][0], blurb: inst.bass ? "Double-stops over the root — what a bassist can hold under the chord." : _INST_GROUPS[g][1], voicings: list }); }
+  }
+  return { ok: true, parsed, instrument: inst.id, groups, total: groups.reduce((a, g) => a + g.voicings.length, 0) };
+}
+
+/* ---- arrangement levels ---- */
+const _LEVEL_VOCAB = {
+  beginner: { label: "Beginner", qualities: ["", "m"], inversions: {}, hidden: { "": [4, 7], m: [3, 7] }, foreign: {}, writeAs: { "7": "", maj7: "", m7: "m", "6": "", m6: "m", sus4: "", sus2: "", add9: "", "6/9": "", "9": "", maj9: "", m9: "m", "5": "" } },
+  intermediate: { label: "Intermediate", qualities: ["", "m", "7", "maj7", "m7", "m7♭5", "dim7", "sus4", "7sus4"], inversions: { "": [4, 7], "7": [4, 10] }, hidden: { m: [3, 7], maj7: [4, 7, 11], m7: [7, 10], "m7♭5": [6, 10], sus4: [7], "7sus4": [7], "6": [4, 7] }, foreign: {}, writeAs: { "6/9": "maj7", "6": "maj7", sus2: "", add9: "", "9": "7", maj9: "maj7", m9: "m7", m11: "m7", "7♭9": "7" } },
+};
+const ARRANGEMENT_LEVELS = ["beginner", "intermediate", "advanced"];
+const _EASY_MAJOR = [0, 7, 2, 9, 4];                 // C G D A E — open-chord keys
+const _EASY_MINOR = [9, 4, 2];                       // Am Em Dm
+/** A playing level of a chart → { score, level, vocabulary, transposedBy, capo }.
+ *  beginner: one chord per bar, plain triads, quarter-note strums, moved to the nearest open-chord
+ *  key (capo given to play along with the record). intermediate: 7ths + triad inversions, straight
+ *  eighths. advanced: the full Pro vocabulary, rhythm as written (or opts.template). */
+function arrangementLevels(score, level = "advanced", opts = {}) {
+  if (!score || !score.bars) return { score, level, vocabulary: "chart", transposedBy: 0, capo: 0 };
+  const useSharp = opts.useSharp !== false;
+  if (level === "advanced") {
+    const s = opts.template ? arrangeScore(score, opts.template) : score;
+    return { score: s, level, vocabulary: "chart", transposedBy: 0, capo: 0 };
+  }
+  const vocab = _LEVEL_VOCAB[level] || _LEVEL_VOCAB.intermediate;
+  let s = level === "beginner" || isMelodicScore(score) ? simplifyScore(score, useSharp) : score;
+  let t = 0;
+  if (level === "beginner") {
+    // the key of the chart AS WRITTEN (a collapsed melody part can read a wrong key) or the user's
+    const k = opts.key || analyzeKey(score);
+    if (k && typeof k.tonic === "number") {
+      const easy = k.mode === "minor" ? _EASY_MINOR : _EASY_MAJOR;
+      // the nearest open-chord key at or BELOW the chart's key, so a capo plays along with the record
+      let best = 0, bd = Infinity;
+      for (const e of easy) { const down = ((k.tonic - e) % 12 + 12) % 12; if (down < bd) { bd = down; best = down ? -down : 0; } }
+      t = best;
+    }
+    if (t) s = transposeScore(s, t, useSharp);
+  }
+  s = respellScore(s, vocab, { useSharp });
+  s = arrangeScore(s, level === "beginner" ? "quarters" : "eighths");
+  const capo = t < 0 ? -t : t > 0 ? 12 - t : 0;
+  return { score: { ...s, level }, level, vocabulary: vocab, transposedBy: t, capo: capo > 0 && capo <= 7 ? capo : 0 };
+}
+
 export {
   makeMask,
   popcount,
@@ -10362,4 +10626,12 @@ export {
   scoreToLyricsSheet,
   scoreToChordProWithLyrics,
   lyricSheetRows,
+  INSTRUMENTS,
+  INSTRUMENT_ORDER,
+  fretVoicings,
+  voiceLeadingDistance,
+  pianoVoicings,
+  voicingsForInstrument,
+  ARRANGEMENT_LEVELS,
+  arrangementLevels,
 };

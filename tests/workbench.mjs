@@ -388,5 +388,98 @@ section("WO-3 lyrics");
   expect(/timing: \{ v: 1, lines:/.test(uiSrc) && /csm:lyrics:v1/.test(uiSrc), "the Perform Lyrics handoff carries optional line timing");
 }
 
+/* ============================================================================
+ *  WO-4 — instrument voicings + arrangement levels
+ * ========================================================================== */
+section("WO-4 instruments");
+{
+  const sufs = eng.QUALITIES.map((q) => q.suffix);
+  const pcSet = (sym) => { const p = eng.parseChordSymbolForVoicings(sym); return { p, pcs: new Set(p.formula.tones.map((t) => (p.rootPc + t.semi) % 12)) }; };
+  for (const id of ["ukulele", "mandolin", "baritone", "bass4"]) {
+    const inst = eng.INSTRUMENTS[id], short = [], bad = [];
+    for (const root of ["C", "F#", "Bb"]) for (const suf of sufs) {
+      const sym = root + suf, r = eng.voicingsForInstrument(sym, id);
+      if (!r.ok) { bad.push(`${sym}:parse`); continue; }
+      const { p, pcs } = pcSet(sym), all = r.groups.flatMap((g) => g.voicings);
+      // dim7 is symmetric: on 4 strings it is one grip moved every 3 frets — 5 fit in 15 frets
+      if (all.length < (suf === "dim7" && id === "baritone" ? 5 : 6)) short.push(`${sym}=${all.length}`);
+      for (const v of all) {
+        const fr = v.frets.filter((f) => f > 0), sp = fr.length ? Math.max(...fr) - Math.min(...fr) + 1 : 0;
+        const ok = v.midi.every((m) => pcs.has(m % 12)) && sp <= inst.maxSpan + (v.stretch ? 1 : 0) && v.fingers.every((f) => f <= 4) && v.frets.length === inst.strings.length
+          && v.frets.every((f, s) => f < 0 || inst.strings[s] + f === v.midi.find((m) => m === inst.strings[s] + f));
+        if (!ok) { bad.push(`${sym}:${v.frets.join(",")}`); break; }
+      }
+    }
+    expect(!short.length, `${inst.name}: every quality × C/F#/Bb has ≥ 6 playable shapes (short: ${short.slice(0, 8).join(" ")})`);
+    expect(!bad.length, `${inst.name}: every shape sounds only chord tones, within the hand span (+1 fret where marked stretch), ≤ 4 fingers (bad: ${bad.slice(0, 5).join(" ")})`);
+  }
+  const uk = eng.voicingsForInstrument("C", "ukulele").groups[0].voicings.map((v) => v.frets.join(""));
+  const md = eng.voicingsForInstrument("G", "mandolin").groups[0].voicings.map((v) => v.frets.join(""));
+  const uf = eng.voicingsForInstrument("F", "ukulele").groups[0].voicings.map((v) => v.frets.join(""));
+  expect(uk[0] === "0003" && uf.includes("2010") && md.includes("0023"), `the textbook shapes come first: uke C ${uk[0]}, uke F has 2010, mandolin G has 0023`);
+  const b7 = eng.voicingsForInstrument("C7", "bass4").groups.flatMap((g) => g.voicings);
+  expect(b7.every((v) => v.midi.length >= 2 && v.midi.length <= 3 && v.midi[0] % 12 === 0), "bass: double-stops with the root lowest");
+  const capo = eng.voicingsForInstrument("D", "ukulele", { capo: 2 }).groups[0].voicings[0];
+  expect(capo.frets.join("") === "0003" && capo.capo === 2, `capo 2 on a uke: D is the C shape (${capo.frets.join("")})`);
+  const slash = eng.voicingsForInstrument("C/E", "mandolin").groups.flatMap((g) => g.voicings);
+  expect(slash.length && slash.every((v) => v.midi[0] % 12 === 4), "a slash chord's bass is the lowest note on a non-re-entrant instrument");
+  // piano
+  const shortP = [], badP = [];
+  for (const suf of sufs) {
+    const sym = "C" + suf, r = eng.voicingsForInstrument(sym, "piano"), { p, pcs } = pcSet(sym), all = r.groups.flatMap((g) => g.voicings);
+    if (all.length < 6) shortP.push(`${sym}=${all.length}`);
+    for (const v of all) {
+      const hl = v.hands.left, hr = v.hands.right;
+      const ok = v.midi.every((m) => pcs.has(m % 12)) && (!hl.length || hl[hl.length - 1] - hl[0] <= 14) && (!hr.length || hr[hr.length - 1] - hr[0] <= 14);
+      if (!ok) { badP.push(`${sym}:${v.label}`); break; }
+    }
+    const rp = all.find((v) => v.label === "root position");
+    if (rp && !p.formula.required.filter((x) => x !== 7).every((x) => rp.midi.some((m) => (m - p.rootPc - x) % 12 === 0)) && !all.some((v) => p.formula.required.every((x) => v.midi.some((m) => ((m - p.rootPc - x) % 12 + 12) % 12 === 0)))) badP.push(`${sym}:required`);
+  }
+  expect(!shortP.length, `piano: every quality has ≥ 6 voicings (short: ${shortP.join(" ")})`);
+  expect(!badP.length, `piano: every voicing is chord tones, each hand within a 9th (bad: ${badP.slice(0, 5).join(" ")})`);
+  const g7 = eng.voicingsForInstrument("G7", "piano", { previous: [60, 64, 67] }).groups.flatMap((g) => g.voicings);
+  const dists = g7.map((v) => eng.voiceLeadingDistance([60, 64, 67], v.midi));
+  const g7c = eng.voicingsForInstrument("G7", "piano", { previous: [60, 64, 67] }).groups[0].voicings;
+  expect(g7c.every((v, i) => i === 0 || v.distance >= g7c[i - 1].distance) && Math.min(...dists) <= 4, `piano voicings rank by voice-leading from the previous chord (best ${Math.min(...dists)} semitones from C)`);
+  expect(eng.voiceLeadingDistance([60, 64, 67], [59, 65, 67]) === 2, "voiceLeadingDistance (C → G7 shell: B, F move one step each)");
+  // left-handed diagram mirrors the strings
+  const v = eng.voicingsForInstrument("C", "ukulele").groups[0].voicings[0];
+  const rh = eng.voicingToSVGuitar(v), lh = eng.voicingToSVGuitar(v, "fingers", { leftHanded: true });
+  expect(rh.fingers.find((f) => f[1] === 3)[0] === 1 && lh.fingers.find((f) => f[1] === 3)[0] === 4, "left-handed diagrams mirror the strings");
+  expect(J(eng.assignChordFingers([-1, 3, 2, 0, 1, 0])) === J({ fingers: [0, 3, 2, 0, 1, 0], barres: [] }), "the 6-string finger model is unchanged");
+}
+
+{ /* arrangement levels */
+  const gp = await eng.parseGuitarProOrXML(bytesOf("blue-sky.gp"), "blue-sky.gp", true, 1);
+  const snap = J(gp);
+  const beg = eng.arrangementLevels(gp, "beginner");
+  const syms = new Set(beg.score.bars.flatMap((b) => b.events.map((e) => e.symbol)));
+  expect(J(gp) === snap, "arrangementLevels never mutates its source");
+  expect([...syms].every((s) => /^[A-G][#b]?m?$/.test(s) || s === "—"), `beginner: plain triads only (${[...syms].join(" ")})`);
+  expect(beg.score.bars.every((b) => b.events.every((e) => Math.abs((e.qdur ?? e.durBeats) - 1) < 1e-6)), "beginner: quarter-note strums");
+  expect(beg.transposedBy === 0 && beg.capo === 0, "beginner: Blue Sky (E) is already an open-chord key");
+  const again = eng.arrangementLevels(beg.score, "beginner");
+  expect(J(again.score.bars.map((b) => b.events.map((e) => e.symbol))) === J(beg.score.bars.map((b) => b.events.map((e) => e.symbol))), "re-applying a level is stable (idempotent)");
+  const bb = eng.transposeScore(gp, 6, true);                          // E → Bb: a barre-chord key
+  const begBb = eng.arrangementLevels(bb, "beginner");
+  const anth = await eng.parseGuitarProOrXML(bytesOf("Charlie Parker - Anthropology.gp5"), "a.gp5", true, 0);
+  const ba = eng.arrangementLevels(anth, "beginner");
+  expect(ba.transposedBy === -1 && ba.capo === 1 && Object.is(eng.arrangementLevels(gp, "beginner").transposedBy, 0), `beginner reads the key of the chart as written (Anthropology's melody: B♭ → A shapes, capo 1; got ${ba.transposedBy})`);
+  expect(begBb.transposedBy === -1 && begBb.capo === 1, `beginner: Bb moves to A shapes with capo 1 (t ${begBb.transposedBy}, capo ${begBb.capo})`);
+  const mid = eng.arrangementLevels(gp, "intermediate");
+  const ms = new Set(mid.score.bars.flatMap((b) => b.events.map((e) => e.symbol)));
+  expect([...ms].every((s) => !/(9|11|13|6\/9)/.test(s)), `intermediate: 7ths, no extensions (${[...ms].slice(0, 10).join(" ")})`);
+  expect(mid.score.bars[2].events.length === 4, "intermediate: straight eighths (2/4 bar → 4 hits)");
+  expect(eng.arrangementLevels(gp, "advanced").score === gp, "advanced: the chart as written (same object)");
+  expect(/^- Chart|^- /m.test(eng.scoreToCSMPN(beg.score, { title: "x" })) && eng.scoreToMidi(mid.score).length > 100, "levels export (CSMPN, MIDI)");
+}
+
+{ /* WO-4 UI contracts */
+  expect(/INSTRUMENT_ORDER/.test(uiSrc) && /voicingsForInstrument\(/.test(uiSrc) && /function KeyboardDiagram\(/.test(uiSrc), "the voicing modal has an instrument picker and a keyboard view");
+  expect(/leftHanded/.test(uiSrc) && /ttp:leftHanded/.test(uiSrc), "left-handed diagrams are a remembered toggle");
+  expect(/arrangementLevels\(/.test(uiSrc) && /ARRANGEMENT_LEVELS/.test(uiSrc), "ChartPanel has arrangement level chips");
+}
+
 console.log(`\nworkbench: ${passes} passed, ${failures} failed`);
 if (failures) process.exit(1);
