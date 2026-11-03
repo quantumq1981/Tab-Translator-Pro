@@ -287,6 +287,14 @@ import {
   createLiveChordTracker,
   practiceTargets,
   transposeSymbol,
+  alignLyrics,
+  lyricLines,
+  nudgeLyricLine,
+  lyricLineAt,
+  lyricsToLRC,
+  scoreToLyricsSheet,
+  scoreToChordProWithLyrics,
+  lyricSheetRows,
 } from "./engine.tsx";
 
 async function extractTokens(buf) {
@@ -1378,7 +1386,7 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
         </div>
       )}
       <div className="no-print" style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
-        {[["chart", "Chart"], ["grid", "Grid"], ["tab", "Tab"], ["edit", "Notes"]].map(([v, lbl]) => (
+        {[["chart", "Chart"], ["grid", "Grid"], ["tab", "Tab"], ["edit", "Notes"], ["lyrics", "Lyrics"]].map(([v, lbl]) => (
           <button key={v} onClick={() => setView(v)} style={{ ...chip(C), padding: "3px 9px", borderColor: view === v ? C.amber : C.border, color: view === v ? C.amber : C.dim }}>{lbl}</button>
         ))}
         <button onClick={() => { setEditMode((m) => !m); setEditKey(""); }} disabled={view !== "chart"}
@@ -1453,7 +1461,9 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
 
       {autoSimplify && melodic && !simplify && <MelodicNudge C={C} onSimplify={() => setSimplify(true)} />}
 
-      {view === "edit"
+      {view === "lyrics"
+        ? <LyricsSheetView C={C} score={tscore} title={title} overrides={overrides} playKey={playKey} getAudio={getAudio} getBuffer={getBuffer} bpm={bpm} exportKey={key} keySpelled={keySpelled} />
+        : view === "edit"
         ? <NoteEditorView score={score} edit={scoreEdit} setEdit={setScoreEdit} C={C} useSharp={useSharp} playKey={playKey} getAudio={getAudio} bpm={bpm} semis={semis} />
         : view === "tab"
         ? (tabTex.error
@@ -1482,6 +1492,150 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
  * bloating as new views (Audio/Practice, Wave 3) land — each is just another
  * sibling here, switched on `view`, with no shared-state entanglement. Pure
  * props in, JSX out — no engine internals, no own persistent state. */
+/* ---- WO-3 · lyrics view: timed chords-over-lyrics performance sheet --------------
+ * Paste / load a lyric sheet (any chords-over-lyrics tab or ChordPro — parseLyrics strips
+ * chords) and 🎯 Auto-align it: to the recording's sung phrases when the chart has audio
+ * (alignLyrics, off-thread), else spread over the chart's bars. The view puts the CHART's
+ * chords above the words, highlights the line being played, and every line can be nudged
+ * a beat. Exports LRC, ChordPro with inline chords, the text sheet, and a TIMED Perform
+ * Lyrics handoff to Chord Sheet Maker Pro. Text + timing are remembered per chart title. */
+const _lyrKey = (title, k) => `ttp:${k}:${String(title || "chart").slice(0, 120)}`;
+const _lsGet = (k) => { try { return localStorage.getItem(k); } catch (_) { return null; } };
+const _lsSet = (k, v) => { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (_) {} };
+function _saveText(name, text, mime) {
+  try {
+    const url = URL.createObjectURL(new Blob([text], { type: (mime || "text/plain") + ";charset=utf-8" })), a = document.createElement("a");
+    a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 2000);
+  } catch (_) {}
+}
+function LyricsSheetView({ C, score, title, overrides, playKey, getAudio, getBuffer, bpm, exportKey, keySpelled }) {
+  const [text, setText] = useState(() => _lsGet(_lyrKey(title, "lyrics")) || "");
+  const [map, setMap] = useState(() => { try { const m = JSON.parse(_lsGet(_lyrKey(title, "lyricmap")) || "null"); return m && Array.isArray(m.lines) ? m : null; } catch (_) { return null; } });
+  const [editing, setEditing] = useState(() => !_lsGet(_lyrKey(title, "lyrics")));
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [sel, setSel] = useState(-1);
+  const [pos, setPos] = useState(null);                            // own playback position (recording seconds)
+  const [sent, setSent] = useState(false);
+  const player = useRef({});
+  const fileRef = useRef(null);
+  const parsed = useMemo(() => { try { return text.trim() ? parseLyrics(text) : null; } catch (_) { return null; } }, [text]);
+  const nLines = parsed ? lyricLines(parsed).length : 0;
+  useEffect(() => { _lsSet(_lyrKey(title, "lyrics"), text || null); }, [text, title]);
+  useEffect(() => { _lsSet(_lyrKey(title, "lyricmap"), map ? JSON.stringify(map) : null); }, [map, title]);
+  const stale = map && parsed && map.lines.length !== nLines;
+  const audio = getAudio ? getAudio() : null;
+  const opts = { overrides, bpm: score.tempo, title: title || "", key: exportKey, spellKey: keySpelled };
+  const rows = useMemo(() => (map ? lyricSheetRows(score, map, { overrides, bpm: score.tempo }) : []), [score, map, overrides]);
+  // the line being played: the chart's own playback (playKey → its event's time) or ours
+  const evTimes = useMemo(() => scoreRecordingTimes(score, score.tempo), [score]);
+  const playT = pos != null ? pos : playKey ? ((evTimes.find((e) => e.key === playKey) || {}).start ?? null) : null;
+  const cur = map && playT != null ? lyricLineAt(map, playT + 0.05) : -1;
+  const curRef = useRef(null);
+  useEffect(() => { if (curRef.current && cur >= 0) { try { curRef.current.scrollIntoView({ block: "nearest", behavior: "smooth" }); } catch (_) {} } }, [cur]);
+  const stopPlay = () => { const s = player.current; if (s.raf) cancelAnimationFrame(s.raf); if (s.src) { try { s.src.stop(); } catch (_) {} } if (s.ctx && s.ctx.state !== "closed") { try { s.ctx.close(); } catch (_) {} } player.current = {}; setPos(null); };
+  useEffect(() => stopPlay, []); // eslint-disable-line
+  const playFrom = (sec) => {
+    stopPlay();
+    const ab = getBuffer && getBuffer(); if (!ab) return;
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext, ctx = new AC(), src = ctx.createBufferSource();
+      src.buffer = ab; src.connect(ctx.destination); const t0 = ctx.currentTime; src.start(0, Math.max(0, sec));
+      src.onended = () => { if (player.current.src === src) stopPlay(); };
+      player.current = { ctx, src };
+      const tick = () => { setPos(sec + ctx.currentTime - t0); player.current.raf = requestAnimationFrame(tick); };
+      player.current.raf = requestAnimationFrame(tick);
+    } catch (_) { stopPlay(); }
+  };
+  const align = async () => {
+    if (!parsed) return;
+    setBusy(true); setErr("");
+    try {
+      const ev = audio && audio.samples ? { samples: audio.samples, sampleRate: audio.sr } : null;
+      const args = [parsed, score, ev, { bpm: score.tempo }];
+      let m; try { m = await _engineRPC("alignLyrics", args); } catch (_) { m = alignLyrics(...args); }
+      setMap(m); setEditing(false); setSel(-1);
+      if (!m.lines.length) setErr("No lyric lines found in that text.");
+    } catch (e) { setErr("Alignment failed."); }
+    setBusy(false);
+  };
+  const beatSec = 60 / (score.tempo || bpm || 100);
+  const nudge = (d) => { if (map && sel >= 0) setMap(nudgeLyricLine(map, sel, d * beatSec, score, score.tempo)); };
+  const onFile = async (e) => { const f = e.target.files && e.target.files[0]; if (!f) return; try { setText(await readFileText(f)); setEditing(true); } catch (_) { setErr("Couldn't read that file."); } e.target.value = ""; };
+  const base = (title || "lyrics").replace(/\.[^.]+$/, "").replace(/[^\w.-]+/g, "_").replace(/^_+|_+$/g, "") || "lyrics";
+  const sendToPerform = () => {
+    if (!map || !parsed) return;
+    try {
+      const body = []; parsed.sections.forEach((sec, si) => { if (sec.label) body.push(sec.label.toUpperCase()); sec.blocks.forEach((blk, bi) => { if (bi > 0) body.push(""); blk.forEach((l) => body.push(l)); }); if (si < parsed.sections.length - 1) body.push(""); });
+      const env = { v: 1, source: "tab-translator-pro", createdAt: new Date().toISOString(), title: parsed.title || base, artist: parsed.subtitle || "", lyrics: body.join("\n"),
+        timing: { v: 1, lines: map.lines.map((l) => ({ text: l.text, section: l.section, startSec: l.startSec, endSec: l.endSec })) } };
+      localStorage.setItem("csm:lyrics:v1", JSON.stringify(env)); setSent(true);
+      window.location.assign(`${window.location.origin}/chord-sheet-maker-pro/?import=lyrics`);
+    } catch (e) { setSent(false); setErr("Couldn't hand the lyrics to Chord Sheet Maker Pro."); }
+  };
+  const last = (() => { try { return localStorage.getItem("ttp:lyrics:last") || ""; } catch (_) { return ""; } })();
+  const ch = (on, col) => ({ ...chip(C), padding: "3px 9px", borderColor: on ? col || C.amber : C.border, color: on ? col || C.amber : C.dim });
+  const mono = { fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "pre", fontSize: 13, lineHeight: 1.35 };
+  return (
+    <div>
+      <div className="no-print" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginBottom: 8, fontSize: 11, color: C.dim }}>
+        <button onClick={() => setEditing((v) => !v)} style={ch(editing, C.green)}>{editing ? "✓ Done" : "✎ Lyrics text"}</button>
+        <button onClick={() => fileRef.current && fileRef.current.click()} style={ch(false)}>⬆ Load lyrics</button>
+        <input ref={fileRef} type="file" onChange={onFile} style={{ display: "none" }} />
+        {last && !text && <button onClick={() => setText(last)} style={ch(false)} title="the sheet you last imported in the Lyrics tab">use Lyrics tab sheet</button>}
+        <button onClick={align} disabled={!parsed || busy} style={{ ...ch(!!map, C.cyan), opacity: parsed ? 1 : 0.4 }}>{busy ? "aligning…" : `🎯 Auto-align${audio ? " to the vocal" : " to the bars"}`}</button>
+        {map && <span>{map.lines.length} lines · {map.source === "vocal" ? "from the recording" : "spread over the bars"} · {Math.round(map.confidence * 100)}% sure</span>}
+        {stale && <span style={{ color: C.amber }}>· the text changed — align again</span>}
+      </div>
+      {editing && (
+        <textarea value={text} onChange={(e) => setText(e.target.value)} spellCheck={false} className="tdp-scroll" placeholder={"[Verse 1]\nPaste the lyrics (chords-over-lyrics or ChordPro — the chords are stripped; the chart's chords are placed back over the words)."}
+          style={{ width: "100%", height: 160, resize: "vertical", boxSizing: "border-box", background: C.bg, color: C.text, border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, fontSize: 12, lineHeight: 1.5, fontFamily: "'IBM Plex Mono', monospace", outline: "none", marginBottom: 8 }} />
+      )}
+      {map && (
+        <div className="no-print" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginBottom: 8, fontSize: 11, color: C.dim }}>
+          {sel >= 0 && <>
+            <span>line {sel + 1}:</span>
+            <button onClick={() => nudge(-1)} style={ch(false)} title="start a beat earlier">◀ beat</button>
+            <button onClick={() => nudge(1)} style={ch(false)} title="start a beat later">beat ▶</button>
+            {getBuffer && getBuffer() && <button onClick={() => playFrom(map.lines[sel].startSec - 0.4)} style={ch(false)}>▶ from here</button>}
+          </>}
+          {pos != null && <button onClick={stopPlay} style={ch(true, C.green)}>■ Stop</button>}
+          <span style={{ marginLeft: "auto", display: "inline-flex", flexWrap: "wrap", gap: 4 }}>
+            <button onClick={() => _saveText(`${base}.lrc`, lyricsToLRC(map, { title: parsed && parsed.title || title, artist: parsed && parsed.subtitle }))} style={ch(false)}>⬇ LRC</button>
+            <button onClick={() => _saveText(`${base}.chordpro`, scoreToChordProWithLyrics(score, map, opts))} style={ch(false)}>⬇ ChordPro + lyrics</button>
+            <button onClick={() => _saveText(`${base}.txt`, scoreToLyricsSheet(score, map, opts))} style={ch(false)}>⬇ Sheet .txt</button>
+            <button onClick={() => { try { navigator.clipboard.writeText(scoreToLyricsSheet(score, map, opts)); } catch (_) {} }} style={ch(false)}>⧉ Copy sheet</button>
+            <button onClick={sendToPerform} style={ch(sent, C.green)} title="Chord Sheet Maker Pro's Perform Lyrics stage view, with the line timing">{sent ? "opening Pro ✓" : "🎤 Perform on CSMP"}</button>
+          </span>
+        </div>
+      )}
+      {err && <div style={{ color: C.red, fontSize: 12, marginBottom: 6 }}>{err}</div>}
+      {!map && !editing && <div style={{ fontSize: 12, color: C.dim, padding: 10 }}>Add lyrics, then 🎯 Auto-align.</div>}
+      {map && (
+        <div className="tdp-scroll" style={{ maxHeight: 520, overflow: "auto", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, padding: "10px 12px" }}>
+          {rows.map((r, i) => {
+            if (r.type === "blank") return <div key={i} style={{ height: 10 }} />;
+            if (r.type === "title") return <div key={i} style={{ fontSize: 15, fontWeight: 600, color: C.text }}>{r.text}</div>;
+            if (r.type === "section") return <div key={i} style={{ fontSize: 10, letterSpacing: 2, color: C.amber, textTransform: "uppercase", margin: "4px 0" }}>{r.text}</div>;
+            if (r.type === "chords") return <div key={i} style={{ ...mono, color: C.chord, fontWeight: 700 }}>{r.text}</div>;
+            const l = map.lines[r.index], on = r.index === cur, picked = r.index === sel;
+            return (
+              <div key={i} ref={on ? curRef : null} onClick={() => setSel(r.index)} title={`${l.startSec.toFixed(2)} s${l.startBar ? ` · bar ${l.startBar} beat ${l.startBeat}` : ""} · ${Math.round(l.confidence * 100)}% sure`}
+                style={{ cursor: "pointer", borderLeft: `3px solid ${on ? C.green : picked ? C.amber : "transparent"}`, background: on ? "rgba(152,195,121,0.10)" : picked ? "rgba(255,107,53,0.08)" : "transparent", padding: "1px 0 1px 6px", borderRadius: 3, overflowX: "auto" }}>
+                {r.chordLine && <div style={{ ...mono, color: C.chord, fontWeight: 700 }}>{r.chordLine}</div>}
+                <div style={{ ...mono, color: on ? C.text : C.text, opacity: l.confidence < 0.4 && !l.manual ? 0.75 : 1 }}>{r.text}{l.confidence < 0.4 && !l.manual ? <span style={{ color: C.dim }}>  ≈</span> : null}</div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <div style={{ fontSize: 10, color: C.dim, marginTop: 6, lineHeight: 1.5 }}>
+        Line-level timing (words aren't timed individually). With a recording, lines snap to where singing starts; best on an isolated vocal stem (Audio mode → 🎤 Isolate vocals, or a split vocals stem). Lines marked ≈ are guesses — tap one and nudge it a beat.
+      </div>
+    </div>
+  );
+}
+
 /* ---- WO-2 · practice player ---------------------------------------------------
  * Loop bars A–B of the recording (or the chart's own synth when there is none) at 50–125 %
  * speed, ±6 semitones, with a metronome and a 1–2 bar count-in. The region is rendered ONCE
@@ -3093,6 +3247,8 @@ function LyricsImport({ C }) {
     if (!raw.trim()) return null;
     try { return parseLyrics(raw); } catch (_) { return null; }
   }, [raw]);
+  // remembered so a chart's Lyrics view can pick up the sheet imported here (WO-3)
+  useEffect(() => { try { if (raw.trim()) localStorage.setItem("ttp:lyrics:last", raw.slice(0, 200000)); } catch (_) {} }, [raw]);
 
   const stats = useMemo(() => {
     if (!parsed) return null;

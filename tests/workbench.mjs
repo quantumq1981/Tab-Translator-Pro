@@ -312,5 +312,81 @@ section("WO-2 practice");
   expect(/clickTrackWav\(/.test(uiSrc), "UI exports a click-track WAV");
 }
 
+/* ============================================================================
+ *  WO-3 — lyric alignment + chords-over-lyrics
+ * ========================================================================== */
+section("WO-3 lyrics");
+{
+  const syl = (s) => eng.countSyllables(s);
+  expect(syl("Hello world") === 3 && syl("beautiful") === 3 && syl("the fire") === 2 && syl("corazón") === 3 && syl("さくら") === 3 && syl("") === 0,
+    `syllable heuristic (Hello world ${syl("Hello world")}, beautiful ${syl("beautiful")}, the fire ${syl("the fire")}, corazón ${syl("corazón")}, さくら ${syl("さくら")})`);
+  // a synthetic "sung" stem: each syllable a 0.28 s vibrato tone, 30 ms between syllables, a breath
+  // between lines — except lines 2+3, sung in one breath (a phrase shared by two lines)
+  const text = "[Verse 1]\nI walked along the river\nThe water running slow\nAnd every stone I counted\nWas a place I used to know\n\n[Chorus]\nCarry me home\nCarry me home tonight\n";
+  const parsed = eng.parseLyrics(text);
+  const lines = eng.lyricLines(parsed);
+  const sr = 16000, x = new Float32Array(sr * 26), truth = [];
+  let t = 1.0;
+  lines.forEach((l, i) => {
+    truth.push(t);
+    for (let k = 0; k < l.syllables; k++) {
+      const f = 220 * Math.pow(2, ((i * 3 + k * 2) % 12) / 12), i0 = Math.round(t * sr), n = Math.round(0.28 * sr);
+      for (let j = 0; j < n; j++) { const tt = j / sr, env = Math.min(1, tt / 0.03, (0.28 - tt) / 0.03); x[i0 + j] += 0.3 * env * Math.sin(2 * Math.PI * f * tt + 0.6 * Math.sin(2 * Math.PI * 5.5 * tt)); }
+      t += 0.31;
+    }
+    t += i === 1 ? 0.05 : 0.7;                                      // line 2 → 3 without a breath
+  });
+  let seed = 11; const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647 - 0.5);
+  for (let i = 0; i < x.length; i++) x[i] += 0.001 * rnd();
+  const ph = eng.voicedPhrases(x, sr);
+  expect(ph.length === lines.length - 1 && Math.abs(ph[0].startSec - 1.0) < 0.06, `voicedPhrases finds the sung phrases (${ph.length} for ${lines.length} lines, one shared; first at ${ph[0] && ph[0].startSec}s)`);
+  const chart = { timeSig: [4, 4], tempo: 120, bars: Array.from({ length: 13 }, (_, b) => ({ number: b + 1, timeSig: [4, 4], section: b === 0 ? "Verse 1" : b === 8 ? "Chorus" : undefined, events: [{ symbol: ["C", "G", "Am", "F"][b % 4], midis: [[60, 64, 67], [55, 59, 62], [57, 60, 64], [53, 57, 60]][b % 4], beat: 0, durBeats: 4, qbeat: 0, qdur: 4 }] })) };
+  const map = eng.alignLyrics(parsed, chart, { samples: x, sampleRate: sr }, { bpm: 120, useSections: false });
+  const errs = map.lines.map((l, i) => Math.abs(l.startSec - truth[i])).sort((a, b) => a - b), med = errs[errs.length >> 1];
+  expect(map.source === "vocal" && map.lines.length === lines.length && med <= 0.5, `alignLyrics: median line-start error ${med.toFixed(2)} s (≤ 0.5 s = 1 beat at 120), worst ${errs[errs.length - 1].toFixed(2)} s`);
+  expect(map.lines.every((l, i) => i === 0 || l.startSec > map.lines[i - 1].startSec) && map.lines.every((l) => l.endSec > l.startSec), "line times are strictly increasing with positive lengths");
+  expect(map.lines.every((l) => l.startBar >= 1 && l.startBeat >= 1 && l.startBeat <= 4), "every line knows its bar and beat");
+  expect(Math.abs(map.lines[2].startSec - truth[2]) < 1.2, `a line sung in the same breath as the one before still lands near its start (${map.lines[2].startSec.toFixed(2)} vs ${truth[2].toFixed(2)})`);
+  // no recording → the chart's bars, low confidence
+  const g = eng.alignLyrics(parsed, chart, null, { bpm: 120 });
+  expect(g.source === "grid" && g.confidence < 0.4 && g.lines.every((l, i) => i === 0 || l.startSec > g.lines[i - 1].startSec), "no recording: lines spread over the chart, monotonic, low confidence");
+  const gs = eng.alignLyrics(parsed, chart, null, { bpm: 120, snapBeats: true });
+  expect(gs.lines.find((l) => l.section === "Chorus").startBar === 9, `section anchors: the sheet's Chorus starts on the chart's Chorus bar (${gs.lines.find((l) => l.section === "Chorus").startBar})`);
+  // nudge
+  const nd = eng.nudgeLyricLine(map, 1, 0.5);
+  expect(Math.abs(nd.lines[1].startSec - map.lines[1].startSec - 0.5) < 1e-6 && nd.lines[0].endSec <= nd.lines[1].startSec && nd.lines[1].manual && map.lines[1].manual === undefined, "nudgeLyricLine moves one line, keeps order, doesn't mutate");
+  const nb = eng.nudgeLyricLine(map, 1, 2.0, chart, 120);
+  expect(nb.lines[1].startBar === Math.floor(nb.lines[1].startSec / 2) + 1, "nudgeLyricLine refreshes the bar/beat when given the chart");
+  expect(eng.lyricLineAt(map, map.lines[3].startSec + 0.1) === 3 && eng.lyricLineAt(map, 0) === -1, "lyricLineAt");
+  // LRC
+  const lrc = eng.lyricsToLRC(map, { title: "River", artist: "Test" });
+  const stamps = lrc.split("\n").map((l) => l.match(/^\[(\d\d):(\d\d\.\d\d)\](.*)$/)).filter(Boolean);
+  expect(/^\[ti:River\]$/m.test(lrc) && /^\[ar:Test\]$/m.test(lrc) && stamps.length === lines.length && stamps.every((m, i) => m[3] === lines[i].text && (i === 0 || +m[1] * 60 + +m[2] >= +stamps[i - 1][1] * 60 + +stamps[i - 1][2])), "LRC: ti/ar tags, one increasing [mm:ss.xx] stamp per line, texts intact");
+  // ChordPro with inline chords → round-trips through parseLyrics
+  const cp = eng.scoreToChordProWithLyrics(chart, map, { title: "River", bpm: 120 });
+  const back = eng.lyricLines(eng.parseLyrics(cp));
+  expect(J(back.map((l) => l.text)) === J(lines.map((l) => l.text)) && J(back.map((l) => l.section)) === J(lines.map((l) => l.section)), "ChordPro with inline chords round-trips through parseLyrics (same lines + sections)");
+  expect(/\{start_of_verse: Verse 1\}/.test(cp) && /\{start_of_chorus: Chorus\}/.test(cp) && /^\[C\]I walked/m.test(cp) && (cp.match(/\[[A-G][#b]?m?\]/g) || []).length >= 8, "ChordPro: verse/chorus environments, the chord at each line start, chords inline");
+  // chords-over-lyrics sheet
+  const sheet = eng.scoreToLyricsSheet(chart, map);
+  const sl = sheet.split("\n"), li = sl.indexOf(sl.find((l) => /I walked along/.test(l)));
+  expect(/^\[Verse 1\]$/m.test(sheet) && /^\[Chorus\]$/m.test(sheet) && /^C\b/.test(sl[li - 1]) && eng.isChordLine(sl[li - 1]), "sheet: section headers, a chord line above each lyric line");
+  expect(J(eng.lyricLines(eng.parseLyrics(sheet)).map((l) => l.text.replace(/\s+/g, " "))) === J(lines.map((l) => l.text)), "the chords-over-lyrics sheet parses back to the same lyrics");
+  // collisions: two chords a syllable apart are pushed apart, not overprinted
+  const tight = { lines: [{ text: "Go now", section: null, stanza: 0, startSec: 0, endSec: 1 }] };
+  const tsc = { timeSig: [4, 4], tempo: 120, bars: [{ number: 1, timeSig: [4, 4], events: [{ symbol: "Cmaj7", midis: [60, 64, 67, 71], beat: 0, qbeat: 0, durBeats: 1, qdur: 1 }, { symbol: "Dm7", midis: [62, 65, 69, 72], beat: 1, qbeat: 1, durBeats: 3, qdur: 3 }] }] };
+  const ts = eng.scoreToLyricsSheet(tsc, tight).trim().split("\n");
+  expect(ts[0] === "Cmaj7 Dm7" && ts[1].startsWith("Go") && ts[1].indexOf("now") === 6, `collision padding: ${J(ts)}`);
+  const last = sheet.trim().split("\n").slice(-3);
+  expect(/tonight$/.test(last[0]) && last[1] === "" && eng.isChordLine(last[2]), `chords after the last line go on their own line, not piled onto it (${J(last)})`);
+  expect(!/[ \t]$/m.test(sheet), "no trailing spaces in the sheet");
+}
+
+{ /* WO-3 UI contracts */
+  expect(/function LyricsSheetView\(/.test(uiSrc) && /\["lyrics", "Lyrics"\]/.test(uiSrc) && /alignLyrics/.test(uiSrc), "ChartPanel has a Lyrics view that aligns lyrics");
+  expect(/lyricsToLRC\(/.test(uiSrc) && /scoreToChordProWithLyrics\(/.test(uiSrc) && /scoreToLyricsSheet\(/.test(uiSrc), "LRC / ChordPro-with-lyrics / chords-over-lyrics exports are wired");
+  expect(/timing: \{ v: 1, lines:/.test(uiSrc) && /csm:lyrics:v1/.test(uiSrc), "the Perform Lyrics handoff carries optional line timing");
+}
+
 console.log(`\nworkbench: ${passes} passed, ${failures} failed`);
 if (failures) process.exit(1);

@@ -9647,6 +9647,313 @@ function practiceTargets(score, region, bpm) {
     .map((e) => { const bar = score.bars.find((b) => b.number === e.bar), ev = bar && bar.events.find((x) => `${bar.number}.${x.beat}` === e.key); return { startSec: e.start, durSec: e.dur, midis: e.midis, symbol: ev ? ev.symbol : "", key: e.key }; });
 }
 
+/* ============================================================================
+ *  WORKBENCH · WO-3 — LYRIC ALIGNMENT + chords-over-lyrics performance sheet
+ *  ---------------------------------------------------------------------------
+ *  LINE-level alignment of a lyric sheet (parseLyrics) to a recording. Sung syllables are
+ *  not cleanly separable from a vocal stem without a phoneme model, so the honest ceiling
+ *  is the LINE, and every line carries a confidence and can be nudged.
+ *
+ *    1. voicedPhrases — the vocal stem's sung phrases: frame RMS (20 ms hop) against a
+ *       level read from the stem itself (noise floor + 12 dB, ≥ the loudest − 30 dB), with
+ *       hysteresis, short gaps bridged, blips dropped.
+ *    2. countSyllables — vowel-group heuristic per word (Intl.Segmenter for word breaks;
+ *       diacritics folded; CJK counts characters).
+ *    3. alignLyrics — each line's PROPORTIONAL start (its syllable share of the voiced
+ *       time) is snapped to a nearby phrase start by a monotonic DP (a line may also stay
+ *       "free" at its proportional time for a fixed cost); lines between two snapped
+ *       anchors are re-proportioned inside that interval. Section labels the chart and the
+ *       sheet share ("Chorus") are hard anchors. Starts snap to the nearest beat of the
+ *       chart. With no recording, lines spread over the chart's bars (low confidence).
+ *  Output: LyricMap { lines:[{ text, section, startSec, endSec, startBar, startBeat, endBar,
+ *  endBeat, confidence, snapped }], source, confidence }. Exporters: LRC, ChordPro with inline
+ *  chords, and the chords-over-lyrics text sheet. Pure; the UI runs the DSP off-thread.
+ * ------------------------------------------------------------------------- */
+const _segWords = (s) => {
+  const t = String(s || "");
+  try { if (typeof Intl !== "undefined" && Intl.Segmenter) return [...new Intl.Segmenter(undefined, { granularity: "word" }).segment(t)].filter((x) => x.isWordLike).map((x) => ({ w: x.segment, i: x.index })); } catch (_) {}
+  const out = []; const re = /[\p{L}\p{N}'’]+/gu; let m; while ((m = re.exec(t))) out.push({ w: m[0], i: m.index }); return out;
+};
+function _wordSyllables(word) {
+  const raw = String(word || "");
+  if (/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(raw)) return [...raw].filter((c) => /\p{L}/u.test(c)).length || 1;
+  let w = raw.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z]/g, "");
+  if (!w) return /\p{N}/u.test(raw) ? 1 : 0;
+  if (w.length <= 3) return 1;
+  w = w.replace(/(?:[^laeiouy]es|ed|[^laeiouy]e)$/, "").replace(/^y/, "").replace(/eau/g, "o");
+  const m = w.match(/[aeiouy]{1,2}/g);
+  return Math.max(1, m ? m.length : 1);
+}
+/** Syllables in a lyric line (≥ 1 for a non-empty line). */
+function countSyllables(line) { const n = _segWords(line).reduce((a, x) => a + _wordSyllables(x.w), 0); return n || (String(line || "").trim() ? 1 : 0); }
+/** A parsed lyric sheet → its lines in order: [{ text, section, stanza, syllables }]. */
+function lyricLines(parsed) {
+  const out = [];
+  ((parsed && parsed.sections) || []).forEach((sec, si) => (sec.blocks || []).forEach((blk, bi) => blk.forEach((text) => {
+    const t = String(text || "").trim(); if (t) out.push({ text: t, section: sec.label || null, sectionIndex: si, stanza: bi, syllables: countSyllables(t) });
+  })));
+  return out;
+}
+/** Sung phrases of a (vocal) signal: [{ startSec, endSec }]. */
+function voicedPhrases(samples, sampleRate, opts = {}) {
+  const hop = Math.max(1, Math.round(sampleRate * (opts.hopSec || 0.02))), win = hop * 2, out = [];
+  const db = [];
+  for (let s = 0; s + win <= samples.length; s += hop) { let e = 0; for (let i = 0; i < win; i++) e += samples[s + i] * samples[s + i]; db.push(10 * Math.log10(e / win + 1e-12)); }
+  if (!db.length) return out;
+  const sorted = db.slice().sort((a, b) => a - b), floor = sorted[Math.floor(sorted.length * 0.1)], peak = sorted[Math.floor(sorted.length * 0.95)];
+  const on = Math.max(floor + (opts.aboveFloorDb || 12), peak - (opts.belowPeakDb || 30)), off = on - 6;
+  const gap = opts.minGapSec != null ? opts.minGapSec : 0.25, minLen = opts.minPhraseSec != null ? opts.minPhraseSec : 0.25, dt = hop / sampleRate;
+  let cur = null;
+  db.forEach((v, k) => {
+    const t = k * dt;
+    if (!cur && v >= on) cur = { startSec: t, endSec: t + dt };
+    else if (cur && v >= off) cur.endSec = t + dt;
+    else if (cur && t - cur.endSec > gap) { out.push(cur); cur = null; }
+  });
+  if (cur) out.push(cur);
+  const merged = [];
+  for (const p of out) { const l = merged[merged.length - 1]; if (l && p.startSec - l.endSec < gap) l.endSec = p.endSec; else merged.push({ ...p }); }
+  return merged.filter((p) => p.endSec - p.startSec >= minLen).map((p) => ({ startSec: +p.startSec.toFixed(3), endSec: +(p.endSec + win / sampleRate / 2).toFixed(3) }));
+}
+/* voiced-time ↔ real-time over a phrase list */
+function _voicedClock(phrases) {
+  const cum = []; let v = 0; for (const p of phrases) { cum.push(v); v += p.endSec - p.startSec; }
+  const toReal = (x) => { if (!phrases.length) return x; let k = 0; while (k + 1 < phrases.length && cum[k + 1] <= x) k++; return phrases[k].startSec + Math.min(x - cum[k], phrases[k].endSec - phrases[k].startSec); };
+  const toVoiced = (t) => { let acc = 0; for (const p of phrases) { if (t <= p.startSec) return acc; if (t < p.endSec) return acc + (t - p.startSec); acc += p.endSec - p.startSec; } return acc; };
+  return { total: v, toReal, toVoiced };
+}
+/* the chart's beats (recording clock) + bar/beat lookup */
+function _beatGrid(score, bpm) {
+  const beats = [];
+  if (!score || !score.bars || !score.bars.length) return { beats, at: () => null };
+  const tm = scoreTimeMap(score, bpm), L = scoreNoteList({ ...score, bars: score.bars.map((b) => ({ ...b, events: [] })) });
+  L.bars.forEach((b) => { const tpb = EDIT_PPQ * 4 / b.timeSig[1]; for (let k = 0; k < b.timeSig[0]; k++) beats.push({ t: tm.tickToSec(b.startTick + k * tpb), bar: b.number, beat: k + 1 }); });
+  const at = (t) => { let best = null, bd = Infinity; for (const x of beats) { const d = Math.abs(x.t - t); if (d < bd) { bd = d; best = x; } else if (x.t > t) break; } return best ? { ...best, dist: bd } : null; };
+  return { beats, at, end: tm.duration, tm, bars: L.bars };
+}
+const _secNorm = (s) => String(s || "").toLowerCase().replace(/[^a-z]/g, "").replace(/(verse|chorus|bridge|intro|outro|prechorus|refrain|hook|solo|interlude|tag|coda).*/, "$1");
+/** Align a parsed lyric sheet to a recording (evidence = { samples, sampleRate } or
+ *  { phrases }) or, with no evidence, to the chart's bars. opts: { bpm, snapBeats (true),
+ *  useSections (true) }. → LyricMap. */
+function alignLyrics(parsed, score, evidence, opts = {}) {
+  const lines = lyricLines(parsed);
+  const grid = _beatGrid(score, opts.bpm);
+  if (!lines.length) return { lines: [], source: "none", confidence: 0 };
+  let phrases = evidence && evidence.phrases ? evidence.phrases : evidence && evidence.samples ? voicedPhrases(evidence.samples, evidence.sampleRate, opts) : null;
+  const source = phrases && phrases.length ? "vocal" : "grid";
+  if (source === "grid") {
+    // spread the lines over the chart's bars, each starting on a bar line
+    const bars = grid.bars || [];
+    if (!bars.length) return { lines: lines.map((l) => ({ ...l, startSec: 0, endSec: 0, confidence: 0 })), source, confidence: 0 };
+    const first = (score.bars.findIndex((b) => (b.events || []).some((e) => e.midis && e.midis.length)) + 1) || 1;
+    const t0 = grid.tm.tickToSec(bars[first - 1].startTick), t1 = grid.end;
+    phrases = [{ startSec: t0, endSec: t1 }];
+  }
+  // section anchors: the chart's section starts that the sheet's sections name, in order
+  const anchors = [];
+  if (opts.useSections !== false && score && score.bars && grid.tm) {
+    const L = grid.bars, secs = [];
+    score.bars.forEach((b, i) => { if (b.section) secs.push({ name: _secNorm(b.section), t: grid.tm.tickToSec(L[i].startTick) }); });
+    let si = 0, prevLabel = null;
+    lines.forEach((l, i) => {
+      if (l.section === prevLabel) return; prevLabel = l.section;
+      const n = _secNorm(l.section); if (!n) return;
+      for (let k = si; k < secs.length; k++) if (secs[k].name === n) { anchors.push({ line: i, t: secs[k].t }); si = k + 1; break; }
+    });
+  }
+  const groups = [];                                               // [{ from, to, t0, t1 }]
+  const cuts = [{ line: 0, t: phrases[0].startSec }].concat(anchors.filter((a) => a.line > 0));
+  cuts.forEach((c, k) => groups.push({ from: c.line, to: k + 1 < cuts.length ? cuts[k + 1].line : lines.length, t0: c.t, t1: k + 1 < cuts.length ? cuts[k + 1].t : Math.max(phrases[phrases.length - 1].endSec, c.t + 1) }));
+  const starts = new Array(lines.length), snapped = new Array(lines.length).fill(false), conf = new Array(lines.length).fill(source === "grid" ? 0.25 : 0.35);
+  for (const g of groups) {
+    const ph = phrases.map((p) => ({ startSec: Math.max(p.startSec, g.t0), endSec: Math.min(p.endSec, g.t1) })).filter((p) => p.endSec - p.startSec > 0.05);
+    const use = ph.length ? ph : [{ startSec: g.t0, endSec: g.t1 }];
+    const clock = _voicedClock(use), idx = []; for (let i = g.from; i < g.to; i++) idx.push(i);
+    const S = idx.reduce((a, i) => a + lines[i].syllables, 0) || 1;
+    let acc = 0; const prop = idx.map((i) => { const t = clock.toReal((acc / S) * clock.total); acc += lines[i].syllables; return t; });
+    if (source === "grid") { idx.forEach((i, k) => { starts[i] = prop[k]; }); continue; }
+    // DP: each line either snaps to a phrase start near its proportional time or stays free
+    const meanDur = clock.total / Math.max(1, idx.length), W = Math.max(2, 1.5 * meanDur), sig = Math.max(0.8, 0.6 * meanDur), FREE = 1.1;
+    const cands = idx.map((i, k) => {
+      const c = [{ t: prop[k], snap: false, cost: FREE }];
+      for (const p of use) if (Math.abs(p.startSec - prop[k]) <= W) c.push({ t: p.startSec, snap: true, cost: Math.abs(p.startSec - prop[k]) / sig });
+      if (k === 0) c.push({ t: use[0].startSec, snap: true, cost: Math.abs(use[0].startSec - prop[0]) / sig * 0.5 });
+      return c;
+    });
+    const dp = cands.map((c) => c.map(() => ({ cost: Infinity, from: -1 })));
+    cands[0].forEach((c, j) => { dp[0][j].cost = c.cost; });
+    for (let k = 1; k < cands.length; k++) cands[k].forEach((c, j) => {
+      cands[k - 1].forEach((p, q) => {
+        if (!(c.t > p.t + 0.3) || (c.snap && p.snap && c.t === p.t)) return;
+        const v = dp[k - 1][q].cost + c.cost; if (v < dp[k][j].cost) dp[k][j] = { cost: v, from: q };
+      });
+    });
+    let j = dp[dp.length - 1].reduce((b, x, q, arr) => (x.cost < arr[b].cost ? q : b), 0);
+    const pick = new Array(cands.length);
+    for (let k = cands.length - 1; k >= 0; k--) { pick[k] = cands[k][j] || cands[k][0]; j = dp[k][j] ? dp[k][j].from : 0; if (j < 0) j = 0; }
+    pick.forEach((c, k) => { starts[idx[k]] = c.t; snapped[idx[k]] = c.snap; if (c.snap) conf[idx[k]] = Math.max(0.5, Math.min(0.95, 1 - Math.abs(c.t - prop[k]) / (2 * W))); });
+    // re-proportion free lines between two snapped neighbours, inside that interval's voiced time
+    for (let k = 0; k < idx.length; k++) {
+      if (snapped[idx[k]]) continue;
+      let a = k - 1; while (a >= 0 && !snapped[idx[a]]) a--;
+      let b = k + 1; while (b < idx.length && !snapped[idx[b]]) b++;
+      const ta = a >= 0 ? starts[idx[a]] : g.t0, tb = b < idx.length ? starts[idx[b]] : g.t1;
+      const from = a >= 0 ? a : -1, sylBefore = idx.slice(from < 0 ? 0 : from, k).reduce((x, i) => x + lines[i].syllables, 0), sylAll = idx.slice(from < 0 ? 0 : from, b < idx.length ? b : idx.length).reduce((x, i) => x + lines[i].syllables, 0) || 1;
+      const sub = use.filter((p) => p.endSec > ta && p.startSec < tb).map((p) => ({ startSec: Math.max(p.startSec, ta), endSec: Math.min(p.endSec, tb) }));
+      const cl = _voicedClock(sub.length ? sub : [{ startSec: ta, endSec: tb }]);
+      starts[idx[k]] = Math.max(ta + 0.3, Math.min(tb - 0.3, cl.toReal((sylBefore / sylAll) * cl.total)));
+    }
+    if (anchors.find((x) => x.line === g.from)) { starts[g.from] = Math.max(starts[g.from], g.t0); }
+  }
+  // ends: the last sung phrase end before the next line, else the next start
+  const out = lines.map((l, i) => {
+    const st = starts[i], nx = i + 1 < lines.length ? starts[i + 1] : Infinity;
+    const inside = phrases.filter((p) => p.startSec < nx && p.endSec > st);
+    let en = inside.length ? Math.min(nx, inside[inside.length - 1].endSec) : Math.min(nx, st + Math.max(1, l.syllables * 0.3));
+    if (!isFinite(en) || en <= st) en = st + Math.max(0.5, l.syllables * 0.25);
+    return { text: l.text, section: l.section, stanza: l.stanza, syllables: l.syllables, startSec: st, endSec: en, confidence: conf[i], snapped: snapped[i] };
+  });
+  if (opts.snapBeats !== false && grid.beats.length) out.forEach((l) => {
+    const b = grid.at(l.startSec);
+    if (b && b.dist <= (source === "grid" ? 10 : 0.35)) { l.startSec = b.t; }
+    const sb = grid.at(l.startSec), eb = grid.at(l.endSec);
+    if (sb) { l.startBar = sb.bar; l.startBeat = sb.beat; }
+    if (eb) { l.endBar = eb.bar; l.endBeat = eb.beat; }
+  });
+  for (let i = 1; i < out.length; i++) if (out[i].startSec <= out[i - 1].startSec) out[i].startSec = out[i - 1].startSec + 0.05;
+  out.forEach((l, i) => { if (i + 1 < out.length && l.endSec > out[i + 1].startSec) l.endSec = out[i + 1].startSec; l.startSec = +l.startSec.toFixed(3); l.endSec = +l.endSec.toFixed(3); });
+  const mean = out.reduce((a, l) => a + l.confidence, 0) / out.length;
+  return { lines: out, source, confidence: +mean.toFixed(3), title: parsed.title || null, artist: parsed.subtitle || null };
+}
+/** Move one line's start by `deltaSec` (its neighbours' bounds follow); keeps the order. Pass the
+ *  chart (`score`, `bpm`) to refresh the line's bar/beat. */
+function nudgeLyricLine(map, index, deltaSec, score, bpm) {
+  if (!map || !map.lines || !map.lines[index]) return map;
+  const lines = map.lines.map((l) => ({ ...l }));
+  const lo = index > 0 ? lines[index - 1].startSec + 0.1 : 0, hi = index + 1 < lines.length ? lines[index + 1].startSec - 0.1 : Infinity;
+  const l = lines[index], len = l.endSec - l.startSec;
+  l.startSec = +Math.max(lo, Math.min(hi, l.startSec + deltaSec)).toFixed(3);
+  l.endSec = +Math.min(index + 1 < lines.length ? lines[index + 1].startSec : Infinity, l.startSec + Math.max(0.3, len)).toFixed(3);
+  if (index > 0) lines[index - 1].endSec = Math.min(lines[index - 1].endSec, l.startSec);
+  l.confidence = 1; l.manual = true;
+  if (score) { const g = _beatGrid(score, bpm), sb = g.at(l.startSec), eb = g.at(l.endSec); if (sb) { l.startBar = sb.bar; l.startBeat = sb.beat; } if (eb) { l.endBar = eb.bar; l.endBeat = eb.beat; } }
+  return { ...map, lines };
+}
+const lyricLineAt = (map, sec) => { if (!map || !map.lines) return -1; let k = -1; map.lines.forEach((l, i) => { if (l.startSec <= sec + 1e-6) k = i; }); return k; };
+const _lrcTime = (t) => { const m = Math.floor(t / 60), s = t - m * 60; return `${String(m).padStart(2, "0")}:${s.toFixed(2).padStart(5, "0")}`; };
+/** LyricMap → LRC (simple LRC: one [mm:ss.xx] stamp per line + ti/ar/length tags). */
+function lyricsToLRC(map, opts = {}) {
+  const L = [];
+  const ti = opts.title || (map && map.title), ar = opts.artist || (map && map.artist);
+  if (ti) L.push(`[ti:${ti}]`);
+  if (ar) L.push(`[ar:${ar}]`);
+  const last = map && map.lines && map.lines.length ? map.lines[map.lines.length - 1].endSec : 0;
+  if (last) L.push(`[length:${_lrcTime(last).slice(0, 5)}]`);
+  L.push("[by:Tab Translator Pro]");
+  for (const l of (map && map.lines) || []) L.push(`[${_lrcTime(l.startSec)}]${l.text}`);
+  return L.join("\n") + "\n";
+}
+/* chords of the score on the line's clock: [{ t, symbol }] with consecutive repeats collapsed */
+function _lyricChords(score, opts) {
+  const ov = opts.overrides || {}, evs = scoreRecordingTimes(score, opts.bpm || score.tempo), out = [];
+  for (const e of evs) {
+    const bar = score.bars.find((b) => b.number === e.bar), ev = bar && bar.events.find((x) => `${bar.number}.${x.beat}` === e.key);
+    let sym = ov[e.key] != null ? ov[e.key] : ev ? ev.symbol : "";
+    if (!sym || sym === "—") sym = e.midis.length ? sym : "N.C.";
+    if (!sym) continue;
+    if (out.length && out[out.length - 1].symbol === sym) continue;
+    out.push({ t: e.start, symbol: sym });
+  }
+  return out;
+}
+/* chord placements inside one line: [{ col, symbol }] at word starts by syllable timing. Chords in
+ * a long instrumental gap after the words (> `gapSec`) are NOT piled onto the line's end — they
+ * come back as `after` (their own chord-only line). Two chords on the same syllable: the later wins. */
+function _placeChords(line, chords, nextStart, restate, gapSec = 3) {
+  const words = _segWords(line.text), syl = [];
+  words.forEach((w) => { const n = Math.max(1, _wordSyllables(w.w)); for (let k = 0; k < n; k++) syl.push(w.i); });
+  const end = Math.min(nextStart, Math.max(line.endSec, line.startSec + 0.5)), span = Math.max(0.2, end - line.startSec);
+  const cut = Math.min(nextStart, end + gapSec);
+  const inLine = chords.filter((c) => c.t >= line.startSec - 0.12 && c.t < cut - 0.12);
+  const after = chords.filter((c) => c.t >= cut - 0.12 && c.t < nextStart - 0.12);
+  const before = chords.filter((c) => c.t < line.startSec - 0.12).pop();
+  const out = [];
+  if (restate && before) out.push({ col: 0, symbol: before.symbol });
+  for (const c of inLine) {
+    const f = (c.t - line.startSec) / span;
+    const col = f >= 0.999 || !syl.length ? line.text.length : syl[Math.max(0, Math.min(syl.length - 1, Math.floor(f * syl.length)))];
+    if (out.length && out[out.length - 1].col === col) out.pop();
+    if (out.length && out[out.length - 1].symbol === c.symbol) continue;
+    out.push({ col, symbol: c.symbol });
+  }
+  return { places: out, after: after.filter((c, i, a) => i === 0 || a[i - 1].symbol !== c.symbol) };
+}
+/** The chords-over-lyrics sheet as ROWS (what the UI renders line by line):
+ *  [{ type:"title"|"section"|"chords"|"line"|"blank", text, chordLine?, index? }]. */
+function lyricSheetRows(score, map, opts = {}) {
+  const chords = _lyricChords(score, opts), R = [], lines = (map && map.lines) || [];
+  const title = opts.title || (map && map.title), artist = opts.artist || (map && map.artist);
+  if (title) R.push({ type: "title", text: title }); if (artist) R.push({ type: "title", text: artist }); if (title || artist) R.push({ type: "blank" });
+  const intro = lines.length ? chords.filter((c) => c.t < lines[0].startSec - 0.12) : chords;
+  if (intro.length) { R.push({ type: "section", text: "Intro" }); R.push({ type: "chords", text: intro.map((c) => c.symbol).join("   ") }); R.push({ type: "blank" }); }
+  let sec = null, stanza = null;
+  lines.forEach((l, i) => {
+    if (l.section !== sec) { if (R.length && R[R.length - 1].type !== "blank") R.push({ type: "blank" }); if (l.section) R.push({ type: "section", text: l.section }); sec = l.section; stanza = l.stanza; }
+    else if (l.stanza !== stanza) { R.push({ type: "blank" }); stanza = l.stanza; }
+    const { places: pl, after } = _placeChords(l, chords, i + 1 < lines.length ? lines[i + 1].startSec : Infinity, opts.restate !== false);
+    let lyric = l.text, chordLine = "", shift = 0;
+    for (const p of pl) {
+      let col = p.col + shift;
+      if (chordLine.length && col < chordLine.length + 1) { const pad = chordLine.length + 1 - col; lyric = lyric.slice(0, col) + " ".repeat(pad) + lyric.slice(col); shift += pad; col += pad; }
+      chordLine = chordLine.padEnd(col) + p.symbol;
+    }
+    R.push({ type: "line", index: i, text: lyric.replace(/\s+$/, ""), chordLine: chordLine.replace(/\s+$/, "") });
+    if (after.length) { R.push({ type: "blank" }); R.push({ type: "chords", text: after.map((c) => c.symbol).join("   ") }); }
+  });
+  return R;
+}
+/** Chords-over-lyrics text (the ultimate-guitar layout), from a score + a LyricMap. */
+function scoreToLyricsSheet(score, map, opts = {}) {
+  const L = [];
+  for (const r of lyricSheetRows(score, map, opts)) {
+    if (r.type === "blank") L.push("");
+    else if (r.type === "section") L.push(`[${r.text}]`);
+    else if (r.type === "line") { if (r.chordLine) L.push(r.chordLine); L.push(r.text); }
+    else L.push(r.text);
+  }
+  return L.join("\n").replace(/\n{3,}/g, "\n\n") + "\n";
+}
+/** ChordPro with inline [chords] in the lyric lines (round-trips through parseLyrics). */
+function scoreToChordProWithLyrics(score, map, opts = {}) {
+  const chords = _lyricChords(score, opts), L = [], lines = (map && map.lines) || [];
+  const title = opts.title || (map && map.title), artist = opts.artist || (map && map.artist);
+  if (title) L.push(`{title: ${title}}`); if (artist) L.push(`{artist: ${artist}}`);
+  const kn = _exportKeyName(opts); if (kn) L.push(`{key: ${kn}}`);
+  if (opts.tempo) L.push(`{tempo: ${Math.round(opts.tempo)}}`);
+  const intro = lines.length ? chords.filter((c) => c.t < lines[0].startSec - 0.12) : chords;
+  if (intro.length) { L.push(""); L.push("{comment: Intro}"); L.push(intro.map((c) => `[${c.symbol}]`).join(" ")); }
+  let sec = null, env = null, stanza = null;
+  const close = () => { if (env) L.push(`{end_of_${env}}`); env = null; };
+  lines.forEach((l, i) => {
+    if (l.section !== sec) {
+      close(); L.push("");
+      const n = _secNorm(l.section);
+      if (n === "chorus" || n === "refrain") { env = "chorus"; L.push(`{start_of_chorus${l.section ? ": " + l.section : ""}}`); }
+      else if (n === "verse") { env = "verse"; L.push(`{start_of_verse: ${l.section}}`); }
+      else if (n === "bridge") { env = "bridge"; L.push(`{start_of_bridge: ${l.section}}`); }
+      else if (l.section) L.push(`{comment: ${l.section}}`);
+      sec = l.section; stanza = l.stanza;
+    } else if (l.stanza !== stanza) { L.push(""); stanza = l.stanza; }
+    const { places: pl, after } = _placeChords(l, chords, i + 1 < lines.length ? lines[i + 1].startSec : Infinity, opts.restate !== false);
+    let text = l.text;
+    for (let k = pl.length - 1; k >= 0; k--) text = text.slice(0, pl[k].col) + `[${pl[k].symbol}]` + text.slice(pl[k].col);
+    L.push(text);
+    if (after.length) L.push(after.map((c) => `[${c.symbol}]`).join(" "));
+  });
+  close();
+  return L.join("\n").replace(/\n{3,}/g, "\n\n").replace(/^\n+/, "") + "\n";
+}
+
 export {
   makeMask,
   popcount,
@@ -10045,4 +10352,14 @@ export {
   createLiveChordTracker,
   practiceCompare,
   practiceTargets,
+  countSyllables,
+  lyricLines,
+  voicedPhrases,
+  alignLyrics,
+  nudgeLyricLine,
+  lyricLineAt,
+  lyricsToLRC,
+  scoreToLyricsSheet,
+  scoreToChordProWithLyrics,
+  lyricSheetRows,
 };
