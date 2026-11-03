@@ -2075,6 +2075,7 @@ async function parseScoreZip(u8, useSharp = true, partIndex) {
     if (m) pick = entries.find((e) => e.name === m[1]) || null;
   }
   pick = pick || entries.find((e) => base(e) === "score.musicxml")
+    || entries.find((e) => base(e) === "full_score.musicxml")     // this app's own ⬇ All parts zip: every part
     || entries.find((e) => /\.(musicxml|xml)$/.test(base(e)) && !e.name.startsWith("META-INF/"));
   if (pick) {
     const xml = new TextDecoder("utf-8").decode(await _zipRead(u8, pick));
@@ -4595,6 +4596,13 @@ function scoresToMultipartMusicXML(parts, opts = {}) {
     "  <part-list>", ...heads, "  </part-list>", ...body, "</score-partwise>", ""].join("\n");
 }
 
+/* Splice a single-part MusicXML document's part (score-part + part) into a multi-part one as `id`. */
+function _mergePartXml(full, one, id) {
+  const sp = one.match(/<score-part id="P1">[\s\S]*?<\/score-part>/), pt = one.match(/<part id="P1">[\s\S]*<\/part>/);
+  if (!sp || !pt) return full;
+  const re = (x) => x.replace(/id="P1"/g, `id="${id}"`).replace(/"P1-/g, `"${id}-`);
+  return full.replace("  </part-list>", "    " + re(sp[0]).trim() + "\n  </part-list>").replace(/<\/score-partwise>\s*$/, re(pt[0]) + "\n</score-partwise>\n");
+}
 /** Format-1 Standard MIDI File for several parts on one clock: a conductor track (tempo map from
  *  the first score — scoreBarTempos — and its meters) + a named track per part. tracks:
  *  [{ name, score, program } | { name, drums: [{ beat, type: "kick"|"snare"|"hat" }] }]; drum
@@ -4632,7 +4640,7 @@ function scoresToMidi(tracks, opts = {}) {
   for (const t of list) {
     const evs = [{ tick: 0, o: 0, b: text(0x03, t.name) }];
     if (t.drums) {
-      const key = { kick: 36, snare: 38, hat: 42 };
+      const key = { kick: 36, snare: 38, hat: 42, openHat: 46, pedalHat: 44, crash: 49, ride: 51, tomHigh: 50, tomMid: 47, tomLow: 43 };
       for (const h of t.drums) { const n = key[h.type]; if (n == null || !(h.beat >= 0)) continue; const tick = Math.round(h.beat * PPQ); evs.push({ tick, o: 2, b: [0x99, n, 100] }, { tick: tick + 60, o: 1, b: [0x89, n, 0] }); }
     } else if (t.score && t.score.bars) {
       if (ch === 9) ch++;
@@ -4661,11 +4669,20 @@ function scoresToMidi(tracks, opts = {}) {
  *  → Uint8Array (a STORED zip). */
 function partsZip(parts, opts = {}) {
   const slug = (s) => String(s || "part").replace(/[^\w.-]+/g, "_").replace(/^_+|_+$/g, "") || "part";
-  const entries = [], pitched = [];
+  const entries = [], pitched = [], drumXml = [];
   const clock = ((parts || []).find((p) => p.score && p.score.bars && p.score.bars.length) || {}).score;
   (parts || []).forEach((p, i) => {
     const stem = `${String(i + 1).padStart(2, "0")}_${slug(p.name)}`;
-    if (p.drums) { entries.push({ name: `${stem}.mid`, data: scoresToMidi([{ name: p.name, drums: p.drums }], { ...opts, title: p.name, clockScore: clock }) }); return; }
+    if (p.drums) {
+      entries.push({ name: `${stem}.mid`, data: scoresToMidi([{ name: p.name, drums: p.drums }], { ...opts, title: p.name, clockScore: clock }) });
+      // WO-5: the drum part as notation too — a percussion staff and a text drum tab
+      const sig = (clock && (clock.timeSig || [4, 4])) || [4, 4];
+      const dx = drumHitsToMusicXML(p.drums, { beatsPerBar: sig[0], beatType: sig[1], tempo: opts.tempo, title: opts.title, partName: p.name });
+      entries.push({ name: `${stem}.musicxml`, data: dx });
+      entries.push({ name: `${stem}.txt`, data: drumHitsToAsciiTab(p.drums, { beatsPerBar: sig[0], title: `${opts.title || "Song"} — ${p.name}` }) });
+      drumXml.push({ name: p.name, xml: dx });
+      return;
+    }
     if (!p.score || !p.score.bars || !p.score.bars.length) return;
     const o = { ...opts, overrides: p.overrides || {} };
     pitched.push(p);
@@ -4673,8 +4690,16 @@ function partsZip(parts, opts = {}) {
     entries.push({ name: `${stem}.mid`, data: scoreToMidi(p.score, o) });
     entries.push({ name: `${stem}.csmpn`, data: scoreToCSMPN(p.score, { ...o, title: `${opts.title || "Song"} — ${p.name}` }) });
     if (p.tuning) { try { entries.push({ name: `${stem}.alphatex`, data: scoreToAlphaTex(p.score, { ...o, tuning: p.tuning, trackName: p.name, title: opts.title }) }); } catch (_) { /* not writable as tab */ } }
+    // WO-5: a piano part also as a grand staff (treble + bass), hands split at an adaptive hinge
+    if (p.piano || /piano|keys/i.test(p.role || p.name || "")) {
+      try { const sig = p.score.timeSig || [4, 4]; entries.push({ name: `${stem}_grand-staff.musicxml`, data: scoreToPianoMusicXML(scoreToPianoHands(p.score), { beatsPerBar: sig[0], beatType: sig[1], tempo: opts.tempo, title: opts.title, partName: p.name, key: opts.key }) }); } catch (_) { /* no notes */ }
+    }
   });
-  if (pitched.length) entries.push({ name: "full_score.musicxml", data: scoresToMultipartMusicXML(pitched, opts) });
+  if (pitched.length) {
+    let full = scoresToMultipartMusicXML(pitched, opts);
+    drumXml.forEach((d, k) => { full = _mergePartXml(full, d.xml, `P${pitched.length + k + 1}`); });
+    entries.push({ name: "full_score.musicxml", data: full });
+  }
   // score.mid: the drums need the pitched parts' clock, so they ride in the same file
   const clockParts = (parts || []).filter((p) => (p.score && p.score.bars && p.score.bars.length) || p.drums);
   if (clockParts.length) entries.push({ name: "score.mid", data: scoresToMidi(clockParts.map((p) => (p.drums ? { name: p.name, drums: p.drums } : { name: p.name, score: p.score, program: p.program })), opts) });
@@ -6932,7 +6957,9 @@ function transcribeDrums(samples, sampleRate, opts = {}) {
   const norm = (h) => h.strength / (peak[h.type] || 1);
   const shadowed = (h) => (h.type === "kick" || h.type === "snare") && norm(h) < 0.8 &&
     hits.some((o) => o !== h && (o.type === "kick" || o.type === "snare") && o.type !== h.type && Math.abs(o.t - h.t) < 0.03 && norm(o) > norm(h));
-  return hits.filter((h) => !shadowed(h)).sort((a, b) => a.t - b.t);
+  const kept = hits.filter((h) => !shadowed(h)).sort((a, b) => a.t - b.t);
+  // opts.kit "full" (WO-5): name every onset from the signal around it — toms, open hat, crash, ride
+  return opts.kit === "full" ? _classifyFullKit(samples, sampleRate, kept) : kept;
 }
 
 /* Hits → a groove grid: per bar, `steps` slots (16 = sixteenths in 4/4) for each drum, on
@@ -6946,20 +6973,24 @@ function drumPattern(hits, opts = {}) {
     const g = t / (60 / bpm);                                      // fractional beat on the chart's grid
     return Math.round(g * sub);
   };
-  const bars = new Map();
+  const bars = new Map(), extra = new Set();
   for (const h of hits || []) {
     const slot = slotOf(h.t);
     if (slot < 0) continue;
     const bar = Math.floor(slot / (bpb * sub)), pos = slot - bar * bpb * sub;
     if (!bars.has(bar)) bars.set(bar, { kick: new Array(bpb * sub).fill("."), snare: new Array(bpb * sub).fill("."), hat: new Array(bpb * sub).fill(".") });
-    bars.get(bar)[h.type][pos] = "x";
+    const row = bars.get(bar);
+    if (!row[h.type]) { row[h.type] = new Array(bpb * sub).fill("."); extra.add(h.type); }
+    row[h.type][pos] = "x";
   }
   const last = bars.size ? Math.max(...bars.keys()) : -1;
   const out = [];
   for (let b = 0; b <= last; b++) {
     const r = bars.get(b) || { kick: [], snare: [], hat: [] };
     const fill = (a) => (a.length ? a.join("") : ".".repeat(bpb * sub));
-    out.push({ number: b + 1, startSec: +beatT(b * bpb).toFixed(3), kick: fill(r.kick), snare: fill(r.snare), hat: fill(r.hat) });
+    const bar = { number: b + 1, startSec: +beatT(b * bpb).toFixed(3), kick: fill(r.kick), snare: fill(r.snare), hat: fill(r.hat) };
+    for (const t of extra) bar[t] = fill(r[t] || []);              // full-kit pieces, only when they occur
+    out.push(bar);
   }
   return { bars: out, beatsPerBar: bpb, subdivisions: sub, bpm };
 }
@@ -6968,7 +6999,7 @@ function drumPattern(hits, opts = {}) {
  * format 0, PPQ 480 — the same container scoreToMidi writes. */
 function drumHitsToMidi(hits, opts = {}) {
   const PPQ = 480, bpm = Math.max(20, Math.min(400, Math.round(opts.bpm || 120))), uspq = Math.round(60000000 / bpm);
-  const note = { kick: 36, snare: 38, hat: 42 };
+  const note = { kick: 36, snare: 38, hat: 42, openHat: 46, pedalHat: 44, crash: 49, ride: 51, tomHigh: 50, tomMid: 47, tomLow: 43 };
   const evs = [{ tick: 0, o: 0, b: [0xff, 0x51, 0x03, (uspq >> 16) & 255, (uspq >> 8) & 255, uspq & 255] }];
   for (const h of hits || []) {
     const tick = Math.max(0, Math.round((h.t * bpm / 60) * PPQ)), n = note[h.type];
@@ -10218,6 +10249,356 @@ function arrangementLevels(score, level = "advanced", opts = {}) {
   return { score: { ...s, level }, level, vocabulary: vocab, transposedBy: t, capo: capo > 0 && capo <= 7 ? capo : 0 };
 }
 
+/* ============================================================================
+ *  WORKBENCH · WO-5 — DRUM + PIANO NOTATION, complete all-parts deliverables
+ *  ---------------------------------------------------------------------------
+ *  DRUMS. transcribeDrums finds onsets with a 3-component semi-adaptive NMF
+ *  (kick / snare / hats) — that path is validated and stays the default. With
+ *  `kit: "full"` each onset is then CLASSIFIED from the raw signal around it:
+ *    - low / mid family (NMF kick + snare): the body's peak frequency (40–400 Hz)
+ *      and how much broadband noise sits on top (1–8 kHz share) separate kick
+ *      (< 95 Hz), floor / mid / high tom (tonal, 95–260 Hz) and snare (noisy);
+ *      a coincident kick + snare pair stays a pair;
+ *    - cymbal family (NMF hats): the high band's DECAY RATE over the first 80 ms
+ *      separates a closed hat (fast) from ringing cymbals, and the ringing ones split
+ *      by spectral SHAPE — a ride's tonal "ping" (peaky 2–6 kHz), a crash's broad wash
+ *      (energy down into 1–3 kHz), an open hat's narrow top end.
+ *  Rim-shot / clap are not separated (they read as snare) — an honest limit.
+ *  drumHitsToMusicXML writes a percussion part (two voices: hands up, feet down; GM
+ *  <midi-unpitched>; x / circle-x noteheads for cymbals), drumHitsToAsciiTab the classic
+ *  CR/RD/HH/SD/T1/T2/FT/BD grid.
+ *  PIANO. pianoScoreFromNotes splits notes into hands at an adaptive hinge (2-means over
+ *  pitch, pulled toward C4; a chord wider than a hand spills to the other hand);
+ *  scoreToPianoMusicXML writes ONE part on a grand staff (<staves>2</staves>, treble +
+ *  bass), each hand quantised by the same metric notation pass the vocal score uses.
+ * ------------------------------------------------------------------------- */
+const DRUM_KIT = {
+  kick: { gm: 36, step: "F", oct: 4, voice: 2, row: "BD", name: "Bass Drum", mark: "o" },
+  snare: { gm: 38, step: "C", oct: 5, voice: 1, row: "SD", name: "Snare", mark: "o" },
+  hat: { gm: 42, step: "G", oct: 5, head: "x", voice: 1, row: "HH", name: "Closed Hi-Hat", mark: "x" },
+  openHat: { gm: 46, step: "G", oct: 5, head: "circle-x", voice: 1, row: "HH", name: "Open Hi-Hat", mark: "o" },
+  pedalHat: { gm: 44, step: "D", oct: 4, head: "x", voice: 2, row: "HF", name: "Pedal Hi-Hat", mark: "x" },
+  crash: { gm: 49, step: "A", oct: 5, head: "x", voice: 1, row: "CR", name: "Crash Cymbal", mark: "x" },
+  ride: { gm: 51, step: "F", oct: 5, head: "x", voice: 1, row: "RD", name: "Ride Cymbal", mark: "x" },
+  tomHigh: { gm: 50, step: "E", oct: 5, voice: 1, row: "T1", name: "High Tom", mark: "o" },
+  tomMid: { gm: 47, step: "D", oct: 5, voice: 1, row: "T2", name: "Mid Tom", mark: "o" },
+  tomLow: { gm: 43, step: "A", oct: 4, voice: 1, row: "FT", name: "Floor Tom", mark: "o" },
+};
+const DRUM_ROWS = ["CR", "RD", "HH", "SD", "T1", "T2", "FT", "BD", "HF"];
+/* features of one onset, from short FFTs of the raw signal around it:
+ *  body / bodyLate — the low body's pitch (40–400 Hz, zero-padded + parabolic) early and 46 ms
+ *  later (a kick's beater sweep drops; a tom barely moves); body2 — a second, separate low peak
+ *  (a kick and a tom struck together); lowShare / noiseShare — of the whole spectrum; above 1 kHz:
+ *  highRise (vs the 46 ms before the onset), decayDb (4–16 kHz over 80 ms, the pre-onset level
+ *  subtracted, so a ringing crash under a hat can't hide its decay), peakiness (a ride's tonal
+ *  ping) and flatness (a crash's wash). */
+function _drumHitFeatures(x, sr, t) {
+  let N = 1; while (N < 0.046 * sr) N <<= 1;
+  const spec = (t0, n, pad) => {
+    const M = pad || n, re = new Float64Array(M), im = new Float64Array(M), w = _hann(n), s0 = Math.round(t0 * sr);
+    for (let i = 0; i < n; i++) re[i] = (x[s0 + i] || 0) * w[i];
+    _fft(re, im); const mag = new Float64Array(M >> 1); for (let k = 1; k < M >> 1; k++) mag[k] = re[k] * re[k] + im[k] * im[k]; return mag;
+  };
+  const band = (P, M, lo, hi) => { let e = 0; const a = Math.max(1, Math.floor((lo * M) / sr)), b = Math.min((M >> 1) - 1, Math.ceil((hi * M) / sr)); for (let k = a; k <= b; k++) e += P[k]; return e; };
+  const top = Math.min(16000, sr / 2 - 1);
+  const A = spec(t - 0.004, N), pre = spec(t - 0.004 - N / sr, N);
+  const all = band(A, N, 40, top) || 1e-18, low = band(A, N, 40, 400), noise = band(A, N, 1000, 8000);
+  const above = band(A, N, 1000, top) || 1e-18;
+  // the low body's pitch: zero-padded ×4 + parabolic interpolation; two separate peaks if present
+  const M = N * 4, peaks = (P) => {
+    const lo = Math.floor((40 * M) / sr), hi = Math.ceil((400 * M) / sr), out = [];
+    for (let k = lo + 1; k < hi; k++) if (P[k] > P[k - 1] && P[k] >= P[k + 1]) {
+      const a = Math.log(P[k - 1] + 1e-30), b = Math.log(P[k] + 1e-30), c = Math.log(P[k + 1] + 1e-30), den = a - 2 * b + c;
+      out.push({ f: ((k + (den < 0 ? Math.max(-0.5, Math.min(0.5, (0.5 * (a - c)) / den)) : 0)) * sr) / M, p: P[k] });
+    }
+    return out.sort((u, v) => v.p - u.p);
+  };
+  const P0 = spec(t, N, M), Pp = spec(t - 0.004 - N / sr, N, M), pk = peaks(P0), pkL = peaks(spec(t + N / sr, N, M));
+  const body = pk.length ? pk[0].f : 0, bodyLate = pkL.length ? pkL[0].f : body;
+  const fresh = (q) => { const k = Math.round((q.f * M) / sr); return q.p > 3 * (Pp[k] || 0); };       // not the previous drum still ringing
+  const second = pk.find((q) => q.p >= 0.3 * pk[0].p && (q.f / body > 1.35 || body / q.f > 1.35) && fresh(q));
+  // above 1 kHz: onset rise, decay over the first 80 ms (pre-onset level subtracted), tonality
+  const preHi = band(pre, N, 3000, top), hiA = band(A, N, 3000, top), n2 = 512, preD = band(spec(t - 0.03, n2), n2, 4000, top), dec = [];
+  for (let k = 0; k < 9; k++) dec.push(Math.max(1e-18, band(spec(t + k * 0.01, n2), n2, 4000, top) - preD));
+  const decayDb = 10 * Math.log10(Math.max(...dec.slice(0, 3)) / ((dec[7] + dec[8]) / 2));
+  const a2 = Math.floor((2000 * N) / sr), b2 = Math.min((N >> 1) - 1, Math.ceil((8000 * N) / sr));
+  let mx = 0, sum = 0, lg = 0, c = 0; for (let k = a2; k <= b2; k++) { const v = A[k] + 1e-24; mx = Math.max(mx, v); sum += v; lg += Math.log(v); c++; }
+  return { body, bodyLate, body2: second ? second.f : 0, lowShare: low / all, noiseShare: noise / all, highRise: hiA / (preHi + 1e-18), decayDb,
+    peakiness: c ? mx / (sum / c) : 0, flatness: c ? Math.exp(lg / c) / (sum / c) : 0, midRel: band(A, N, 1000, 3000) / above, highRel: band(A, N, 6000, top) / above };
+}
+function _classifyFullKit(x, sr, hits) {
+  const out = [], sorted = hits.slice().sort((a, b) => a.t - b.t), used = new Set();
+  const peakOf = {}; for (const h of sorted) peakOf[h.type] = Math.max(peakOf[h.type] || 0, h.strength || 0);
+  const tom = (f) => (f < 118 ? "tomLow" : f < 172 ? "tomMid" : "tomHigh");
+  const RIDE = 22;                                                 // peakiness of a ride's ping (noise ≈ 5–10)
+  const cymbal = (f) => (f.decayDb > 9 ? "hat" : f.peakiness > RIDE ? "ride" : f.decayDb > 1.9 ? "openHat" : "crash");
+  const lowKind = (f) => (f.body < 80 || f.body / Math.max(1, f.bodyLate) > 1.25 ? "kick" : tom(f.bodyLate || f.body));
+  const nearCym = (t) => out.some((h) => ["hat", "openHat", "crash", "ride"].includes(h.type) && Math.abs(h.t - t) < 0.03);
+  for (let i = 0; i < sorted.length; i++) {
+    if (used.has(i)) continue;
+    const h = sorted[i];
+    if (h.type === "hat") {
+      const f = _drumHitFeatures(x, sr, h.t); used.add(i);
+      // a tom's stick click lends the hat component a weak rise: a body-dominated onset next to a tonal
+      // drum, at under half the hats' own peak, is that click — not a hi-hat
+      const nearTom = sorted.some((o) => o.type !== "hat" && Math.abs(o.t - h.t) < 0.03);
+      if (nearTom && f.lowShare > 0.5 && f.noiseShare < 0.12 && f.body >= 80 && (h.strength || 0) < 0.5 * (peakOf.hat || 1)) continue;
+      out.push({ ...h, type: cymbal(f), features: f }); continue;
+    }
+    const grp = [i]; for (let j = i + 1; j < sorted.length && sorted[j].t - h.t < 0.03; j++) if (sorted[j].type !== "hat") grp.push(j);
+    grp.forEach((k) => used.add(k));
+    const t0 = Math.min(...grp.map((k) => sorted[k].t)), f = _drumHitFeatures(x, sr, t0);
+    const best = grp.reduce((a, k) => (sorted[k].strength > sorted[a].strength ? k : a), grp[0]), base = sorted[best];
+    if (f.lowShare < 0.04) { if (!nearCym(t0)) out.push({ ...base, type: cymbal(f), features: f }); continue; }   // no body: a cymbal NMF filed low
+    const types = new Set(grp.map((k) => sorted[k].type)), tonal = f.noiseShare < 0.12;
+    // NMF can re-fire inside a ringing tom: a "hit" with no new transient right after another drum
+    const lastLow = [...out].reverse().find((o) => !["hat", "openHat", "crash", "ride"].includes(o.type));
+    if (tonal && f.highRise < 1.5 && lastLow && t0 - lastLow.t < 0.12) continue;
+    if (tonal) {
+      const k1 = lowKind(f);
+      out.push({ ...base, type: k1, features: f });
+      if (f.body2) { const k2 = f.body2 < 95 ? "kick" : tom(f.body2); if (k2 !== k1) out.push({ ...base, type: k2, features: f }); }
+    } else if (types.has("kick") && types.has("snare")) grp.forEach((k) => out.push({ ...sorted[k], features: f }));
+    else out.push({ ...base, type: f.body < 95 && f.lowShare > 0.6 ? "kick" : "snare", features: f });
+    // a cymbal struck WITH this drum: a fresh rise above 3 kHz that keeps ringing (a snare's
+    // wires die within ~80 ms; a crash or ride does not)
+    if (f.highRise > 3 && (f.decayDb < 6 || f.peakiness > RIDE) && !nearCym(t0) && !sorted.some((o, k) => k !== i && o.type === "hat" && Math.abs(o.t - t0) < 0.03)) out.push({ ...base, type: f.peakiness > RIDE ? "ride" : f.decayDb < 1.9 ? "crash" : "openHat", features: f });
+  }
+  // hats NMF missed under a ringing crash / open hat: a sharp LOG-domain rise of the 6–16 kHz band
+  // (relative to the wash, so a loud cymbal can't mask it) with no drum or cymbal already there
+  for (const t of _highBandOnsets(x, sr)) {
+    if (out.some((o) => Math.abs(o.t - t) < 0.035)) continue;
+    const f = _drumHitFeatures(x, sr, t);
+    // only a clearly-decaying CLOSED hat is rescued: crashes / rides are loud enough for NMF
+    if (f.lowShare > 0.3 || f.decayDb < 6) continue;
+    out.push({ t: +t.toFixed(3), type: "hat", strength: 0, features: f, rescued: true });
+  }
+  return out.sort((a, b) => a.t - b.t);
+}
+function _highBandOnsets(x, sr, opts = {}) {
+  const n = 512, hop = Math.round(sr * 0.005), top = Math.min(16000, sr / 2 - 1), a = Math.floor((6000 * n) / sr), b = Math.min((n >> 1) - 1, Math.ceil((top * n) / sr));
+  const w = _hann(n), re = new Float64Array(n), im = new Float64Array(n), db = [];
+  for (let s0 = 0; s0 + n <= x.length; s0 += hop) {
+    for (let i = 0; i < n; i++) { re[i] = x[s0 + i] * w[i]; im[i] = 0; }
+    _fft(re, im); let e = 0; for (let k = a; k <= b; k++) e += re[k] * re[k] + im[k] * im[k];
+    db.push(10 * Math.log10(e + 1e-12));
+  }
+  const rise = opts.riseDb || 2.5, out = [], mx = Math.max(...db);
+  for (let k = 6; k + 2 < db.length; k++) {
+    const before = Math.min(db[k - 6], db[k - 5], db[k - 4]), now = Math.max(db[k], db[k + 1]);
+    if (now - before < rise || db[k] < mx - 45 || !(db[k] - db[k - 1] > 1 && db[k] >= db[k - 1])) continue;
+    const t = (k * hop + n / 2) / sr;
+    if (out.length && t - out[out.length - 1] < 0.06) continue;
+    out.push(t);
+  }
+  return out;
+}
+/* hits ({ type, t } seconds or { type, beat } quarter beats) → quarter beats from bar 1 */
+function _drumBeats(hits, opts = {}) {
+  const bpm = opts.bpm || 120, tl = opts.timeline && opts.timeline.times && opts.timeline.times.length >= 2 ? opts.timeline : null;
+  return (hits || []).filter((h) => h && DRUM_KIT[h.type]).map((h) => ({ type: h.type, beat: h.beat != null ? h.beat : tl ? timelineBeatsAt(tl, h.t) : (h.t * bpm) / 60, accent: !!h.accent }))
+    .filter((h) => isFinite(h.beat) && h.beat > -0.1).sort((a, b) => a.beat - b.beat);
+}
+/** Drum hits → classic ASCII drum tab: one row per drum (CR RD HH SD T1 T2 FT BD), `sub` slots per
+ *  beat (16ths in 4/4), "x" cymbal / "o" drum or open hat, bars split by "|", `barsPerLine` per block. */
+function drumHitsToAsciiTab(hits, opts = {}) {
+  const bpb = opts.beatsPerBar || 4, sub = opts.subdivisions || 4, per = opts.barsPerLine || 4;
+  const hb = _drumBeats(hits, opts);
+  const rowsUsed = new Set(hb.map((h) => DRUM_KIT[h.type].row));
+  const rows = DRUM_ROWS.filter((r) => rowsUsed.has(r));
+  if (!rows.length) return "";
+  const slots = bpb * sub, nb = Math.max(1, Math.floor((hb.length ? hb[hb.length - 1].beat : 0) / bpb) + 1);
+  const grid = new Map(rows.map((r) => [r, Array.from({ length: nb }, () => new Array(slots).fill("-"))]));
+  for (const h of hb) {
+    const s = Math.round(h.beat * sub), bar = Math.floor(s / slots), pos = s - bar * slots;
+    if (bar < 0 || bar >= nb) continue;
+    const k = DRUM_KIT[h.type], cell = grid.get(k.row)[bar];
+    cell[pos] = h.type === "openHat" ? "o" : k.mark === "x" ? "x" : h.accent ? "O" : "o";
+  }
+  const L = [];
+  if (opts.title) L.push(opts.title, "");
+  for (let b0 = 0; b0 < nb; b0 += per) {
+    const count = []; for (let b = b0; b < Math.min(nb, b0 + per); b++) { const c = new Array(slots).fill(" "); for (let k = 0; k < bpb; k++) c[k * sub] = String(k + 1); count.push(c.join("")); }
+    L.push(`   ${count.join(" ")}`);
+    for (const r of rows) L.push(`${r.padEnd(2)}|${grid.get(r).slice(b0, b0 + per).map((c) => c.join("")).join("|")}|`);
+    L.push("");
+  }
+  L.push("x = cymbal / hi-hat · o = drum (open hi-hat on HH) · " + `${sub} slots per beat`);
+  return L.join("\n") + "\n";
+}
+/** Drum hits → a MusicXML percussion part (percussion clef, GM instruments, two voices: hands
+ *  stems-up, feet stems-down, a 16th grid, rests filling each voice). */
+function drumHitsToMusicXML(hits, opts = {}) {
+  const bpb = opts.beatsPerBar || 4, bt = opts.beatType || 4, div = 4, q = 4 / bt, barQ = bpb * q, sub = 4;
+  const hb = _drumBeats(hits, opts);
+  const used = [...new Set(hb.map((h) => h.type))];
+  const nb = Math.max(opts.minBars || 1, hb.length ? Math.floor(hb[hb.length - 1].beat / barQ) + 1 : 1);
+  const slotsBar = Math.round(barQ * sub);
+  const L = ['<?xml version="1.0" encoding="UTF-8"?>', '<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 3.1 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">', '<score-partwise version="3.1">'];
+  if (opts.title) L.push("  <work><work-title>" + _xmlEsc(opts.title) + "</work-title></work>");
+  L.push("  <part-list>", '    <score-part id="P1">', "      <part-name>" + _xmlEsc(opts.partName || "Drums") + "</part-name>");
+  for (const t of used) L.push(`      <score-instrument id="P1-${t}"><instrument-name>${DRUM_KIT[t].name}</instrument-name></score-instrument>`);
+  for (const t of used) L.push(`      <midi-instrument id="P1-${t}"><midi-channel>10</midi-channel><midi-unpitched>${DRUM_KIT[t].gm + 1}</midi-unpitched></midi-instrument>`);
+  L.push("    </score-part>", "  </part-list>", '  <part id="P1">');
+  const vals = [[16, "whole"], [8, "half"], [4, "quarter"], [2, "eighth"], [1, "16th"]];
+  const spell = (len, at) => { const out = []; let a = at, n = len; while (n > 0) { const v = vals.find(([s]) => s <= n && a % s === 0) || [1, "16th"]; out.push(v); a += v[0]; n -= v[0]; } return out; };
+  for (let b = 0; b < nb; b++) {
+    L.push(`    <measure number="${b + 1}">`);
+    if (b === 0) {
+      L.push("      <attributes>", `        <divisions>${div}</divisions>`, "        <key><fifths>0</fifths></key>", `        <time><beats>${bpb}</beats><beat-type>${bt}</beat-type></time>`,
+        "        <clef><sign>percussion</sign></clef>", "      </attributes>");
+      if (opts.tempo) L.push(`      <direction placement="above"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>${Math.round(opts.tempo)}</per-minute></metronome></direction-type><sound tempo="${Math.round(opts.tempo)}"/></direction>`);
+    }
+    for (const voice of [1, 2]) {
+      if (voice === 2) L.push(`      <backup><duration>${slotsBar}</duration></backup>`);
+      const slots = new Map();
+      for (const h of hb) {
+        if (DRUM_KIT[h.type].voice !== voice) continue;
+        const s = Math.round(h.beat * sub) - b * slotsBar; if (s < 0 || s >= slotsBar) continue;
+        if (!slots.has(s)) slots.set(s, new Set()); slots.get(s).add(h.type);
+      }
+      const on = [...slots.keys()].sort((x, y) => x - y);
+      let pos = 0;
+      const rest = (a, n) => { for (const [s, ty] of spell(n, a)) L.push(`      <note><rest/><duration>${s}</duration><voice>${voice}</voice><type>${ty}</type></note>`); };
+      if (!on.length) { L.push(`      <note><rest measure="yes"/><duration>${slotsBar}</duration><voice>${voice}</voice></note>`); continue; }
+      on.forEach((s, i) => {
+        if (s > pos) rest(pos, s - pos);
+        const next = i + 1 < on.length ? on[i + 1] : slotsBar, len = Math.min(next - s, s % 4 === 0 ? 4 : s % 2 === 0 ? 2 : 1), [d0, ty] = spell(len, s)[0];
+        [...slots.get(s)].forEach((t, ci) => {
+          const k = DRUM_KIT[t];
+          L.push("      <note>" + (ci ? "<chord/>" : "") + `<unpitched><display-step>${k.step}</display-step><display-octave>${k.oct}</display-octave></unpitched><duration>${d0}</duration><instrument id="P1-${t}"/><voice>${voice}</voice><type>${ty}</type><stem>${voice === 1 ? "up" : "down"}</stem>` + (k.head ? `<notehead>${k.head}</notehead>` : "") + "</note>");
+        });
+        pos = s + d0;
+      });
+      if (pos < slotsBar) rest(pos, slotsBar - pos);
+    }
+    if (b === nb - 1) L.push('      <barline location="right"><bar-style>light-heavy</bar-style></barline>');
+    L.push("    </measure>");
+  }
+  L.push("  </part>", "</score-partwise>", "");
+  return L.join("\n");
+}
+/** Drum hits → GM MIDI for every kit piece (channel 10), the full-kit superset of drumHitsToMidi. */
+function drumKitToMidi(hits, opts = {}) {
+  const PPQ = 480, bpm = Math.max(20, Math.min(400, Math.round(opts.bpm || 120))), uspq = Math.round(60000000 / bpm);
+  const evs = [{ tick: 0, o: 0, b: [0xff, 0x51, 0x03, (uspq >> 16) & 255, (uspq >> 8) & 255, uspq & 255] }];
+  for (const h of _drumBeats(hits, opts)) {
+    const tick = Math.max(0, Math.round(h.beat * PPQ)), n = DRUM_KIT[h.type].gm;
+    evs.push({ tick, o: 2, b: [0x99, n, h.accent ? 120 : 100] }, { tick: tick + 60, o: 1, b: [0x89, n, 0] });
+  }
+  evs.sort((a, b) => a.tick - b.tick || a.o - b.o);
+  evs.push({ tick: (evs.length ? evs[evs.length - 1].tick : 0) + PPQ, o: 3, b: [0xff, 0x2f, 0x00] });
+  const body = []; let t = 0; const vlq = (v) => { const st = [v & 0x7f]; while ((v >>= 7)) st.unshift((v & 0x7f) | 0x80); return st; };
+  for (const e of evs) { body.push(...vlq(e.tick - t), ...e.b); t = e.tick; }
+  const u32 = (v) => [(v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255];
+  return Uint8Array.from([0x4d, 0x54, 0x68, 0x64, 0, 0, 0, 6, 0, 0, 0, 1, (PPQ >> 8) & 255, PPQ & 255, 0x4d, 0x54, 0x72, 0x6b, ...u32(body.length), ...body]);
+}
+
+/* ---- piano: hands + grand staff ---- */
+/** Split notes ([{ midi, startSec, durSec }] or beat notes) into right and left hand. The hinge is a
+ *  2-means split of the pitches pulled toward C4 (60); a chord spanning more than a 10th at one
+ *  onset sends its outer notes to the other hand. → { right, left, hinge } */
+function pianoScoreFromNotes(notes, opts = {}) {
+  const ns = (notes || []).filter((n) => n && isFinite(n.midi)).slice();
+  if (!ns.length) return { right: [], left: [], hinge: 60 };
+  let a = 48, b = 72;
+  for (let it = 0; it < 12; it++) {
+    const A = ns.filter((n) => Math.abs(n.midi - a) <= Math.abs(n.midi - b)), B = ns.filter((n) => Math.abs(n.midi - a) > Math.abs(n.midi - b));
+    const na = A.length ? A.reduce((s, n) => s + n.midi, 0) / A.length : a, nb2 = B.length ? B.reduce((s, n) => s + n.midi, 0) / B.length : b;
+    if (Math.abs(na - a) < 0.01 && Math.abs(nb2 - b) < 0.01) break; a = na; b = nb2;
+  }
+  const hinge = opts.hinge != null ? opts.hinge : Math.round(Math.max(52, Math.min(67, 0.6 * ((a + b) / 2) + 0.4 * 60)));
+  const t = (n) => (n.startSec != null ? n.startSec : n.onsetBeat), d = (n) => (n.durSec != null ? n.durSec : n.durBeat);
+  const right = [], left = [];
+  // group by onset (within 30 ms / a 16th of a beat) so a wide chord can be shared between the hands
+  const sorted = ns.sort((x, y) => t(x) - t(y) || x.midi - y.midi);
+  for (let i = 0; i < sorted.length;) {
+    let j = i + 1; while (j < sorted.length && t(sorted[j]) - t(sorted[i]) < (sorted[i].startSec != null ? 0.03 : 0.0625)) j++;
+    const grp = sorted.slice(i, j).sort((x, y) => x.midi - y.midi);
+    let R = grp.filter((n) => n.midi >= hinge), Lh = grp.filter((n) => n.midi < hinge);
+    while (R.length > 1 && R[R.length - 1].midi - R[0].midi > 16) { Lh.push(R.shift()); }
+    while (Lh.length > 1 && Lh[Lh.length - 1].midi - Lh[0].midi > 16) { R.unshift(Lh.pop()); }
+    right.push(...R); left.push(...Lh);
+    i = j;
+  }
+  return { right, left, hinge, durOf: d };
+}
+/** A two-handed piano part → one MusicXML part on a grand staff (treble + bass). hands = { right,
+ *  left } of [{ midi, startSec, durSec }] (with opts.bpm / opts.timeline) or beat notes
+ *  [{ midi, onsetBeat, durBeat }]. Key from opts.key, else read from the notes (keyFromNotes). */
+function scoreToPianoMusicXML(hands, opts = {}) {
+  const bpb = opts.beatsPerBar || 4, bt = opts.beatType || 4, div = 480, bpm = opts.bpm || 120;
+  const tl = opts.timeline && opts.timeline.times && opts.timeline.times.length >= 2 ? opts.timeline : null;
+  // every note in the bar's BEAT unit (what the notation pass counts in): seconds via the timeline or
+  // ♩=, beat notes as given
+  const beatsPerQ = bt / 4;
+  const toBeat = (n) => {
+    if (n.onsetBeat != null) return { on: n.onsetBeat, dur: n.durBeat };
+    const on = tl ? timelineBeatsAt(tl, n.startSec) : (n.startSec * bpm) / 60, off = tl ? timelineBeatsAt(tl, n.startSec + n.durSec) : on + (n.durSec * bpm) / 60;
+    return { on: on * beatsPerQ, dur: (off - on) * beatsPerQ };
+  };
+  const chordify = (list) => {
+    const out = [], src = (list || []).map((n) => ({ midi: n.midi, ...toBeat(n) })).sort((x, y) => x.on - y.on);
+    for (const n of src) {
+      const last = out[out.length - 1];
+      if (last && Math.abs(last.onsetBeat - n.on) < 0.06) { if (!last.midis.includes(n.midi)) last.midis.push(n.midi); last.durBeat = Math.max(last.durBeat, n.dur); }
+      else out.push({ onsetBeat: n.on, durBeat: n.dur, midis: [n.midi] });
+    }
+    out.forEach((c) => c.midis.sort((x, y) => x - y));
+    return out;
+  };
+  const rh = chordify(hands.right), lh = chordify(hands.left);
+  const all = (hands.right || []).concat(hands.left || []).map((n) => ({ midi: n.midi, durSec: n.durSec != null ? n.durSec : n.durBeat || 1 }));
+  const key = opts.key || (all.length ? keyFromNotes(all) : null), spell = _keySpeller(key), fifths = _keyFifths(key);
+  const mOpts = { beatsPerBar: bpb, beatType: bt, div, grid: opts.grid || 4 };
+  const mr = _voiceNotationMeasures(rh, mOpts), ml = _voiceNotationMeasures(lh, mOpts);
+  const nb = Math.max(mr.measures.length, ml.measures.length, opts.minBars || 1), measDiv = mr.measDiv;
+  const L = ['<?xml version="1.0" encoding="UTF-8"?>', '<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 3.1 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">', '<score-partwise version="3.1">'];
+  if (opts.title) L.push("  <work><work-title>" + _xmlEsc(opts.title) + "</work-title></work>");
+  L.push("  <part-list>", '    <score-part id="P1">', "      <part-name>" + _xmlEsc(opts.partName || "Piano") + "</part-name>",
+    '      <score-instrument id="P1-I1"><instrument-name>Acoustic Grand Piano</instrument-name></score-instrument>',
+    '      <midi-instrument id="P1-I1"><midi-channel>1</midi-channel><midi-program>1</midi-program></midi-instrument>', "    </score-part>", "  </part-list>", '  <part id="P1">');
+  const writeStaff = (cells, staff, voice, acc) => {
+    for (const c of cells) {
+      if (c.rest || !c.midis || !c.midis.length) {
+        L.push("      <note>" + (c.wholeMeasure ? '<rest measure="yes"/>' : "<rest/>") + `<duration>${c.divs}</duration><voice>${voice}</voice>` + (c.type && !c.wholeMeasure ? `<type>${c.type}</type>` + (c.dot ? "<dot/>" : "") : "") + `<staff>${staff}</staff></note>`);
+        continue;
+      }
+      c.midis.forEach((m, ci) => {
+        const p = spell(m), a = acc.need(p, c.tieStop);
+        L.push("      <note>" + (ci ? "<chord/>" : "") + `<pitch><step>${p.step}</step>${p.alter ? `<alter>${p.alter}</alter>` : ""}<octave>${p.oct}</octave></pitch><duration>${c.divs}</duration>`
+          + (c.tieStop ? '<tie type="stop"/>' : "") + (c.tieStart ? '<tie type="start"/>' : "") + `<voice>${voice}</voice>` + (c.type ? `<type>${c.type}</type>` + (c.dot ? "<dot/>" : "") : "")
+          + (a != null ? `<accidental>${_ACC_XML[a]}</accidental>` : "") + `<staff>${staff}</staff>`
+          + (c.tieStart || c.tieStop ? "<notations>" + (c.tieStop ? '<tied type="stop"/>' : "") + (c.tieStart ? '<tied type="start"/>' : "") + "</notations>" : "") + "</note>");
+      });
+    }
+  };
+  const accR = _accidentalTracker(key), accL = _accidentalTracker(key);
+  const empty = [{ rest: true, midis: null, type: null, dot: false, divs: measDiv, wholeMeasure: true }];
+  for (let b = 0; b < nb; b++) {
+    accR.newBar(); accL.newBar();
+    L.push(`    <measure number="${b + 1}">`);
+    if (b === 0) {
+      L.push("      <attributes>", `        <divisions>${div}</divisions>`, `        <key><fifths>${fifths}</fifths>${key ? `<mode>${key.mode || "major"}</mode>` : ""}</key>`, `        <time><beats>${bpb}</beats><beat-type>${bt}</beat-type></time>`,
+        "        <staves>2</staves>", '        <clef number="1"><sign>G</sign><line>2</line></clef>', '        <clef number="2"><sign>F</sign><line>4</line></clef>', "      </attributes>");
+      if (opts.tempo) L.push(`      <direction placement="above"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>${Math.round(opts.tempo)}</per-minute></metronome></direction-type><staff>1</staff><sound tempo="${Math.round(opts.tempo)}"/></direction>`);
+    }
+    writeStaff(mr.measures[b] || empty, 1, 1, accR);
+    L.push(`      <backup><duration>${measDiv}</duration></backup>`);
+    writeStaff(ml.measures[b] || empty, 2, 5, accL);
+    if (b === nb - 1) L.push('      <barline location="right"><bar-style>light-heavy</bar-style></barline>');
+    L.push("    </measure>");
+  }
+  L.push("  </part>", "</score-partwise>", "");
+  return L.join("\n");
+}
+/** A score's events as piano notes in beats (for a chord chart or an ML note score). */
+function scoreToPianoHands(score, opts = {}) {
+  const bn = _scoreToBeatNotes(score), notes = [];
+  for (const n of bn) for (const m of n.midis) notes.push({ midi: m, onsetBeat: n.onsetBeat, durBeat: n.durBeat });
+  return pianoScoreFromNotes(notes, opts);
+}
+
 export {
   makeMask,
   popcount,
@@ -10634,4 +11015,12 @@ export {
   voicingsForInstrument,
   ARRANGEMENT_LEVELS,
   arrangementLevels,
+  DRUM_KIT,
+  DRUM_ROWS,
+  drumHitsToAsciiTab,
+  drumHitsToMusicXML,
+  drumKitToMidi,
+  pianoScoreFromNotes,
+  scoreToPianoMusicXML,
+  scoreToPianoHands,
 };

@@ -2261,7 +2261,7 @@ expect(uiSrc.includes('async function extractTokens'), "extractTokens (browser P
 expect(/function ChordVocabPicker/.test(uiSrc) && /function useChordVocab/.test(uiSrc) && /_usePref\(_VOCAB_KEY, "chart"/.test(uiSrc), "UI ships the chord-vocabulary picker, Chart by default");
 expect(/vocabulary: vocab, sixNine \}/.test(uiSrc) && /chartsFromStemsOffThread\(byRole, asr, \{ useSharp, vocabulary: vocab/.test(uiSrc), "the chord decode and the stem charts both pass the chosen vocabulary");
 expect(!/maxRank: 14/.test(uiSrc) && !/setSimple/.test(uiSrc), "the old △ Simple toggle (maxRank:14) is replaced by the picker");
-expect(/function useSixNine/.test(uiSrc) && /_usePref\(_SIX9_KEY, "maj9"/.test(uiSrc) && /vocabulary: vocab, sixNine \}/.test(uiSrc) && /vocabulary: vocab, sixNine, fullRate/.test(uiSrc), "the 6/9 → maj9/maj7/triad setting defaults to maj9 and reaches both decodes");
+expect(/function useSixNine/.test(uiSrc) && /_usePref\(_SIX9_KEY, "maj9"/.test(uiSrc) && /vocabulary: vocab, sixNine \}/.test(uiSrc) && /vocabulary: vocab, sixNine, kit: fullKit \? "full" : undefined, fullRate/.test(uiSrc), "the 6/9 → maj9/maj7/triad setting defaults to maj9 and reaches both decodes");
 expect(/function _usePref/.test(uiSrc) && /try \{ const x = localStorage\.getItem\(key\)/.test(uiSrc) && /try \{ localStorage\.setItem\(key, x\); \} catch/.test(uiSrc) && /_prefListeners/.test(uiSrc), "the vocabulary choices are shared live between pickers and remembered per device, guarded by try/catch");
 // every chart (PDF / GP / MusicXML / ML / guitar tab) is named by the same vocabulary
 expect(/respellScore\(transposeScore\(base, semis, useSharp\), lvl \? lvl\.vocabulary : vocab, \{ sixNine, useSharp \}\)/.test(uiSrc) && /vocabPicker && <ChordVocabPicker/.test(uiSrc), "ChartPanel names every chart with the shared vocabulary (or the arrangement level's) and shows the picker");
@@ -3658,14 +3658,15 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
     `partsZip: per-part files, tab for the fretted part only, a full score and a multi-track MIDI (${names.join(", ")})`);
   const full = new TextDecoder().decode(await eng._zipRead(zp, eng._zipEntries(zp).find((e) => e.name === "full_score.musicxml")));
   const fullDoc = new globalThis.DOMParser().parseFromString(full, "application/xml");
-  expect(fullDoc.getElementsByTagName("score-part").length === 2 && fullDoc.getElementsByTagName("part").length === 2 && /<part-name>Bass<\/part-name>/.test(full) && fullDoc.getElementsByTagName("parsererror").length === 0,
-    "full_score.musicxml: one well-formed score, a named part per chart");
+  // WO-5 (roadmap): the full score now carries the drum part too, as a percussion staff
+  expect(fullDoc.getElementsByTagName("score-part").length === 3 && fullDoc.getElementsByTagName("part").length === 3 && /<part-name>Bass<\/part-name>/.test(full) && /<sign>percussion<\/sign>/.test(full) && fullDoc.getElementsByTagName("parsererror").length === 0,
+    "full_score.musicxml: one well-formed score, a named part per chart (+ the drums as a percussion part)");
   const sm = await eng._zipRead(zp, eng._zipEntries(zp).find((e) => e.name === "score.mid"));
   const smf = eng._readSmf(sm);
   expect(smf && smf.format === 1 && smf.tracks.length === 4 && smf.tracks[3].notes.some((n) => n.ch === 9 && n.midi === 36) && smf.tracks[2].name === "Bass" && smf.metas.tempo.length >= 1,
     `score.mid is format 1: conductor + 3 named tracks, the kick on channel 10 (${smf && smf.tracks.length} tracks)`);
   const reparsed = eng.parseMusicXML(full, true, 0);
-  expect(reparsed.parts.length === 2 && reparsed.bars[0].events[0].symbol === "C", "the full score re-imports through our own MusicXML reader");
+  expect(reparsed.parts.length === 3 && reparsed.bars[0].events[0].symbol === "C", "the full score re-imports through our own MusicXML reader");
 
   // check-by-ear clock: the chart on the RECORDING's seconds
   const rt = eng.scoreRecordingTimes(chordSc);

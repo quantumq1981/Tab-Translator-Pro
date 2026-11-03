@@ -481,5 +481,115 @@ section("WO-4 instruments");
   expect(/arrangementLevels\(/.test(uiSrc) && /ARRANGEMENT_LEVELS/.test(uiSrc), "ChartPanel has arrangement level chips");
 }
 
+/* ============================================================================
+ *  WO-5 — drum + piano notation, all-parts deliverables
+ * ========================================================================== */
+section("WO-5 drums + piano");
+function renderKit(sr, seed = 5) {
+  let s = seed; const R = () => ((s = (s * 16807) % 2147483647) / 2147483647) * 2 - 1;
+  const bpm = 100, spb = 60 / bpm, bars = 8, x = new Float32Array(Math.round((bars * 4 * spb + 2.5) * sr)), truth = [];
+  const add = (t, type, fn, dur) => { truth.push({ t, type }); const i0 = Math.round(t * sr); let hp = 0, prev = 0; for (let i = 0; i < dur * sr && i0 + i < x.length; i++) { const w = R(); hp = 0.85 * (hp + w - prev); prev = w; x[i0 + i] += fn(i / sr, w, hp); } };
+  const kick = (t) => add(t, "kick", (u) => 0.9 * Math.sin(2 * Math.PI * (50 + 70 * Math.exp(-u * 30)) * u) * Math.exp(-u * 9), 0.3);
+  const snare = (t) => add(t, "snare", (u, w) => (0.5 * w + 0.3 * Math.sin(2 * Math.PI * 185 * u)) * Math.exp(-u * 22), 0.18);
+  const hat = (t) => add(t, "hat", (u, w, hp) => 0.25 * hp * Math.exp(-u / 0.012), 0.05);
+  const openHat = (t) => add(t, "openHat", (u, w, hp) => 0.22 * hp * Math.exp(-u / 0.16), 0.5);
+  const crash = (t) => add(t, "crash", (u, w, hp) => (0.35 * w + 0.25 * hp) * Math.exp(-u / 0.7), 2.0);
+  const ride = (t) => add(t, "ride", (u, w, hp) => (0.07 * (Math.sin(2 * Math.PI * 3100 * u) + Math.sin(2 * Math.PI * 4430 * u) + 0.8 * Math.sin(2 * Math.PI * 5680 * u) + 0.6 * Math.sin(2 * Math.PI * 7210 * u)) * Math.exp(-u / 0.6) + 0.12 * hp * Math.exp(-u / 0.01)), 1.2);
+  const tom = (t, f0, type) => add(t, type, (u, w) => (0.8 * Math.sin(2 * Math.PI * f0 * (1 + 0.15 * Math.exp(-u * 20)) * u) * Math.exp(-u * 6) + 0.2 * w * Math.exp(-u * 300)), 0.45);
+  for (let b = 0; b < bars; b++) {
+    const t0 = 1 + b * 4 * spb;
+    for (const k of [0, 2]) kick(t0 + k * spb);
+    if (b % 4 !== 3) for (const k of [1, 3]) snare(t0 + k * spb);
+    else snare(t0 + spb);
+    if (b === 0 || b === 4) crash(t0);
+    if (b >= 4 && b <= 5) { for (let k = 0; k < 4; k++) if (!(b === 4 && k === 0)) ride(t0 + k * spb); }
+    else if (b % 4 !== 3) for (let k = 0; k < 8; k++) { if ((b % 2 === 1 && k === 7) || ((b === 2 || b === 6) && k === 3)) openHat(t0 + k * spb / 2); else if (!(k === 0 && (b === 0 || b === 4))) hat(t0 + k * spb / 2); }
+    if (b % 4 === 3) { const fill = [[200, "tomHigh"], [200, "tomHigh"], [135, "tomMid"], [135, "tomMid"], [95, "tomLow"], [95, "tomLow"]]; fill.forEach(([f, ty], i) => tom(t0 + 2 * spb + i * spb / 4, f, ty)); for (let k = 0; k < 4; k++) (k === 3 ? openHat : hat)(t0 + k * spb / 2); }
+  }
+  return { x, truth: truth.sort((a, b) => a.t - b.t), bpm };
+}
+function f1(truth, est, type, tol = 0.03) {
+  const g = truth.filter((h) => h.type === type), e = est.filter((h) => h.type === type), used = new Set(); let tp = 0;
+  for (const h of g) { const k = e.findIndex((x, i) => !used.has(i) && Math.abs(x.t - h.t) <= tol); if (k >= 0) { used.add(k); tp++; } }
+  return g.length + e.length ? (2 * tp) / (g.length + e.length) : 1;
+}
+
+{
+  const types = ["kick", "snare", "hat", "openHat", "crash", "ride", "tomHigh", "tomMid", "tomLow"];
+  for (const seed of [5, 23]) {
+    const { x, truth } = renderKit(44100, seed), hits = eng.transcribeDrums(x, 44100, { kit: "full" });
+    const scores = types.map((ty) => [ty, f1(truth, hits, ty)]), low = scores.filter(([, v]) => v < 0.85);
+    expect(!low.length, `full kit (rendered, seed ${seed}): every class F1 ≥ 0.85 — ${scores.map(([k, v]) => `${k} ${v.toFixed(2)}`).join(" · ")}`);
+  }
+  const { x, truth } = renderKit(44100, 5);
+  const base = eng.transcribeDrums(x, 44100);
+  expect(base.every((h) => ["kick", "snare", "hat"].includes(h.type)) && !base.some((h) => h.features), "without kit:\"full\" transcribeDrums is the 3-class path, unchanged");
+  const hits = eng.transcribeDrums(x, 44100, { kit: "full" });
+  const bpm = 100, beats = hits.map((h) => ({ type: h.type, beat: (h.t - 1) * bpm / 60 })).filter((h) => h.beat > -0.1);
+  // MusicXML percussion part
+  const xml = eng.drumHitsToMusicXML(beats, { tempo: 100, title: "Kit" });
+  const doc = new DOMParser().parseFromString(xml, "text/xml");
+  const ms = Array.from(doc.getElementsByTagName("measure"));
+  const voiceSums = ms.map((m) => { const s = { 1: 0, 2: 0 }; Array.from(m.getElementsByTagName("note")).forEach((n) => { if (n.getElementsByTagName("chord").length) return; s[n.getElementsByTagName("voice")[0].textContent] += +n.getElementsByTagName("duration")[0].textContent; }); return s; });
+  expect(/<sign>percussion<\/sign>/.test(xml) && ms.length === 8 && voiceSums.every((s) => s[1] === 16 && s[2] === 16), `drum MusicXML: percussion clef, 8 bars, both voices fill every bar (${J(voiceSums.slice(0, 2))})`);
+  const unp = Array.from(doc.getElementsByTagName("note")).filter((n) => n.getElementsByTagName("unpitched").length);
+  const inst = new Set(unp.map((n) => n.getElementsByTagName("instrument")[0].getAttribute("id")));
+  expect(unp.length === beats.filter((h) => Math.round(h.beat * 4) < 8 * 16).length && inst.size >= 8 && /<midi-unpitched>37<\/midi-unpitched>/.test(xml) && /<notehead>x<\/notehead>/.test(xml) && /<notehead>circle-x<\/notehead>/.test(xml), `every hit is an unpitched note on its GM instrument (${unp.length} notes, ${inst.size} instruments), cymbals with x heads`);
+  expect(unp.filter((n) => /kick/.test(n.getElementsByTagName("instrument")[0].getAttribute("id"))).every((n) => n.getElementsByTagName("stem")[0].textContent === "down" && n.getElementsByTagName("voice")[0].textContent === "2"), "kick in the feet voice, stems down");
+  // ASCII tab matches the MIDI
+  const tab = eng.drumHitsToAsciiTab(beats, { title: "Kit" });
+  const rowCount = (r) => tab.split("\n").filter((l) => l.startsWith(r + "|") || l.startsWith(r + " |")).join("").replace(/[^xoO]/g, "").length;
+  const midi = eng.drumKitToMidi(beats, { bpm: 100 });
+  const ons = {}; for (let i = 0; i + 2 < midi.length; i++) if (midi[i] === 0x99) { ons[midi[i + 1]] = (ons[midi[i + 1]] || 0) + 1; i += 2; }
+  const byRow = (row) => beats.filter((h) => eng.DRUM_KIT[h.type].row === row).length;
+  expect(["CR", "RD", "HH", "SD", "T1", "T2", "FT", "BD"].every((r) => rowCount(r) === byRow(r)), "drum tab: one mark per hit on its row");
+  expect(Object.entries(eng.DRUM_KIT).every(([ty, k]) => (ons[k.gm] || 0) === beats.filter((h) => h.type === ty).length), "drum MIDI: one GM note-on per hit (channel 10)");
+  expect(/^BD\|o---/m.test(tab) && /x = cymbal/.test(tab), "the tab reads like a drum tab (BD on the downbeat)");
+  // drumPattern tolerates the new kit pieces, and adds them only when present
+  const pat = eng.drumPattern(hits, { bpm: 100 });
+  expect(pat.bars.some((b) => b.tomLow) && eng.drumPattern(base, { bpm: 100 }).bars.every((b) => Object.keys(b).join(",") === "number,startSec,kick,snare,hat"), "drumPattern: extra rows only for full-kit pieces");
+}
+
+{ /* piano: hands + grand staff */
+  // LH: C2/G2 bass, RH: C-major triads around C5, plus a melody note
+  const notes = [];
+  for (let b = 0; b < 4; b++) {
+    const root = [36, 41, 43, 36][b];
+    notes.push({ midi: root, startSec: b * 2, durSec: 1.9 }, { midi: root + 7, startSec: b * 2 + 1, durSec: 0.9 });
+    for (const m of [[64, 67, 72], [65, 69, 72], [67, 71, 74], [64, 67, 72]][b]) notes.push({ midi: m, startSec: b * 2, durSec: 0.95 }, { midi: m, startSec: b * 2 + 1, durSec: 0.95 });
+  }
+  const hands = eng.pianoScoreFromNotes(notes);
+  expect(hands.right.every((n) => n.midi >= 60) && hands.left.every((n) => n.midi < 60) && hands.left.length === 8 && hands.right.length === 24, `hands split at the hinge (${hands.hinge}): LH ${hands.left.length}, RH ${hands.right.length}`);
+  const wide = eng.pianoScoreFromNotes([{ midi: 62, startSec: 0, durSec: 1 }, { midi: 64, startSec: 0, durSec: 1 }, { midi: 84, startSec: 0, durSec: 1 }], { hinge: 60 });
+  expect(wide.right.length === 1 && wide.right[0].midi === 84 && wide.left.length === 2, "a chord wider than a hand spills its lower notes to the left hand");
+  const px = eng.scoreToPianoMusicXML(hands, { bpm: 120, tempo: 120, title: "Piano" });
+  const pd = new DOMParser().parseFromString(px, "text/xml");
+  const pn = Array.from(pd.getElementsByTagName("note")).filter((n) => n.getElementsByTagName("pitch").length);
+  const STEP = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+  const pm = pn.filter((n) => !n.getElementsByTagName("tie").length || n.getElementsByTagName("tie")[0].getAttribute("type") === "start").map((n) => { const p = n.getElementsByTagName("pitch")[0], al = p.getElementsByTagName("alter")[0]; return { midi: 12 * (+p.getElementsByTagName("octave")[0].textContent + 1) + STEP[p.getElementsByTagName("step")[0].textContent] + (al ? +al.textContent : 0), staff: n.getElementsByTagName("staff")[0].textContent }; });
+  expect(/<staves>2<\/staves>/.test(px) && /<clef number="2"><sign>F<\/sign>/.test(px) && pd.getElementsByTagName("part").length === 1, "grand staff: one part, two staves, treble + bass clef");
+  expect(J(pm.map((n) => n.midi).sort((a, b) => a - b)) === J(notes.map((n) => n.midi).sort((a, b) => a - b)) && pm.every((n) => (n.staff === "1") === (n.midi >= 60)), "every note is written once, with its pitch, on its hand's staff");
+  const sums = Array.from(pd.getElementsByTagName("measure")).map((m) => { const s = { 1: 0, 2: 0 }; Array.from(m.getElementsByTagName("note")).forEach((n) => { if (n.getElementsByTagName("chord").length) return; s[n.getElementsByTagName("staff")[0].textContent] += +n.getElementsByTagName("duration")[0].textContent; }); return s; });
+  expect(sums.length === 4 && sums.every((s) => s[1] === 1920 && s[2] === 1920), `both staves fill every bar (${J(sums[0])})`);
+}
+
+{ /* all-parts zip: drums + piano join the deliverables */
+  const band = { timeSig: [4, 4], tempo: 100, bars: [1, 2].map((n) => ({ number: n, timeSig: [4, 4], events: [{ symbol: "C", midis: [48, 60, 64, 67], beat: 0, durBeats: 4, qbeat: 0, qdur: 4 }] })) };
+  const drums = [0, 1, 2, 3, 4, 5, 6, 7].map((b) => ({ type: b % 2 ? "snare" : "kick", beat: b })).concat([0, 2, 4, 6].map((b) => ({ type: "crash", beat: b })));
+  const zip = eng.partsZip([{ name: "Band", score: band }, { name: "Piano", role: "piano", score: band }, { name: "Drums", drums }], { title: "T", tempo: 100 });
+  const names = eng._zipEntries(zip).map((e) => e.name);
+  expect(["03_Drums.musicxml", "03_Drums.txt", "03_Drums.mid", "02_Piano_grand-staff.musicxml", "full_score.musicxml", "score.mid"].every((n) => names.includes(n)), `zip: drum notation + tab + MIDI, piano grand staff, full score (${names.join(", ")})`);
+  const full = new TextDecoder().decode(await eng._zipRead(zip, eng._zipEntries(zip).find((e) => e.name === "full_score.musicxml")));
+  const fd = new DOMParser().parseFromString(full, "text/xml");
+  expect(fd.getElementsByTagName("part").length === 3 && /<sign>percussion<\/sign>/.test(full) && /id="P3-crash"/.test(full), "full_score.musicxml carries the drum part as a third, percussion part");
+  const back = await eng.parseScoreZip(zip, true, 0);
+  expect(back && back.bars.length === 2 && back.parts.length === 3, `the zip re-imports through parseScoreZip (${back && back.parts.map((p) => p.name).join(", ")})`);
+}
+
+{ /* WO-5 UI contracts */
+  expect(/kit: fullKit \? "full"/.test(uiSrc) && /drumHitsToMusicXML\(/.test(uiSrc) && /drumHitsToAsciiTab\(/.test(uiSrc), "the drum chart offers the full kit + notation / tab downloads");
+  expect(/scoreToPianoMusicXML\(/.test(uiSrc) && /pianoScoreFromNotes\(/.test(uiSrc), "Voices (ML) can save a piano grand staff");
+}
+
 console.log(`\nworkbench: ${passes} passed, ${failures} failed`);
 if (failures) process.exit(1);

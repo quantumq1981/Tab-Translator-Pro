@@ -300,6 +300,11 @@ import {
   voicingsForInstrument,
   ARRANGEMENT_LEVELS,
   arrangementLevels,
+  drumHitsToMusicXML,
+  drumHitsToAsciiTab,
+  drumKitToMidi,
+  pianoScoreFromNotes,
+  scoreToPianoMusicXML,
 } from "./engine.tsx";
 
 async function extractTokens(buf) {
@@ -4282,6 +4287,9 @@ function AudioImport({ C, useSharp }) {
                   style={{ ...chip(C), padding: "3px 9px", borderColor: abcCopied ? C.green : C.border, color: abcCopied ? C.green : C.dim }}>{abcCopied ? "ABC copied ✓" : "⧉ Copy ABC"}</button>
                 <button onClick={() => exportVocalScore("midi")} title="rehearsal MIDI: one named track per part (Choir Aahs), balanced"
                   style={{ ...chip(C), padding: "3px 9px", borderColor: C.border, color: C.dim }}>⬇ Rehearsal MIDI</button>
+                <button onClick={() => { try { const hands = pianoScoreFromNotes(mlNotes || []); _saveText(`${(name || "piano").replace(/\.[^.]+$/, "").replace(/[^\w.-]+/g, "_")}-piano.musicxml`, scoreToPianoMusicXML(hands, { timeline: bg.grid.timeline, bpm, beatsPerBar: bpb, tempo: bpm, title: name || "Piano" }), "application/vnd.recordare.musicxml+xml"); } catch (_) {} }}
+                  title="the ML notes as a PIANO grand staff (treble + bass, hands split at an adaptive hinge) — for a piano / keys stem"
+                  style={{ ...chip(C), padding: "3px 9px", borderColor: C.border, color: C.dim }}>⬇ Piano grand staff</button>
                 {vocalParts.length > 1 && (
                   <button onClick={() => exportVocalScore("midi-part")} title="learning track: every part audible, the displayed part loud + centred"
                     style={{ ...chip(C), padding: "3px 9px", borderColor: C.amber, color: C.amber }}>⬇ Learning track: {voiceLabel(voiceIdx)}</button>
@@ -4541,6 +4549,8 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, getSour
     }
   }, []);
   const [ovr, setOvr] = useState({});                    // role → chord overrides
+  // WO-5: name toms / open hat / crash / ride on the drum stem (the 3-piece kick·snare·hat reading otherwise)
+  const [fullKit, setFullKit] = useState(() => { try { return localStorage.getItem("ttp:fullKit") === "1"; } catch (_) { return false; } });
   // ONE beat grid for every stem chart (chartsFromStems tracks it on the drum stem) — the same
   // Tempo & bars corrections as the single-file panel, and bar 1 where the band first plays.
   const stemFirst = useMemo(() => { const band = res && res.charts.find((c) => c.kind === "chords" && c.events && c.events.length); return band ? band.events[0].startSec : 0; }, [res]);
@@ -4579,7 +4589,7 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, getSour
         if (role === "drums") drumsFull = mono;
         byRole[role] = await resampleOffThread(mono, sr, asr, { transfer: role !== "drums" });
       }
-      const r = await chartsFromStemsOffThread(byRole, asr, { useSharp, vocabulary: vocab, sixNine, fullRate: drumsFull ? { drums: drumsFull, sampleRate: sr } : undefined }, { transfer: true });
+      const r = await chartsFromStemsOffThread(byRole, asr, { useSharp, vocabulary: vocab, sixNine, kit: fullKit ? "full" : undefined, fullRate: drumsFull ? { drums: drumsFull, sampleRate: sr } : undefined }, { transfer: true });
       setRes(r); setOvr({});
       // a NEW split/import starts from the detected grid; re-charting the same stems (a chord-
       // vocabulary change) keeps the user's Tempo & bars corrections
@@ -4589,8 +4599,8 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, getSour
     setBusy(""); setProg(null);
   };
   // a new chord vocabulary re-charts the stems already split (seconds), never re-runs the separator
-  const vocabSeen = useRef(vocab + "|" + sixNine);
-  useEffect(() => { const k = vocab + "|" + sixNine; if (vocabSeen.current !== k) { vocabSeen.current = k; if (tracks && res && !busy) analyse(tracks); } }, [vocab, sixNine]);
+  const vocabSeen = useRef(vocab + "|" + sixNine + "|" + fullKit);
+  useEffect(() => { const k = vocab + "|" + sixNine + "|" + fullKit; if (vocabSeen.current !== k) { vocabSeen.current = k; if (tracks && res && !busy) analyse(tracks); } }, [vocab, sixNine, fullKit]);
 
   /* Keep the screen on for the length of a split. iOS suspends a Safari tab when the screen auto-locks (or Safari
    * goes to the background) — on a slow device a split outlasts the auto-lock, stalls, and is eventually killed.
@@ -4857,15 +4867,23 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, getSour
               <div className="tdp-scroll" style={{ display: "grid", gap: 8, maxHeight: 360, overflow: "auto", fontFamily: "'Space Mono', monospace", fontSize: 11 }}>
                 {groove.bars.map((b) => (
                   <div key={b.number} style={{ display: "grid", gridTemplateColumns: "28px 1fr", gap: 2 }}>
-                    <span style={{ color: C.dim, gridRow: "span 3" }}>{b.number}</span>
-                    {[["H", b.hat], ["S", b.snare], ["K", b.kick]].map(([lab, row]) => (
+                    <span style={{ color: C.dim, gridRow: "span 9" }}>{b.number}</span>
+                    {[["C", b.crash], ["R", b.ride], ["O", b.openHat], ["H", b.hat], ["S", b.snare], ["T1", b.tomHigh], ["T2", b.tomMid], ["FT", b.tomLow], ["K", b.kick]].filter(([lab, row]) => row && (/[HSK]/.test(lab[0]) && lab.length === 1 || row.includes("x"))).map(([lab, row]) => (
                       <span key={lab} style={{ letterSpacing: 2, color: lab === "K" ? C.amber : lab === "S" ? C.cyan : C.dim }}>{lab} {row.replace(/(.{4})/g, "$1 ").trim()}</span>
                     ))}
                   </div>
                 ))}
               </div>
-              <button onClick={() => saveBytes(drumHitsToMidi(drumHits || chart.hits, { bpm }), `${base}-drums.mid`, "audio/midi")} style={{ ...chip(C), padding: "4px 12px", marginTop: 8 }}>⬇ Drums MIDI</button>
-              <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>H = hi-hat/cymbals · S = snare · K = kick, sixteenths per beat. Soft ghost notes are left out.</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+                <button onClick={() => saveBytes(fullKit ? drumKitToMidi(drumHits || chart.hits, { bpm }) : drumHitsToMidi(drumHits || chart.hits, { bpm }), `${base}-drums.mid`, "audio/midi")} style={{ ...chip(C), padding: "4px 12px" }}>⬇ Drums MIDI</button>
+                <button onClick={() => { const hb = chart.hits.map((h) => ({ type: h.type, beat: timelineBeatsAt(bg.grid.timeline, h.t) })); saveBytes(new TextEncoder().encode(drumHitsToMusicXML(hb, { beatsPerBar: bpb, tempo: bpm, title: `${base} — drums` })), `${base}-drums.musicxml`, "application/vnd.recordare.musicxml+xml"); }}
+                  title="a percussion staff: hands stems-up, feet stems-down, GM drum sounds — opens in MuseScore / Sibelius / Dorico" style={{ ...chip(C), padding: "4px 12px" }}>⬇ Drum notation (MusicXML)</button>
+                <button onClick={() => { const hb = chart.hits.map((h) => ({ type: h.type, beat: timelineBeatsAt(bg.grid.timeline, h.t) })); saveBytes(new TextEncoder().encode(drumHitsToAsciiTab(hb, { beatsPerBar: bpb, title: `${base} — drums` })), `${base}-drums.txt`, "text/plain"); }}
+                  style={{ ...chip(C), padding: "4px 12px" }}>⬇ Drum tab (.txt)</button>
+                <button onClick={() => { const v = !fullKit; setFullKit(v); try { localStorage.setItem("ttp:fullKit", v ? "1" : "0"); } catch (_) {} }} title="re-chart the stems to name toms, open hi-hat, crash and ride (else kick · snare · hi-hat)"
+                  style={{ ...chip(C), padding: "4px 12px", borderColor: fullKit ? C.green : C.border, color: fullKit ? C.green : C.dim }}>{fullKit ? "full kit ✓" : "full kit"}</button>
+              </div>
+              <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>C crash · R ride · O open hi-hat · H hi-hat · S snare · T1/T2/FT toms · K kick, sixteenths per beat. Soft ghost notes are left out. Full kit names toms / open hat / crash / ride (measured on a rendered kit; a real kit can still be misread — check by ear).</div>
             </div>
           )}
         </>
