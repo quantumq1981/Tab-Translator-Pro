@@ -3258,7 +3258,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   expect(/window\.__TTP_ENGINE_URL__/.test(gm) && /import\(\/\* @vite-ignore \*\/ engineUrl\)/.test(gw) && /transcribeGuitarPcm/.test(gw), "the worker runs the page's own engine (one engine, no copy)");
   expect(/<script type="module" src="\.\/guitar-model\.js"><\/script>/.test(html), "index.html loads guitar-model.js");
   expect(/cp guitar-model\.js guitar-model-core\.js guitar-worker\.js _site\//.test(pages) && /cp models\/guitar-crnn\/guitar-gaps\.w8\.onnx models\/guitar-crnn\/NOTICE _site\/models\/guitar-crnn\//.test(pages) && /guitar-model\.js\?v=\$\{BUILD\}/.test(pages), "Pages ships the guitar glue + model, deploy-stamped");
-  expect(/window\.TTP_GUITAR_MODEL/.test(ui) && /polyNotesToScore\(gtrNotes, noteGridOpts/.test(ui) && /fingerScore\(gtrPoly, /.test(ui) && /🎸 Guitar → Tab \(ML\)/.test(ui), "the Audio panel's 🎸 Guitar → Tab button runs the model and fingers the notes");
+  expect(/window\.TTP_GUITAR_MODEL/.test(ui) && /polyNotesToScore\(gtrLine, noteGridOpts/.test(ui) && /const gtrLine = gtrTechOn && gtrTechNotes \? gtrTechNotes : gtrNotes/.test(ui) && /fingerScore\(gtrPoly, /.test(ui) && /🎸 Guitar → Tab \(ML\)/.test(ui), "the Audio panel's 🎸 Guitar → Tab button runs the model and fingers the notes");
   expect(/\["alphatex", "AlphaTex \(tab\)"\]/.test(ui) && /scoreToAlphaTex\(tabScore/.test(ui) && /alphatex: "alphatex"/.test(ui), "ChartPanel exports AlphaTex (tab)");
   // the tab chart must not auto-Simplify (a guitar line is "melodic" → one chord per bar → notes lost
   // from the AlphaTex export: the real-app run exported 87 of 117 notes before this) nor share the
@@ -3695,7 +3695,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
     "index.html loads beat-model.js; pages.yml ships the glue + model + NOTICE and stamps it");
   const uiSrc2 = fs.readFileSync(UI, "utf8");
   expect(/function useBeatGrid\(/.test(uiSrc2) && /function TempoBarsPanel\(/.test(uiSrc2) && /function CheckByEar\(/.test(uiSrc2) && /audioBeatTimeline\(src && src\.beats, timing/.test(uiSrc2)
-    && /timeline: tl, beatsPerBar: bpb, quantize: \{ step: 0\.5 \}/.test(uiSrc2) && /noteGridOpts\(bg, gtrNotes, useSharp\)/.test(uiSrc2) && /bg\.findBars\(monoOf\(b\), b\.sampleRate\)/.test(uiSrc2)
+    && /timeline: tl, beatsPerBar: bpb, quantize: \{ step: 0\.5 \}/.test(uiSrc2) && /noteGridOpts\(bg, gtrLine, useSharp\)/.test(uiSrc2) && /bg\.findBars\(monoOf\(b\), b\.sampleRate\)/.test(uiSrc2)
     && /createStereoPanner/.test(uiSrc2) && /scoreRecordingTimes\(score\)/.test(uiSrc2) && /partsZip\(parts, \{ title: base, tempo: bpm, key: stemKey, useSharp \}\)/.test(uiSrc2) && /sendPartsToPro/.test(uiSrc2) && /parts: parts\.map\(\(p\) => \(\{ name: p\.name, role: p\.role/.test(uiSrc2) && /timelineBarAt\(tl, sec, bpb\)/.test(uiSrc2),
     "UI: one beat grid (useBeatGrid → audioBeatTimeline) under every audio chart, Tempo & bars, 🥁 Find bar 1 on the original-rate audio, 🎧 Check by ear (StereoPanner, recording clock), ⬇ All parts, sections on the timeline");
 }
@@ -3754,7 +3754,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   // UI wiring
   const ui = fs.readFileSync(UI, "utf8");
   expect(/GUITAR_TUNINGS,\n  guitarTuning,\n  suggestGuitarTuning,/.test(ui) && /fingerScore\(gtrPoly, \{ tuning: t\.midi, capo: gtrCapo \}\)/.test(ui) && /soundingCapo: gtrCapo/.test(ui)
-    && /GUITAR_TUNINGS\.map\(\(t\) => <option/.test(ui) && /setGtrCapo/.test(ui) && /suggestGuitarTuning\(polyNotesToScore\(gtrNotes/.test(ui) && /Use \{gtrSuggest\.name\}/.test(ui),
+    && /GUITAR_TUNINGS\.map\(\(t\) => <option/.test(ui) && /setGtrCapo/.test(ui) && /detectTuningAndCapo\(polyNotesToScore\(gtrNotes/.test(ui) && /onClick=\{\(\) => \{ setGtrUndo\(\{ tuning: gtrTuning, capo: gtrCapo \}\); setGtrTuning\(gtrSuggest\.id\); \}\}/.test(ui),
     "UI: Guitar → Tab has a tuning picker + capo stepper, fingers on them, and offers (never applies) the suggestion");
 }
 

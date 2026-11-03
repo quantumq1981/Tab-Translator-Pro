@@ -317,6 +317,8 @@ import {
   setlistPrune,
   exportProjectBundle,
   importProjectBundle,
+  detectGuitarTechniques,
+  detectTuningAndCapo,
 } from "./engine.tsx";
 
 async function extractTokens(buf) {
@@ -4293,15 +4295,34 @@ function AudioImport({ C, useSharp, incoming, onLoaded }) {
     } catch (e) { setErr("Guitar transcription failed: " + (e && e.message ? e.message : "unknown")); }
     setGtrProg(null); setBusy(false);
   };
-  const gtrPoly = useMemo(() => (gtrNotes && gtrNotes.length ? polyNotesToScore(gtrNotes, noteGridOpts(bg, gtrNotes, useSharp)) : null), [gtrNotes, bg.grid, useSharp]);
+  /* WO-7: playing techniques read from the audio around each transcribed note (bend, vibrato,
+   * slide, hammer-on / pull-off, palm mute, ghost — single-line notes only; off-thread, pure). */
+  const [gtrTechOn, setGtrTechOn] = useState(() => { try { return localStorage.getItem("ttp:gtrTech") !== "0"; } catch (_) { return true; } });
+  const [gtrTechNotes, setGtrTechNotes] = useState(null);
+  useEffect(() => {
+    setGtrTechNotes(null);
+    if (!gtrTechOn || !gtrNotes || !gtrNotes.length || !ref.current.mono) return;
+    let live = true;
+    (async () => {
+      const args = [ref.current.mono, ref.current.sr, gtrNotes];
+      let out; try { out = await _engineRPC("detectGuitarTechniques", args); } catch (_) { try { out = detectGuitarTechniques(...args); } catch (_) { out = null; } }
+      if (live && out) setGtrTechNotes(out);
+    })();
+    return () => { live = false; };
+  }, [gtrNotes, gtrTechOn]); // eslint-disable-line
+  const gtrLine = gtrTechOn && gtrTechNotes ? gtrTechNotes : gtrNotes;
+  const gtrTechCount = useMemo(() => { const c = {}; for (const n of gtrTechNotes || []) for (const t of n.tech || []) c[t] = (c[t] || 0) + 1; return c; }, [gtrTechNotes]);
+  const gtrPoly = useMemo(() => (gtrLine && gtrLine.length ? polyNotesToScore(gtrLine, noteGridOpts(bg, gtrLine, useSharp)) : null), [gtrLine, bg.grid, useSharp]);
   /* Tuning suggestion from the pitches alone — only when standard can't reach some of them (notes
    * below its low E): on the GP corpus that rule flagged 0 of 192 standard-tuned parts and named the
    * right tuning for 12 of 18 others (tests/bench/tuning.mjs). The rest never go below E2, so the
    * picker is the way. Suggested, never applied. */
-  const gtrSuggest = useMemo(() => {
+  const gtrDetect = useMemo(() => {
     if (!gtrNotes || !gtrNotes.length) return null;
-    try { return suggestGuitarTuning(polyNotesToScore(gtrNotes, { bpm: 120 })); } catch (_) { return null; }
+    try { return detectTuningAndCapo(polyNotesToScore(gtrNotes, { bpm: 120 }), { maxEvents: 400 }); } catch (_) { return null; }
   }, [gtrNotes]);
+  const gtrSuggest = gtrDetect && gtrDetect.tuning;
+  const [gtrUndo, setGtrUndo] = useState(null);                 // { tuning, capo } before an Apply
   const gtrScore = useMemo(() => {
     if (!gtrPoly) return null;
     // Finger on the chosen tuning (+ capo): on the GP corpus, fingering a non-standard part in its real
@@ -4671,11 +4692,29 @@ function AudioImport({ C, useSharp, incoming, onLoaded }) {
           </div>
           {gtrSuggest && gtrSuggest.id !== gtrTuning && (
             <div style={{ fontSize: 11, color: C.amber, border: `1px dashed ${C.amber}`, borderRadius: 6, padding: "5px 8px", marginBottom: 6, lineHeight: 1.5 }}>
-              {gtrSuggest.standard.unplayable} note{gtrSuggest.standard.unplayable === 1 ? "" : "s"} sit below standard tuning's low E — this sounds like <b>{gtrSuggest.label}</b>.{" "}
-              <button onClick={() => setGtrTuning(gtrSuggest.id)} style={{ ...chip(C), padding: "2px 9px", borderColor: C.amber, color: C.amber }}>Use {gtrSuggest.name}</button>
+              Detected: <b>{gtrSuggest.label}</b> ({Math.round((gtrSuggest.confidence || 0.6) * 100)}%) — {gtrSuggest.standard.unplayable} note{gtrSuggest.standard.unplayable === 1 ? "" : "s"} sit below standard tuning's low E.{" "}
+              <button onClick={() => { setGtrUndo({ tuning: gtrTuning, capo: gtrCapo }); setGtrTuning(gtrSuggest.id); }} style={{ ...chip(C), padding: "2px 9px", borderColor: C.amber, color: C.amber }}>Apply</button>
               <span style={{ color: C.dim }}> (a full mix's bass can do this too — keep standard if the guitar is in standard)</span>
             </div>
           )}
+          {gtrDetect && gtrDetect.capo && gtrDetect.capo.capo !== gtrCapo && (
+            <div style={{ fontSize: 11, color: C.amber, border: `1px dashed ${C.amber}`, borderRadius: 6, padding: "5px 8px", marginBottom: 6, lineHeight: 1.5 }}>
+              Sounds like <b>capo {gtrDetect.capo.capo}</b> ({Math.round(gtrDetect.capo.confidence * 100)}%) — {Math.round(gtrDetect.capo.openShare * 100)}% of the notes fall on its open strings (vs {Math.round(gtrDetect.capo.openShare0 * 100)}% without).{" "}
+              <button onClick={() => { setGtrUndo({ tuning: gtrTuning, capo: gtrCapo }); setGtrCapo(gtrDetect.capo.capo); }} style={{ ...chip(C), padding: "2px 9px", borderColor: C.amber, color: C.amber }}>Apply</button>
+            </div>
+          )}
+          {gtrUndo && (gtrUndo.tuning !== gtrTuning || gtrUndo.capo !== gtrCapo) && (
+            <div style={{ fontSize: 11, color: C.dim, marginBottom: 6 }}>Applied — <button onClick={() => { setGtrTuning(gtrUndo.tuning); setGtrCapo(gtrUndo.capo); setGtrUndo(null); }} style={{ ...chip(C), padding: "2px 9px" }}>Undo</button></div>
+          )}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginBottom: 6, fontSize: 11, color: C.dim }}>
+            <button onClick={() => { const v = !gtrTechOn; setGtrTechOn(v); try { localStorage.setItem("ttp:gtrTech", v ? "1" : "0"); } catch (_) {} }}
+              title="read bends, vibrato, slides, hammer-ons / pull-offs, palm mutes and ghost notes from the recording (single-line notes)"
+              style={{ ...chip(C), padding: "2px 9px", borderColor: gtrTechOn ? C.green : C.border, color: gtrTechOn ? C.green : C.dim }}>{gtrTechOn ? "techniques ✓" : "techniques"}</button>
+            {gtrTechOn && !gtrTechNotes && <span>reading techniques…</span>}
+            {gtrTechOn && gtrTechNotes && (Object.keys(gtrTechCount).length
+              ? Object.entries(gtrTechCount).map(([t, n]) => <span key={t} style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 999, padding: "1px 8px" }}>{n} {t === "palmMute" ? "palm mute" : t === "hammer" ? "hammer/pull" : t}{n === 1 ? "" : "s"}</span>)
+              : <span>no techniques heard</span>)}
+          </div>
           <div style={{ marginBottom: 6 }}><CheckByEar C={C} score={gtrScore} getBuffer={() => ref.current.audioBuf} onStart={stopPlay} /></div>
           <ChartPanel score={gtrScore} title={(name || "Guitar") + " · tab"}
             meta={`${gtrScore.bars.length} bars · ${gtrNotes.length} notes · from the guitar ML model · ${guitarTuning(gtrTuning).name}${gtrCapo ? ` · capo ${gtrCapo}` : ""}`}

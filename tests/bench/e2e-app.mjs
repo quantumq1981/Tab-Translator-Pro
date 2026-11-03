@@ -36,7 +36,7 @@ export async function startApp({ deps = arg("deps"), width = 820, height = 1180,
   await page.goto(origin + "/"); await page.waitForTimeout(400);
   const steps = [];
   const ok = (name, cond, extra) => { steps.push({ name, ok: !!cond, ...(extra !== undefined ? { extra } : {}) }); console.log(cond ? "OK  " : "FAIL", name, extra !== undefined ? JSON.stringify(extra).slice(0, 300) : ""); };
-  const errors = () => logs.filter((l) => !/fonts\.googleapis|ERR_FAILED|net::|\[BABEL\] Note/.test(l));
+  const errors = () => logs.filter((l) => !/fonts\.googleapis|ERR_FAILED|net::|\[BABEL\] Note|W:onnxruntime/.test(l));
   const close = async () => { await browser.close(); server.close(); };
   return { page, ctx, browser, origin, ok, steps, errors, close, repo: L.repo };
 }

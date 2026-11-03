@@ -4109,6 +4109,13 @@ function fingerScore(score, opts = {}) {
     for (const n of shapes[k]) frets[n.string] = n.fret;
     bars[bi].events[ei] = { ...bars[bi].events[ei], frets, fingered: true };
   });
+  // techniques read from audio (WO-7) ride per PITCH (`ntech`); here they go under their string
+  bars.forEach((b) => b.events.forEach((e, ei) => {
+    if (!e.ntech || !e.frets) return;
+    const tech = { ...(e.tech || {}) }, bends = { ...(e.bends || {}) };
+    for (const [k, f] of Object.entries(e.frets)) { const nt = e.ntech[tuning[+k] + f]; if (!nt) continue; tech[k] = nt.tech.slice(); if (nt.bend) bends[k] = nt.bend; }
+    b.events[ei] = { ...e, ...(Object.keys(tech).length ? { tech } : {}), ...(Object.keys(bends).length ? { bends } : {}) };
+  }));
   return { ...score, bars };
 }
 
@@ -7752,7 +7759,7 @@ function audioEventsToScore(events, opts = {}) {
   let placed = (events || []).filter((e) => e.symbol).map((e) => {
     const onsetBeat = tl ? timelineBeatsAt(tl, e.startSec) : e.startSec / secPerBeat;  // global beat position
     const endBeat = tl ? timelineBeatsAt(tl, e.startSec + (e.durSec || secPerBeat)) : onsetBeat + (e.durSec || secPerBeat) / secPerBeat;
-    return { symbol: e.symbol, midis: e.midis || [], onsetBeat: Math.max(0, onsetBeat), durBeat: Math.max(0.25, endBeat - onsetBeat), uncertain: !!e.ambiguous, reviewed: !!e.reviewed };
+    return { symbol: e.symbol, midis: e.midis || [], onsetBeat: Math.max(0, onsetBeat), durBeat: Math.max(0.25, endBeat - onsetBeat), uncertain: !!e.ambiguous, reviewed: !!e.reviewed, ...(e.ntech ? { ntech: e.ntech } : {}) };
   }).sort((a, b) => a.onsetBeat - b.onsetBeat);
   if (tl && opts.quantize && opts.quantize.step > 0) {
     placed = quantizeBeatNotes(placed.map((p) => ({ ...p, startBeat: p.onsetBeat, endBeat: p.onsetBeat + p.durBeat })), opts.quantize.step, opts.quantize.strength != null ? opts.quantize.strength : 1)
@@ -7768,7 +7775,7 @@ function audioEventsToScore(events, opts = {}) {
     const bar = Math.floor(p.onsetBeat / beatsPerBar + 1e-6);
     const inBar = p.onsetBeat - bar * beatsPerBar;
     if (!barsMap.has(bar)) barsMap.set(bar, []);
-    barsMap.get(bar).push({ symbol: p.symbol, midis: p.midis, qbeat: Math.max(0, Math.min(beatsPerBar - 1e-6, inBar)), uncertain: p.uncertain, reviewed: p.reviewed });
+    barsMap.get(bar).push({ symbol: p.symbol, midis: p.midis, qbeat: Math.max(0, Math.min(beatsPerBar - 1e-6, inBar)), uncertain: p.uncertain, reviewed: p.reviewed, ...(p.ntech ? { ntech: p.ntech } : {}) });
   }
   const lastBar = barsMap.size ? Math.max(...barsMap.keys()) : -1;
   // A bar with no ONSET is not "no chord" — the previous chord is often still sounding
@@ -7793,7 +7800,7 @@ function audioEventsToScore(events, opts = {}) {
     for (let i = 1; i < evs.length; i++) if (evs[i].beat <= evs[i - 1].beat) evs[i].beat = Math.min(beatsPerBar - 1, evs[i - 1].beat + 1);
     evs.forEach((e, i) => { e.durBeats = (i + 1 < evs.length ? evs[i + 1].beat : beatsPerBar) - e.beat; });
     _fillTrueDur(evs, beatsPerBar);
-    bars.push({ number: b + 1, timeSig: [beatsPerBar, beatType], events: evs.map((e) => ({ symbol: e.symbol, midis: e.midis, beat: e.beat, durBeats: e.durBeats, qbeat: e.qbeat, qdur: e.qdur, ...(e.held ? { held: true } : {}), ...(e.uncertain ? { uncertain: true } : {}), ...(e.reviewed ? { reviewed: true } : {}) })) });
+    bars.push({ number: b + 1, timeSig: [beatsPerBar, beatType], events: evs.map((e) => ({ symbol: e.symbol, midis: e.midis, beat: e.beat, durBeats: e.durBeats, qbeat: e.qbeat, qdur: e.qdur, ...(e.held ? { held: true } : {}), ...(e.uncertain ? { uncertain: true } : {}), ...(e.reviewed ? { reviewed: true } : {}), ...(e.ntech && !e.held ? { ntech: e.ntech } : {}) })) });
   }
   const score = { source: "audio", timeSig: [beatsPerBar, beatType], tempo: bpm, bars };
   if (tl) {
@@ -7863,8 +7870,9 @@ function polyNotesToScore(notes, opts = {}) {
     let c = cols.length && Math.abs(cols[cols.length - 1].startSec - n.startSec) < grid ? cols[cols.length - 1] : null;
     if (!c) { c = { startSec: n.startSec, midis: [], durSec: 0 }; cols.push(c); }
     c.midis.push(n.midi); c.durSec = Math.max(c.durSec, n.durSec);
+    if (n.tech && n.tech.length) { c.ntech = c.ntech || {}; c.ntech[n.midi] = { tech: n.tech.slice(), ...(n.bend ? { bend: n.bend } : {}) }; }
   }
-  const events = cols.map((c) => ({ symbol: symbolForMidis(c.midis, useSharp), midis: c.midis.slice().sort((a, b) => a - b), startSec: c.startSec, durSec: c.durSec }));
+  const events = cols.map((c) => ({ symbol: symbolForMidis(c.midis, useSharp), midis: c.midis.slice().sort((a, b) => a - b), startSec: c.startSec, durSec: c.durSec, ...(c.ntech ? { ntech: c.ntech } : {}) }));
   const score = audioEventsToScore(events, opts);
   score.source = "ml";                                          // tag the provenance
   return score;
@@ -10694,6 +10702,152 @@ async function importProjectBundle(u8, opts = {}) {
   return { project, source: src ? { name: src.name.slice("source/".length), bytes } : null, meta };
 }
 
+/* ============================================================================
+ *  WORKBENCH · WO-7 — TECHNIQUES FROM AUDIO + TUNING / CAPO DETECTION
+ *  ---------------------------------------------------------------------------
+ *  Scoped, as the roadmap says, to the guitar model's NOTE STREAM (one line at a
+ *  time — chords are left alone): each transcribed note gets a pitch track around
+ *  its own pitch (a normalised squared-difference search over only the lags within
+ *  ±7 semitones of the note — 30-ish lags instead of hundreds, so a whole solo is
+ *  cheap), and a few rules read the techniques from it:
+ *    bend     the pitch rises ≥ 0.9 st above the note and holds (size in quarter-tones)
+ *    vibrato  the detrended pitch oscillates at 4–8 Hz, ≥ 20 cents deep, ≥ 150 ms
+ *    slide    two consecutive notes with NO new attack and a pitch GLIDE between them
+ *             (≥ 50 ms, ≥ 2 st) → slide on the first
+ *    hammer   no new attack but a JUMP (< 50 ms) → hammer-on / pull-off on the first
+ *    palmMute dark (spectral centroid < 3.2 × f0) and short-lived (−12 dB within 150 ms)
+ *    ghost    far softer than the line's median note
+ *  An "attack" is a jump of the RMS or of the 2–6 kHz pick noise across the onset.
+ *  Harmonics are not detected (an honest limit). Notes come back with `tech` and
+ *  `bend`; polyNotesToScore → audioEventsToScore carry them per pitch (`ntech`), and
+ *  fingerScore files them under the string each pitch lands on, so AlphaTex writes them.
+ *
+ *  detectTuningAndCapo ranks every GUITAR_TUNINGS × capo 0–7 for a transcribed part:
+ *  rankGuitarTunings' fingering cost + prior, plus how much of the part sits on OPEN
+ *  strings of that tuning + capo. MEASURED LIMIT (GP corpus, 202 standard parts vs the same
+ *  parts moved up 2/3/5 frets as a capo would): from PITCHES a capo is almost indistinguishable
+ *  from a transposition — open-string share mostly tracks the KEY, and the fingering-cost cue
+ *  overlaps. So a capo is suggested only past thresholds measured at ≤ 0.5 % false positives
+ *  (it then finds ~2 % of real capo parts); a tuning only through suggestGuitarTuning's
+ *  "standard can't play these" gate (0 / 192 false, 12 / 18 named). Suggest, never apply.
+ * ------------------------------------------------------------------------- */
+function _noteTrack(pcm, sr, midi, t0, t1, hopSec = 0.01) {
+  const f0 = 440 * Math.pow(2, (midi - 69) / 12);
+  const tauLo = Math.max(2, Math.floor(sr / (f0 * Math.pow(2, 7 / 12)))), tauHi = Math.ceil(sr / (f0 * Math.pow(2, -7 / 12)));
+  const W = Math.max(Math.round(sr * 0.025), 2 * tauHi + 2), hop = Math.max(1, Math.round(sr * hopSec));
+  const out = [];
+  for (let s = Math.max(0, Math.round(t0 * sr)); s + W + tauHi < pcm.length && s <= t1 * sr; s += hop) {
+    let best = Infinity, bt = -1; const dn = new Float64Array(tauHi + 2);
+    for (let tau = tauLo; tau <= tauHi; tau++) {
+      let d = 0, e = 0;
+      for (let j = 0; j < W; j++) { const a = pcm[s + j], b = pcm[s + j + tau]; d += (a - b) * (a - b); e += a * a + b * b; }
+      dn[tau] = e > 1e-12 ? d / e : 1;
+      if (dn[tau] < best) { best = dn[tau]; bt = tau; }
+    }
+    let tau = bt;
+    if (bt > tauLo && bt < tauHi) { const a = dn[bt - 1], b = dn[bt], c = dn[bt + 1], den = a - 2 * b + c; if (den > 0) tau = bt + 0.5 * (a - c) / den; }
+    let rms = 0; for (let j = 0; j < W; j++) rms += pcm[s + j] * pcm[s + j];
+    out.push({ t: (s + W / 2) / sr, midi: bt > 0 ? 69 + 12 * Math.log2(sr / tau / 440) : NaN, clarity: 1 - best, rms: Math.sqrt(rms / W) });
+  }
+  return out;
+}
+/** A pitch track of the whole line (only around the given notes): [{ t, midi, clarity, rms }]. */
+function pitchTrack(pcm, sr, notes, opts = {}) {
+  const out = [];
+  for (const n of notes || []) out.push(..._noteTrack(pcm, sr, n.midi, Math.max(0, n.startSec - 0.05), n.startSec + n.durSec, opts.hopSec));
+  return out.sort((a, b) => a.t - b.t);
+}
+function _bandEnergy(pcm, sr, t, len, lo, hi) {
+  let N = 1; while (N < len * sr) N <<= 1;
+  const s0 = Math.max(0, Math.round(t * sr)), re = new Float64Array(N), im = new Float64Array(N), w = _hann(N);
+  for (let i = 0; i < N; i++) re[i] = (pcm[s0 + i] || 0) * w[i];
+  _fft(re, im); let e = 0, ce = 0, tot = 0;
+  for (let k = 1; k < N >> 1; k++) { const f = (k * sr) / N, p = re[k] * re[k] + im[k] * im[k]; if (f >= lo && f <= hi) e += p; ce += f * p; tot += p; }
+  return { e, centroid: tot > 0 ? ce / tot : 0 };
+}
+/** Read the playing techniques of a single-line part from its audio. notes: [{ midi, startSec,
+ *  durSec }] (the guitar model's). → the same notes with `tech` (TECHNIQUES tags) and `bend`
+ *  (quarter-tones) where found; the input is not mutated. opts: { attackRatio 1.8 }. */
+function detectGuitarTechniques(pcm, sr, notes, opts = {}) {
+  const ns = (notes || []).map((n) => ({ ...n })).sort((a, b) => a.startSec - b.startSec);
+  if (!ns.length || !pcm || !pcm.length) return ns;
+  // a "line" note: nothing else sounding at its onset (chords keep their notes as they are)
+  const solo = ns.map((n, i) => !ns.some((o, j) => j !== i && Math.abs(o.startSec - n.startSec) < 0.03));
+  const rmsAt = (t, len) => { const a = Math.max(0, Math.round(t * sr)), b = Math.min(pcm.length, Math.round((t + len) * sr)); let s = 0; for (let i = a; i < b; i++) s += pcm[i] * pcm[i]; return b > a ? Math.sqrt(s / (b - a)) : 0; };
+  const attack = (t) => {
+    const r = rmsAt(t, 0.03) / Math.max(1e-6, rmsAt(t - 0.035, 0.03));
+    const hf = _bandEnergy(pcm, sr, t - 0.002, 0.02, 2000, 6000).e / Math.max(1e-12, _bandEnergy(pcm, sr, t - 0.03, 0.02, 2000, 6000).e);
+    return r > (opts.attackRatio || 1.8) || hf > 4;
+  };
+  const tracks = ns.map((n, i) => (solo[i] ? _noteTrack(pcm, sr, n.midi, Math.max(0, n.startSec - 0.12), n.startSec + n.durSec) : []));
+  const peak = ns.map((n) => rmsAt(n.startSec, 0.05)), med = peak.slice().sort((a, b) => a - b)[peak.length >> 1] || 1e-6;
+  const add = (n, tag) => { n.tech = n.tech || []; if (!n.tech.includes(tag)) n.tech.push(tag); };
+  ns.forEach((n, i) => {
+    if (!solo[i]) return;
+    const tr = tracks[i].filter((f) => f.t >= n.startSec + 0.015 && f.t <= n.startSec + n.durSec - 0.01 && f.clarity > 0.6 && Math.abs(f.midi - n.midi) < 3.5);
+    if (tr.length >= 4) {
+      const dev = tr.map((f) => f.midi - n.midi);
+      // bend: a sustained rise ≥ 0.9 st (median of the top quarter) reached by a mostly-rising path
+      const sorted = dev.slice().sort((a, b) => a - b), top = sorted[Math.floor(sorted.length * 0.85)], startDev = dev.slice(0, 2).reduce((a, b) => a + b, 0) / Math.min(2, dev.length);
+      const peakIdx = dev.indexOf(Math.max(...dev)), rising = dev.slice(0, peakIdx + 1).reduce((a, d, k, arr) => a + (k && d >= arr[k - 1] - 0.05 ? 1 : 0), 0) / Math.max(1, peakIdx);
+      // (a bend rises ABOVE the note — a slide's destination arrives from below and is not one)
+      if (top >= 0.9 && top - startDev >= 0.9 && peakIdx >= 4 && rising >= 0.7) { add(n, "bend"); n.bend = Math.max(1, Math.min(8, Math.round((top - startDev) * 2))); }
+      // vibrato: detrended oscillation 4–8 Hz, ≥ 20 cents, over ≥ 150 ms
+      if (tr.length >= 15) {
+        const k = 7, det = dev.map((d, j) => { const a = Math.max(0, j - k), b = Math.min(dev.length, j + k + 1); let s = 0; for (let q = a; q < b; q++) s += dev[q]; return d - s / (b - a); });
+        let zc = 0; for (let j = 1; j < det.length; j++) if ((det[j - 1] < 0) !== (det[j] < 0)) zc++;
+        const span = tr[tr.length - 1].t - tr[0].t, rate = zc / 2 / Math.max(0.01, span), depth = (Math.max(...det) - Math.min(...det)) * 50;
+        if (span >= 0.15 && rate >= 4 && rate <= 8.5 && depth >= 20 && !n.tech?.includes("bend")) add(n, "vibrato");
+      }
+    }
+    // ghost: far softer than the line
+    if (peak[i] < 0.3 * med && n.durSec < 0.25) { add(n, "ghost"); return; }
+    // palm mute: dark and short-lived (the decay is measured INSIDE the note)
+    if (n.durSec >= 0.18) {
+      const sp = _bandEnergy(pcm, sr, n.startSec + 0.005, 0.06, 40, sr / 2), f0 = 440 * Math.pow(2, (n.midi - 69) / 12);
+      const decayed = rmsAt(n.startSec + 0.14, 0.03) < 0.25 * Math.max(1e-6, rmsAt(n.startSec + 0.005, 0.03));
+      if (sp.centroid < 3.2 * f0 && decayed) add(n, "palmMute");
+    }
+  });
+  // legato pairs: no new attack at B → slide (a glide) or hammer-on / pull-off (a jump), on A
+  for (let i = 0; i + 1 < ns.length; i++) {
+    const A = ns[i], B = ns[i + 1];
+    if (!solo[i] || !solo[i + 1] || B.midi === A.midi || Math.abs(B.midi - A.midi) > 7) continue;
+    if (B.startSec - (A.startSec + A.durSec) > 0.08 || attack(B.startSec)) continue;
+    const tr = _noteTrack(pcm, sr, (A.midi + B.midi) / 2, Math.max(A.startSec, B.startSec - 0.25), B.startSec + 0.12).filter((f) => f.clarity > 0.6);
+    const lo = Math.min(A.midi, B.midi) + 0.4, hi = Math.max(A.midi, B.midi) - 0.4, mid = tr.filter((f) => f.midi > lo && f.midi < hi);
+    const glide = mid.length ? mid[mid.length - 1].t - mid[0].t + 0.01 : 0;
+    add(A, glide >= 0.05 && Math.abs(B.midi - A.midi) >= 2 ? "slide" : "hammer");
+  }
+  return ns;
+}
+
+/** Rank tuning × capo for a part, with the open-string share → { best, ranked, capo, tuning } where
+ *  `tuning` (non-standard, via suggestGuitarTuning's gate) and `capo` (> 0) are suggestions or null. */
+function detectTuningAndCapo(score, opts = {}) {
+  if (!score || !score.bars) return null;
+  const midis = []; for (const b of score.bars) for (const e of b.events || []) for (const m of e.midis || []) midis.push(m);
+  if (!midis.length) return null;
+  const capos = opts.capos || [0, 1, 2, 3, 4, 5, 6, 7];
+  const ranked = rankGuitarTunings(score, { ...opts, capos }).map((r) => {
+    const open = new Set(capoTuning(r.midi, r.capo).filter((m) => m != null)), share = midis.filter((m) => open.has(m)).length / midis.length;
+    const lowest = Math.min(...capoTuning(r.midi, r.capo).filter((m) => m != null));
+    return { ...r, openShare: share, below: midis.filter((m) => m < lowest).length, score: r.cost - (opts.openWeight != null ? opts.openWeight : 2.5) * share + 0.06 * r.capo };
+  }).sort((a, b) => a.score - b.score);
+  const tun = suggestGuitarTuning(score, opts);
+  const tid = tun ? tun.id : "standard";
+  const rows = ranked.filter((r) => r.id === tid), zero = rows.find((r) => r.capo === 0);
+  let capo = null;
+  const minGain = opts.minOpenGain != null ? opts.minOpenGain : 0.25, minShare = opts.minOpenShare != null ? opts.minOpenShare : 0.35, minCost = opts.minCostGain != null ? opts.minCostGain : 1.0;
+  for (const r of rows) {
+    if (!r.capo || r.below || r.unplayable || !zero) continue;
+    if (r.openShare - zero.openShare >= minGain && r.openShare >= minShare && zero.perNote - r.perNote >= minCost) { capo = { capo: r.capo, openShare: r.openShare, openShare0: zero.openShare, confidence: Math.min(0.95, 0.55 + (r.openShare - zero.openShare)) }; break; }
+  }
+  // the tuning suggestion's confidence: how much of the part standard cannot reach at all
+  const total = midis.length, tconf = tun ? Math.min(0.97, 0.6 + Math.min(0.37, (tun.standard.unplayable / total) * 5)) : 0;
+  return { ranked, tuning: tun ? { ...tun, confidence: tconf } : null, capo, best: ranked[0] };
+}
+
 export {
   makeMask,
   popcount,
@@ -11133,4 +11287,7 @@ export {
   BUNDLE_MANIFEST,
   exportProjectBundle,
   importProjectBundle,
+  pitchTrack,
+  detectGuitarTechniques,
+  detectTuningAndCapo,
 };

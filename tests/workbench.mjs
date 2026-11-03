@@ -636,5 +636,90 @@ section("WO-6 library");
   expect(/exportProjectBundle\(/.test(uiSrc) && /importProjectBundle\(/.test(uiSrc) && /setlistAdd\(/.test(uiSrc), "bundles + setlists wired");
 }
 
+/* ============================================================================
+ *  WO-7 — playing techniques from audio + tuning / capo
+ * ========================================================================== */
+section("WO-7 techniques + tuning");
+function renderLine(sr, seed = 3) {
+  let s = seed; const R = () => ((s = (s * 16807) % 2147483647) / 2147483647) * 2 - 1;
+  const x = new Float32Array(Math.round(sr * 9)), notes = [], truth = [];
+  // a phrase: [startSec, durSec, pitchFn(t) in midi, attack?, harmonic rolloff, decay, amp, expected tag]
+  let ph = 0, cur = null;
+  const plucks = [];
+  const seg = (t0, dur, pitch, o = {}) => plucks.push({ t0, dur, pitch, ...o });
+  const n = (t, d, m, tag, o) => { notes.push({ midi: m, startSec: t, durSec: d }); truth.push(tag || null); };
+  // 1 plain E4
+  seg(0.5, 0.4, () => 64); n(0.5, 0.4, 64);
+  // 2 bend G4 +2 st
+  seg(1.1, 0.5, (t) => 67 + (t < 0.08 ? 0 : Math.min(2, (t - 0.08) / 0.12 * 2))); n(1.1, 0.5, 67, "bend");
+  // 3 vibrato A4
+  seg(1.9, 0.6, (t) => 69 + 0.3 * Math.sin(2 * Math.PI * 6 * t) * Math.min(1, t / 0.1)); n(1.9, 0.6, 69, "vibrato");
+  // 4 hammer C5 → D5 (no new attack, a jump)
+  seg(2.8, 0.5, (t) => (t < 0.25 ? 72 : 74)); n(2.8, 0.25, 72, "hammer"); n(3.05, 0.25, 74);
+  // 5 slide E5 → G5 (glide 120 ms, no new attack)
+  seg(3.6, 0.6, (t) => (t < 0.22 ? 76 : t < 0.34 ? 76 + 3 * (t - 0.22) / 0.12 : 79)); n(3.6, 0.22, 76, "slide"); n(3.82, 0.38, 79);
+  // 6 palm-muted E3 x2
+  seg(4.5, 0.25, () => 52, { mute: true }); n(4.5, 0.25, 52, "palmMute");
+  seg(4.85, 0.25, () => 52, { mute: true }); n(4.85, 0.25, 52, "palmMute");
+  // 7 ghost A3 between plain notes
+  seg(5.3, 0.3, () => 57); n(5.3, 0.3, 57);
+  seg(5.65, 0.12, () => 57, { amp: 0.08 }); n(5.65, 0.12, 57, "ghost");
+  seg(5.85, 0.3, () => 59); n(5.85, 0.3, 59);
+  // 8 pull-off D5 → C5 and plain picked notes (negatives)
+  seg(6.4, 0.5, (t) => (t < 0.25 ? 74 : 72)); n(6.4, 0.25, 74, "hammer"); n(6.65, 0.25, 72);
+  seg(7.1, 0.3, () => 67); n(7.1, 0.3, 67); seg(7.45, 0.3, () => 69); n(7.45, 0.3, 69); seg(7.8, 0.4, () => 71); n(7.8, 0.4, 71);
+  for (const p of plucks) {
+    const i0 = Math.round(p.t0 * sr), len = Math.round(p.dur * sr), amp = p.amp || 0.35; let phase = 0;
+    for (let i = 0; i < len && i0 + i < x.length; i++) {
+      const t = i / sr, f = 440 * Math.pow(2, (p.pitch(t) - 69) / 12); phase += 2 * Math.PI * f / sr;
+      const env = Math.min(1, t / 0.004) * (p.mute ? Math.exp(-t * 18) : Math.exp(-t * 2.2)) * Math.min(1, (p.dur - t) / 0.01);
+      let v = 0; for (let h = 1; h <= 10; h++) v += Math.sin(h * phase) / (p.mute ? Math.pow(h, 2.6) : h);
+      x[i0 + i] += amp * env * v * 0.5 + (t < 0.004 ? amp * 0.4 * R() * (1 - t / 0.004) : 0);
+    }
+  }
+  return { x, notes, truth };
+}
+
+{
+  for (const [sr, snr] of [[16000, Infinity], [22050, Infinity], [16000, 20]]) {
+    const { x, notes, truth } = renderLine(sr); let e = 0; for (const v of x) e += v * v; const rms = Math.sqrt(e / x.length);
+    let sd = 9; const R = () => ((sd = (sd * 16807) % 2147483647) / 2147483647) * 2 - 1;
+    const y = Float32Array.from(x, (v) => v + (isFinite(snr) ? rms * Math.pow(10, -snr / 20) * R() * 1.73 : 0));
+    const snap = J(notes), out = eng.detectGuitarTechniques(y, sr, notes);
+    let tp = 0, fp = 0, fn = 0; out.forEach((n, i) => { const got = n.tech || [], want = truth[i]; if (want && got.includes(want)) tp++; else if (want) fn++; fp += got.filter((g) => g !== want).length; });
+    expect(tp === 8 && fn === 0 && fp === 0 && J(notes) === snap, `techniques (${sr} Hz${isFinite(snr) ? `, ${snr} dB SNR` : ""}): bend · vibrato · hammer · slide · 2 palm mutes · ghost · pull-off — ${tp}/8 found, ${fp} false, input untouched`);
+  }
+  const { x, notes } = renderLine(16000), out = eng.detectGuitarTechniques(x, 16000, notes);
+  expect(out[1].bend === 4, `the bend's size: a whole step = 4 quarter-tones (${out[1].bend})`);
+  const chord = [{ midi: 60, startSec: 0.5, durSec: 0.5 }, { midi: 64, startSec: 0.5, durSec: 0.5 }];
+  expect(eng.detectGuitarTechniques(x, 16000, chord).every((n) => !n.tech), "notes struck together (a chord) are left alone");
+  const tr = eng.pitchTrack(x, 16000, [notes[2]]);
+  const voiced = tr.filter((f) => f.clarity > 0.6 && f.t > 2.0 && f.t < 2.4);
+  expect(voiced.length > 20 && Math.max(...voiced.map((f) => f.midi)) - Math.min(...voiced.map((f) => f.midi)) > 0.4, "pitchTrack follows the vibrato (±0.3 st)");
+  // carried into the tab: notes → score → fingering → AlphaTex → alphaTab sees them
+  const sc = eng.fingerScore(eng.polyNotesToScore(out, { bpm: 120 }));
+  const techs = sc.bars.flatMap((b) => b.events.flatMap((e) => Object.values(e.tech || {}).flat()));
+  expect(["bend", "vibrato", "hammer", "slide", "palmMute", "ghost"].every((t) => techs.includes(t)), `the techniques reach the tab's strings (${[...new Set(techs)].join(", ")})`);
+  const st = readTex(eng.scoreToAlphaTex(sc)).tracks[0].staves[0], an = st.bars.flatMap((b) => b.voices[0].beats.flatMap((bt) => bt.notes.map((n) => ({ n, bt }))));
+  expect(an.some(({ n }) => n.hasBend) && an.some(({ n, bt }) => n.vibrato || bt.vibrato) && an.some(({ n }) => n.isHammerPullOrigin) && an.some(({ n }) => n.slideOutType) && an.some(({ n }) => n.isPalmMute) && an.some(({ n }) => n.isGhost), "alphaTab reads bend, vibrato, hammer-on, slide, palm mute and ghost from the AlphaTex");
+  const plain = eng.polyNotesToScore(notes, { bpm: 120 });
+  expect(plain.bars.every((b) => b.events.every((e) => !("ntech" in e))), "without techniques the score is unchanged (no ntech field)");
+  // tuning + capo
+  const schism = await eng.parseGuitarProOrXML(bytesOf("Tool - Schism.gp5"), "s.gp5", true, 1);      // Adam Jones (Guitar I), Drop D
+  const dd = eng.detectTuningAndCapo(schism, { maxEvents: 400 });
+  expect(dd.tuning && dd.tuning.id === "dropD" && dd.tuning.confidence > 0.6 && !dd.capo, `Drop D part → Drop D (${dd.tuning && dd.tuning.id}, ${dd.tuning && Math.round(dd.tuning.confidence * 100)}%), no capo`);
+  let fpN = 0, nStd = 0;
+  for (const f of ["blue-sky.gp", "Steely Dan - Peg.gp4", "Charlie Parker - Anthropology.gp5", "Lynyrd Skynyrd - Sweet Home Alabama.gp5", "The Eagles - Hotel California.gp5"]) {
+    const s0 = await eng.parseGuitarProOrXML(bytesOf(f), f, true, 0); if (s0.tuning !== "Standard") continue;
+    nStd++; const d = eng.detectTuningAndCapo(s0, { maxEvents: 300 }); if (d.capo || d.tuning) fpN++;
+  }
+  expect(nStd >= 4 && fpN === 0, `standard parts: no tuning or capo suggested (${fpN}/${nStd})`);
+}
+
+{ /* WO-7 UI contracts */
+  expect(/detectGuitarTechniques/.test(uiSrc) && /detectTuningAndCapo\(/.test(uiSrc), "Guitar → Tab reads techniques and ranks tuning / capo");
+  expect(/Apply/.test(uiSrc) && /gtrTechOn/.test(uiSrc), "technique detection is a toggle; tuning / capo suggestions apply on a tap");
+}
+
 console.log(`\nworkbench: ${passes} passed, ${failures} failed`);
 if (failures) process.exit(1);
