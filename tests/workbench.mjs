@@ -591,5 +591,50 @@ function f1(truth, est, type, tol = 0.03) {
   expect(/scoreToPianoMusicXML\(/.test(uiSrc) && /pianoScoreFromNotes\(/.test(uiSrc), "Voices (ML) can save a piano grand staff");
 }
 
+/* ============================================================================
+ *  WO-6 — project library, setlists, bundles
+ * ========================================================================== */
+section("WO-6 library");
+{
+  const keys = ["C", "G", "D", "A", "E", "F", "Bb", "Eb", "Am", "Em"], words = ["Blue", "Sky", "River", "Night", "Song", "Road", "Fire", "Rain", "Moon", "Peg"];
+  const recs = Array.from({ length: 200 }, (_, i) => eng.makeProjectRecord({ id: "p" + i, title: `${words[i % 10]} ${words[(i * 7) % 10]} ${i}`, artist: i % 3 ? "The Band" : "Allman Brothers", filename: `f${i}.gp`, kind: i % 4 ? "xml" : "audio", key: keys[i % 10], bpm: 80 + (i % 60), tags: i % 5 ? ["gig"] : ["gig", "jazz"], now: 1e12 + i * 1000 }));
+  expect(recs.every(eng.isProjectRecord) && !eng.isProjectRecord({ v: 9 }), "makeProjectRecord / isProjectRecord");
+  const t0 = performance.now(); let r; for (let k = 0; k < 20; k++) r = eng.searchProjects(recs, { q: "river allman", sort: "title" }); const dt = (performance.now() - t0) / 20;
+  expect(r.length > 0 && r.every((x) => /river/i.test(x.title) && x.artist === "Allman Brothers") && r.every((x, i) => i === 0 || x.title.toLowerCase() >= r[i - 1].title.toLowerCase()), `search: every word must match, sorted by title (${r.length} hits)`);
+  expect(dt < 100, `200 projects searchable in ${dt.toFixed(2)} ms (< 100 ms)`);
+  expect(eng.searchProjects(recs, { tags: ["jazz"] }).length === 40 && eng.searchProjects(recs, { q: "Bb" }).length === 20 && eng.searchProjects(recs, { sort: "updated" })[0].id === "p199", "tag filter, key search, newest first by default");
+  expect(eng.searchProjects([eng.makeProjectRecord({ title: "Corazón Espinado" })], { q: "corazon" }).length === 1, "search folds accents");
+  expect(J(eng.projectTags(recs)) === J([{ tag: "gig", count: 200 }, { tag: "jazz", count: 40 }]), "projectTags counts, most used first");
+  // setlists
+  let set = eng.createSetlist("Friday");
+  set = eng.setlistAdd(set, "p1", { transpose: 2 }); set = eng.setlistAdd(set, "p2"); set = eng.setlistAdd(set, "p3", { capo: 3 });
+  set = eng.setlistMove(set, 2, 0); set = eng.setlistUpdateItem(set, 1, { transpose: -3, capo: 2 });
+  expect(J(set.items.map((x) => [x.projectId, x.transpose, x.capo])) === J([["p3", 0, 3], ["p1", -3, 2], ["p2", 0, 0]]), "setlist add / move / per-item transpose + capo");
+  expect(eng.setlistRemove(set, 0).items.length === 2 && eng.setlistPrune(set, ["p1"]).items.length === 1 && eng.setlistUpdateItem(set, 0, { transpose: 40 }).items[0].transpose === 11, "remove / prune / clamped transpose");
+  const re = JSON.parse(JSON.stringify(set));
+  expect(J(re) === J(set), "a setlist survives a JSON round trip (what IndexedDB stores)");
+  // project bundle round trip
+  const src = bytesOf("Charlie Parker - Anthropology.gp5");
+  const edit = eng.editPush(null, { t: "note.remove", id: "n1.0.55" });
+  const proj = eng.makeProjectRecord({ title: "Anthropology", filename: "Charlie Parker - Anthropology.gp5", kind: "xml", key: "Bb", bpm: 220, tags: ["bebop"], meta: { v: 1, kind: "xml", overrides: { "2.0": "Cm7" }, scoreEdit: { ...edit, target: "xml:x:0" }, keyOverride: "Bb" } });
+  const zip = eng.exportProjectBundle(proj, { source: src });
+  const back = await eng.importProjectBundle(zip);
+  expect(back.source && back.source.bytes.length === src.length && back.source.bytes.every((b, i) => b === src[i]) && back.source.name === proj.filename, "bundle round-trips the source file byte-for-byte");
+  expect(J(back.meta) === J(proj.meta) && back.project.title === "Anthropology" && back.project.id !== proj.id && J(back.project.tags) === J(["bebop"]) && eng.isScoreEdit(back.meta.scoreEdit), "…and the edits (overrides, note edits, key), as a new project");
+  expect((await eng.importProjectBundle(zip, { keepId: true })).project.id === proj.id, "keepId keeps the project id");
+  let bad = ""; try { await eng.importProjectBundle(eng.zipStore([{ name: "x.txt", data: new Uint8Array([1]) }])); } catch (e) { bad = e.message; }
+  expect(/not a tab translator pro project bundle/i.test(bad), "a foreign zip is refused with a clear message");
+  const sc = await eng.parseGuitarProOrXML(back.source.bytes, back.source.name, true, 0);
+  expect(sc.bars.length > 10, "the bundled source re-parses");
+}
+
+{ /* WO-6 UI contracts */
+  expect(/function LibraryPanel\(/.test(uiSrc) && /\["library", "Library/.test(uiSrc) && /indexedDB/.test(uiSrc), "UI ships a Library mode on IndexedDB");
+  expect(/navigator\.storage/.test(uiSrc) && /projectFilePut/.test(uiSrc), "project bytes go to OPFS (IndexedDB fallback)");
+  expect(/function PrintSheet\(/.test(uiSrc) && /window\.print\(\)/.test(uiSrc) && /@page/.test(uiSrc), "a print view (window.print, @page setup)");
+  expect(/navigator\.share/.test(uiSrc) && /canShare/.test(uiSrc), "exports can go to the share sheet");
+  expect(/exportProjectBundle\(/.test(uiSrc) && /importProjectBundle\(/.test(uiSrc) && /setlistAdd\(/.test(uiSrc), "bundles + setlists wired");
+}
+
 console.log(`\nworkbench: ${passes} passed, ${failures} failed`);
 if (failures) process.exit(1);

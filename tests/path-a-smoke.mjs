@@ -2666,7 +2666,7 @@ console.log(synhSummary);
 
 /* ---- UI contract guards for the two features (static, like the module split) -- */
 expect(/function KeyPicker\(/.test(uiSrc) && /<KeyPicker\b/.test(uiSrc), "the UI ships a key picker");
-expect(/keyOverride/.test(uiSrc) && /saveSessionMeta\(\{[^}]*keyOverride/.test(uiSrc),
+expect(/keyOverride/.test(uiSrc) && (/saveSessionMeta\(\{[^}]*keyOverride/.test(uiSrc) || /const meta = \{[^}]*keyOverride[^}]*\};\s*saveSessionMeta\(meta\)/.test(uiSrc)),
   "a manual key correction is persisted in the session meta (a corrected chart must restore corrected)");
 expect(/function SectionEditor\(/.test(uiSrc) && /<SectionEditor\b/.test(uiSrc), "the UI ships an editable section list");
 expect(/detectSectionsOffThread/.test(uiSrc) && /catch \(_\) \{ return detectSections\(samples, sr, opts\); \}/.test(uiSrc),

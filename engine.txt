@@ -10599,6 +10599,101 @@ function scoreToPianoHands(score, opts = {}) {
   return pianoScoreFromNotes(notes, opts);
 }
 
+
+/* ============================================================================
+ *  WORKBENCH · WO-6 — PROJECT LIBRARY, SETLISTS, PROJECT BUNDLES (pure half)
+ *  ---------------------------------------------------------------------------
+ *  The app restored exactly one session. A local library is the zero-server
+ *  stand-in for a catalog: every opened file becomes a PROJECT RECORD (metadata
+ *  only — the bytes live in OPFS / IndexedDB, browser glue in the UI file) that
+ *  re-opens through the SAME validated parsers, with its edits re-applied. This half
+ *  is pure: the record shape, search / sort / tags, setlist operations, and the
+ *  portable project bundle (a STORED zip: manifest.json + source bytes + edits.json).
+ * ------------------------------------------------------------------------- */
+const PROJECT_SCHEMA = 1;
+const PROJECT_KINDS = ["pdf", "xml", "alphatex", "audio"];
+const _projId = (now) => "p" + Math.floor(now).toString(36) + Math.floor(Math.random() * 1e6).toString(36);
+/** A project record. meta = the session meta (overrides, scoreEdit, keyOverride, partIndex, useSharp…). */
+function makeProjectRecord(o = {}) {
+  const now = o.now != null ? o.now : Date.now();
+  const kind = PROJECT_KINDS.includes(o.kind) ? o.kind : "xml";
+  return {
+    v: PROJECT_SCHEMA, id: o.id || _projId(now), title: String(o.title || o.filename || "Untitled").replace(/\.[^.]+$/, "").slice(0, 200),
+    artist: o.artist ? String(o.artist).slice(0, 200) : "", filename: o.filename || "", kind,
+    createdAt: o.createdAt || now, updatedAt: now, bytes: o.bytes || 0, duration: o.duration || 0, bars: o.bars || 0,
+    key: o.key || "", bpm: o.bpm ? Math.round(o.bpm) : 0, tags: Array.isArray(o.tags) ? [...new Set(o.tags.map((t) => String(t).trim().toLowerCase()).filter(Boolean))].slice(0, 20) : [],
+    meta: o.meta && typeof o.meta === "object" ? o.meta : {},
+  };
+}
+function isProjectRecord(x) {
+  return !!x && x.v === PROJECT_SCHEMA && typeof x.id === "string" && typeof x.title === "string" && PROJECT_KINDS.includes(x.kind) && Array.isArray(x.tags) && typeof x.updatedAt === "number";
+}
+/** Search + filter + sort project records. q matches title / artist / filename / key / tags
+ *  (every word must match, case- and accent-insensitive); tags = all required. */
+function searchProjects(records, opts = {}) {
+  const fold = (s) => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+  const words = fold(opts.q).split(/\s+/).filter(Boolean), need = (opts.tags || []).map(fold);
+  const sort = opts.sort || "updated", dir = opts.dir === "asc" ? 1 : opts.dir === "desc" ? -1 : sort === "title" || sort === "key" ? 1 : -1;
+  const out = [];
+  for (const r of records || []) {
+    if (!r) continue;
+    if (need.length && !need.every((t) => r.tags.includes(t))) continue;
+    if (words.length) { const hay = fold([r.title, r.artist, r.filename, r.key, r.kind, ...r.tags].join(" ")); if (!words.every((w) => hay.includes(w))) continue; }
+    out.push(r);
+  }
+  const val = (r) => (sort === "title" ? fold(r.title) : sort === "key" ? fold(r.key) : sort === "bpm" ? r.bpm || 0 : sort === "created" ? r.createdAt : r.updatedAt);
+  return out.sort((a, b) => { const x = val(a), y = val(b); return (x < y ? -1 : x > y ? 1 : 0) * dir || (b.updatedAt - a.updatedAt); });
+}
+/** Tags in use with counts, most used first. */
+function projectTags(records) {
+  const m = new Map(); for (const r of records || []) for (const t of r.tags || []) m.set(t, (m.get(t) || 0) + 1);
+  return [...m.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).map(([tag, count]) => ({ tag, count }));
+}
+/* ---- setlists: an ordered list of project ids with per-item transpose / capo / note ---- */
+function createSetlist(name, now = Date.now()) { return { v: 1, id: "s" + Math.floor(now).toString(36) + Math.floor(Math.random() * 1e6).toString(36), name: String(name || "Setlist").slice(0, 120), items: [], createdAt: now, updatedAt: now }; }
+const _setItem = (projectId, o = {}) => ({ projectId, transpose: Math.max(-11, Math.min(11, o.transpose | 0)), capo: Math.max(0, Math.min(12, o.capo | 0)), note: o.note ? String(o.note).slice(0, 200) : "" });
+function setlistAdd(set, projectId, o = {}) { return { ...set, items: set.items.concat([_setItem(projectId, o)]), updatedAt: o.now || Date.now() }; }
+function setlistRemove(set, index) { return { ...set, items: set.items.filter((_, i) => i !== index), updatedAt: Date.now() }; }
+function setlistMove(set, from, to) {
+  if (from < 0 || from >= set.items.length) return set;
+  const items = set.items.slice(), [it] = items.splice(from, 1); items.splice(Math.max(0, Math.min(items.length, to)), 0, it);
+  return { ...set, items, updatedAt: Date.now() };
+}
+function setlistUpdateItem(set, index, patch) {
+  if (!set.items[index]) return set;
+  const items = set.items.slice(); items[index] = _setItem(items[index].projectId, { ...items[index], ...patch });
+  return { ...set, items, updatedAt: Date.now() };
+}
+/** Drop items whose project no longer exists. */
+function setlistPrune(set, ids) { const have = new Set(ids); return { ...set, items: set.items.filter((it) => have.has(it.projectId)) }; }
+/* ---- the portable project bundle ---- */
+const BUNDLE_MANIFEST = "ttp-project.json";
+/** A project → a STORED zip: ttp-project.json (the record, schema-versioned), source/<filename>
+ *  (the original file), and edits.json (the session meta — chord overrides, note edits, key…). */
+function exportProjectBundle(project, files = {}) {
+  const enc = (s) => (typeof TextEncoder !== "undefined" ? new TextEncoder().encode(s) : _utf8(s));
+  const rec = { ...project, meta: undefined };
+  const entries = [{ name: BUNDLE_MANIFEST, data: enc(JSON.stringify({ format: "tab-translator-pro/project", version: 1, project: rec }, null, 2)) }];
+  if (files.source) entries.push({ name: "source/" + (project.filename || "source.bin").replace(/[\\/]/g, "_"), data: files.source });
+  entries.push({ name: "edits.json", data: enc(JSON.stringify(project.meta || {}, null, 2)) });
+  return zipStore(entries);
+}
+/** The inverse: → { project (a fresh id unless keepId), source: { name, bytes } | null, meta }. */
+async function importProjectBundle(u8, opts = {}) {
+  const entries = _zipEntries(u8), dec = (b) => new TextDecoder("utf-8").decode(b);
+  const man = entries.find((e) => e.name === BUNDLE_MANIFEST);
+  if (!man) throw new Error("Not a Tab Translator Pro project bundle (no ttp-project.json).");
+  const doc = JSON.parse(dec(await _zipRead(u8, man)));
+  if (!doc || doc.format !== "tab-translator-pro/project" || !doc.project) throw new Error("Unrecognised project bundle.");
+  const ed = entries.find((e) => e.name === "edits.json");
+  const meta = ed ? JSON.parse(dec(await _zipRead(u8, ed))) : {};
+  const src = entries.find((e) => e.name.startsWith("source/") && !e.name.endsWith("/"));
+  const bytes = src ? await _zipRead(u8, src) : null;
+  const p = doc.project;
+  const project = makeProjectRecord({ ...p, id: opts.keepId ? p.id : undefined, meta, now: opts.now, createdAt: p.createdAt, bytes: bytes ? bytes.length : 0 });
+  return { project, source: src ? { name: src.name.slice("source/".length), bytes } : null, meta };
+}
+
 export {
   makeMask,
   popcount,
@@ -11023,4 +11118,19 @@ export {
   pianoScoreFromNotes,
   scoreToPianoMusicXML,
   scoreToPianoHands,
+  PROJECT_SCHEMA,
+  PROJECT_KINDS,
+  makeProjectRecord,
+  isProjectRecord,
+  searchProjects,
+  projectTags,
+  createSetlist,
+  setlistAdd,
+  setlistRemove,
+  setlistMove,
+  setlistUpdateItem,
+  setlistPrune,
+  BUNDLE_MANIFEST,
+  exportProjectBundle,
+  importProjectBundle,
 };

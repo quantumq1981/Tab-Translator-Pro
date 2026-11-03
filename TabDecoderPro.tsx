@@ -305,6 +305,18 @@ import {
   drumKitToMidi,
   pianoScoreFromNotes,
   scoreToPianoMusicXML,
+  isProjectRecord,
+  makeProjectRecord,
+  searchProjects,
+  projectTags,
+  createSetlist,
+  setlistAdd,
+  setlistRemove,
+  setlistMove,
+  setlistUpdateItem,
+  setlistPrune,
+  exportProjectBundle,
+  importProjectBundle,
 } from "./engine.tsx";
 
 async function extractTokens(buf) {
@@ -614,6 +626,7 @@ export default function TabDecoderPro() {
       setChart({ ...c, tokens, pages, fileName: f.name });
       setRestored(false);
       saveSessionFile(bytes); // meta is written by the persist effect
+      setPlaySet(null); rememberProject({ kind: "pdf", filename: f.name, bytes, bars: c.measures.length, keyLabel: keyLabelOf(buildScore(c, useSharp)) });
     } catch (err) {
       setPdfErr("Parse failed: " + (err && err.message ? err.message : String(err)));
     } finally { setPdfBusy(false); }
@@ -660,6 +673,7 @@ export default function TabDecoderPro() {
       const tex = alphaTexFromBytes(bytes);
       if (tex != null) { // a saved .alphatex: draw it — it's already a tab, not something to recognise
         setTexDoc({ name: f.name, text: tex }); setXmlName(f.name); setRestored(false); saveSessionFile(bytes);
+        setPlaySet(null); rememberProject({ kind: "alphatex", filename: f.name, bytes });
         return;
       }
       const sc = await parseScoreOffThread(bytes, f.name, useSharp); // MusicXML / GP3-8 auto-detect (binary GP/PTB off-thread)
@@ -667,6 +681,7 @@ export default function TabDecoderPro() {
       setXmlScore(sc); setXmlName(f.name);
       setRestored(false);
       saveSessionFile(bytes); // meta is written by the persist effect
+      setPlaySet(null); rememberProject({ kind: "xml", filename: f.name, bytes, bars: sc.bars.length, bpm: sc.tempo, keyLabel: keyLabelOf(sc) });
     } catch (err) {
       setXmlErr("Parse failed: " + (err && err.message ? err.message : String(err)));
     } finally { setXmlBusy(false); }
@@ -745,6 +760,24 @@ export default function TabDecoderPro() {
    * PDF chart's edits never replay over a Guitar Pro part. Persisted in the session meta next to
    * `overrides`, re-applied after the restore re-parse (ids are positional and reproduced exactly). */
   const [scoreEdit, setScoreEdit] = useState(null);
+  /* WO-6 project library: every opened file becomes a project (record in IndexedDB, bytes in OPFS);
+   * its meta (overrides, note edits, key, part) follows the session meta. Opening a project replays
+   * the SAME restore path (re-parse the bytes, re-apply the edits). */
+  const [projectId, setProjectId] = useState(null);
+  const projRef = useRef(null), projTimer = useRef(null);
+  const [playSet, setPlaySet] = useState(null);               // { setlist, index } while a set plays
+  const [semisReq, setSemisReq] = useState(null);
+  const [audioIncoming, setAudioIncoming] = useState(null);   // { bytes, name, n } → AudioImport
+  const rememberProject = async ({ kind, filename, bytes, bars, bpm, keyLabel, duration }) => {
+    try {
+      const recs = await projectsAll();
+      const old = recs.find((r) => r.kind === kind && r.filename === filename && r.bytes === bytes.length);
+      const rec = old ? { ...old, updatedAt: Date.now(), bars: bars || old.bars, bpm: bpm ? Math.round(bpm) : old.bpm, key: keyLabel || old.key } : makeProjectRecord({ kind, filename, bytes: bytes.length, bars, bpm, key: keyLabel, duration });
+      if (!old) await projectFilePut(rec.id, bytes);
+      await projectPut(rec); projRef.current = rec; setProjectId(rec.id);
+    } catch (_) { /* the library is a convenience: never block opening a file */ }
+  };
+  const keyLabelOf = (sc) => { try { const k = sc && analyzeKey(sc); return k ? keyName(k, true) : ""; } catch (_) { return ""; } };
   const editTarget = mode === "pdf" && chart ? `pdf:${chart.fileName}` : mode === "xml" && xmlScore ? `xml:${xmlName}:${xmlScore.partIndex || 0}` : "";
   const editFor = (target) => (scoreEdit && scoreEdit.target === target ? scoreEdit : null);
   const setEditFor = (target) => (upd) => setScoreEdit((prev) => {
@@ -768,7 +801,14 @@ export default function TabDecoderPro() {
                  : (mode === "xml" && xmlScore) ? { kind: "xml", filename: xmlName }
                  : (mode === "xml" && texDoc) ? { kind: "alphatex", filename: texDoc.name } : null;
     if (!active) return;
-    saveSessionMeta({ v: 1, kind: active.kind, filename: active.filename, useSharp, overrides, sysShifts, keyOverride, scoreEdit, partIndex: xmlScore ? (xmlScore.partIndex || 0) : 0 });
+    const meta = { v: 1, kind: active.kind, filename: active.filename, useSharp, overrides, sysShifts, keyOverride, scoreEdit, partIndex: xmlScore ? (xmlScore.partIndex || 0) : 0 };
+    saveSessionMeta(meta);
+    // the open project follows the same meta (debounced; IndexedDB writes are async)
+    const pr = projRef.current;
+    if (pr && pr.filename === active.filename) {
+      clearTimeout(projTimer.current);
+      projTimer.current = setTimeout(() => { const rec = { ...projRef.current, meta, updatedAt: Date.now(), key: keyOverride || projRef.current.key }; projRef.current = rec; projectPut(rec); }, 600);
+    }
   }, [mode, chart, xmlScore, xmlName, texDoc, overrides, useSharp, keyOverride, scoreEdit]);
 
   const restoreRef = useRef(null);
@@ -817,9 +857,11 @@ export default function TabDecoderPro() {
         }
         if (meta.overrides && Object.keys(meta.overrides).length) setOverrides(meta.overrides);
         if (meta.keyOverride) setKeyOverride(meta.keyOverride);
-        if (meta.scoreEdit && isScoreEdit(meta.scoreEdit) && typeof meta.scoreEdit.target === "string") setScoreEdit(meta.scoreEdit);
-        setRestored(true);
-        saveSessionMeta(meta); // re-affirm the restored state in one clean write
+        if (meta.scoreEdit && isScoreEdit(meta.scoreEdit) && typeof meta.scoreEdit.target === "string") setScoreEdit(meta.scoreEdit); else setScoreEdit(null);
+        if (!meta.fromLibrary) setRestored(true);
+        // one-shot migration: the restored session becomes a library project (dedup by name + size)
+        if (!projRef.current || projRef.current.filename !== meta.filename) rememberProject({ kind: meta.kind, filename: meta.filename || "restored", bytes });
+        { const { fromLibrary: _fl, ...clean } = meta; saveSessionMeta(clean); } // re-affirm the restored state in one clean write
       } catch (err) { console.warn("session restore failed:", err); }
       finally { restoringRef.current = false; }
     })();
@@ -827,9 +869,31 @@ export default function TabDecoderPro() {
 
   const startFresh = async () => {
     try { await clearSession(); } catch (_) {}
-    setChart(null); setXmlScore(null); setTexDoc(null); setXmlName(""); setMode("manual"); clearSel(); setRestored(false); setKeyOverride(""); setScoreEdit(null);
+    setChart(null); setXmlScore(null); setTexDoc(null); setXmlName(""); setMode("manual"); clearSel(); setRestored(false); setKeyOverride(""); setScoreEdit(null); setProjectId(null); projRef.current = null; setPlaySet(null);
   };
 
+  /* Open a library project: audio → the Audio panel loads its bytes; a chart → its bytes + meta go
+   * through the restore path (same parsers, same edit re-application). opts.setlist starts a set. */
+  const openProject = async (rec, opts = {}) => {
+    if (!rec) return;
+    const bytes = await projectFileGet(rec.id);
+    if (!bytes) { window.alert("This project's file is no longer on this device."); return; }
+    projRef.current = rec; setProjectId(rec.id);
+    if (opts.setlist) setPlaySet({ setlist: opts.setlist, index: opts.index || 0 });
+    const item = opts.setlist ? opts.setlist.items[opts.index || 0] : null;
+    setSemisReq({ n: Date.now(), value: item ? item.transpose : 0 });
+    if (rec.kind === "audio") { setMode("audio"); setAudioIncoming({ bytes, name: rec.filename || rec.title, n: Date.now() }); return; }
+    await saveSessionFile(bytes);
+    restoreRef.current = { ...(rec.meta || {}), v: 1, kind: rec.kind, filename: rec.filename, fromLibrary: true };
+    setOverrides({}); setKeyOverride("");
+    setRestoreReq((n) => n + 1);
+  };
+  const stepSet = async (d) => {
+    if (!playSet) return;
+    const i = playSet.index + d, it = playSet.setlist.items[i]; if (!it) return;
+    const recs = await projectsAll(), rec = recs.find((r) => r.id === it.projectId);
+    if (rec) openProject(rec, { setlist: playSet.setlist, index: i });
+  };
   const pickChord = (key, e) => { setSelKey(key); setSelFrets(e.frets || null); setSelMidis(e.midis || null); };
 
   const tuningArr = TUNINGS[tuningName];
@@ -880,7 +944,7 @@ export default function TabDecoderPro() {
     // semantic status colors, not the brand.
 
   return (
-    <div style={{ background: C.bg, color: C.text, minHeight: "100%", fontFamily: "'IBM Plex Mono', ui-monospace, monospace" }}>
+    <div className="tdp-app" style={{ background: C.bg, color: C.text, minHeight: "100%", fontFamily: "'IBM Plex Mono', ui-monospace, monospace" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap');
         @keyframes glowpulse {0%{transform:scale(.97);opacity:0;}100%{transform:scale(1);opacity:1;}}
@@ -907,6 +971,16 @@ export default function TabDecoderPro() {
           .meas,.tdp-bar{break-inside:avoid;page-break-inside:avoid;}
           textarea.tdp-scroll{height:auto!important;}
         }
+        /* WO-6 print view: only the marked subtree prints (:has keeps its ancestors), on white paper */
+        @media screen { .tdp-print{display:none!important;} }
+        @media print {
+          html:has(body.tdp-printing){color-scheme:light!important;}
+          html:has(body.tdp-printing), body.tdp-printing, body.tdp-printing .tdp-app, body.tdp-printing #root{background:#fff!important;color:#111!important;}
+          body.tdp-printing .tdp-app *:not(.tdp-print-keep):not(.tdp-print-keep *):not(:has(.tdp-print-keep)){display:none!important;}
+          body.tdp-printing .tdp-app *:has(.tdp-print-keep){display:block!important;background:none!important;border-color:transparent!important;box-shadow:none!important;padding:0!important;margin:0!important;max-width:none!important;animation:none!important;}
+          body.tdp-printing [data-tab-view] > div:nth-child(1), body.tdp-printing [data-tab-view] > div:nth-child(2){display:none!important;}
+          body.tdp-printing .tdp-print-line, body.tdp-printing .tdp-bar{break-inside:avoid;page-break-inside:avoid;}
+        }
       `}</style>
 
       <div style={{ position: "relative", maxWidth: 1100, margin: "0 auto", padding: "20px 16px 40px" }}>
@@ -916,7 +990,7 @@ export default function TabDecoderPro() {
             <span style={{ color: C.dim, fontSize: 12, letterSpacing: 3 }}>TABTRANSLATOR PRO</span>
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6, maxWidth: "100%" }}>
-            {[["manual", "Manual"], ["pdf", "PDF Chart"], ["xml", "MusicXML / GP"], ["audio", "Audio 🎵"], ["lyrics", "Lyrics 🎙️"], ["live", "Live chords 🎶"], ["tuner", "Tuner 🎤"]].map(([m, lbl]) => (
+            {[["manual", "Manual"], ["pdf", "PDF Chart"], ["xml", "MusicXML / GP"], ["audio", "Audio 🎵"], ["lyrics", "Lyrics 🎙️"], ["live", "Live chords 🎶"], ["tuner", "Tuner 🎤"], ["library", "Library 📚"]].map(([m, lbl]) => (
               <button key={m} onClick={() => { setMode(m); clearSel(); }} style={{ ...toggle(C), padding: "6px 14px", flex: "none", ...(mode === m ? activeToggle(C) : {}) }}>
                 {lbl}
               </button>
@@ -931,7 +1005,17 @@ export default function TabDecoderPro() {
           </div>
         )}
 
-        {mode === "tuner" ? <LiveTuner C={C} useSharp={useSharp} /> : mode === "live" ? <LiveChords C={C} useSharp={useSharp} /> : mode === "lyrics" ? <LyricsPanel C={C} /> : mode === "audio" ? <AudioImport C={C} useSharp={useSharp} /> : (
+        {playSet && (
+          <div className="no-print" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, marginBottom: 12, padding: "8px 12px", background: C.panel, border: `1px solid ${C.green}`, borderRadius: 8, fontSize: 12, color: C.dim }}>
+            <span style={{ color: C.green }}>▶ {playSet.setlist.name}</span>
+            <span>{playSet.index + 1} / {playSet.setlist.items.length}</span>
+            {(() => { const it = playSet.setlist.items[playSet.index]; return it ? <span>{it.transpose ? `transposed ${it.transpose > 0 ? "+" : ""}${it.transpose}` : ""}{it.capo ? ` · capo ${it.capo}` : ""}</span> : null; })()}
+            <button onClick={() => stepSet(-1)} disabled={playSet.index <= 0} style={{ ...toggle(C), flex: "none", padding: "3px 10px" }}>◀ Prev</button>
+            <button onClick={() => stepSet(1)} disabled={playSet.index >= playSet.setlist.items.length - 1} style={{ ...toggle(C), flex: "none", padding: "3px 10px" }}>Next ▶</button>
+            <button onClick={() => setPlaySet(null)} style={{ ...toggle(C), flex: "none", padding: "3px 10px" }}>✕</button>
+          </div>
+        )}
+        {mode === "library" ? <LibraryPanel C={C} onOpen={openProject} currentId={projectId} /> : mode === "tuner" ? <LiveTuner C={C} useSharp={useSharp} /> : mode === "live" ? <LiveChords C={C} useSharp={useSharp} /> : mode === "lyrics" ? <LyricsPanel C={C} /> : mode === "audio" ? <AudioImport C={C} useSharp={useSharp} incoming={audioIncoming} onLoaded={(f, bytes, dur) => { if (!audioIncoming || audioIncoming.name !== f.name) rememberProject({ kind: "audio", filename: f.name, bytes, duration: dur }); }} /> : (
         <div className={"tdp-cols" + (mode === "manual" ? " manual" : "")} style={{ position: "relative" }}>
           <section className="panel-rise" style={{ animationDelay: ".05s", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
             {mode === "manual" ? (
@@ -1000,7 +1084,7 @@ export default function TabDecoderPro() {
                     meta={`${scoreView.bars.length} bars · ${chart.systemsFound} systems · ${chart.pages} pp · 4/4 assumed`}
                     C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey={selKey} onPick={pickChord}
                     keyOverride={keyOverride} setKeyOverride={setKeyOverride}
-                    scoreEdit={editFor(editTarget)} setScoreEdit={setEditFor(editTarget)} />
+                    scoreEdit={editFor(editTarget)} setScoreEdit={setEditFor(editTarget)} semisReq={semisReq} />
                 )}
                 {scoreView && chart.systems && chart.systems.length > 0 && (
                   <StringShiftPanel systems={chart.systems} shifts={sysShifts} onBump={bumpSystemShift} C={C} />
@@ -1046,7 +1130,7 @@ export default function TabDecoderPro() {
                     meta={`${xmlScore.bars.length} bars · ${xmlScore.tuning} tuning · ${xmlScore.timeSig.join("/")}`}
                     C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey={selKey} onPick={pickChord}
                     keyOverride={keyOverride} setKeyOverride={setKeyOverride}
-                    scoreEdit={editFor(editTarget)} setScoreEdit={setEditFor(editTarget)} />
+                    scoreEdit={editFor(editTarget)} setScoreEdit={setEditFor(editTarget)} semisReq={semisReq} />
                 )}
               </>
             )}
@@ -1131,7 +1215,7 @@ export default function TabDecoderPro() {
  * the same shape, so the renderer, editor and exporters are identical. Edits are
  * lifted to the parent as an `overrides` map ("<bar>.<beat>" -> symbol) so they
  * survive view/transpose changes and feed straight into export. */
-function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setOverrides, selKey, onPick, keyOverride, setKeyOverride, autoSimplify = true, defaultView = "chart", vocabPicker = true, scoreEdit: scoreEditProp, setScoreEdit: setScoreEditProp, getAudio, getBuffer }) {
+function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setOverrides, selKey, onPick, keyOverride, setKeyOverride, autoSimplify = true, defaultView = "chart", vocabPicker = true, scoreEdit: scoreEditProp, setScoreEdit: setScoreEditProp, getAudio, getBuffer, semisReq }) {
   /* WO-1: note-level corrections. The edit is an op list replayed over the parsed score
    * (applyScoreEdits); controlled when the parent persists it (session meta), local otherwise.
    * Everything downstream — simplify, arrange, transpose, respell, every view and export — reads
@@ -1163,6 +1247,12 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
 
   const [showRoman, setShowRoman] = useState(false);
   const [practice, setPractice] = useState(false);                // WO-2 practice player open
+  // WO-6: print / PDF (a light copy of the current view; window.print → iOS "Save as PDF")
+  const [printing, setPrinting] = useState(false);
+  const [paper, setPaperState] = useState(() => { try { return localStorage.getItem(_PAPER_KEY) === "letter" ? "letter" : "a4"; } catch (_) { return "a4"; } });
+  const setPaper = (v) => { setPaperState(v); try { localStorage.setItem(_PAPER_KEY, v); } catch (_) {} };
+  const [printLib, setPrintLib] = useState(null);
+  const [printDict, setPrintDict] = useState(null);
   // "Mostly single notes" → the chart is a melodic line (an arpeggiated part / a
   // single-note PDF/tab head), not block harmony. Simplify (1 chord/bar) duration-weights
   // each bar's notes into one inferred chord — the right tool there — so it's AUTO-ENABLED
@@ -1393,6 +1483,31 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
     } catch (e) { setSent(false); console.warn("Send to Pro failed:", e); }
   };
   const bump = (d) => setSemis((s) => Math.max(-11, Math.min(11, s + d)));
+  // a setlist item's transpose (WO-6): applied when the item opens
+  useEffect(() => { if (semisReq && typeof semisReq.value === "number") setSemis(Math.max(-11, Math.min(11, semisReq.value))); }, [semisReq && semisReq.n]); // eslint-disable-line
+  const doPrint = async () => {
+    try { const [l, d] = await Promise.all([loadSVGuitar().catch(() => null), loadChordDictionary().catch(() => null)]); setPrintLib(l); setPrintDict(d); } catch (_) { /* diagrams optional */ }
+    setPrinting(true);
+    setTimeout(() => {
+      const st = document.createElement("style"); st.id = "tdp-page-style";
+      st.textContent = `@page { size: ${paper === "letter" ? "letter" : "A4"} portrait; margin: 12mm 11mm 14mm; @bottom-right { content: counter(page) " / " counter(pages); font: 9px sans-serif; color: #666; } }`;
+      document.head.appendChild(st); document.body.classList.add("tdp-printing");
+      // the page MARGINS are painted from the root's background: white paper, restored after
+      // (index.html declares color-scheme: dark, which makes the browser paint the page canvas dark)
+      const html = document.documentElement, prevBg = html.style.background, prevBodyBg = document.body.style.background, prevCs = html.style.colorScheme;
+      html.style.background = "#fff"; document.body.style.background = "#fff"; html.style.colorScheme = "light";
+      const done = () => { document.body.classList.remove("tdp-printing"); html.style.background = prevBg; document.body.style.background = prevBodyBg; html.style.colorScheme = prevCs; const x = document.getElementById("tdp-page-style"); if (x) x.remove(); setPrinting(false); window.removeEventListener("afterprint", done); };
+      window.addEventListener("afterprint", done);
+      try { window.print(); } catch (_) { done(); }
+    }, 450);
+  };
+  const share = async () => {
+    if (!exp) return;
+    const ext = exp.fmt === "abc" ? abcExt : (_EXPORT_EXT[exp.fmt] || "txt");
+    const mime = exp.fmt === "abc" ? abcMimeFor(abcExt).split(";")[0] : (_EXPORT_MIME[exp.fmt] || "text/plain");
+    const base = (title || "chart").replace(/\.[^.]+$/, "").replace(/[^\w.-]+/g, "_").replace(/^_+|_+$/g, "") || "chart";
+    await shareOrDownload(exp.bytes || exp.text, `${base}.${ext}`, mime);
+  };
 
   return (
     <>
@@ -1472,6 +1587,11 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
       </div>
 
       <div className="no-print" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, marginBottom: 10, fontSize: 11, color: C.dim }}>
+        <button onClick={doPrint} title="print this view, or save it as a PDF (iOS: share sheet → Save as PDF): header, the chords used as diagrams, the chart / grid / lyrics / tab"
+          style={{ ...chip(C), padding: "4px 10px", borderColor: printing ? C.green : C.border, color: printing ? C.green : C.dim }}>🖨 Print / PDF</button>
+        <select value={paper} onChange={(e) => setPaper(e.target.value)} title="paper size" style={{ ...chip(C), padding: "3px 6px", background: C.raised, color: C.dim }}>
+          <option value="a4">A4</option><option value="letter">Letter</option>
+        </select>
         <button onClick={() => { stopPlay(); setPractice((v) => !v); }} title="loop bars, slow down without changing pitch, metronome, count-in, wait-for-me coach"
           style={{ ...chip(C), padding: "4px 10px", borderColor: practice ? C.green : C.border, color: practice ? C.green : C.amber }}>🎯 Practice</button>
         <label style={{ ...chip(C), padding: "4px 10px", cursor: "pointer" }}>
@@ -1493,6 +1613,7 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
 
       {autoSimplify && melodic && !simplify && <MelodicNudge C={C} onSimplify={() => setSimplify(true)} />}
 
+      {printing && <PrintSheet score={tscore} title={title} keyLabel={key ? kName(key) : ""} bpm={bpm} view={view === "edit" ? "chart" : view} overrides={overrides} musicKey={key} semis={semis} levelLabel={lvl ? `${level} level` : ""} capo={lvl ? lvl.capo : 0} lib={printLib} dict={printDict} />}
       {view === "lyrics"
         ? <LyricsSheetView C={C} score={tscore} title={title} overrides={overrides} playKey={playKey} getAudio={getAudio} getBuffer={getBuffer} bpm={bpm} exportKey={key} keySpelled={keySpelled} />
         : view === "edit"
@@ -1502,7 +1623,7 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
             ? <div style={{ fontSize: 12, color: C.dim, padding: "10px 4px" }}>{tabTex.error}</div>
             : <>
                 {simplify && <div style={{ fontSize: 11, color: C.dim, marginBottom: 6 }}>The tab shows every note as written — <b>1 chord/bar</b> only simplifies the Chart and Grid views.</div>}
-                <TabView tex={tabTex.text} title={title} C={C} />
+                <div className={printing ? "tdp-print-keep" : undefined}><TabView tex={tabTex.text} title={title} C={C} /></div>
               </>)
         : view === "chart"
         ? <LeadSheetView score={tscore} C={C} overrides={overrides} setOverrides={setOverrides} editMode={editMode}
@@ -1511,7 +1632,7 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
         : <GridView score={tscore} C={C} symOf={symOf} selKey={selKey} onPick={onPick} onVoicings={setVoicingChoices} />}
       {voicingChoices && <ChordVoicingModal key={voicingChoices.map((c) => c.symbol).join("|")} choices={voicingChoices} onClose={() => setVoicingChoices(null)} C={C} useSharp={useSharp} sequence={chordSeq} />}
 
-      <ExportPanel exp={exp} setExp={setExp} C={C} bpm={bpm} semis={semis} score={tscore}
+      <ExportPanel exp={exp} setExp={setExp} C={C} bpm={bpm} semis={semis} score={tscore} share={share}
         copy={copy} download={download} copied={copied} downloaded={downloaded} extOf={(f) => (f === "abc" ? abcExt : _EXPORT_EXT[f] || "txt")}
         abcExt={abcExt} setAbcExt={setAbcExt} />
     </>
@@ -1524,6 +1645,220 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
  * bloating as new views (Audio/Practice, Wave 3) land — each is just another
  * sibling here, switched on `view`, with no shared-state entanglement. Pure
  * props in, JSX out — no engine internals, no own persistent state. */
+/* ---- WO-6 · project library storage (browser glue; the record model is pure, in engine.tsx) ----
+ * IndexedDB "ttp-projects": projects (records), setlists, and files (the fallback for source
+ * bytes). Source bytes prefer OPFS (projects/<id>.bin — quota-free on most browsers); older Safari
+ * without createWritable falls back to IndexedDB. Every call is try/catch'd: a library that can't
+ * open (private mode, blocked storage) simply shows empty — it never breaks the app. */
+const _PDB = "ttp-projects";
+let _pdbP = null;
+function _pdb() {
+  if (_pdbP) return _pdbP;
+  _pdbP = new Promise((res, rej) => {
+    try {
+      if (typeof indexedDB === "undefined") { rej(new Error("IndexedDB unavailable")); return; }
+      const r = indexedDB.open(_PDB, 1);
+      r.onupgradeneeded = () => { const db = r.result; for (const [n, k] of [["projects", "id"], ["setlists", "id"]]) if (!db.objectStoreNames.contains(n)) db.createObjectStore(n, { keyPath: k }); if (!db.objectStoreNames.contains("files")) db.createObjectStore("files"); };
+      r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); r.onblocked = () => rej(new Error("IndexedDB blocked"));
+    } catch (e) { rej(e); }
+  });
+  _pdbP.catch(() => { _pdbP = null; });
+  return _pdbP;
+}
+async function _ptx(store, mode, fn) {
+  const db = await _pdb();
+  return new Promise((res, rej) => {
+    const t = db.transaction(store, mode), r = fn(t.objectStore(store)); let out;
+    if (r) r.onsuccess = () => { out = r.result; };
+    t.oncomplete = () => res(out); t.onerror = () => rej(t.error); t.onabort = () => rej(t.error);
+  });
+}
+const projectsAll = () => _ptx("projects", "readonly", (s) => s.getAll()).then((a) => (a || []).filter(isProjectRecord)).catch(() => []);
+const projectPut = (r) => _ptx("projects", "readwrite", (s) => s.put(r)).catch(() => null);
+const projectDel = (id) => _ptx("projects", "readwrite", (s) => s.delete(id)).catch(() => null);
+const setlistsAll = () => _ptx("setlists", "readonly", (s) => s.getAll()).then((a) => (a || []).filter((x) => x && Array.isArray(x.items))).catch(() => []);
+const setlistPut = (x) => _ptx("setlists", "readwrite", (s) => s.put(x)).catch(() => null);
+const setlistDel = (id) => _ptx("setlists", "readwrite", (s) => s.delete(id)).catch(() => null);
+async function _opfsProjects() {
+  try { if (!navigator.storage || !navigator.storage.getDirectory) return null; return await (await navigator.storage.getDirectory()).getDirectoryHandle("projects", { create: true }); } catch (_) { return null; }
+}
+async function projectFilePut(id, bytes) {
+  try { const d = await _opfsProjects(); if (d) { const fh = await d.getFileHandle(id + ".bin", { create: true }); if (fh.createWritable) { const w = await fh.createWritable(); await w.write(bytes); await w.close(); return "opfs"; } } } catch (_) { /* fall back */ }
+  try { await _ptx("files", "readwrite", (s) => s.put(bytes, id)); return "idb"; } catch (_) { return null; }
+}
+async function projectFileGet(id) {
+  try { const d = await _opfsProjects(); if (d) { const f = await (await d.getFileHandle(id + ".bin")).getFile(); return new Uint8Array(await f.arrayBuffer()); } } catch (_) { /* not in OPFS */ }
+  try { const v = await _ptx("files", "readonly", (s) => s.get(id)); return v ? new Uint8Array(v) : null; } catch (_) { return null; }
+}
+async function projectFileDel(id) {
+  try { const d = await _opfsProjects(); if (d) await d.removeEntry(id + ".bin"); } catch (_) { /* absent */ }
+  try { await _ptx("files", "readwrite", (s) => s.delete(id)); } catch (_) { /* absent */ }
+}
+/* Hand a file to the share sheet (iOS / Android / desktop Safari), else download it. */
+async function shareOrDownload(data, filename, mime) {
+  try {
+    if (typeof File !== "undefined" && navigator.share && navigator.canShare) {
+      const file = new File([data], filename, { type: mime || "application/octet-stream" });
+      if (navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: filename }); return "shared"; }
+    }
+  } catch (e) { if (e && e.name === "AbortError") return "cancelled"; }
+  try {
+    const url = URL.createObjectURL(new Blob([data], { type: mime || "application/octet-stream" })), a = document.createElement("a");
+    a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 2000);
+    return "downloaded";
+  } catch (_) { return "failed"; }
+}
+
+/* ---- WO-6 · library + setlists ---- */
+function LibraryPanel({ C, onOpen, currentId }) {
+  const [recs, setRecs] = useState(null);
+  const [sets, setSets] = useState([]);
+  const [q, setQ] = useState("");
+  const [tag, setTag] = useState("");
+  const [sort, setSort] = useState("updated");
+  const [msg, setMsg] = useState("");
+  const bundleRef = useRef(null);
+  const refresh = async () => { setRecs(await projectsAll()); setSets(await setlistsAll()); };
+  useEffect(() => { refresh(); }, []);
+  const list = useMemo(() => (recs ? searchProjects(recs, { q, tags: tag ? [tag] : [], sort }) : []), [recs, q, tag, sort]);
+  const tags = useMemo(() => (recs ? projectTags(recs) : []), [recs]);
+  const byId = useMemo(() => new Map((recs || []).map((r) => [r.id, r])), [recs]);
+  const editTags = async (r) => { const v = window.prompt("Tags (comma separated)", r.tags.join(", ")); if (v == null) return; await projectPut(makeProjectRecord({ ...r, tags: v.split(",") , createdAt: r.createdAt })); refresh(); };
+  const rename = async (r) => { const v = window.prompt("Title", r.title); if (!v) return; await projectPut({ ...r, title: v.slice(0, 200), updatedAt: Date.now() }); refresh(); };
+  const dup = async (r) => { const b = await projectFileGet(r.id); const n = makeProjectRecord({ ...r, id: undefined, title: r.title + " (copy)", createdAt: undefined }); if (b) await projectFilePut(n.id, b); await projectPut(n); refresh(); };
+  const del = async (r) => { if (!window.confirm(`Delete “${r.title}” from the library? Its file is removed from this device.`)) return; await projectDel(r.id); await projectFileDel(r.id); for (const s of sets) if (s.items.some((it) => it.projectId === r.id)) await setlistPut(setlistPrune(s, (recs || []).filter((x) => x.id !== r.id).map((x) => x.id))); refresh(); };
+  const bundle = async (r) => { const b = await projectFileGet(r.id); const zip = exportProjectBundle(r, { source: b }); const how = await shareOrDownload(zip, `${r.title.replace(/[^\w.-]+/g, "_") || "project"}.ttp.zip`, "application/zip"); setMsg(how === "shared" ? "Bundle shared." : how === "downloaded" ? "Bundle saved." : ""); };
+  const importBundle = async (e) => {
+    const f = e.target.files && e.target.files[0]; e.target.value = ""; if (!f) return;
+    try { const { project, source } = await importProjectBundle(new Uint8Array(await f.arrayBuffer())); if (source) await projectFilePut(project.id, source.bytes); await projectPut(project); setMsg(`Imported “${project.title}”.`); refresh(); }
+    catch (err) { setMsg(err && err.message ? err.message : "Couldn't import that bundle."); }
+  };
+  const newSet = async () => { const n = window.prompt("Setlist name", "Gig"); if (!n) return; await setlistPut(createSetlist(n)); refresh(); };
+  const addTo = async (setId, r) => { const s = sets.find((x) => x.id === setId); if (!s) return; await setlistPut(setlistAdd(s, r.id)); refresh(); setMsg(`Added to ${s.name}.`); };
+  const upd = async (s) => { await setlistPut(s); refresh(); };
+  const fmtDate = (t) => { try { return new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric" }); } catch (_) { return ""; } };
+  const ch = (on, col) => ({ ...chip(C), padding: "3px 9px", borderColor: on ? col || C.amber : C.border, color: on ? col || C.amber : C.dim });
+  return (
+    <section className="panel-rise" style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
+      <SectionLabel C={C}>LIBRARY · every chart you open is kept on this device</SectionLabel>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginBottom: 10 }}>
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="search title, artist, key, tag…" aria-label="search"
+          style={{ flex: "1 1 180px", minWidth: 0, background: C.bg, color: C.text, border: `1px solid ${C.border}`, borderRadius: 8, padding: "6px 10px", fontSize: 12, fontFamily: "inherit" }} />
+        <select value={sort} onChange={(e) => setSort(e.target.value)} style={{ ...chip(C), padding: "4px 6px", background: C.raised, color: C.dim }}>
+          <option value="updated">recent</option><option value="title">title</option><option value="key">key</option><option value="bpm">tempo</option><option value="created">added</option>
+        </select>
+        <button onClick={() => bundleRef.current && bundleRef.current.click()} style={ch(false)}>⬆ Import bundle</button>
+        <input ref={bundleRef} type="file" onChange={importBundle} style={{ display: "none" }} />
+      </div>
+      {tags.length > 0 && <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 10 }}>
+        <button onClick={() => setTag("")} style={ch(!tag)}>all</button>
+        {tags.map((t) => <button key={t.tag} onClick={() => setTag(tag === t.tag ? "" : t.tag)} style={ch(tag === t.tag, C.cyan)}>#{t.tag} {t.count}</button>)}
+      </div>}
+      {msg && <div style={{ fontSize: 11, color: C.cyan, marginBottom: 8 }}>{msg}</div>}
+      {recs === null ? <div style={{ fontSize: 12, color: C.dim }}>loading…</div> : !recs.length ? (
+        <div style={{ fontSize: 12, color: C.dim, lineHeight: 1.6 }}>Nothing here yet. Open a PDF, Guitar Pro, MusicXML, MIDI or audio file and it's added automatically — with its chord edits, note edits and key.</div>
+      ) : (
+        <div style={{ display: "grid", gap: 8 }}>
+          {list.map((r) => (
+            <div key={r.id} style={{ border: `1px solid ${r.id === currentId ? C.amber : C.border}`, borderRadius: 10, padding: "8px 10px", background: C.bg }}>
+              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "baseline", gap: 8 }}>
+                <b style={{ color: C.text, fontSize: 13, cursor: "pointer" }} onClick={() => onOpen(r)}>{r.title}</b>
+                {r.artist && <span style={{ fontSize: 11, color: C.dim }}>{r.artist}</span>}
+                <span style={{ fontSize: 10, color: C.dim, marginLeft: "auto" }}>{r.kind}{r.key ? ` · ${r.key}` : ""}{r.bpm ? ` · ♩=${r.bpm}` : ""}{r.bars ? ` · ${r.bars} bars` : ""} · {fmtDate(r.updatedAt)}</span>
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 6, alignItems: "center" }}>
+                <button onClick={() => onOpen(r)} style={ch(true, C.green)}>Open</button>
+                <button onClick={() => rename(r)} style={ch(false)}>rename</button>
+                <button onClick={() => editTags(r)} style={ch(false)}>#tags{r.tags.length ? `: ${r.tags.join(" ")}` : ""}</button>
+                <button onClick={() => dup(r)} style={ch(false)}>duplicate</button>
+                <button onClick={() => bundle(r)} title="the file + its edits as one .ttp.zip — share it or move it to another device" style={ch(false)}>⬇ bundle</button>
+                {sets.length > 0 && <select value="" onChange={(e) => e.target.value && addTo(e.target.value, r)} style={{ ...chip(C), padding: "3px 6px", background: C.raised, color: C.dim }}>
+                  <option value="">+ setlist…</option>{sets.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>}
+                <button onClick={() => del(r)} style={{ ...ch(false), color: C.red }}>delete</button>
+              </div>
+            </div>
+          ))}
+          {!list.length && <div style={{ fontSize: 12, color: C.dim }}>No project matches.</div>}
+        </div>
+      )}
+      <div style={{ marginTop: 18 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+          <SectionLabel C={C} style={{ margin: 0 }}>SETLISTS</SectionLabel>
+          <button onClick={newSet} style={ch(false)}>＋ New setlist</button>
+        </div>
+        {sets.map((s) => (
+          <div key={s.id} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: "8px 10px", marginBottom: 8, background: C.bg }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <b style={{ color: C.text, fontSize: 13 }}>{s.name}</b><span style={{ fontSize: 11, color: C.dim }}>{s.items.length} songs</span>
+              <button onClick={() => s.items.length && onOpen(byId.get(s.items[0].projectId), { setlist: s, index: 0 })} disabled={!s.items.length} style={{ ...ch(true, C.green), marginLeft: "auto" }}>▶ Play set</button>
+              <button onClick={async () => { if (window.confirm(`Delete the setlist “${s.name}”?`)) { await setlistDel(s.id); refresh(); } }} style={{ ...ch(false), color: C.red }}>✕</button>
+            </div>
+            {s.items.map((it, i) => { const r = byId.get(it.projectId); return (
+              <div key={i} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 5, marginTop: 6, fontSize: 11, color: C.dim }}>
+                <span style={{ minWidth: 16 }}>{i + 1}.</span>
+                <span style={{ color: r ? C.text : C.red, flex: "1 1 120px" }}>{r ? r.title : "(missing)"}</span>
+                <span>transpose</span>
+                <button onClick={() => upd(setlistUpdateItem(s, i, { transpose: it.transpose - 1 }))} style={ch(false)}>−</button>
+                <b style={{ minWidth: 20, textAlign: "center", color: it.transpose ? C.amber : C.dim }}>{it.transpose > 0 ? "+" : ""}{it.transpose}</b>
+                <button onClick={() => upd(setlistUpdateItem(s, i, { transpose: it.transpose + 1 }))} style={ch(false)}>+</button>
+                <span>capo</span>
+                <button onClick={() => upd(setlistUpdateItem(s, i, { capo: it.capo - 1 }))} style={ch(false)}>−</button>
+                <b style={{ minWidth: 12, textAlign: "center", color: it.capo ? C.amber : C.dim }}>{it.capo}</b>
+                <button onClick={() => upd(setlistUpdateItem(s, i, { capo: it.capo + 1 }))} style={ch(false)}>+</button>
+                <button onClick={() => upd(setlistMove(s, i, i - 1))} disabled={!i} style={ch(false)}>▲</button>
+                <button onClick={() => upd(setlistMove(s, i, i + 1))} disabled={i === s.items.length - 1} style={ch(false)}>▼</button>
+                <button onClick={() => upd(setlistRemove(s, i))} style={{ ...ch(false), color: C.red }}>✕</button>
+              </div>); })}
+          </div>
+        ))}
+      </div>
+      <div style={{ fontSize: 10, color: C.dim, marginTop: 10, lineHeight: 1.5 }}>Stored on this device only (IndexedDB + OPFS). A bundle (.ttp.zip) carries a project — its file and every edit — to another device.</div>
+    </section>
+  );
+}
+
+/* ---- WO-6 · print / PDF ----
+ * A light, paper-friendly copy of the current view (Chart · Grid · Lyrics; the Tab view prints its own
+ * alphaTab page) with a header and the chords used as diagrams, printed through window.print() — on
+ * iOS that's the share sheet's "Save as PDF". Everything else on the page is hidden by the print CSS
+ * (:has() keeps only the marked subtree, so no blank pages). */
+const _PAPER_KEY = "ttp:paper";
+const _PRINT_C = { bg: "#ffffff", panel: "#ffffff", raised: "#f3f3f3", border: "#bdbdbd", text: "#111111", dim: "#555555", amber: "#a8401a", chord: "#111111", cyan: "#0b6a73", red: "#a40000", green: "#2c6a1f" };
+function PrintSheet({ score, title, keyLabel, bpm, view, overrides, musicKey, semis, levelLabel, capo, lib, dict }) {
+  const C = _PRINT_C;
+  const symOf = (bar, e) => { const v = overrides[`${bar.number}.${e.beat}`]; return v != null ? v : e.symbol; };
+  const used = useMemo(() => { const out = []; for (const b of score.bars) for (const e of b.events) { const s = symOf(b, e); if (s && s !== "—" && s !== "N.C." && !out.includes(s)) out.push(s); } return out.slice(0, 24); }, [score, overrides]); // eslint-disable-line
+  const instrument = (() => { try { const v = localStorage.getItem("ttp:instrument"); return INSTRUMENTS[v] ? v : "guitar"; } catch (_) { return "guitar"; } })();
+  const lyr = useMemo(() => { if (view !== "lyrics") return null; try { const m = JSON.parse(localStorage.getItem(_lyrKey(title, "lyricmap")) || "null"); return m && m.lines ? lyricSheetRows(score, m, { overrides, bpm: score.tempo }) : null; } catch (_) { return null; } }, [view, score, title, overrides]);
+  const first = (sym) => { try { const d = instrument === "guitar" && dict ? chordVoicings(dict, sym, {}) : voicingsForInstrument(sym, instrument); return d && d.ok && d.groups[0] && d.groups[0].voicings[0]; } catch (_) { return null; } };
+  const mono = { fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "pre", fontSize: 12, lineHeight: 1.3 };
+  return (
+    <div className="tdp-print tdp-print-keep" style={{ background: "#fff", color: "#111", padding: 0, fontFamily: "'IBM Plex Mono', monospace" }}>
+      <div style={{ borderBottom: "1.5px solid #111", paddingBottom: 6, marginBottom: 8 }}>
+        <div style={{ fontSize: 20, fontWeight: 700 }}>{String(title || "Chart").replace(/\.[^.]+$/, "")}</div>
+        <div style={{ fontSize: 10, color: "#444" }}>{[keyLabel && `key ${keyLabel}`, bpm && `♩=${Math.round(bpm)}`, score.timeSig && score.timeSig.join("/"), semis ? `transposed ${semis > 0 ? "+" : ""}${semis}` : "", capo ? `capo ${capo}` : "", levelLabel].filter(Boolean).join(" · ")}</div>
+      </div>
+      {used.length > 0 && view !== "tab" && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(78px, 1fr))", gap: 6, marginBottom: 10, breakInside: "avoid" }}>
+          {used.map((s) => { const v = first(s); return (
+            <div key={s} style={{ textAlign: "center", breakInside: "avoid" }}>
+              <div style={{ fontSize: 11, fontWeight: 700 }}>{s}</div>
+              {v ? (v.frets ? <VoicingDiagram v={v} mode="fingers" lib={lib} C={C} /> : <KeyboardDiagram v={v} mode="notes" C={C} />) : <div style={{ fontSize: 9, color: "#888" }}>—</div>}
+            </div>); })}
+        </div>
+      )}
+      {view === "grid" ? <GridView score={score} C={C} symOf={symOf} selKey="" onPick={() => {}} onVoicings={() => {}} />
+        : view === "lyrics" ? (lyr ? <div>{lyr.map((r, i) => r.type === "blank" ? <div key={i} style={{ height: 8 }} /> : r.type === "section" ? <div key={i} style={{ fontSize: 10, letterSpacing: 2, fontWeight: 700, textTransform: "uppercase", marginTop: 6, breakAfter: "avoid" }}>{r.text}</div>
+            : r.type === "line" ? <div key={i} className="tdp-print-line" style={{ breakInside: "avoid" }}>{r.chordLine && <div style={{ ...mono, fontWeight: 700 }}>{r.chordLine}</div>}<div style={mono}>{r.text}</div></div>
+            : <div key={i} style={{ ...mono, fontWeight: r.type === "chords" ? 700 : 400 }}>{r.text}</div>)}</div> : <div style={{ fontSize: 11 }}>Align the lyrics in the Lyrics view first.</div>)
+        : view === "tab" ? null
+        : <LeadSheetView score={score} C={C} overrides={overrides} setOverrides={() => {}} editMode={false} editKey="" setEditKey={() => {}} draft="" setDraft={() => {}} selKey="" playKey="" showRoman={false} musicKey={musicKey} onPick={() => {}} symOf={symOf} onVoicings={() => {}} />}
+      <div style={{ fontSize: 8, color: "#777", marginTop: 10 }}>Tab Translator Pro</div>
+    </div>
+  );
+}
+
 /* ---- WO-3 · lyrics view: timed chords-over-lyrics performance sheet --------------
  * Paste / load a lyric sheet (any chords-over-lyrics tab or ChordPro — parseLyrics strips
  * chords) and 🎯 Auto-align it: to the recording's sung phrases when the chart has audio
@@ -2912,7 +3247,7 @@ function ChordVocabPicker({ C, value, onChange, sixNine, onSixNine, disabled }) 
   );
 }
 /* Export preview: the generated text (or MIDI byte summary) + copy/download. */
-function ExportPanel({ exp, setExp, C, bpm, semis, copy, download, copied, downloaded, extOf, abcExt, setAbcExt, score }) {
+function ExportPanel({ exp, setExp, C, bpm, semis, copy, download, copied, downloaded, extOf, abcExt, setAbcExt, score, share }) {
   if (!exp) return null;
   return (
     <div style={{ marginTop: 12 }}>
@@ -2920,6 +3255,7 @@ function ExportPanel({ exp, setExp, C, bpm, semis, copy, download, copied, downl
         <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim }}>EXPORT · {exp.fmt === "abc" ? "ABC NOTATION" : exp.fmt === "musicxml" ? "MUSICXML" : exp.fmt === "midi" ? "MIDI FILE" : exp.fmt === "csmpn" ? "CSMPN" : exp.fmt === "csml" ? "CHORDSLASHML" : exp.fmt === "music" ? "LISTENHUB · GENERATE AUDIO" : exp.fmt === "alphatex" ? "ALPHATEX · TAB" : "CHORDPRO"}</span>
         <span style={{ display: "inline-flex", gap: 6 }}>
           {!exp.bytes && <button onClick={copy} style={{ ...chip(C), padding: "3px 9px", borderColor: copied ? C.green : C.border, color: copied ? C.green : C.dim }}>{copied ? "copied ✓" : "copy"}</button>}
+          {share && typeof navigator !== "undefined" && navigator.share && <button onClick={share} title="send it with the share sheet (Files, Mail, AirDrop, another app)" style={{ ...chip(C), padding: "3px 9px", color: C.cyan }}>↗ share</button>}
           <button onClick={download} title={`download as .${extOf(exp.fmt)}`} style={{ ...chip(C), padding: "3px 9px", borderColor: downloaded ? C.green : C.border, color: downloaded ? C.green : C.cyan }}>{downloaded ? "saved ✓" : "⬇ download"}</button>
           <button onClick={() => setExp(null)} style={{ ...chip(C), padding: "3px 9px" }}>close</button>
         </span>
@@ -3745,7 +4081,7 @@ function CheckByEar({ C, score, getBuffer, onStart }) {
  * HONEST: works on a CLEAN ISOLATED stem (one instrument) — a full mix won't
  * recognise reliably. Can't be headless-tested (decode + playback) — device only;
  * the analysis engine under it is unit-tested. */
-function AudioImport({ C, useSharp }) {
+function AudioImport({ C, useSharp, incoming, onLoaded }) {
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -3836,12 +4172,16 @@ function AudioImport({ C, useSharp }) {
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) { setErr("Web Audio isn't available in this browser."); setBusy(false); return; }
       const ab = await f.arrayBuffer();
+      const kept = new Uint8Array(ab.slice(0));                        // decodeAudioData may detach `ab`
       const dctx = new AC();
       const audioBuf = await new Promise((res, rej) => { const p = dctx.decodeAudioData(ab, res, rej); if (p && p.then) p.then(res, rej); });
       try { dctx.close(); } catch (_) {}
+      if (onLoaded) { try { onLoaded(f, kept, audioBuf.duration); } catch (_) {} }
       await loadBuffer(audioBuf);
     } catch (_) { setErr("Couldn't decode audio from that file — try an audio file, or a video that has an audio track."); setBusy(false); }
   };
+  // a library project (WO-6) handed in: the same path as a picked file
+  useEffect(() => { if (incoming && incoming.bytes && typeof File !== "undefined") onFile({ target: { files: [new File([incoming.bytes], incoming.name || "audio")] } }); }, [incoming && incoming.n]); // eslint-disable-line
   /* Live capture → the SAME pipeline as an uploaded file (see LiveCapture). */
   const onCaptured = async (audioBuf, label) => {
     resetFor(label);
