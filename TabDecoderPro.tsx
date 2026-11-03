@@ -278,6 +278,15 @@ import {
   applyScoreEdits,
   describeScoreEdit,
   noteRollSpectrogram,
+  timeStretchChannels,
+  loopRegion,
+  clickTimes,
+  renderClicks,
+  clickTrackWav,
+  renderScorePcm,
+  createLiveChordTracker,
+  practiceTargets,
+  transposeSymbol,
 } from "./engine.tsx";
 
 async function extractTokens(buf) {
@@ -889,7 +898,7 @@ export default function TabDecoderPro() {
             <span style={{ color: C.dim, fontSize: 12, letterSpacing: 3 }}>TABTRANSLATOR PRO</span>
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6, maxWidth: "100%" }}>
-            {[["manual", "Manual"], ["pdf", "PDF Chart"], ["xml", "MusicXML / GP"], ["audio", "Audio 🎵"], ["lyrics", "Lyrics 🎙️"], ["tuner", "Tuner 🎤"]].map(([m, lbl]) => (
+            {[["manual", "Manual"], ["pdf", "PDF Chart"], ["xml", "MusicXML / GP"], ["audio", "Audio 🎵"], ["lyrics", "Lyrics 🎙️"], ["live", "Live chords 🎶"], ["tuner", "Tuner 🎤"]].map(([m, lbl]) => (
               <button key={m} onClick={() => { setMode(m); clearSel(); }} style={{ ...toggle(C), padding: "6px 14px", flex: "none", ...(mode === m ? activeToggle(C) : {}) }}>
                 {lbl}
               </button>
@@ -904,7 +913,7 @@ export default function TabDecoderPro() {
           </div>
         )}
 
-        {mode === "tuner" ? <LiveTuner C={C} useSharp={useSharp} /> : mode === "lyrics" ? <LyricsPanel C={C} /> : mode === "audio" ? <AudioImport C={C} useSharp={useSharp} /> : (
+        {mode === "tuner" ? <LiveTuner C={C} useSharp={useSharp} /> : mode === "live" ? <LiveChords C={C} useSharp={useSharp} /> : mode === "lyrics" ? <LyricsPanel C={C} /> : mode === "audio" ? <AudioImport C={C} useSharp={useSharp} /> : (
         <div className={"tdp-cols" + (mode === "manual" ? " manual" : "")} style={{ position: "relative" }}>
           <section className="panel-rise" style={{ animationDelay: ".05s", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
             {mode === "manual" ? (
@@ -1104,7 +1113,7 @@ export default function TabDecoderPro() {
  * the same shape, so the renderer, editor and exporters are identical. Edits are
  * lifted to the parent as an `overrides` map ("<bar>.<beat>" -> symbol) so they
  * survive view/transpose changes and feed straight into export. */
-function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setOverrides, selKey, onPick, keyOverride, setKeyOverride, autoSimplify = true, defaultView = "chart", vocabPicker = true, scoreEdit: scoreEditProp, setScoreEdit: setScoreEditProp, getAudio }) {
+function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setOverrides, selKey, onPick, keyOverride, setKeyOverride, autoSimplify = true, defaultView = "chart", vocabPicker = true, scoreEdit: scoreEditProp, setScoreEdit: setScoreEditProp, getAudio, getBuffer }) {
   /* WO-1: note-level corrections. The edit is an op list replayed over the parsed score
    * (applyScoreEdits); controlled when the parent persists it (session meta), local otherwise.
    * Everything downstream — simplify, arrange, transpose, respell, every view and export — reads
@@ -1135,6 +1144,7 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
   const refAudio = useRef({});
 
   const [showRoman, setShowRoman] = useState(false);
+  const [practice, setPractice] = useState(false);                // WO-2 practice player open
   // "Mostly single notes" → the chart is a melodic line (an arpeggiated part / a
   // single-note PDF/tab head), not block harmony. Simplify (1 chord/bar) duration-weights
   // each bar's notes into one inferred chord — the right tool there — so it's AUTO-ENABLED
@@ -1422,6 +1432,8 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
       </div>
 
       <div className="no-print" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, marginBottom: 10, fontSize: 11, color: C.dim }}>
+        <button onClick={() => { stopPlay(); setPractice((v) => !v); }} title="loop bars, slow down without changing pitch, metronome, count-in, wait-for-me coach"
+          style={{ ...chip(C), padding: "4px 10px", borderColor: practice ? C.green : C.border, color: practice ? C.green : C.amber }}>🎯 Practice</button>
         <label style={{ ...chip(C), padding: "4px 10px", cursor: "pointer" }}>
           🎵 Reference audio
           <input type="file" onChange={attachRef} style={{ display: "none" }} />
@@ -1436,6 +1448,8 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
         </>}
         {refErr && <span style={{ color: C.red }}>{refErr}</span>}
       </div>
+
+      {practice && <PracticePlayer C={C} score={tscore} getBuffer={getBuffer} bpm={bpm} onPlayKey={setPlayKey} />}
 
       {autoSimplify && melodic && !simplify && <MelodicNudge C={C} onSimplify={() => setSimplify(true)} />}
 
@@ -1468,6 +1482,352 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
  * bloating as new views (Audio/Practice, Wave 3) land — each is just another
  * sibling here, switched on `view`, with no shared-state entanglement. Pure
  * props in, JSX out — no engine internals, no own persistent state. */
+/* ---- WO-2 · practice player ---------------------------------------------------
+ * Loop bars A–B of the recording (or the chart's own synth when there is none) at 50–125 %
+ * speed, ±6 semitones, with a metronome and a 1–2 bar count-in. The region is rendered ONCE
+ * (WSOLA in the engine worker, main-thread fallback) into an AudioBuffer and looped
+ * sample-exactly by Web Audio (loopStart/loopEnd), so the loop never drifts or clicks. The
+ * chart's playhead highlight follows through onPlayKey. Never touches the score. */
+const _PP_SPEEDS = [50, 60, 70, 75, 80, 90, 100, 110, 125];
+function _micStart(fftSize) {
+  return (async () => {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw Object.assign(new Error("Microphone access isn't available in this browser."), { user: true });
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) { stream.getTracks().forEach((t) => t.stop()); throw Object.assign(new Error("Web Audio isn't available in this browser."), { user: true }); }
+    const ctx = new AC(); if (ctx.state === "suspended") { try { await ctx.resume(); } catch (_) {} }
+    const analyser = ctx.createAnalyser(); analyser.fftSize = fftSize;
+    ctx.createMediaStreamSource(stream).connect(analyser);
+    const buf = new Float32Array(analyser.fftSize);
+    const read = () => {
+      if (analyser.getFloatTimeDomainData) analyser.getFloatTimeDomainData(buf);
+      else { const b = new Uint8Array(analyser.fftSize); analyser.getByteTimeDomainData(b); for (let i = 0; i < buf.length; i++) buf[i] = (b[i] - 128) / 128; }
+      return buf;
+    };
+    const stop = () => { stream.getTracks().forEach((t) => { try { t.stop(); } catch (_) {} }); if (ctx.state !== "closed") { try { ctx.close(); } catch (_) {} } };
+    return { ctx, analyser, read, stop, sr: ctx.sampleRate };
+  })();
+}
+const _micErr = (e) => (e && e.user ? e.message : e && e.name === "NotAllowedError" ? "Microphone permission was denied — allow it in your browser settings and try again." : "Couldn't start the microphone.");
+const _rms = (x) => { let e = 0; for (let i = 0; i < x.length; i++) e += x[i] * x[i]; return Math.sqrt(e / (x.length || 1)); };
+
+function PracticePlayer({ C, score, getBuffer, bpm, onPlayKey }) {
+  const nums = score.bars.map((b) => b.number);
+  const hasRec = !!(getBuffer && getBuffer());
+  const [a, setA] = useState(nums[0]);
+  const [b, setB] = useState(nums[Math.min(nums.length - 1, 3)]);
+  const [loopOn, setLoopOn] = useState(true);
+  const [speed, setSpeed] = useState(100);
+  const [pitch, setPitch] = useState(0);
+  const [metro, setMetro] = useState(false);
+  const [countIn, setCountIn] = useState(1);
+  const [src, setSrc] = useState(hasRec ? "rec" : "synth");
+  const [playing, setPlaying] = useState(false);
+  const [status, setStatus] = useState("");
+  const [wait, setWait] = useState(false);
+  const ref = useRef({ cache: new Map() });
+  useEffect(() => { if (!nums.includes(a)) setA(nums[0]); if (!nums.includes(b)) setB(nums[Math.min(nums.length - 1, 3)]); }, [score]); // eslint-disable-line
+  const stop = () => {
+    const s = ref.current;
+    if (s.raf) cancelAnimationFrame(s.raf);
+    if (s.node) { try { s.node.stop(); } catch (_) {} s.node = null; }
+    if (s.ctx && s.ctx.state !== "closed") { try { s.ctx.close(); } catch (_) {} s.ctx = null; }
+    s.raf = null; setPlaying(false); if (onPlayKey) onPlayKey("");
+  };
+  useEffect(() => stop, []); // eslint-disable-line
+  useEffect(() => { stop(); ref.current.cache = new Map(); }, [score]); // eslint-disable-line
+  const useRec = src === "rec" && hasRec;
+  const lo = Math.min(a, b), hi = Math.max(a, b);
+  const region = useMemo(() => loopRegion(score, { startBar: lo, endBar: hi, bpm: useRec ? undefined : bpm }), [score, lo, hi, useRec, bpm]);
+
+  const render = async () => {
+    const key = [useRec ? "rec" : "syn", lo, hi, speed, pitch, metro, countIn, bpm].join("|");
+    const hit = ref.current.cache.get(key); if (hit) return hit;
+    const rate = speed / 100;
+    let sr, chs;
+    if (useRec) {
+      const ab = getBuffer(); sr = ab.sampleRate;
+      const i0 = Math.max(0, Math.floor(region.startSec * sr)), i1 = Math.min(ab.length, Math.ceil(region.endSec * sr));
+      chs = []; for (let c = 0; c < Math.min(2, ab.numberOfChannels); c++) chs.push(ab.getChannelData(c).slice(i0, i1));
+    } else { sr = 22050; chs = [renderScorePcm(score, { startBar: lo, endBar: hi, bpm, sampleRate: sr })]; }
+    if (rate !== 1 || pitch) {
+      setStatus(`rendering ${speed}%${pitch ? ` · ${pitch > 0 ? "+" : ""}${pitch} st` : ""}…`);
+      const args = [chs, sr, rate, { pitchSemitones: pitch }];
+      try { chs = await _engineRPC("timeStretchChannels", args); } catch (_) { chs = timeStretchChannels(...args); }
+    }
+    const first = region.bars[0], lead = countIn ? (countIn * first.beats * first.beatSec) / rate : 0;
+    const body = chs[0].length, total = Math.round(lead * sr) + body;
+    const clicks = clickTimes(region, { countInBars: countIn }).filter((c) => c.countIn || metro);
+    const clickPcm = renderClicks(clicks, sr, total / sr, { offsetSec: lead, timeScale: 1 / rate, gain: 0.45 });
+    const out = chs.map((c) => { const o = new Float32Array(total); o.set(c, Math.round(lead * sr)); for (let i = 0; i < total; i++) o[i] += clickPcm[i]; return o; });
+    const r = { out, sr, lead, loopLen: body / sr, rate };
+    ref.current.cache.set(key, r);
+    return r;
+  };
+  const play = async () => {
+    if (playing) { stop(); return; }
+    if (!region) return;
+    try {
+      const r = await render(); setStatus("");
+      const AC = window.AudioContext || window.webkitAudioContext; if (!AC) { setStatus("Web Audio isn't available."); return; }
+      const ctx = new AC(); if (ctx.state === "suspended") { try { await ctx.resume(); } catch (_) {} }
+      const buf = ctx.createBuffer(r.out.length, r.out[0].length, r.sr);
+      r.out.forEach((c, i) => buf.copyToChannel ? buf.copyToChannel(c, i) : buf.getChannelData(i).set(c));
+      const node = ctx.createBufferSource(); node.buffer = buf; node.connect(ctx.destination);
+      if (loopOn) { node.loop = true; node.loopStart = r.lead; node.loopEnd = r.lead + r.loopLen; }
+      node.onended = () => { if (ref.current.node === node) stop(); };
+      const evs = scoreRecordingTimes(score, useRec ? score.tempo : bpm);
+      const t0 = ctx.currentTime + 0.05; node.start(t0);
+      Object.assign(ref.current, { ctx, node });
+      setPlaying(true);
+      const tick = () => {
+        const el = ctx.currentTime - t0;
+        if (el >= r.lead) {
+          const pos = loopOn ? (el - r.lead) % r.loopLen : el - r.lead;
+          const T = region.startSec + pos * r.rate, ev = evs.find((e) => T >= e.start && T < e.start + e.dur);
+          if (onPlayKey) onPlayKey(ev ? ev.key : "");
+        }
+        ref.current.raf = requestAnimationFrame(tick);
+      };
+      ref.current.raf = requestAnimationFrame(tick);
+    } catch (e) { setStatus("Couldn't render the loop."); stop(); }
+  };
+  useEffect(() => { if (playing) { stop(); } }, [lo, hi, speed, pitch, metro, countIn, loopOn, src]); // eslint-disable-line
+  const downloadClicks = () => {
+    try {
+      const wav = clickTrackWav(score, { bpm: useRec ? undefined : bpm, alignToRecording: useRec, sampleRate: 44100 });
+      if (!wav) return;
+      const url = URL.createObjectURL(new Blob([wav], { type: "audio/wav" })), el = document.createElement("a");
+      el.href = url; el.download = "click-track.wav"; document.body.appendChild(el); el.click(); el.remove(); setTimeout(() => URL.revokeObjectURL(url), 2000);
+    } catch (_) {}
+  };
+  const step = (set, v, d) => set(nums[Math.max(0, Math.min(nums.length - 1, nums.indexOf(v) + d))]);
+  const ch = (on, col) => ({ ...chip(C), padding: "3px 9px", borderColor: on ? col || C.amber : C.border, color: on ? col || C.amber : C.dim });
+  return (
+    <div className="no-print" style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 10, marginBottom: 10, background: C.bg, fontSize: 11, color: C.dim }}>
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginBottom: 8 }}>
+        <span style={{ letterSpacing: 2, fontSize: 10 }}>PRACTICE</span>
+        <span>bars</span>
+        <button onClick={() => step(setA, a, -1)} style={ch(false)}>−</button><b style={{ color: C.text, minWidth: 18, textAlign: "center" }}>{lo}</b><button onClick={() => step(setA, a, 1)} style={ch(false)}>+</button>
+        <span>to</span>
+        <button onClick={() => step(setB, b, -1)} style={ch(false)}>−</button><b style={{ color: C.text, minWidth: 18, textAlign: "center" }}>{hi}</b><button onClick={() => step(setB, b, 1)} style={ch(false)}>+</button>
+        <button onClick={() => setLoopOn((v) => !v)} style={ch(loopOn, C.green)}>{loopOn ? "⟲ loop" : "→ once"}</button>
+        {region && <span>{(region.endSec - region.startSec).toFixed(1)} s</span>}
+        {hasRec && <span style={{ display: "inline-flex", gap: 3 }}>
+          <button onClick={() => setSrc("rec")} style={ch(src === "rec", C.cyan)}>recording</button>
+          <button onClick={() => setSrc("synth")} style={ch(src === "synth", C.cyan)}>chart synth</button>
+        </span>}
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginBottom: 8 }}>
+        <span>speed</span>
+        <select value={speed} onChange={(e) => setSpeed(+e.target.value)} style={{ ...chip(C), padding: "3px 6px", background: C.raised, color: speed !== 100 ? C.amber : C.dim }}>
+          {_PP_SPEEDS.map((v) => <option key={v} value={v}>{v}%</option>)}
+        </select>
+        <span>pitch</span>
+        <button onClick={() => setPitch((p) => Math.max(-6, p - 1))} style={ch(false)}>−</button>
+        <b style={{ minWidth: 26, textAlign: "center", color: pitch ? C.amber : C.dim }}>{pitch > 0 ? "+" : ""}{pitch} st</b>
+        <button onClick={() => setPitch((p) => Math.min(6, p + 1))} style={ch(false)}>+</button>
+        <button onClick={() => setMetro((m) => !m)} style={ch(metro, C.green)}>♩ metronome</button>
+        <span>count-in</span>
+        {[0, 1, 2].map((n) => <button key={n} onClick={() => setCountIn(n)} style={ch(countIn === n)}>{n ? `${n} bar${n > 1 ? "s" : ""}` : "off"}</button>)}
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+        <button onClick={play} style={{ ...ch(playing, C.green), padding: "5px 14px", fontSize: 12, color: playing ? C.green : C.amber }}>{playing ? "■ Stop" : "▶ Practice"}</button>
+        <button onClick={() => { stop(); setWait((w) => !w); }} style={ch(wait, C.cyan)} title="the player waits at each note/chord until the microphone hears it">🎯 Wait for me</button>
+        <button onClick={downloadClicks} style={ch(false)} title={useRec ? "clicks on the recording's tracked beats, from 0:00 — drop it under the recording in a DAW" : "clicks for the whole chart at the chart tempo"}>⬇ Click track (WAV)</button>
+        {status && <span style={{ color: C.cyan }}>{status}</span>}
+      </div>
+      {wait && region && <WaitForMe C={C} targets={practiceTargets(score, region, useRec ? score.tempo : bpm)} onTarget={onPlayKey} transpose={pitch} />}
+      <div style={{ marginTop: 6, lineHeight: 1.5 }}>
+        {useRec ? "Slowing the recording keeps its pitch (WSOLA); pitch shifts keep its speed." : "No recording on this chart — the loop plays the chart's own synth."} The loop is sample-exact; count-in plays once.
+      </div>
+    </div>
+  );
+}
+
+/* Wait-for-me coach: shows the next written note/chord of the loop and listens; it moves on
+ * only when the microphone hears it (a note: same pitch class, any octave, 3 clear frames; a
+ * chord: chroma ≥ 0.8 cosine to its tones, 3 frames). Reports how long each target took. */
+function WaitForMe({ C, targets, onTarget, transpose = 0 }) {
+  const [idx, setIdx] = useState(0);
+  const [heard, setHeard] = useState("");
+  const [listening, setListening] = useState(false);
+  const [err, setErr] = useState("");
+  const [times, setTimes] = useState([]);
+  const ref = useRef({});
+  const tg = targets.map((t) => ({ ...t, midis: t.midis.map((m) => m + transpose) }));
+  const stop = () => { const s = ref.current; if (s.raf) cancelAnimationFrame(s.raf); if (s.mic) s.mic.stop(); ref.current = {}; setListening(false); };
+  useEffect(() => stop, []); // eslint-disable-line
+  useEffect(() => { if (onTarget && tg[idx]) onTarget(tg[idx].key); }, [idx]); // eslint-disable-line
+  const names = NOTE_SHARP;
+  const label = (t) => (!t ? "" : t.midis.length === 1 ? midiToNoteName(t.midis[0]) : transpose ? transposeSymbol(t.symbol, transpose) : t.symbol);
+  const start = async () => {
+    setErr(""); setIdx(0); setTimes([]);
+    try {
+      const mic = await _micStart(4096);
+      ref.current = { mic, ok: 0, shownAt: performance.now(), i: 0 };
+      setListening(true);
+      const tick = () => {
+        const s = ref.current; if (!s.mic) return;
+        const now = performance.now();
+        if (now - (s.last || 0) > 60) {
+          s.last = now;
+          const x = s.mic.read(), t = tg[s.i];
+          if (!t) { stop(); return; }
+          let match = false, h = "";
+          if (_rms(x) > 0.004) {
+            if (t.midis.length === 1) {
+              const p = detectPitch(x, s.mic.sr);
+              if (p && p.clarity > 0.75) { h = p.note; match = ((p.midi - t.midis[0]) % 12 + 12) % 12 === 0; }
+            } else {
+              const c = pcmToChroma(x, s.mic.sr), pcs = [...new Set(t.midis.map((m) => ((m % 12) + 12) % 12))];
+              let d = 0, n = 0; for (let i = 0; i < 12; i++) { d += c[i] * (pcs.includes(i) ? 1 : 0); n += c[i] * c[i]; }
+              const sim = n > 0 ? d / (Math.sqrt(n) * Math.sqrt(pcs.length)) : 0;
+              h = `${Math.round(sim * 100)}% match`; match = sim >= 0.8;
+            }
+          }
+          setHeard(h);
+          s.ok = match ? s.ok + 1 : 0;
+          if (s.ok >= 3) {
+            const took = (now - s.shownAt) / 1000;
+            setTimes((ts) => ts.concat([took]));
+            s.i += 1; s.ok = 0; s.shownAt = now; setIdx(s.i);
+            if (s.i >= tg.length) { stop(); return; }
+          }
+        }
+        s.raf = requestAnimationFrame(tick);
+      };
+      ref.current.raf = requestAnimationFrame(tick);
+    } catch (e) { setErr(_micErr(e)); stop(); }
+  };
+  const done = idx >= tg.length && times.length;
+  const avg = times.length ? times.reduce((p, q) => p + q, 0) / times.length : 0;
+  void names;
+  return (
+    <div style={{ marginTop: 8, padding: 10, border: `1px dashed ${C.cyan}`, borderRadius: 8 }}>
+      {!tg.length ? <span>No notes in these bars.</span> : done ? (
+        <span style={{ color: C.green }}>✓ All {tg.length} targets · average {avg.toFixed(2)} s each · slowest {Math.max(...times).toFixed(2)} s</span>
+      ) : (
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10 }}>
+          <span>next</span>
+          <b style={{ fontFamily: "'Space Mono', monospace", fontSize: 28, color: C.chord }}>{label(tg[idx])}</b>
+          {tg[idx + 1] && <span>then {label(tg[idx + 1])}</span>}
+          <span>{idx + 1}/{tg.length}</span>
+          {listening && <span style={{ color: C.cyan }}>heard: {heard || "…"}</span>}
+          <button onClick={listening ? stop : start} style={{ ...chip(C), padding: "4px 12px", borderColor: listening ? C.green : C.border, color: listening ? C.green : C.amber }}>{listening ? "■ Stop" : "🎤 Start"}</button>
+          {!listening && idx > 0 && <button onClick={() => { setIdx(0); setTimes([]); }} style={{ ...chip(C), padding: "4px 10px" }}>restart</button>}
+        </div>
+      )}
+      {err && <div style={{ color: C.red, marginTop: 6 }}>{err}</div>}
+    </div>
+  );
+}
+
+/* ---- WO-2 · Live chords (mic) + chord trainer -----------------------------------
+ * The mic through the pure createLiveChordTracker: a median over the last frames and a
+ * hysteresis switch (a new chord must win twice, by a margin, after the current one has been
+ * held 0.4 s), so a strum can't flicker the readout. Capo shows the SHAPE to play. The trainer
+ * shows a target chord and times how long it takes until the tracker hears it, held. */
+const _LC_SETS = { open: "C G D A E Am Em Dm F", jazz: "Cmaj7 Dm7 G7 Am7 Fmaj7 Bm7♭5 E7", blues: "A7 D7 E7" };
+function LiveChords({ C, useSharp }) {
+  const [listening, setListening] = useState(false);
+  const [err, setErr] = useState("");
+  const [out, setOut] = useState(null);
+  const [hist, setHist] = useState([]);
+  const [capo, setCapo] = useState(0);
+  const [vocab, setVocab] = useState("chart");
+  const [trainer, setTrainer] = useState(false);
+  const [setName, setSetName] = useState("open");
+  const [custom, setCustom] = useState("");
+  const [target, setTarget] = useState(null);
+  const [stats, setStats] = useState({ n: 0, total: 0, last: null });
+  const [level, setLevel] = useState(0);
+  const ref = useRef({});
+  const pool = (setName === "custom" ? custom : _LC_SETS[setName]).split(/[\s,]+/).filter(Boolean);
+  const shape = (sym) => (sym && capo ? transposeSymbol(sym, -capo, useSharp) : sym);
+  const stop = () => { const s = ref.current; if (s.raf) cancelAnimationFrame(s.raf); if (s.mic) s.mic.stop(); ref.current = {}; setListening(false); setLevel(0); };
+  useEffect(() => stop, []); // eslint-disable-line
+  const nextTarget = (prev) => { const c = pool.filter((x) => x !== prev); return c.length ? c[Math.floor(Math.random() * c.length)] : pool[0] || null; };
+  const norm = (s) => (s || "").replace("♭", "b").replace("♯", "#");
+  const start = async () => {
+    setErr(""); setHist([]);
+    try {
+      const mic = await _micStart(8192);
+      const tracker = createLiveChordTracker({ vocabulary: vocab, useSharp });
+      const t0 = performance.now();
+      ref.current = { mic, tracker, t0 };
+      setListening(true);
+      if (trainer) { setTarget({ sym: nextTarget(null), at: performance.now() }); setStats({ n: 0, total: 0, last: null }); }
+      const tick = () => {
+        const s = ref.current; if (!s.mic) return;
+        const now = performance.now();
+        if (now - (s.last || 0) > 50) {
+          s.last = now;
+          const x = s.mic.read(), e = _rms(x);
+          const r = s.tracker.push(pcmToChroma(x, s.mic.sr, { fftSize: 8192 }), (now - s.t0) / 1000, e);
+          setOut(r); setLevel(Math.min(1, e * 8));
+          if (r.changed && r.symbol) setHist((h) => h.concat([{ sym: r.symbol, t: (now - s.t0) / 1000 }]).slice(-8));
+          s.onFrame && s.onFrame(r, now);
+        }
+        s.raf = requestAnimationFrame(tick);
+      };
+      ref.current.raf = requestAnimationFrame(tick);
+    } catch (e) { setErr(_micErr(e)); stop(); }
+  };
+  // trainer: success when the heard SHAPE equals the target, held ≥ 0.4 s
+  useEffect(() => {
+    if (!trainer || !target || !out || !out.symbol) return;
+    if (norm(shape(out.symbol)) === norm(target.sym) && out.stableFor >= 0.4 && !target.hit) {
+      const took = (performance.now() - target.at) / 1000;
+      setStats((st) => ({ n: st.n + 1, total: st.total + took, last: took }));
+      setTarget({ ...target, hit: true });
+      setTimeout(() => setTarget((t) => ({ sym: nextTarget(t && t.sym), at: performance.now() })), 700);
+    }
+  }, [out, trainer, target]); // eslint-disable-line
+  const sym = out && out.symbol ? shape(out.symbol) : null;
+  return (
+    <section className="panel-rise" style={{ position: "relative", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 20, maxWidth: 640, margin: "0 auto" }}>
+      <SectionLabel C={C}>LIVE CHORDS · microphone → chord, with hysteresis</SectionLabel>
+      {trainer && target && (
+        <div style={{ textAlign: "center", marginBottom: 10, fontSize: 12, color: C.dim }}>
+          play <b style={{ fontFamily: "'Space Mono', monospace", fontSize: 30, color: target.hit ? C.green : C.amber }}>{target.sym}</b>{target.hit ? " ✓" : ""}
+          <div style={{ marginTop: 4 }}>{stats.n} right · avg {stats.n ? (stats.total / stats.n).toFixed(2) : "—"} s{stats.last != null ? ` · last ${stats.last.toFixed(2)} s` : ""}</div>
+        </div>
+      )}
+      <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: "26px 16px", textAlign: "center", marginBottom: 12 }}>
+        <div style={{ fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: 72, lineHeight: 1, color: sym ? C.chord : C.dim }}>{sym || (listening ? "…" : "—")}</div>
+        {capo > 0 && sym && <div style={{ marginTop: 6, fontSize: 11, color: C.dim }}>shape with capo {capo} · sounds {out.symbol}</div>}
+        {out && out.alternatives && out.alternatives.length > 0 && sym && <div style={{ marginTop: 8, fontSize: 11, color: C.dim }}>or {out.alternatives.map((a) => `${shape(a.symbol)} ${Math.round(a.confidence * 100)}%`).join(" · ")}</div>}
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, letterSpacing: 2, color: C.dim, marginBottom: 4 }}><span>CONFIDENCE</span><span>{out && out.symbol ? `${Math.round(out.confidence * 100)}% · held ${out.stableFor.toFixed(1)} s` : "—"}</span></div>
+      <div style={{ height: 8, background: C.bg, borderRadius: 8, border: `1px solid ${C.border}`, overflow: "hidden", marginBottom: 6 }}><div style={{ width: `${(out && out.symbol ? out.confidence : 0) * 100}%`, height: "100%", background: C.cyan, transition: "width .15s" }} /></div>
+      <div style={{ height: 4, background: C.bg, borderRadius: 4, overflow: "hidden", marginBottom: 12 }}><div style={{ width: `${level * 100}%`, height: "100%", background: C.green }} /></div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, minHeight: 28, marginBottom: 12 }}>
+        {hist.map((h, i) => <span key={i} style={{ ...chip(C), padding: "3px 9px", color: i === hist.length - 1 ? C.chord : C.dim }}>{shape(h.sym)}</span>)}
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, justifyContent: "center", fontSize: 11, color: C.dim }}>
+        <button onClick={listening ? stop : start} style={{ ...toggle(C), flex: "none", padding: "8px 22px", fontSize: 14, borderColor: listening ? C.green : C.border, color: listening ? C.green : C.text }}>{listening ? "■ Stop" : "🎤 Listen"}</button>
+        <span>capo</span>
+        <button onClick={() => setCapo((c) => Math.max(0, c - 1))} style={{ ...chip(C), padding: "3px 8px" }}>−</button>
+        <b style={{ minWidth: 14, textAlign: "center", color: capo ? C.amber : C.dim }}>{capo}</b>
+        <button onClick={() => setCapo((c) => Math.min(9, c + 1))} style={{ ...chip(C), padding: "3px 8px" }}>+</button>
+        <select value={vocab} disabled={listening} onChange={(e) => setVocab(e.target.value)} style={{ ...chip(C), padding: "3px 6px", background: C.raised, color: C.dim }}>
+          <option value="chart">Pro names</option><option value="basic">Basic names</option><option value="lite">Lite names</option>
+        </select>
+        <button onClick={() => { setTrainer((t) => !t); setTarget(null); }} disabled={listening} style={{ ...chip(C), padding: "3px 9px", borderColor: trainer ? C.amber : C.border, color: trainer ? C.amber : C.dim }}>🏋 Chord trainer</button>
+        {trainer && <select value={setName} disabled={listening} onChange={(e) => setSetName(e.target.value)} style={{ ...chip(C), padding: "3px 6px", background: C.raised, color: C.dim }}>
+          <option value="open">open chords</option><option value="jazz">jazz ii–V</option><option value="blues">blues</option><option value="custom">my chords…</option>
+        </select>}
+        {trainer && setName === "custom" && <input value={custom} disabled={listening} onChange={(e) => setCustom(e.target.value)} placeholder="C G Am F" style={{ width: 140, background: C.raised, color: C.text, border: `1px solid ${C.border}`, borderRadius: 6, padding: "4px 6px", fontFamily: "inherit", fontSize: 11 }} />}
+      </div>
+      {err && <div style={{ marginTop: 12, color: C.red, fontSize: 12, textAlign: "center" }}>{err}</div>}
+      <div style={{ marginTop: 14, fontSize: 11, color: C.dim, lineHeight: 1.6, textAlign: "center" }}>
+        Strum and let it ring — the readout changes only when a new chord wins twice in a row and the last one has held for 0.4 s. Nothing leaves your device. Best with one instrument in a quiet room.
+      </div>
+    </section>
+  );
+}
+
 /* ---- WO-1 · note-level correction editor --------------------------------------
  * Three synchronised panes over ONE horizontal scroller: a chord/bar ruler, a piano roll
  * (x = time, y = pitch; drag a note to move it, drag its right edge to change its length)
@@ -3698,7 +4058,7 @@ function AudioImport({ C, useSharp }) {
                 title={(name || "Vocals") + (voiceCount > 1 ? ` · voice ${voiceIdx + 1}/${voiceCount}` : " · voices")}
                 meta={`${mlDisplayScore.bars.length} bars · from ML notes${voiceCount > 1 ? ` · voice ${voiceIdx + 1} of ${voiceCount}` : ""}`}
                 C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey="" onPick={() => {}}
-                getAudio={() => (ref.current.cur ? { samples: ref.current.cur, sr: ref.current.sr } : null)} />
+                getAudio={() => (ref.current.cur ? { samples: ref.current.cur, sr: ref.current.sr } : null)} getBuffer={() => ref.current.audioBuf || null} />
             : <div style={{ fontSize: 11, color: C.dim, padding: 8 }}>Voice {voiceIdx + 1} of {voiceCount} — no notes fell into this slot on this stem.</div>}
         </div>
       )}
@@ -3731,7 +4091,7 @@ function AudioImport({ C, useSharp }) {
           <ChartPanel score={gtrScore} title={(name || "Guitar") + " · tab"}
             meta={`${gtrScore.bars.length} bars · ${gtrNotes.length} notes · from the guitar ML model · ${guitarTuning(gtrTuning).name}${gtrCapo ? ` · capo ${gtrCapo}` : ""}`}
             C={C} useSharp={useSharp} overrides={gtrOvr} setOverrides={setGtrOvr} selKey="" onPick={() => {}} autoSimplify={false} defaultView="tab"
-            getAudio={() => (ref.current.mono ? { samples: ref.current.mono, sr: ref.current.sr } : null)} />
+            getAudio={() => (ref.current.mono ? { samples: ref.current.mono, sr: ref.current.sr } : null)} getBuffer={() => ref.current.audioBuf || null} />
         </div>
       )}
 
@@ -3760,7 +4120,7 @@ function AudioImport({ C, useSharp }) {
           </div>
           <ChordReview events={raw} C={C} fmt={fmt} onSeek={(t) => play(t)} onCommit={commitChoices} auto={autoPick} onAuto={toggleAuto} />
           <ChartPanel score={audioScore} vocabPicker={false} title={name || "Audio stem"} meta={`${audioScore.bars.length} bars · ♩=${bg.grid.follow ? "~" + Math.round(bpm) + " (follows the performance)" : +bpm.toFixed(1)} · from audio`} C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey="" onPick={() => {}}
-            getAudio={() => (ref.current.cur ? { samples: ref.current.cur, sr: ref.current.sr } : null)} />
+            getAudio={() => (ref.current.cur ? { samples: ref.current.cur, sr: ref.current.sr } : null)} getBuffer={() => ref.current.audioBuf || null} />
           <div style={{ fontSize: 11, color: C.dim, marginTop: 10, lineHeight: 1.6 }}>
             Decoded with <b>SynHarmonics v2</b> (note-level NNLS transcription, tuning compensation, inversions + slash chords, calibrated confidence). Faded chords with a <b style={{ color: C.amber }}>?</b> are the uncertain ones — fix them from the review list or <b>✎ Edit</b>, check the bar lines with <b>🎧 Check by ear</b>, then <b>CSMPN</b> / <b>→ Chord Sheet Maker Pro</b> to send it on. Dense voicings / heavy bleed still mislabel.
           </div>

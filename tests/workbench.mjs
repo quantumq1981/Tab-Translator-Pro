@@ -192,5 +192,125 @@ section("WO-1 ScoreEdit layer");
   expect(/editUndo\(/.test(uiSrc) && /editRedo\(/.test(uiSrc), "the editor has undo/redo");
 }
 
+/* ============================================================================
+ *  WO-2 — practice & real-time coach
+ * ========================================================================== */
+section("WO-2 practice");
+{
+  const cents = (f, ref) => 1200 * Math.log2(f / ref);
+  const tone = (f, sec, sr, a = 0.5) => { const x = new Float32Array(Math.round(sec * sr)); for (let i = 0; i < x.length; i++) x[i] = a * Math.sin(2 * Math.PI * f * i / sr); return x; };
+  const pitchAt = (x, sr) => { const mid = x.subarray(Math.floor(x.length / 2) - 2048, Math.floor(x.length / 2) + 2048); return eng.detectPitch(mid, sr).freq; };
+  // WSOLA: 1 s of A4 at 0.6× → 1.667 s, still A4
+  const sr = 44100, a4 = tone(440, 1, sr);
+  const slow = eng.timeStretch(a4, sr, 0.6);
+  expect(Math.abs(slow.length / sr - 1 / 0.6) < 0.01, `0.6× stretch: 1 s → ${(slow.length / sr).toFixed(3)} s (1.667)`);
+  const fs = pitchAt(slow, sr);
+  expect(Math.abs(cents(fs, 440)) <= 5, `0.6× keeps the pitch: ${fs.toFixed(2)} Hz (${cents(fs, 440).toFixed(2)}¢, ±5¢)`);
+  const fast = eng.timeStretch(a4, sr, 1.25);
+  expect(Math.abs(fast.length / sr - 0.8) < 0.01 && Math.abs(cents(pitchAt(fast, sr), 440)) <= 5, "1.25× shortens to 0.8 s at the same pitch");
+  // pitch shift +2 semitones at the original speed → B4, same length
+  const up = eng.timeStretch(a4, sr, 1, { pitchSemitones: 2 }), fu = pitchAt(up, sr), want = 440 * Math.pow(2, 2 / 12);
+  expect(Math.abs(up.length - a4.length) <= 1 && Math.abs(cents(fu, want)) <= 5, `+2 st pitch shift: ${fu.toFixed(2)} Hz vs ${want.toFixed(2)} (${cents(fu, want).toFixed(2)}¢), length kept`);
+  const both = eng.timeStretch(a4, sr, 0.75, { pitchSemitones: -3 }), fb = pitchAt(both, sr), wb = 440 * Math.pow(2, -3 / 12);
+  expect(Math.abs(both.length / sr - 1 / 0.75) < 0.01 && Math.abs(cents(fb, wb)) <= 5, `0.75× and −3 st together (${cents(fb, wb).toFixed(2)}¢)`);
+  // a stereo "music" loop (C-major triad + a little noise, panned) at 0.5×: no pitch change, channels stay aligned
+  const L = new Float32Array(sr * 2), R = new Float32Array(sr * 2); let seed = 7; const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647 - 0.5);
+  for (let i = 0; i < L.length; i++) { const t = i / sr, ch = 0.3 * (Math.sin(2 * Math.PI * 261.63 * t) + Math.sin(2 * Math.PI * 329.63 * t) + Math.sin(2 * Math.PI * 392 * t)) / 3; L[i] = ch + 0.02 * rnd(); R[i] = 0.7 * ch + 0.02 * rnd(); }
+  const [sl, srr] = eng.timeStretchChannels([L, R], sr, 0.5);
+  const chOf = (x) => eng.pcmToChroma(x.subarray(sr, sr + 8192), sr);
+  const cs = chOf(sl);
+  expect(sl.length === srr.length && Math.abs(sl.length / sr - 4) < 0.02 && cs[0] > 0.6 && cs[4] > 0.4 && cs[7] > 0.4 && Math.max(cs[1], cs[3], cs[6], cs[10]) < 0.3, "stereo 0.5×: both channels 4 s, the chord's pitch classes unchanged");
+  expect(eng.timeStretch(a4, sr, 1) !== a4 && eng.timeStretch(a4, sr, 1).length === a4.length, "rate 1 = an untouched copy");
+
+  // loop + count-in on a fixed-tempo chart: 2 bars at 100 bpm
+  const chart = { timeSig: [4, 4], tempo: 100, bars: [1, 2, 3, 4].map((n) => ({ number: n, timeSig: [4, 4], events: [{ symbol: "C", midis: [60, 64, 67], beat: 0, durBeats: 4, qbeat: 0, qdur: 4 }] })) };
+  const reg = eng.loopRegion(chart, { startBar: 2, endBar: 3, bpm: 100 });
+  expect(Math.abs(reg.startSec - 2.4) < 1e-9 && Math.abs(reg.endSec - 7.2) < 1e-9, `loop bars 2–3 at 100 bpm: ${reg.startSec}–${reg.endSec} s`);
+  const clicks = eng.clickTimes(reg, { countInBars: 1 });
+  const ci = clicks.filter((c) => c.countIn), main = clicks.filter((c) => !c.countIn);
+  expect(ci.length === 4 && Math.abs(ci[0].t + 2.4) < 1e-9 && Math.abs(ci[3].t + 0.6) < 1e-9 && ci[0].accent === 2, "count-in is exactly one bar (4 clicks, −2.4 … −0.6 s, downbeat accented)");
+  expect(main.length === 8 && main.every((c, i) => Math.abs(c.t - i * 0.6) < 0.01) && main[4].accent === 2, "the loop's clicks sit on the beat grid within ±10 ms");
+  const r68 = eng.loopRegion({ ...chart, bars: [{ number: 1, timeSig: [6, 8], events: [] }] }, { bpm: 120 });
+  expect(eng.clickTimes(r68).map((c) => c.accent).join("") === "200100", "6/8 clicks accent beats 1 and 4");
+  // a tempo-mapped audio chart: the loop follows the recording's clock
+  const aud = eng.audioEventsToScore([{ symbol: "C", midis: [60, 64, 67], startSec: 1.0, durSec: 2.2 }, { symbol: "G", midis: [55, 59, 62], startSec: 3.2, durSec: 2.2 }], { timeline: { times: [1.0, 1.5, 2.1, 2.6, 3.2, 3.7, 4.3, 4.8, 5.4], positions: [0, 1, 2, 3, 4, 5, 6, 7, 8] } });
+  const ra = eng.loopRegion(aud, { startBar: 2, endBar: 2 });
+  expect(Math.abs(ra.startSec - 3.2) < 0.02 && Math.abs(ra.endSec - 5.4) < 0.05, `an audio chart's loop lands on the recording's bar lines (${ra.startSec.toFixed(2)}–${ra.endSec.toFixed(2)} s)`);
+  const wav = eng.clickTrackWav(chart, { bpm: 100, sampleRate: 22050 });
+  expect(wav && String.fromCharCode(...wav.subarray(0, 4)) === "RIFF" && wav.length > 44 + 22050 * 2 * 9, "clickTrackWav writes a WAV of the whole chart");
+  const syn = eng.renderScorePcm(chart, { startBar: 1, endBar: 1, bpm: 100, sampleRate: 16000 });
+  const sch = eng.pcmToChroma(syn.subarray(4000, 8096), 16000);
+  expect(Math.abs(syn.length / 16000 - 2.7) < 0.05 && sch[0] > 0.5 && sch[4] > 0.4 && sch[7] > 0.3 && sch[2] < 0.2, "renderScorePcm synthesises the chart's chord");
+  expect(eng.renderScorePcm(chart, { startBar: 1, endBar: 1, bpm: 100, sampleRate: 16000, transpose: 2 }).length === syn.length, "renderScorePcm transposes without changing length");
+}
+
+{ /* live chord tracker: 16 bars of C–G–Am–F, 100–140 bpm, strummed */
+  const sr = 16000, prog = [[48, 52, 55, 60, 64], [43, 47, 50, 55, 59], [45, 52, 57, 60, 64], [41, 48, 53, 57, 60]], names = ["C", "G", "Am", "F"];
+  for (const bpm of [100, 140]) {
+    const bar = (60 / bpm) * 4, total = 16 * bar + 1, x = new Float32Array(Math.round(total * sr));
+    for (let b = 0; b < 16; b++) for (let k = 0; k < 4; k++) {
+      const t0 = b * bar + (k * bar) / 4;
+      for (const m of prog[b % 4]) {
+        const f = 440 * Math.pow(2, (m - 69) / 12), i0 = Math.round(t0 * sr), n = Math.round((bar / 4) * sr);
+        for (let i = 0; i < n && i0 + i < x.length; i++) { const t = i / sr, e = Math.exp(-t * 3); x[i0 + i] += 0.08 * e * (Math.sin(2 * Math.PI * f * t) + 0.5 * Math.sin(4 * Math.PI * f * t) + 0.25 * Math.sin(6 * Math.PI * f * t)); }
+      }
+    }
+    const tr = eng.createLiveChordTracker({ vocabulary: "chart" }), hop = 0.05, N = 4096, labels = [];
+    for (let t = N / sr; t < total; t += hop) {
+      const end = Math.round(t * sr), fr = x.subarray(end - N, end);
+      let e = 0; for (let i = 0; i < fr.length; i++) e += fr[i] * fr[i];
+      const out = tr.push(eng.pcmToChroma(fr, sr), t, Math.sqrt(e / N));
+      labels.push({ t, symbol: out.symbol });
+    }
+    const at = (sec) => labels.reduce((a, l) => (l.t <= sec ? l : a), labels[0]).symbol;
+    const right = Array.from({ length: 16 }, (_, b) => at(b * bar + bar * 0.75) === names[b % 4]).filter(Boolean).length;
+    const changes = tr.history.filter((h) => h.symbol).length;
+    const lat = tr.history.filter((h) => h.symbol).map((h) => { const b = Math.round(h.startSec / bar); return h.startSec - b * bar; }).filter((d) => d >= 0 && d < bar / 2).sort((a, b) => a - b);
+    const medLat = lat[lat.length >> 1];
+    expect(right === 16, `live tracker at ${bpm} bpm: ${right}/16 bars labelled right`);
+    expect(changes <= 17, `live tracker at ${bpm} bpm: ${changes} chord changes for 16 bars (≤ 1 spurious)`);
+    expect(medLat <= 0.3, `live tracker at ${bpm} bpm: median latency ${(medLat * 1000).toFixed(0)} ms (≤ 300)`);
+  }
+  // noise → no chord; silence → no chord
+  const tr = eng.createLiveChordTracker();
+  let seed = 3; const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647 - 0.5);
+  let last = null;
+  for (let k = 0; k < 40; k++) { const fr = new Float32Array(4096); for (let i = 0; i < fr.length; i++) fr[i] = 0.3 * rnd(); last = tr.push(eng.pcmToChroma(fr, 16000), k * 0.05, 0.08); }
+  expect(last.symbol === null, `white noise reads as no chord (got ${last.symbol})`);
+  const tr2 = eng.createLiveChordTracker(); let s2 = null; for (let k = 0; k < 10; k++) s2 = tr2.push(new Array(12).fill(0), k * 0.05, 0);
+  expect(s2.symbol === null, "silence reads as no chord");
+}
+
+{ /* practiceCompare */
+  const scale = [60, 62, 64, 65, 67, 69, 71, 72, 71, 69, 67, 65, 64, 62, 60, 62, 64, 65, 67, 69];
+  const exp = scale.map((m, i) => ({ startSec: i * 0.5, durSec: 0.5, midis: [m] }));
+  const heard = { notes: scale.map((m, i) => ({ midi: i === 4 || i === 13 ? m + 1 : m, startSec: i * 0.5 + (i % 3 ? 0.03 : -0.04), durSec: 0.45 })) };
+  const r = eng.practiceCompare(exp, heard);
+  expect(r.hits === 18 && r.misses === 2 && r.extras === 2 && r.wrongPitch === 2, `scale with 10% wrong notes: ${r.hits} hits, ${r.misses} misses, ${r.extras} extras, ${r.wrongPitch} wrong pitch`);
+  expect(Math.abs(r.meanOffsetMs - ((11 * 30 - 7 * 40) / 18)) < 0.5 && r.score === 90, `timing offset ${r.meanOffsetMs.toFixed(1)} ms, score ${r.score}`);
+  const late = eng.practiceCompare(exp, { notes: scale.map((m, i) => ({ midi: m, startSec: i * 0.5 + 0.35, durSec: 0.4 })) });
+  expect(late.hits === 0 && late.misses === 20, "notes outside the timing window are misses");
+  expect(eng.practiceCompare(exp, { notes: scale.map((m, i) => ({ midi: m + 12, startSec: i * 0.5, durSec: 0.4 })) }, { octave: true }).hits === 20, "octave-tolerant mode accepts the octave");
+  // end to end: synthesise the expected line, transcribe it with YIN, score it
+  const line = { timeSig: [4, 4], tempo: 120, bars: [0, 1].map((b) => ({ number: b + 1, timeSig: [4, 4], events: [0, 1, 2, 3].map((k) => ({ symbol: "", midis: [scale[b * 4 + k]], beat: k, durBeats: 1, qbeat: k, qdur: 1 })) })) };
+  const pcm = eng.renderScorePcm(line, { bpm: 120, sampleRate: 16000 });
+  const tx = eng.transcribeMonophonic(pcm, 16000, { minClarity: 0.6 });
+  const tg = eng.practiceTargets(line, eng.loopRegion(line, { bpm: 120 }), 120);
+  const e2e = eng.practiceCompare(tg, { notes: tx }, { tolSec: 0.15 });
+  expect(tg.length === 8 && e2e.hits >= 7, `synthesised line → YIN → practiceCompare: ${e2e.hits}/8 hits`);
+  // chords mode
+  const cExp = [{ startSec: 0, durSec: 1, midis: [60, 64, 67] }, { startSec: 1, durSec: 1, midis: [55, 59, 62] }];
+  const frames = []; for (let t = 0; t < 2; t += 0.1) { const c = new Array(12).fill(0); (t < 1 ? [0, 4, 7] : [9, 0, 4]).forEach((p) => (c[p] = 1)); frames.push({ t, chroma: c }); }
+  const rc = eng.practiceCompare(cExp, { frames });
+  expect(rc.mode === "chords" && rc.hits === 1 && rc.misses === 1, "chords mode: the C matches, an Am played over the G does not");
+}
+
+{ /* WO-2 UI contracts */
+  expect(/function PracticePlayer\(/.test(uiSrc) && /timeStretchChannels/.test(uiSrc) && /clickTimes\(/.test(uiSrc) && /loop = true/.test(uiSrc), "UI ships a PracticePlayer (stretch, clicks, seamless loop)");
+  expect(/function LiveChords\(/.test(uiSrc) && /createLiveChordTracker\(/.test(uiSrc) && /\["live", "Live chords/.test(uiSrc), "UI ships a Live chords mode on the tracker");
+  expect(/function WaitForMe\(/.test(uiSrc) && /practiceTargets\(/.test(uiSrc), "UI ships the wait-for-me coach on the loop's targets");
+  expect(/clickTrackWav\(/.test(uiSrc), "UI exports a click-track WAV");
+}
+
 console.log(`\nworkbench: ${passes} passed, ${failures} failed`);
 if (failures) process.exit(1);

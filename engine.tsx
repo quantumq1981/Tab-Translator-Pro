@@ -9316,6 +9316,13 @@ function scoreTimeMap(score, bpm) {
     starts.push(tick); secs.push(sec); spt.push(q); tick += len; sec += len * q;
   });
   const lastQ = spt.length ? spt[spt.length - 1] : 60 / tempo / EDIT_PPQ;
+  // an audio chart that carries its tracked beat TIMELINE (beats from bar 1 → recording seconds):
+  // the exact beats, not the simplified tempo map, so loops and the spectrogram sit on the real beats
+  const tl = score && score.timeline && score.timeline.times && score.timeline.times.length >= 2 && !(bpm > 0 && score.tempo > 0 && Math.abs(bpm - score.tempo) > 1e-6) ? score.timeline : null;
+  if (tl) {
+    const tpb0 = EDIT_PPQ * 4 / ((score.timeSig || [4, 4])[1]);
+    return { duration: timelineSecondsAt(tl, tick / tpb0), totalTicks: tick, tickToSec: (t) => timelineSecondsAt(tl, t / tpb0), secToTick: (s2) => timelineBeatsAt(tl, s2) * tpb0 };
+  }
   const idxOf = (arr, v) => { let lo = 0, hi = arr.length - 1; while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (arr[mid] <= v) lo = mid; else hi = mid - 1; } return lo; };
   return {
     duration: sec, totalTicks: tick,
@@ -9379,6 +9386,265 @@ function describeScoreEdit(edit) {
   say("note.string", "string changed", "strings changed"); say("note.tech", "technique set", "techniques set");
   say("chord.refinger", "chord re-fingered", "chords re-fingered"); say("symbol.lock", "chord locked", "chord locks");
   return parts.join(" · ");
+}
+
+/* ============================================================================
+ *  WORKBENCH · WO-2 — PRACTICE: slow-down, loop, metronome, live chords, coach
+ *  ---------------------------------------------------------------------------
+ *  All pure DSP (no Web Audio, no DOM): the UI hands PCM in and plays PCM out, so
+ *  every piece is headless-tested with synthesized audio.
+ *
+ *  timeStretchChannels / timeStretch — WSOLA (Verhelst & Roelands 1993): overlap-add
+ *    Hann frames at a fixed SYNTHESIS hop, reading the input at hop × rate, each frame
+ *    nudged within ±12 ms to the position whose waveform best continues the previous
+ *    frame (normalised cross-correlation, coarse search on a 4× decimated signal then a
+ *    full-rate refine). Pitch is untouched by construction; a pitch shift is a stretch by
+ *    2^(s/12) followed by the Kaiser-sinc resampler. Stereo channels share ONE set of
+ *    frame positions (found on the mix), so the image doesn't smear.
+ *  loopRegion / clickTimes / renderClicks / clickTrackWav — loop points and metronome
+ *    clicks on the SCORE's own clock (scoreTimeMap: tempo map + recording offset), so a
+ *    loop over an audio chart lands on the recording's real bar lines.
+ *  renderScorePcm — a tiny additive synth, for looping a chart that has no recording.
+ *  practiceCompare — what you played vs what's written: hits / misses / extras /
+ *    timing offsets (notes), or per-chord chroma match (chords).
+ *  createLiveChordTracker — the live-chord readout: per-frame template match against the
+ *    chart vocabulary, a median over the last frames, and HYSTERESIS (a new chord must win
+ *    two frames in a row by a margin and the current one must have been held ≥ 0.4 s), so
+ *    a strum or a passing note can't flicker the display.
+ * ------------------------------------------------------------------------- */
+function _wsolaPositions(mono, sampleRate, tempo, outLen, N, Hs) {
+  const L = mono.length, tol = Math.max(8, Math.round(sampleRate * 0.012)), M = N >> 1, D = 4;
+  const frames = Math.ceil(outLen / Hs) + 1, pos = new Int32Array(frames);
+  pos[0] = 0;
+  for (let k = 1; k < frames; k++) {
+    const nominal = Math.round(k * Hs * tempo), natural = pos[k - 1] + Hs;
+    const lo = Math.max(0, nominal - tol), hi = Math.min(L - N, nominal + tol);
+    if (hi < lo || natural + M > L) { pos[k] = Math.max(0, Math.min(L - N, nominal)); continue; }
+    const score = (p, step) => {
+      let dot = 0, e = 0;
+      for (let i = 0; i < M; i += step) { const a = mono[natural + i], b = mono[p + i]; dot += a * b; e += b * b; }
+      return e > 1e-12 ? dot / Math.sqrt(e) : -Infinity;
+    };
+    let best = Math.max(lo, Math.min(hi, nominal)), bs = -Infinity;
+    for (let p = lo; p <= hi; p += 2) { const s = score(p, D); if (s > bs) { bs = s; best = p; } }
+    const a = Math.max(lo, best - 2), b = Math.min(hi, best + 2);
+    bs = -Infinity; let fine = best;
+    for (let p = a; p <= b; p++) { const s = score(p, 1); if (s > bs) { bs = s; fine = p; } }
+    pos[k] = fine;
+  }
+  return pos;
+}
+/** Time-stretch (and optionally pitch-shift) several channels with shared frame positions.
+ *  rate = playback speed (0.5 = half speed, twice as long); opts.pitchSemitones shifts pitch
+ *  without changing the length. → Float32Array[] (same count as `channels`). */
+function timeStretchChannels(channels, sampleRate, rate = 1, opts = {}) {
+  const chs = (channels || []).filter(Boolean);
+  if (!chs.length) return [];
+  const L = Math.min(...chs.map((c) => c.length));
+  const r = Math.max(0.25, Math.min(4, rate || 1)), semis = opts.pitchSemitones || 0, p = Math.pow(2, semis / 12);
+  if (Math.abs(r - 1) < 1e-6 && !semis) return chs.map((c) => Float32Array.from(c.subarray ? c.subarray(0, L) : c.slice(0, L)));
+  let N = Math.round(sampleRate * (opts.frameSec || 0.042)); N += N & 1;
+  if (L < N * 2) return chs.map((c) => Float32Array.from(c));
+  const Hs = N >> 1, tempo = r / p, outLen = Math.round(L / tempo);
+  const mono = chs.length === 1 ? chs[0] : (() => { const m = new Float32Array(L); for (const c of chs) for (let i = 0; i < L; i++) m[i] += c[i] / chs.length; return m; })();
+  const pos = _wsolaPositions(mono, sampleRate, tempo, outLen, N, Hs);
+  const win = _hann(N), norm = new Float32Array(outLen + N);
+  for (let k = 0; k < pos.length; k++) { const o = k * Hs; for (let i = 0; i < N && o + i < norm.length; i++) norm[o + i] += win[i]; }
+  return chs.map((c) => {
+    const out = new Float32Array(outLen + N);
+    for (let k = 0; k < pos.length; k++) {
+      const o = k * Hs, s = pos[k];
+      for (let i = 0; i < N && o + i < out.length; i++) out[o + i] += (c[s + i] || 0) * win[i];
+    }
+    for (let i = 0; i < out.length; i++) out[i] = norm[i] > 1e-3 ? out[i] / norm[i] : 0;
+    const stretched = out.subarray(0, outLen);
+    if (!semis) return Float32Array.from(stretched);
+    const shifted = resampleTo(stretched, sampleRate * p, sampleRate);
+    const want = Math.round(L / r);
+    if (shifted.length === want) return shifted;
+    const fit = new Float32Array(want); fit.set(shifted.subarray(0, Math.min(want, shifted.length))); return fit;
+  });
+}
+function timeStretch(pcm, sampleRate, rate = 1, opts = {}) { return timeStretchChannels([pcm], sampleRate, rate, opts)[0] || new Float32Array(0); }
+
+/** A loop from bar `startBar` through bar `endBar` (bar numbers, inclusive) on the score's
+ *  clock (the recording's, for an audio chart). → { startSec, endSec, startBar, endBar, bars:[{number,startSec,beats,beatSec}] } */
+function loopRegion(score, opts = {}) {
+  const bars = (score && score.bars) || [];
+  if (!bars.length) return null;
+  const tm = scoreTimeMap(score, opts.bpm), L = scoreNoteList({ ...score, bars: bars.map((b) => ({ ...b, events: [] })) }).bars;
+  const nums = L.map((b) => b.number);
+  const a = Math.max(0, nums.indexOf(opts.startBar != null ? opts.startBar : nums[0]));
+  let b = nums.indexOf(opts.endBar != null ? opts.endBar : nums[nums.length - 1]); if (b < a) b = a;
+  const out = [];
+  for (let i = a; i <= b; i++) {
+    const bar = L[i], tpb = EDIT_PPQ * 4 / bar.timeSig[1], s = tm.tickToSec(bar.startTick), e = tm.tickToSec(bar.startTick + bar.lenTicks);
+    out.push({ number: bar.number, startSec: s, endSec: e, beats: bar.timeSig[0], beatSec: (tm.tickToSec(bar.startTick + tpb) - s), timeSig: bar.timeSig });
+  }
+  return { startSec: out[0].startSec, endSec: out[out.length - 1].endSec, startBar: out[0].number, endBar: out[out.length - 1].number, bars: out };
+}
+/** Metronome click times for a loop region (+ `countInBars` bars of count-in before it, at the
+ *  first bar's beat length). Times are relative to the region start (count-in clicks negative)
+ *  unless `absolute`. accent: 2 = downbeat, 1 = a compound-meter group (6/8 beat 4), 0 = beat. */
+function clickTimes(region, opts = {}) {
+  if (!region) return [];
+  const base = opts.absolute ? 0 : region.startSec, out = [];
+  const first = region.bars[0], n = Math.max(0, Math.round(opts.countInBars || 0));
+  const strong = (k, beats, den) => (k === 0 ? 2 : den === 8 && beats % 3 === 0 && k % 3 === 0 ? 1 : 0);
+  for (let c = n; c > 0; c--) for (let k = 0; k < first.beats; k++) out.push({ t: first.startSec - c * first.beats * first.beatSec + k * first.beatSec - base, accent: strong(k, first.beats, first.timeSig[1]), countIn: true });
+  for (const bar of region.bars) for (let k = 0; k < bar.beats; k++) out.push({ t: bar.startSec + k * bar.beatSec - base, accent: strong(k, bar.beats, bar.timeSig[1]), bar: bar.number, beat: k });
+  return out;
+}
+/** Clicks → PCM (a short damped sine: 1.6 kHz downbeat, 1.2 kHz group, 0.9 kHz beat). */
+function renderClicks(times, sampleRate, durSec, opts = {}) {
+  const n = Math.max(0, Math.ceil(durSec * sampleRate)), out = new Float32Array(n), gain = opts.gain != null ? opts.gain : 0.5;
+  const len = Math.round(sampleRate * 0.03), offset = opts.offsetSec || 0, scale = opts.timeScale || 1;
+  for (const c of times || []) {
+    const s0 = Math.round((c.t * scale + offset) * sampleRate), f = c.accent === 2 ? 1600 : c.accent === 1 ? 1200 : 900, g = gain * (c.accent === 2 ? 1 : 0.7);
+    for (let i = 0; i < len; i++) { const j = s0 + i; if (j < 0 || j >= n) continue; out[j] += g * Math.exp(-i / (len / 5)) * Math.sin((2 * Math.PI * f * i) / sampleRate); }
+  }
+  return out;
+}
+/** A click track WAV for the whole score (or a region), on the score's clock: drag it into a
+ *  DAW under the recording and the clicks sit on the tracked beats. */
+function clickTrackWav(score, opts = {}) {
+  const region = loopRegion(score, opts); if (!region) return null;
+  const sr = opts.sampleRate || 44100, absolute = !!opts.alignToRecording;
+  const times = clickTimes(region, { absolute, countInBars: opts.countInBars || 0 });
+  const lead = absolute ? 0 : (opts.countInBars || 0) * region.bars[0].beats * region.bars[0].beatSec;
+  const dur = (absolute ? region.endSec : region.endSec - region.startSec + lead) + 0.2;
+  return encodeWav16([renderClicks(times, sr, dur, { offsetSec: lead })], sr);
+}
+/** The chart itself as PCM (a small additive synth), from bar a to bar b on the score clock
+ *  minus its recording offset — for looping a chart that has no recording. opts: { startBar,
+ *  endBar, bpm, sampleRate, transpose, gain }. */
+function renderScorePcm(score, opts = {}) {
+  const region = loopRegion(score, opts); if (!region) return new Float32Array(0);
+  const sr = opts.sampleRate || 22050, tr = opts.transpose || 0, gain = opts.gain != null ? opts.gain : 0.25;
+  const dur = region.endSec - region.startSec, out = new Float32Array(Math.ceil((dur + 0.3) * sr));
+  const off = score && isFinite(score.audioOffset) ? score.audioOffset : 0;
+  const evs = scoreEventTimes(score, opts.bpm || score.tempo || 100).events;
+  for (const ev of evs) {
+    const st = ev.start + off - region.startSec; if (st < -1e-6 || st >= dur) continue;
+    const en = Math.min(dur, st + ev.dur), v = gain / Math.max(1, Math.sqrt(ev.midis.length));
+    for (const m0 of ev.midis) {
+      const f = 440 * Math.pow(2, (m0 + tr - 69) / 12), i0 = Math.round(st * sr), i1 = Math.round(en * sr), rel = Math.round(0.08 * sr);
+      for (let i = i0; i < Math.min(out.length, i1 + rel); i++) {
+        const t = (i - i0) / sr, env = Math.min(1, t / 0.008) * (i < i1 ? Math.exp(-t * 1.6) * 0.7 + 0.3 : Math.max(0, 1 - (i - i1) / rel) * 0.3);
+        const ph = 2 * Math.PI * f * t;
+        out[i] += v * env * (Math.sin(ph) + 0.35 * Math.sin(2 * ph) + 0.15 * Math.sin(3 * ph));
+      }
+    }
+  }
+  return out;
+}
+
+/* ---- chord templates on the chart vocabulary (shared by the tracker + the coach) ---- */
+function _chordTemplates(vocabulary = "chart", useSharp = true) {
+  const V = resolveChordVocabulary(vocabulary);
+  const qs = QUALITIES.filter((q) => !V || (V.allow.has(q.suffix) && !V.writeAs[q.suffix]));
+  const names = useSharp ? NOTE_SHARP : NOTE_FLAT, out = [];
+  for (let r = 0; r < 12; r++) for (const q of qs) {
+    const t = new Float64Array(12); for (const iv of q.intervals) t[(r + iv) % 12] = iv === 0 ? 1.15 : 1;
+    let n = 0; for (let i = 0; i < 12; i++) n += t[i] * t[i];
+    out.push({ key: `${r}:${q.suffix}`, root: r, suffix: q.suffix, symbol: names[r] + q.suffix, tones: q.intervals.length, rank: q.rank, t, norm: Math.sqrt(n) });
+  }
+  return out;
+}
+const _chromaCos = (c, tp) => { let d = 0, n = 0; for (let i = 0; i < 12; i++) { d += c[i] * tp.t[i]; n += c[i] * c[i]; } return n > 0 ? d / (Math.sqrt(n) * tp.norm) : 0; };
+const _chromaEntropy = (c) => { let s = 0; for (const v of c) s += Math.max(0, v); if (!(s > 0)) return 1; let h = 0; for (const v of c) { const p = Math.max(0, v) / s; if (p > 0) h -= p * Math.log(p); } return h / Math.log(12); };
+/** Score a chroma vector against chord templates → best first: [{ symbol, root, suffix, confidence }]. */
+function rankChordTemplates(chroma, templates) {
+  return templates.map((tp) => ({ tp, s: _chromaCos(chroma, tp) - 0.012 * Math.max(0, tp.tones - 3) - 0.0004 * tp.rank }))
+    .sort((a, b) => b.s - a.s).map(({ tp, s }) => ({ key: tp.key, symbol: tp.symbol, root: tp.root, suffix: tp.suffix, confidence: Math.max(0, Math.min(1, s)) }));
+}
+/** The live-chord tracker. push(chroma, tSec, energy?) → { symbol|null, confidence, alternatives,
+ *  stableFor, changed }. null symbol = no chord (silence / noise). History in `.history`. */
+function createLiveChordTracker(opts = {}) {
+  const tpl = _chordTemplates(opts.vocabulary || "chart", opts.useSharp !== false);
+  const K = opts.medianFrames || 3, confirm = opts.confirmFrames || 2, minHold = opts.minHoldSec != null ? opts.minHoldSec : 0.4;
+  const margin = opts.switchMargin != null ? opts.switchMargin : 0.05, minConf = opts.minConfidence != null ? opts.minConfidence : 0.62;
+  const flat = opts.flatEntropy != null ? opts.flatEntropy : 0.93, gateRel = opts.energyGate != null ? opts.energyGate : 0.06;
+  let hist = [], cur = null, cand = null, peak = 0;
+  const history = [];
+  const api = {
+    history,
+    reset() { hist = []; cur = null; cand = null; peak = 0; history.length = 0; },
+    push(chroma, t, energy) {
+      hist.push(Array.from(chroma)); if (hist.length > K) hist.shift();
+      const med = new Array(12); for (let i = 0; i < 12; i++) { const v = hist.map((h) => h[i]).sort((a, b) => a - b); med[i] = v[v.length >> 1]; }
+      const mx = Math.max(...med) || 1; for (let i = 0; i < 12; i++) med[i] /= mx;
+      if (energy != null) peak = Math.max(peak * 0.999, energy);
+      const quiet = energy != null && (energy < 1e-4 || energy < gateRel * peak);
+      const ranked = quiet ? [] : rankChordTemplates(med, tpl);
+      const best = !quiet && _chromaEntropy(med) < flat && ranked[0].confidence >= minConf ? ranked[0] : null;
+      const bestKey = best ? best.key : "nc";
+      const curConf = cur && cur.key !== "nc" ? (ranked.find((r) => r.key === cur.key) || { confidence: 0 }).confidence : 0;
+      let changed = false;
+      if (!cur) { cur = { key: bestKey, symbol: best ? best.symbol : null, since: t }; changed = true; }
+      else if (bestKey === cur.key) cand = null;
+      else {
+        cand = cand && cand.key === bestKey ? { ...cand, count: cand.count + 1 } : { key: bestKey, count: 1, best };
+        const strongEnough = bestKey === "nc" || !cur.symbol || (best && best.confidence >= curConf + margin);
+        if (cand.count >= confirm && t - cur.since >= minHold && strongEnough) { cur = { key: bestKey, symbol: best ? best.symbol : null, since: t }; cand = null; changed = true; }
+      }
+      if (changed && (!history.length || history[history.length - 1].symbol !== cur.symbol)) history.push({ symbol: cur.symbol, startSec: t });
+      const conf = cur.symbol ? (ranked.find((r) => r.key === cur.key) || { confidence: 0 }).confidence : 0;
+      return { symbol: cur.symbol, confidence: conf, alternatives: ranked.slice(0, 4).filter((r) => r.key !== cur.key).slice(0, 3), stableFor: t - cur.since, changed };
+    },
+  };
+  return api;
+}
+
+/** Compare what was played against what's written.
+ *  expected: [{ startSec, durSec, midis }]; heard: { notes:[{midi,startSec,durSec}] } (notes mode)
+ *  or { frames:[{ t, chroma }] } (chords mode). opts: { tolSec 0.2, octave (pitch class only), threshold 0.8 }.
+ *  → { mode, hits, misses, extras, wrongPitch, timingOffsets, accuracy, precision, f1, meanOffsetMs, score, detail } */
+function practiceCompare(expected, heard, opts = {}) {
+  const exp = (expected || []).filter((e) => e && e.midis && e.midis.length).slice().sort((a, b) => a.startSec - b.startSec);
+  const mode = opts.mode || (heard && heard.frames && !heard.notes ? "chords" : "notes");
+  if (mode === "chords") {
+    const thr = opts.threshold != null ? opts.threshold : 0.8, frames = (heard && heard.frames) || [], detail = [];
+    let hits = 0; const offs = [];
+    for (const e of exp) {
+      const pcs = [...new Set(e.midis.map((m) => ((m % 12) + 12) % 12))], t = new Float64Array(12); pcs.forEach((p) => (t[p] = 1));
+      const tp = { t, norm: Math.sqrt(pcs.length) };
+      const fs = frames.filter((f) => f.t >= e.startSec && f.t < e.startSec + e.durSec);
+      const avg = new Array(12).fill(0); fs.forEach((f) => f.chroma.forEach((v, i) => (avg[i] += v / fs.length)));
+      const sim = fs.length ? _chromaCos(avg, tp) : 0, ok = sim >= thr;
+      const first = fs.find((f) => _chromaCos(f.chroma, tp) >= thr);
+      if (ok) { hits++; if (first) offs.push(first.t - e.startSec); }
+      detail.push({ startSec: e.startSec, ok, similarity: sim });
+    }
+    const n = exp.length || 1;
+    return { mode, hits, misses: exp.length - hits, extras: 0, wrongPitch: 0, timingOffsets: offs, accuracy: hits / n, precision: hits / n, f1: hits / n, meanOffsetMs: offs.length ? (1000 * offs.reduce((a, b) => a + b, 0)) / offs.length : 0, score: Math.round((100 * hits) / n), detail };
+  }
+  const tol = opts.tolSec != null ? opts.tolSec : 0.2, oct = !!opts.octave;
+  const notes = ((heard && heard.notes) || []).slice().sort((a, b) => a.startSec - b.startSec), used = new Array(notes.length).fill(false);
+  const same = (a, b) => (oct ? ((a - b) % 12 + 12) % 12 === 0 : a === b);
+  const flat = []; exp.forEach((e) => e.midis.forEach((m) => flat.push({ midi: m, startSec: e.startSec })));
+  const offs = [], detail = []; let hits = 0, wrong = 0;
+  for (const e of flat) {
+    let bi = -1, bd = Infinity, near = false;
+    notes.forEach((h, i) => {
+      const d = Math.abs(h.startSec - e.startSec); if (d > tol) return; near = true;
+      if (used[i] || !same(h.midi, e.midi)) return;
+      if (d < bd) { bd = d; bi = i; }
+    });
+    if (bi >= 0) { used[bi] = true; hits++; offs.push(notes[bi].startSec - e.startSec); detail.push({ ...e, ok: true, offsetMs: Math.round(1000 * (notes[bi].startSec - e.startSec)) }); }
+    else { if (near) wrong++; detail.push({ ...e, ok: false, wrongPitch: near }); }
+  }
+  const misses = flat.length - hits, extras = used.filter((u) => !u).length;
+  const accuracy = flat.length ? hits / flat.length : 0, precision = notes.length ? hits / notes.length : 0;
+  const f1 = hits ? (2 * hits) / (2 * hits + misses + extras) : 0;
+  return { mode: "notes", hits, misses, extras, wrongPitch: wrong, timingOffsets: offs, accuracy, precision, f1, meanOffsetMs: offs.length ? (1000 * offs.reduce((a, b) => a + b, 0)) / offs.length : 0, score: Math.round(100 * f1), detail };
+}
+/** A loop region's written events as practice targets: [{ startSec, durSec, midis, symbol, key }]
+ *  on the score clock (recording seconds for an audio chart). */
+function practiceTargets(score, region, bpm) {
+  if (!score || !region) return [];
+  return scoreRecordingTimes(score, bpm || score.tempo).filter((e) => e.midis.length && e.start >= region.startSec - 1e-6 && e.start < region.endSec - 1e-6)
+    .map((e) => { const bar = score.bars.find((b) => b.number === e.bar), ev = bar && bar.events.find((x) => `${bar.number}.${x.beat}` === e.key); return { startSec: e.start, durSec: e.dur, midis: e.midis, symbol: ev ? ev.symbol : "", key: e.key }; });
 }
 
 export {
@@ -9768,4 +10034,15 @@ export {
   describeScoreEdit,
   scoreTimeMap,
   noteRollSpectrogram,
+  timeStretchChannels,
+  timeStretch,
+  loopRegion,
+  clickTimes,
+  renderClicks,
+  clickTrackWav,
+  renderScorePcm,
+  rankChordTemplates,
+  createLiveChordTracker,
+  practiceCompare,
+  practiceTargets,
 };
