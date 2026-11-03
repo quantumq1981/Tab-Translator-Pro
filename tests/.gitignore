@@ -3,3 +3,4 @@ package-lock.json
 .engine.generated.mjs
 bench/.cache/
 bench/.engine*.mjs
+.engine.workbench.mjs

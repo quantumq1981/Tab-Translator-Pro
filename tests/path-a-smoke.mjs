@@ -2261,10 +2261,10 @@ expect(uiSrc.includes('async function extractTokens'), "extractTokens (browser P
 expect(/function ChordVocabPicker/.test(uiSrc) && /function useChordVocab/.test(uiSrc) && /_usePref\(_VOCAB_KEY, "chart"/.test(uiSrc), "UI ships the chord-vocabulary picker, Chart by default");
 expect(/vocabulary: vocab, sixNine \}/.test(uiSrc) && /chartsFromStemsOffThread\(byRole, asr, \{ useSharp, vocabulary: vocab/.test(uiSrc), "the chord decode and the stem charts both pass the chosen vocabulary");
 expect(!/maxRank: 14/.test(uiSrc) && !/setSimple/.test(uiSrc), "the old △ Simple toggle (maxRank:14) is replaced by the picker");
-expect(/function useSixNine/.test(uiSrc) && /_usePref\(_SIX9_KEY, "maj9"/.test(uiSrc) && /vocabulary: vocab, sixNine \}/.test(uiSrc) && /vocabulary: vocab, sixNine, fullRate/.test(uiSrc), "the 6/9 → maj9/maj7/triad setting defaults to maj9 and reaches both decodes");
+expect(/function useSixNine/.test(uiSrc) && /_usePref\(_SIX9_KEY, "maj9"/.test(uiSrc) && /vocabulary: vocab, sixNine \}/.test(uiSrc) && /vocabulary: vocab, sixNine, kit: fullKit \? "full" : undefined, fullRate/.test(uiSrc), "the 6/9 → maj9/maj7/triad setting defaults to maj9 and reaches both decodes");
 expect(/function _usePref/.test(uiSrc) && /try \{ const x = localStorage\.getItem\(key\)/.test(uiSrc) && /try \{ localStorage\.setItem\(key, x\); \} catch/.test(uiSrc) && /_prefListeners/.test(uiSrc), "the vocabulary choices are shared live between pickers and remembered per device, guarded by try/catch");
 // every chart (PDF / GP / MusicXML / ML / guitar tab) is named by the same vocabulary
-expect(/respellScore\(transposeScore\(base, semis, useSharp\), vocab, \{ sixNine, useSharp \}\)/.test(uiSrc) && /vocabPicker && <ChordVocabPicker/.test(uiSrc), "ChartPanel names every chart with the shared vocabulary and shows the picker");
+expect(/respellScore\(transposeScore\(base, semis, useSharp\), lvl \? lvl\.vocabulary : vocab, \{ sixNine, useSharp \}\)/.test(uiSrc) && /vocabPicker && <ChordVocabPicker/.test(uiSrc), "ChartPanel names every chart with the shared vocabulary (or the arrangement level's) and shows the picker");
 expect((uiSrc.match(/vocabPicker=\{false\}/g) || []).length === 2, "the audio and stem charts hide the duplicate picker (theirs sits above)");
 expect(/from\s*\$\{engineUrl\}/.test(htmlSrc) || /engine\.tsx/.test(htmlSrc), "index.html loader must reference/wire engine.tsx");
 const pagesYml = fs.readFileSync(path.join(repo, ".github", "workflows", "pages.yml"), "utf8");
@@ -2666,7 +2666,7 @@ console.log(synhSummary);
 
 /* ---- UI contract guards for the two features (static, like the module split) -- */
 expect(/function KeyPicker\(/.test(uiSrc) && /<KeyPicker\b/.test(uiSrc), "the UI ships a key picker");
-expect(/keyOverride/.test(uiSrc) && /saveSessionMeta\(\{[^}]*keyOverride/.test(uiSrc),
+expect(/keyOverride/.test(uiSrc) && (/saveSessionMeta\(\{[^}]*keyOverride/.test(uiSrc) || /const meta = \{[^}]*keyOverride[^}]*\};\s*saveSessionMeta\(meta\)/.test(uiSrc)),
   "a manual key correction is persisted in the session meta (a corrected chart must restore corrected)");
 expect(/function SectionEditor\(/.test(uiSrc) && /<SectionEditor\b/.test(uiSrc), "the UI ships an editable section list");
 expect(/detectSectionsOffThread/.test(uiSrc) && /catch \(_\) \{ return detectSections\(samples, sr, opts\); \}/.test(uiSrc),
@@ -3258,12 +3258,12 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   expect(/window\.__TTP_ENGINE_URL__/.test(gm) && /import\(\/\* @vite-ignore \*\/ engineUrl\)/.test(gw) && /transcribeGuitarPcm/.test(gw), "the worker runs the page's own engine (one engine, no copy)");
   expect(/<script type="module" src="\.\/guitar-model\.js"><\/script>/.test(html), "index.html loads guitar-model.js");
   expect(/cp guitar-model\.js guitar-model-core\.js guitar-worker\.js _site\//.test(pages) && /cp models\/guitar-crnn\/guitar-gaps\.w8\.onnx models\/guitar-crnn\/NOTICE _site\/models\/guitar-crnn\//.test(pages) && /guitar-model\.js\?v=\$\{BUILD\}/.test(pages), "Pages ships the guitar glue + model, deploy-stamped");
-  expect(/window\.TTP_GUITAR_MODEL/.test(ui) && /polyNotesToScore\(gtrNotes, noteGridOpts/.test(ui) && /fingerScore\(gtrPoly, /.test(ui) && /🎸 Guitar → Tab \(ML\)/.test(ui), "the Audio panel's 🎸 Guitar → Tab button runs the model and fingers the notes");
+  expect(/window\.TTP_GUITAR_MODEL/.test(ui) && /polyNotesToScore\(gtrLine, noteGridOpts/.test(ui) && /const gtrLine = gtrTechOn && gtrTechNotes \? gtrTechNotes : gtrNotes/.test(ui) && /fingerScore\(gtrPoly, /.test(ui) && /🎸 Guitar → Tab \(ML\)/.test(ui), "the Audio panel's 🎸 Guitar → Tab button runs the model and fingers the notes");
   expect(/\["alphatex", "AlphaTex \(tab\)"\]/.test(ui) && /scoreToAlphaTex\(tabScore/.test(ui) && /alphatex: "alphatex"/.test(ui), "ChartPanel exports AlphaTex (tab)");
   // the tab chart must not auto-Simplify (a guitar line is "melodic" → one chord per bar → notes lost
   // from the AlphaTex export: the real-app run exported 87 of 117 notes before this) nor share the
   // chord chart's edits
-  expect(/autoSimplify && \(isMelodicScore\(score\) \|\| !!score\.merged\)/.test(ui) && /score=\{gtrScore\}[\s\S]{0,400}overrides=\{gtrOvr\}[\s\S]{0,120}autoSimplify=\{false\}/.test(ui), "the guitar tab chart keeps every note (no auto-Simplify) and has its own overrides");
+  expect(/autoSimplify && \(isMelodicScore\(rawScore\) \|\| !!rawScore\.merged\)/.test(ui) && /score=\{gtrScore\}[\s\S]{0,400}overrides=\{gtrOvr\}[\s\S]{0,120}autoSimplify=\{false\}/.test(ui), "the guitar tab chart keeps every note (no auto-Simplify) and has its own overrides");
   // the core, driven with a fake ORT at the import seam: one session, heads mapped, released once
   const gcore = await import(path.join(repo, "guitar-model-core.js") + "?t=" + Date.now());
   let created = 0, released = 0, seen = null;
@@ -3318,7 +3318,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   expect(/window\.TTP_TAB_VIEW = \{ mount/.test(tv) && /new URL\("\.\/vendor\/alphatab-1\.8\.4\/", import\.meta\.url\)/.test(tv) && !/^import /m.test(tv) && /import\(\/\* @vite-ignore \*\/ BASE \+ "alphaTab\.mjs"\)/.test(tv) && /_lib = null; throw e/.test(tv), "tab-view.js: same-origin vendor path, lazy import (nothing at boot), retry after a failed load");
   expect(/PlayerMode\.EnabledSynthesizer/.test(tv) && /sonivox\.sf3/.test(tv) && /Bravura\.woff2/.test(tv) && /StaveProfile\.Tab/.test(tv) && /api\.destroy\(\)/.test(tv), "tab-view.js: synth player with the vendored sound font, the vendored font, tab-only profile, destroy");
   expect(/<script type="module" src="\.\/tab-view\.js"><\/script>/.test(html) && /cp tab-view\.js _site\//.test(pages) && /cp -r vendor\/alphatab-1\.8\.4\/\. _site\/vendor\/alphatab-1\.8\.4\//.test(pages) && /tab-view\.js\?v=\$\{BUILD\}/.test(pages), "index.html loads tab-view.js; pages.yml ships it + the vendored alphaTab and stamps it");
-  expect(/\["tab", "Tab"\]/.test(ui) && /view === "tab"/.test(ui) && /<TabView tex=\{tabTex\.text\}/.test(ui) && /fmt === "alphatex" \? \(tabTex\.error/.test(ui), "ChartPanel has a Tab view, drawn from the SAME AlphaTex the export writes");
+  expect(/\["tab", "Tab"\]/.test(ui) && /view === "tab"/.test(ui) && /<TabView tex=\{tabTex\.text\}/.test(ui) && /tabTex = useMemo\(\(\) => \(wantTex \? makeTex\(\)/.test(ui) && /fmt === "alphatex" \? \(\(t\) => [^\n]*\(view === "tab" \? tabTex : makeTex\(\)\)/.test(ui), "ChartPanel has a Tab view, drawn from the SAME AlphaTex the export writes");
   expect(/if \(!simplify\) return tscore;\s*const t = respellScore\(transposeScore\(arrange === "off" \? score : arrangeScore\(score, arrange\), semis, useSharp\), vocab/.test(ui), "the tab (view + AlphaTex export) skips Simplify — a tab shows the notes played, not one inferred chord per bar");
   expect(/defaultView="tab"/.test(ui) && /const tex = alphaTexFromBytes\(bytes\);\s*if \(tex != null\)/.test(ui) && /meta\.kind === "alphatex"/.test(ui) && /<TabView tex=\{texDoc\.text\}/.test(ui), "the guitar tab opens on the Tab view; a saved .alphatex upload (and its session restore) opens in the viewer");
 }
@@ -3501,7 +3501,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   expect(/selectPart\(HARMONY_PART\)/.test(ui) && /Harmony \(all pitched parts\)/.test(ui) && /prev\._midbuf\) next = parseMidiFile\(prev\._midbuf, sharp, idx\)/.test(ui) && /next\._midbuf = prev\._midbuf/.test(ui),
     "UI: Harmony chip in the part picker; MIDI re-parse keeps its bytes for ♯♭ / part switch");
   expect(/meta\.partIndex != null && meta\.partIndex !== sc\.partIndex/.test(ui), "restore re-applies a saved part only when it differs from where the file lands (a zip lands on Harmony)");
-  expect(/_usePref\(_SPELL_KEY, "key"/.test(ui) && /keySpelled \? spellScoreForKey\(nscore, key\) : nscore/.test(ui) && /spellKey: keySpelled/.test(ui) && /analyzeKeyCandidates\(nscore/.test(ui) && /isMelodicScore\(score\) \|\| !!score\.merged/.test(ui),
+  expect(/_usePref\(_SPELL_KEY, "key"/.test(ui) && /keySpelled \? spellScoreForKey\(nscore, key\) : nscore/.test(ui) && /spellKey: keySpelled/.test(ui) && /analyzeKeyCandidates\(nscore/.test(ui) && /isMelodicScore\(rawScore\) \|\| !!rawScore\.merged/.test(ui),
     "UI: spelling for the key by default (after naming, key read from the unspelled chart); a Harmony reading simplifies to one chord per bar");
 }
 
@@ -3658,14 +3658,15 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
     `partsZip: per-part files, tab for the fretted part only, a full score and a multi-track MIDI (${names.join(", ")})`);
   const full = new TextDecoder().decode(await eng._zipRead(zp, eng._zipEntries(zp).find((e) => e.name === "full_score.musicxml")));
   const fullDoc = new globalThis.DOMParser().parseFromString(full, "application/xml");
-  expect(fullDoc.getElementsByTagName("score-part").length === 2 && fullDoc.getElementsByTagName("part").length === 2 && /<part-name>Bass<\/part-name>/.test(full) && fullDoc.getElementsByTagName("parsererror").length === 0,
-    "full_score.musicxml: one well-formed score, a named part per chart");
+  // WO-5 (roadmap): the full score now carries the drum part too, as a percussion staff
+  expect(fullDoc.getElementsByTagName("score-part").length === 3 && fullDoc.getElementsByTagName("part").length === 3 && /<part-name>Bass<\/part-name>/.test(full) && /<sign>percussion<\/sign>/.test(full) && fullDoc.getElementsByTagName("parsererror").length === 0,
+    "full_score.musicxml: one well-formed score, a named part per chart (+ the drums as a percussion part)");
   const sm = await eng._zipRead(zp, eng._zipEntries(zp).find((e) => e.name === "score.mid"));
   const smf = eng._readSmf(sm);
   expect(smf && smf.format === 1 && smf.tracks.length === 4 && smf.tracks[3].notes.some((n) => n.ch === 9 && n.midi === 36) && smf.tracks[2].name === "Bass" && smf.metas.tempo.length >= 1,
     `score.mid is format 1: conductor + 3 named tracks, the kick on channel 10 (${smf && smf.tracks.length} tracks)`);
   const reparsed = eng.parseMusicXML(full, true, 0);
-  expect(reparsed.parts.length === 2 && reparsed.bars[0].events[0].symbol === "C", "the full score re-imports through our own MusicXML reader");
+  expect(reparsed.parts.length === 3 && reparsed.bars[0].events[0].symbol === "C", "the full score re-imports through our own MusicXML reader");
 
   // check-by-ear clock: the chart on the RECORDING's seconds
   const rt = eng.scoreRecordingTimes(chordSc);
@@ -3694,7 +3695,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
     "index.html loads beat-model.js; pages.yml ships the glue + model + NOTICE and stamps it");
   const uiSrc2 = fs.readFileSync(UI, "utf8");
   expect(/function useBeatGrid\(/.test(uiSrc2) && /function TempoBarsPanel\(/.test(uiSrc2) && /function CheckByEar\(/.test(uiSrc2) && /audioBeatTimeline\(src && src\.beats, timing/.test(uiSrc2)
-    && /timeline: tl, beatsPerBar: bpb, quantize: \{ step: 0\.5 \}/.test(uiSrc2) && /noteGridOpts\(bg, gtrNotes, useSharp\)/.test(uiSrc2) && /bg\.findBars\(monoOf\(b\), b\.sampleRate\)/.test(uiSrc2)
+    && /timeline: tl, beatsPerBar: bpb, quantize: \{ step: 0\.5 \}/.test(uiSrc2) && /noteGridOpts\(bg, gtrLine, useSharp\)/.test(uiSrc2) && /bg\.findBars\(monoOf\(b\), b\.sampleRate\)/.test(uiSrc2)
     && /createStereoPanner/.test(uiSrc2) && /scoreRecordingTimes\(score\)/.test(uiSrc2) && /partsZip\(parts, \{ title: base, tempo: bpm, key: stemKey, useSharp \}\)/.test(uiSrc2) && /sendPartsToPro/.test(uiSrc2) && /parts: parts\.map\(\(p\) => \(\{ name: p\.name, role: p\.role/.test(uiSrc2) && /timelineBarAt\(tl, sec, bpb\)/.test(uiSrc2),
     "UI: one beat grid (useBeatGrid → audioBeatTimeline) under every audio chart, Tempo & bars, 🥁 Find bar 1 on the original-rate audio, 🎧 Check by ear (StereoPanner, recording clock), ⬇ All parts, sections on the timeline");
 }
@@ -3753,7 +3754,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   // UI wiring
   const ui = fs.readFileSync(UI, "utf8");
   expect(/GUITAR_TUNINGS,\n  guitarTuning,\n  suggestGuitarTuning,/.test(ui) && /fingerScore\(gtrPoly, \{ tuning: t\.midi, capo: gtrCapo \}\)/.test(ui) && /soundingCapo: gtrCapo/.test(ui)
-    && /GUITAR_TUNINGS\.map\(\(t\) => <option/.test(ui) && /setGtrCapo/.test(ui) && /suggestGuitarTuning\(polyNotesToScore\(gtrNotes/.test(ui) && /Use \{gtrSuggest\.name\}/.test(ui),
+    && /GUITAR_TUNINGS\.map\(\(t\) => <option/.test(ui) && /setGtrCapo/.test(ui) && /detectTuningAndCapo\(polyNotesToScore\(gtrNotes/.test(ui) && /onClick=\{\(\) => \{ setGtrUndo\(\{ tuning: gtrTuning, capo: gtrCapo \}\); setGtrTuning\(gtrSuggest\.id\); \}\}/.test(ui),
     "UI: Guitar → Tab has a tuning picker + capo stepper, fingers on them, and offers (never applies) the suggestion");
 }
 

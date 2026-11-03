@@ -112,6 +112,17 @@ const CHORD_VOCABULARIES = {
     foreign: {},
     writeAs: { "6/9": "maj7", "6": "maj7", sus2: "", add9: "" },
   },
+  // phones: 5 qualities × 12 roots, root position only = 61 HMM states (memory ∝ states). No
+  // writeAs on purpose — every writeAs source is decoded as its own state; an extended chord
+  // simply decodes to its nearest core chord (C6/9 → C).
+  lite: {
+    label: "Lite",
+    qualities: ["", "m", "7", "maj7", "m7"],
+    inversions: {},
+    hidden: {},
+    foreign: {},
+    writeAs: {},
+  },
   full: { label: "Full", qualities: null, inversions: null, hidden: null, foreign: null, writeAs: null },
 };
 /* A vocabulary name or object → { allow:Set, inversions, hidden, foreign, writeAs } (null =
@@ -2064,6 +2075,7 @@ async function parseScoreZip(u8, useSharp = true, partIndex) {
     if (m) pick = entries.find((e) => e.name === m[1]) || null;
   }
   pick = pick || entries.find((e) => base(e) === "score.musicxml")
+    || entries.find((e) => base(e) === "full_score.musicxml")     // this app's own ⬇ All parts zip: every part
     || entries.find((e) => /\.(musicxml|xml)$/.test(base(e)) && !e.name.startsWith("META-INF/"));
   if (pick) {
     const xml = new TextDecoder("utf-8").decode(await _zipRead(u8, pick));
@@ -3868,10 +3880,13 @@ function transposeScore(score, n, useSharp) {
   if (!n) return score;
   const bars = score.bars.map((b) => ({
     ...b,
-    events: b.events.map((e) => {
+    events: b.events.map((e0) => {
+      // `notes` (the editor's per-note ids, WO-1) are position-specific like frets: dropped.
+      const { notes: _notes, ...e } = e0;
       const midis = (e.midis || []).map((m) => m + n);
       // frets and the string-keyed techniques are position-specific; fingerScore can re-finger.
-      return { ...e, midis, frets: undefined, tech: undefined, bends: undefined, symbol: midis.length ? symbolForMidis(midis, useSharp) : e.symbol };
+      // A chord the user LOCKED keeps its own name, moved with the music (not re-named).
+      return { ...e, midis, frets: undefined, tech: undefined, bends: undefined, symbol: e.locked ? transposeSymbol(e.symbol, n, useSharp) : midis.length ? symbolForMidis(midis, useSharp) : e.symbol };
     }),
   }));
   return { ...score, bars, transposedBy: n };
@@ -4094,6 +4109,13 @@ function fingerScore(score, opts = {}) {
     for (const n of shapes[k]) frets[n.string] = n.fret;
     bars[bi].events[ei] = { ...bars[bi].events[ei], frets, fingered: true };
   });
+  // techniques read from audio (WO-7) ride per PITCH (`ntech`); here they go under their string
+  bars.forEach((b) => b.events.forEach((e, ei) => {
+    if (!e.ntech || !e.frets) return;
+    const tech = { ...(e.tech || {}) }, bends = { ...(e.bends || {}) };
+    for (const [k, f] of Object.entries(e.frets)) { const nt = e.ntech[tuning[+k] + f]; if (!nt) continue; tech[k] = nt.tech.slice(); if (nt.bend) bends[k] = nt.bend; }
+    b.events[ei] = { ...e, ...(Object.keys(tech).length ? { tech } : {}), ...(Object.keys(bends).length ? { bends } : {}) };
+  }));
   return { ...score, bars };
 }
 
@@ -4581,6 +4603,13 @@ function scoresToMultipartMusicXML(parts, opts = {}) {
     "  <part-list>", ...heads, "  </part-list>", ...body, "</score-partwise>", ""].join("\n");
 }
 
+/* Splice a single-part MusicXML document's part (score-part + part) into a multi-part one as `id`. */
+function _mergePartXml(full, one, id) {
+  const sp = one.match(/<score-part id="P1">[\s\S]*?<\/score-part>/), pt = one.match(/<part id="P1">[\s\S]*<\/part>/);
+  if (!sp || !pt) return full;
+  const re = (x) => x.replace(/id="P1"/g, `id="${id}"`).replace(/"P1-/g, `"${id}-`);
+  return full.replace("  </part-list>", "    " + re(sp[0]).trim() + "\n  </part-list>").replace(/<\/score-partwise>\s*$/, re(pt[0]) + "\n</score-partwise>\n");
+}
 /** Format-1 Standard MIDI File for several parts on one clock: a conductor track (tempo map from
  *  the first score — scoreBarTempos — and its meters) + a named track per part. tracks:
  *  [{ name, score, program } | { name, drums: [{ beat, type: "kick"|"snare"|"hat" }] }]; drum
@@ -4618,7 +4647,7 @@ function scoresToMidi(tracks, opts = {}) {
   for (const t of list) {
     const evs = [{ tick: 0, o: 0, b: text(0x03, t.name) }];
     if (t.drums) {
-      const key = { kick: 36, snare: 38, hat: 42 };
+      const key = { kick: 36, snare: 38, hat: 42, openHat: 46, pedalHat: 44, crash: 49, ride: 51, tomHigh: 50, tomMid: 47, tomLow: 43 };
       for (const h of t.drums) { const n = key[h.type]; if (n == null || !(h.beat >= 0)) continue; const tick = Math.round(h.beat * PPQ); evs.push({ tick, o: 2, b: [0x99, n, 100] }, { tick: tick + 60, o: 1, b: [0x89, n, 0] }); }
     } else if (t.score && t.score.bars) {
       if (ch === 9) ch++;
@@ -4647,11 +4676,20 @@ function scoresToMidi(tracks, opts = {}) {
  *  → Uint8Array (a STORED zip). */
 function partsZip(parts, opts = {}) {
   const slug = (s) => String(s || "part").replace(/[^\w.-]+/g, "_").replace(/^_+|_+$/g, "") || "part";
-  const entries = [], pitched = [];
+  const entries = [], pitched = [], drumXml = [];
   const clock = ((parts || []).find((p) => p.score && p.score.bars && p.score.bars.length) || {}).score;
   (parts || []).forEach((p, i) => {
     const stem = `${String(i + 1).padStart(2, "0")}_${slug(p.name)}`;
-    if (p.drums) { entries.push({ name: `${stem}.mid`, data: scoresToMidi([{ name: p.name, drums: p.drums }], { ...opts, title: p.name, clockScore: clock }) }); return; }
+    if (p.drums) {
+      entries.push({ name: `${stem}.mid`, data: scoresToMidi([{ name: p.name, drums: p.drums }], { ...opts, title: p.name, clockScore: clock }) });
+      // WO-5: the drum part as notation too — a percussion staff and a text drum tab
+      const sig = (clock && (clock.timeSig || [4, 4])) || [4, 4];
+      const dx = drumHitsToMusicXML(p.drums, { beatsPerBar: sig[0], beatType: sig[1], tempo: opts.tempo, title: opts.title, partName: p.name });
+      entries.push({ name: `${stem}.musicxml`, data: dx });
+      entries.push({ name: `${stem}.txt`, data: drumHitsToAsciiTab(p.drums, { beatsPerBar: sig[0], title: `${opts.title || "Song"} — ${p.name}` }) });
+      drumXml.push({ name: p.name, xml: dx });
+      return;
+    }
     if (!p.score || !p.score.bars || !p.score.bars.length) return;
     const o = { ...opts, overrides: p.overrides || {} };
     pitched.push(p);
@@ -4659,8 +4697,16 @@ function partsZip(parts, opts = {}) {
     entries.push({ name: `${stem}.mid`, data: scoreToMidi(p.score, o) });
     entries.push({ name: `${stem}.csmpn`, data: scoreToCSMPN(p.score, { ...o, title: `${opts.title || "Song"} — ${p.name}` }) });
     if (p.tuning) { try { entries.push({ name: `${stem}.alphatex`, data: scoreToAlphaTex(p.score, { ...o, tuning: p.tuning, trackName: p.name, title: opts.title }) }); } catch (_) { /* not writable as tab */ } }
+    // WO-5: a piano part also as a grand staff (treble + bass), hands split at an adaptive hinge
+    if (p.piano || /piano|keys/i.test(p.role || p.name || "")) {
+      try { const sig = p.score.timeSig || [4, 4]; entries.push({ name: `${stem}_grand-staff.musicxml`, data: scoreToPianoMusicXML(scoreToPianoHands(p.score), { beatsPerBar: sig[0], beatType: sig[1], tempo: opts.tempo, title: opts.title, partName: p.name, key: opts.key }) }); } catch (_) { /* no notes */ }
+    }
   });
-  if (pitched.length) entries.push({ name: "full_score.musicxml", data: scoresToMultipartMusicXML(pitched, opts) });
+  if (pitched.length) {
+    let full = scoresToMultipartMusicXML(pitched, opts);
+    drumXml.forEach((d, k) => { full = _mergePartXml(full, d.xml, `P${pitched.length + k + 1}`); });
+    entries.push({ name: "full_score.musicxml", data: full });
+  }
   // score.mid: the drums need the pitched parts' clock, so they ride in the same file
   const clockParts = (parts || []).filter((p) => (p.score && p.score.bars && p.score.bars.length) || p.drums);
   if (clockParts.length) entries.push({ name: "score.mid", data: scoresToMidi(clockParts.map((p) => (p.drums ? { name: p.name, drums: p.drums } : { name: p.name, score: p.score, program: p.program })), opts) });
@@ -6918,7 +6964,9 @@ function transcribeDrums(samples, sampleRate, opts = {}) {
   const norm = (h) => h.strength / (peak[h.type] || 1);
   const shadowed = (h) => (h.type === "kick" || h.type === "snare") && norm(h) < 0.8 &&
     hits.some((o) => o !== h && (o.type === "kick" || o.type === "snare") && o.type !== h.type && Math.abs(o.t - h.t) < 0.03 && norm(o) > norm(h));
-  return hits.filter((h) => !shadowed(h)).sort((a, b) => a.t - b.t);
+  const kept = hits.filter((h) => !shadowed(h)).sort((a, b) => a.t - b.t);
+  // opts.kit "full" (WO-5): name every onset from the signal around it — toms, open hat, crash, ride
+  return opts.kit === "full" ? _classifyFullKit(samples, sampleRate, kept) : kept;
 }
 
 /* Hits → a groove grid: per bar, `steps` slots (16 = sixteenths in 4/4) for each drum, on
@@ -6932,20 +6980,24 @@ function drumPattern(hits, opts = {}) {
     const g = t / (60 / bpm);                                      // fractional beat on the chart's grid
     return Math.round(g * sub);
   };
-  const bars = new Map();
+  const bars = new Map(), extra = new Set();
   for (const h of hits || []) {
     const slot = slotOf(h.t);
     if (slot < 0) continue;
     const bar = Math.floor(slot / (bpb * sub)), pos = slot - bar * bpb * sub;
     if (!bars.has(bar)) bars.set(bar, { kick: new Array(bpb * sub).fill("."), snare: new Array(bpb * sub).fill("."), hat: new Array(bpb * sub).fill(".") });
-    bars.get(bar)[h.type][pos] = "x";
+    const row = bars.get(bar);
+    if (!row[h.type]) { row[h.type] = new Array(bpb * sub).fill("."); extra.add(h.type); }
+    row[h.type][pos] = "x";
   }
   const last = bars.size ? Math.max(...bars.keys()) : -1;
   const out = [];
   for (let b = 0; b <= last; b++) {
     const r = bars.get(b) || { kick: [], snare: [], hat: [] };
     const fill = (a) => (a.length ? a.join("") : ".".repeat(bpb * sub));
-    out.push({ number: b + 1, startSec: +beatT(b * bpb).toFixed(3), kick: fill(r.kick), snare: fill(r.snare), hat: fill(r.hat) });
+    const bar = { number: b + 1, startSec: +beatT(b * bpb).toFixed(3), kick: fill(r.kick), snare: fill(r.snare), hat: fill(r.hat) };
+    for (const t of extra) bar[t] = fill(r[t] || []);              // full-kit pieces, only when they occur
+    out.push(bar);
   }
   return { bars: out, beatsPerBar: bpb, subdivisions: sub, bpm };
 }
@@ -6954,7 +7006,7 @@ function drumPattern(hits, opts = {}) {
  * format 0, PPQ 480 — the same container scoreToMidi writes. */
 function drumHitsToMidi(hits, opts = {}) {
   const PPQ = 480, bpm = Math.max(20, Math.min(400, Math.round(opts.bpm || 120))), uspq = Math.round(60000000 / bpm);
-  const note = { kick: 36, snare: 38, hat: 42 };
+  const note = { kick: 36, snare: 38, hat: 42, openHat: 46, pedalHat: 44, crash: 49, ride: 51, tomHigh: 50, tomMid: 47, tomLow: 43 };
   const evs = [{ tick: 0, o: 0, b: [0xff, 0x51, 0x03, (uspq >> 16) & 255, (uspq >> 8) & 255, uspq & 255] }];
   for (const h of hits || []) {
     const tick = Math.max(0, Math.round((h.t * bpm / 60) * PPQ)), n = note[h.type];
@@ -7707,7 +7759,7 @@ function audioEventsToScore(events, opts = {}) {
   let placed = (events || []).filter((e) => e.symbol).map((e) => {
     const onsetBeat = tl ? timelineBeatsAt(tl, e.startSec) : e.startSec / secPerBeat;  // global beat position
     const endBeat = tl ? timelineBeatsAt(tl, e.startSec + (e.durSec || secPerBeat)) : onsetBeat + (e.durSec || secPerBeat) / secPerBeat;
-    return { symbol: e.symbol, midis: e.midis || [], onsetBeat: Math.max(0, onsetBeat), durBeat: Math.max(0.25, endBeat - onsetBeat), uncertain: !!e.ambiguous, reviewed: !!e.reviewed };
+    return { symbol: e.symbol, midis: e.midis || [], onsetBeat: Math.max(0, onsetBeat), durBeat: Math.max(0.25, endBeat - onsetBeat), uncertain: !!e.ambiguous, reviewed: !!e.reviewed, ...(e.ntech ? { ntech: e.ntech } : {}) };
   }).sort((a, b) => a.onsetBeat - b.onsetBeat);
   if (tl && opts.quantize && opts.quantize.step > 0) {
     placed = quantizeBeatNotes(placed.map((p) => ({ ...p, startBeat: p.onsetBeat, endBeat: p.onsetBeat + p.durBeat })), opts.quantize.step, opts.quantize.strength != null ? opts.quantize.strength : 1)
@@ -7723,7 +7775,7 @@ function audioEventsToScore(events, opts = {}) {
     const bar = Math.floor(p.onsetBeat / beatsPerBar + 1e-6);
     const inBar = p.onsetBeat - bar * beatsPerBar;
     if (!barsMap.has(bar)) barsMap.set(bar, []);
-    barsMap.get(bar).push({ symbol: p.symbol, midis: p.midis, qbeat: Math.max(0, Math.min(beatsPerBar - 1e-6, inBar)), uncertain: p.uncertain, reviewed: p.reviewed });
+    barsMap.get(bar).push({ symbol: p.symbol, midis: p.midis, qbeat: Math.max(0, Math.min(beatsPerBar - 1e-6, inBar)), uncertain: p.uncertain, reviewed: p.reviewed, ...(p.ntech ? { ntech: p.ntech } : {}) });
   }
   const lastBar = barsMap.size ? Math.max(...barsMap.keys()) : -1;
   // A bar with no ONSET is not "no chord" — the previous chord is often still sounding
@@ -7748,7 +7800,7 @@ function audioEventsToScore(events, opts = {}) {
     for (let i = 1; i < evs.length; i++) if (evs[i].beat <= evs[i - 1].beat) evs[i].beat = Math.min(beatsPerBar - 1, evs[i - 1].beat + 1);
     evs.forEach((e, i) => { e.durBeats = (i + 1 < evs.length ? evs[i + 1].beat : beatsPerBar) - e.beat; });
     _fillTrueDur(evs, beatsPerBar);
-    bars.push({ number: b + 1, timeSig: [beatsPerBar, beatType], events: evs.map((e) => ({ symbol: e.symbol, midis: e.midis, beat: e.beat, durBeats: e.durBeats, qbeat: e.qbeat, qdur: e.qdur, ...(e.held ? { held: true } : {}), ...(e.uncertain ? { uncertain: true } : {}), ...(e.reviewed ? { reviewed: true } : {}) })) });
+    bars.push({ number: b + 1, timeSig: [beatsPerBar, beatType], events: evs.map((e) => ({ symbol: e.symbol, midis: e.midis, beat: e.beat, durBeats: e.durBeats, qbeat: e.qbeat, qdur: e.qdur, ...(e.held ? { held: true } : {}), ...(e.uncertain ? { uncertain: true } : {}), ...(e.reviewed ? { reviewed: true } : {}), ...(e.ntech && !e.held ? { ntech: e.ntech } : {}) })) });
   }
   const score = { source: "audio", timeSig: [beatsPerBar, beatType], tempo: bpm, bars };
   if (tl) {
@@ -7818,8 +7870,9 @@ function polyNotesToScore(notes, opts = {}) {
     let c = cols.length && Math.abs(cols[cols.length - 1].startSec - n.startSec) < grid ? cols[cols.length - 1] : null;
     if (!c) { c = { startSec: n.startSec, midis: [], durSec: 0 }; cols.push(c); }
     c.midis.push(n.midi); c.durSec = Math.max(c.durSec, n.durSec);
+    if (n.tech && n.tech.length) { c.ntech = c.ntech || {}; c.ntech[n.midi] = { tech: n.tech.slice(), ...(n.bend ? { bend: n.bend } : {}) }; }
   }
-  const events = cols.map((c) => ({ symbol: symbolForMidis(c.midis, useSharp), midis: c.midis.slice().sort((a, b) => a - b), startSec: c.startSec, durSec: c.durSec }));
+  const events = cols.map((c) => ({ symbol: symbolForMidis(c.midis, useSharp), midis: c.midis.slice().sort((a, b) => a - b), startSec: c.startSec, durSec: c.durSec, ...(c.ntech ? { ntech: c.ntech } : {}) }));
   const score = audioEventsToScore(events, opts);
   score.source = "ml";                                          // tag the provenance
   return score;
@@ -8553,9 +8606,9 @@ function normalizeDictPosition(pos) {
  * when there aren't enough fingers). Returns { fingers:[6], barres:[{fret,from,to}] }
  * or null when the shape needs more than four fingers — i.e. it isn't a grip. */
 function assignChordFingers(frets) {
-  const fingers = [0, 0, 0, 0, 0, 0], barres = [];
+  const n = frets.length || 6, fingers = new Array(n).fill(0), barres = [];
   const fretted = [];
-  for (let s = 0; s < 6; s++) if (frets[s] > 0) fretted.push(s);
+  for (let s = 0; s < n; s++) if (frets[s] > 0) fretted.push(s);
   if (!fretted.length) return { fingers, barres };
   const minF = Math.min(...fretted.map((s) => frets[s]));
   if (Math.max(...fretted.map((s) => frets[s])) - minF > 4) return null;
@@ -8898,10 +8951,11 @@ function _vcValidRootless(frets, rootPc, formula) {
 /* A voicing → the svguitar `chord()` payload. Strings are numbered 1 = high e; frets
  * are RELATIVE to the diagram window when it starts above the nut. mode "fingers"
  * labels each fretted dot with its finger, "intervals" with its chord degree. */
-function voicingToSVGuitar(v, mode = "fingers") {
-  const fingers = [];
-  for (let s = 0; s < 6; s++) {
-    const f = v.frets[s], str = 6 - s;
+function voicingToSVGuitar(v, mode = "fingers", opts = {}) {
+  const fingers = [], n = v.frets.length;
+  for (let s = 0; s < n; s++) {
+    // svguitar string 1 is drawn on the right: the lowest string on the left, mirrored for left-handers
+    const f = v.frets[s], str = opts.leftHanded ? s + 1 : n - s;
     if (f < 0) { fingers.push([str, "x"]); continue; }
     if (f === 0) { fingers.push([str, 0]); continue; }
     const rel = v.baseFret > 1 ? f - v.baseFret + 1 : f;
@@ -8975,6 +9029,1823 @@ function chordSubstitutions(symbol, useSharp = true) {
     }
     default: return [];
   }
+}
+
+/* ============================================================================
+ *  WORKBENCH · WO-1 — NOTE-LEVEL CORRECTION (the ScoreEdit layer)
+ *  ---------------------------------------------------------------------------
+ *  The parsed / transcribed score is NEVER mutated. A correction is a small,
+ *  serialisable list of operations — `{ v:1, ops:[…], groups:[…], redo:[…] }` —
+ *  that `applyScoreEdits(score, edit)` replays on top of it. That is what lets an
+ *  edit survive a re-parse (the session stores the source bytes + the ops, never
+ *  the derived score), the ♯♭ toggle, and a reload: the parsers are deterministic,
+ *  so the positional note ids the ops reference are reproduced exactly.
+ *
+ *  NOTE IDENTITY. A note is one pitch of one event. Its id is positional in the
+ *  BASE score — `n<bar>.<onsetTick>.<midi>` (+ `.<k>` for the k-th unison of the
+ *  same pitch at that onset) — with ticks at EDIT_PPQ = 480 per QUARTER note (the
+ *  MIDI convention; divisible by 3 for triplets, 16 for 64ths). An edited event
+ *  carries `notes:[{id, midi, string?, fret?, tech?, bend?}]`, so a MOVED note keeps
+ *  its id and a later op can still find it. Added notes take the op's `id`.
+ *
+ *  THE SCORE MODEL IS HARMONIC (one onset = one event, its duration = the gap to the
+ *  next onset — every parser fills that way). So a duration edit is an ONSET edit:
+ *  `note.dur` shortens/extends that onset (a rest opens behind it). Untouched bars are
+ *  returned by reference and their events untouched — `edit = null` (or no ops) is a
+ *  strict passthrough, which keeps the whole validated corpus byte-identical.
+ *
+ *  RE-RECOGNITION. When an onset's notes change, its chord symbol is re-run through
+ *  the engine (`symbolForMidis`) — the engine stays the oracle — unless a
+ *  `symbol.lock` pins it. A locked event is flagged `reviewed` so the chart-vocabulary
+ *  respell leaves it alone, and `transposeScore` transposes its TEXT instead of
+ *  re-naming it.
+ *
+ *  Op set (all positions are bar-relative ticks at EDIT_PPQ; `bar` = bar.number):
+ *    note.add     { bar, onsetTicks, midi, durTicks?, string?, fret?, tech?, bend?, id? }
+ *    note.remove  { id }
+ *    note.move    { id, midi?, bar?, onsetTicks? }          pitch and/or time
+ *    note.dur     { id, durTicks }                           the onset's length
+ *    note.string  { id, engIdx, fret }                       tab position (sets the pitch)
+ *    note.tech    { id, tech:[…TECHNIQUES], bend? }          needs a string
+ *    chord.refinger { bar, onsetTicks }                      forget strings → auto-finger
+ *    symbol.lock  { bar, onsetTicks, symbol }                "" / null unlocks
+ * ------------------------------------------------------------------------- */
+const EDIT_PPQ = 480;
+const EDIT_OPS = ["note.add", "note.remove", "note.move", "note.dur", "note.string", "note.tech", "chord.refinger", "symbol.lock"];
+const EDIT_SNAPS = { "1/4": 480, "1/8": 240, "1/16": 120, "1/32": 60, "1/8T": 160, "1/16T": 80 };
+const _edTpb = (sig) => (EDIT_PPQ * 4) / sig[1];                        // ticks per BEAT of the bar
+const _edBarTicks = (sig) => Math.round(sig[0] * _edTpb(sig));
+const _edSig = (score, bar) => (bar && bar.timeSig) || (score && score.timeSig) || [4, 4];
+function _edTuning(score) {
+  const open = (score && (score.tuningMidi || TUNINGS[score.tuning])) || TUNINGS.Standard;
+  return capoTuning(open, (score && score.soundingCapo) || 0);
+}
+const _edMaxFret = 24;
+
+/** The notes of one event, with ids (positional unless the event already carries them). */
+function eventNotes(e, barNo, onTick, tuning) {
+  if (Array.isArray(e.notes)) return e.notes.map((n) => ({ ...n, tech: n.tech ? n.tech.slice() : undefined }));
+  const seen = {}, used = new Set();
+  return (e.midis || []).map((m) => {
+    seen[m] = (seen[m] || 0) + 1;
+    const n = { id: `n${barNo}.${onTick}.${m}${seen[m] > 1 ? "." + seen[m] : ""}`, midi: m };
+    for (const [k, f] of Object.entries(e.frets || {})) {
+      if (used.has(k) || tuning[+k] == null || tuning[+k] + f !== m) continue;
+      used.add(k); n.string = +k; n.fret = f;
+      const tg = e.tech && e.tech[k]; if (tg && tg.length) n.tech = tg.slice();
+      const bd = e.bends && e.bends[k]; if (bd) n.bend = bd;
+      break;
+    }
+    return n;
+  });
+}
+
+/** A flat, editor-shaped view of a score: every note with its id, absolute tick and tab
+ *  position, plus each bar's tick range. This is the editor's grid model — pure, so the
+ *  piano roll / tab grid render from it and the tests can assert on it. */
+function scoreNoteList(score) {
+  const out = { ppq: EDIT_PPQ, bars: [], notes: [], onsets: [], totalTicks: 0 };
+  if (!score || !score.bars) return out;
+  const tuning = _edTuning(score);
+  let abs = 0;
+  score.bars.forEach((bar, bi) => {
+    const sig = _edSig(score, bar), tpb = _edTpb(sig), len = _edBarTicks(sig), no = bar.number != null ? bar.number : bi + 1;
+    out.bars.push({ number: no, index: bi, startTick: abs, lenTicks: len, timeSig: sig, section: bar.section || null });
+    (bar.events || []).forEach((e, ei) => {
+      const on = Math.round((e.qbeat != null ? e.qbeat : e.beat || 0) * tpb);
+      const dur = Math.max(1, Math.round((e.qdur != null ? e.qdur : e.durBeats || 1) * tpb));
+      out.onsets.push({ bar: no, barIndex: bi, eventIndex: ei, onTick: on, absTick: abs + on, durTicks: dur, symbol: e.symbol, locked: !!e.locked, edited: !!e.edited });
+      for (const n of eventNotes(e, no, on, tuning))
+        out.notes.push({ ...n, bar: no, barIndex: bi, eventIndex: ei, onTick: on, absTick: abs + on, durTicks: dur, symbol: e.symbol, locked: !!e.locked });
+    });
+    abs += len;
+  });
+  out.totalTicks = abs;
+  out.tuning = tuning;
+  return out;
+}
+
+/** Snap a tick to a grid ("1/16", "1/8T", …, or a tick count). */
+function snapTicks(t, grid) {
+  const g = typeof grid === "number" ? grid : EDIT_SNAPS[grid] || 0;
+  return g > 0 ? Math.round(t / g) * g : Math.round(t);
+}
+
+/* ---- the edit record (pure undo/redo stack) ---------------------------------- */
+function emptyScoreEdit() { return { v: 1, ops: [], groups: [], redo: [] }; }
+function isScoreEdit(x) {
+  return !!x && x.v === 1 && Array.isArray(x.ops) && Array.isArray(x.groups)
+    && x.ops.every((o) => o && EDIT_OPS.includes(o.t))
+    && x.groups.every((g) => Number.isInteger(g) && g > 0)
+    && x.groups.reduce((a, b) => a + b, 0) === x.ops.length;
+}
+/** Append one undoable step (one op or several applied as a unit). Clears redo. */
+function editPush(edit, ops) {
+  const e = isScoreEdit(edit) ? edit : emptyScoreEdit();
+  const list = (Array.isArray(ops) ? ops : [ops]).filter((o) => o && EDIT_OPS.includes(o.t));
+  if (!list.length) return e;
+  return { v: 1, ops: e.ops.concat(list), groups: e.groups.concat([list.length]), redo: [] };
+}
+function editUndo(edit) {
+  if (!isScoreEdit(edit) || !edit.groups.length) return edit;
+  const n = edit.groups[edit.groups.length - 1];
+  return { v: 1, ops: edit.ops.slice(0, edit.ops.length - n), groups: edit.groups.slice(0, -1), redo: (edit.redo || []).concat([edit.ops.slice(edit.ops.length - n)]) };
+}
+function editRedo(edit) {
+  if (!isScoreEdit(edit) || !edit.redo || !edit.redo.length) return edit;
+  const step = edit.redo[edit.redo.length - 1];
+  return { v: 1, ops: edit.ops.concat(step), groups: edit.groups.concat([step.length]), redo: edit.redo.slice(0, -1) };
+}
+const editCanUndo = (edit) => isScoreEdit(edit) && edit.groups.length > 0;
+const editCanRedo = (edit) => isScoreEdit(edit) && !!edit.redo && edit.redo.length > 0;
+
+/* ---- apply ------------------------------------------------------------------- */
+/** Replay `edit` over `score`. Non-mutating; untouched bars are returned by reference;
+ *  `edit` absent / empty → `score` itself. Ops that no longer resolve (an id the source
+ *  doesn't have any more) are skipped and counted in `score.editReport`. Re-applying the
+ *  same edit to its own output is a no-op (ids are absolute; an add whose id exists is
+ *  skipped), so the layer is idempotent. */
+function applyScoreEdits(score, edit, opts = {}) {
+  const ops = Array.isArray(edit) ? edit : edit && Array.isArray(edit.ops) ? edit.ops : null;
+  if (!score || !score.bars || !ops || !ops.length) return score;
+  const useSharp = opts.useSharp !== false;
+  const tuning = _edTuning(score);
+  const byNumber = new Map();
+  score.bars.forEach((b, bi) => byNumber.set(b.number != null ? b.number : bi + 1, bi));
+  const work = new Map();                                            // barIndex → working cells
+  const idIndex = new Map();                                         // note id → barIndex
+  score.bars.forEach((bar, bi) => {
+    const sig = _edSig(score, bar), tpb = _edTpb(sig), no = bar.number != null ? bar.number : bi + 1;
+    for (const e of bar.events || []) {
+      const on = Math.round((e.qbeat != null ? e.qbeat : e.beat || 0) * tpb);
+      for (const n of eventNotes(e, no, on, tuning)) idIndex.set(n.id, bi);
+    }
+  });
+  const cellsOf = (bi) => {
+    if (work.has(bi)) return work.get(bi);
+    const bar = score.bars[bi], sig = _edSig(score, bar), tpb = _edTpb(sig), bpb = sig[0], no = bar.number != null ? bar.number : bi + 1;
+    const evs = bar.events || [];
+    const cells = evs.map((e, i) => {
+      const qbeat = e.qbeat != null ? e.qbeat : e.beat || 0;
+      const nextQ = i + 1 < evs.length ? (evs[i + 1].qbeat != null ? evs[i + 1].qbeat : evs[i + 1].beat || 0) : bpb;
+      const qdur = e.qdur != null ? e.qdur : e.durBeats || (nextQ - qbeat);
+      const fill = qdur >= nextQ - qbeat - 0.5 / tpb;                 // gap-filling, as every parser writes
+      return { ev: e, qbeat, onTick: Math.round(qbeat * tpb), notes: eventNotes(e, no, Math.round(qbeat * tpb), tuning), fill, maxDur: qdur, dirty: false, lock: e.locked ? e.symbol : undefined };
+    });
+    const w = { bi, sig, tpb, bpb, cells, touched: false };
+    work.set(bi, w);
+    return w;
+  };
+  const find = (id) => {
+    const bi = idIndex.get(id);
+    if (bi == null) return null;
+    const w = cellsOf(bi);
+    for (const c of w.cells) { const k = c.notes.findIndex((n) => n.id === id); if (k >= 0) return { w, c, k, n: c.notes[k] }; }
+    return null;
+  };
+  const cellAt = (w, onTick) => w.cells.find((c) => c.onTick === onTick);
+  const durOf = (w, c) => {                                          // the onset's current length in beats
+    const s = w.cells.slice().sort((a, b) => a.qbeat - b.qbeat), i = s.indexOf(c);
+    const gap = (i + 1 < s.length ? s[i + 1].qbeat : w.bpb) - c.qbeat;
+    return c.fill ? gap : Math.min(c.maxDur, gap);
+  };
+  const newCell = (w, onTick, inherit) => {
+    const qbeat = onTick / w.tpb, c = { ev: null, qbeat, onTick, notes: [], fill: inherit ? inherit.fill : true, maxDur: inherit ? inherit.maxDur : Infinity, dirty: true };
+    w.cells.push(c); return c;
+  };
+  const clampTick = (w, t) => Math.max(0, Math.min(_edBarTicks(w.sig) - 1, Math.round(t)));
+  const fitString = (n, midi) => {
+    if (n.string == null) return;
+    const f = midi - (tuning[n.string] == null ? NaN : tuning[n.string]);
+    if (Number.isInteger(f) && f >= 0 && f <= _edMaxFret) n.fret = f;
+    else { delete n.string; delete n.fret; delete n.tech; delete n.bend; }
+  };
+  const freeString = (c, keep, s) => { for (const o of c.notes) if (o !== keep && o.string === s) { delete o.string; delete o.fret; delete o.tech; delete o.bend; } };
+  let applied = 0, skipped = 0;
+  ops.forEach((op, oi) => {
+    let ok = false;
+    try {
+      switch (op && op.t) {
+        case "note.add": {
+          const bi = byNumber.get(op.bar), midi = Math.round(op.midi);
+          const id = op.id || `+${oi}`;
+          if (bi == null || !Number.isFinite(midi) || idIndex.has(id)) break;
+          const w = cellsOf(bi), t = clampTick(w, op.onsetTicks || 0);
+          const c = cellAt(w, t) || newCell(w, t, op.durTicks > 0 ? { fill: false, maxDur: op.durTicks / w.tpb } : null);
+          if (op.durTicks > 0 && c.ev) { c.fill = false; c.maxDur = op.durTicks / w.tpb; }
+          const n = { id, midi };
+          if (op.string != null && tuning[op.string] != null) { n.string = +op.string; n.fret = op.fret != null ? op.fret : midi - tuning[op.string]; fitString(n, midi); if (n.string != null) freeString(c, n, n.string); }
+          if (n.string != null && Array.isArray(op.tech) && op.tech.length) n.tech = op.tech.filter((x) => TECHNIQUES.includes(x));
+          if (n.string != null && op.bend > 0) n.bend = op.bend;
+          c.notes.push(n); c.notes.sort((a, b) => a.midi - b.midi); c.dirty = true; w.touched = true; idIndex.set(id, bi);
+          ok = true; break;
+        }
+        case "note.remove": {
+          const f = find(op.id); if (!f) break;
+          f.c.notes.splice(f.k, 1); f.c.dirty = true; f.w.touched = true; idIndex.delete(op.id);
+          ok = true; break;
+        }
+        case "note.move": {
+          const f = find(op.id); if (!f) break;
+          const n = f.n;
+          const midi = op.midi != null ? Math.round(op.midi) : n.midi;
+          const tbi = op.bar != null ? byNumber.get(op.bar) : f.w.bi;
+          if (tbi == null || !Number.isFinite(midi)) break;
+          if (midi !== n.midi) { n.midi = midi; fitString(n, midi); }
+          const tw = cellsOf(tbi), t = op.onsetTicks != null ? clampTick(tw, op.onsetTicks) : f.c.onTick;
+          if (tw !== f.w || t !== f.c.onTick) {
+            const inherit = { fill: f.c.fill, maxDur: f.c.fill ? Infinity : durOf(f.w, f.c) };
+            f.c.notes.splice(f.k, 1); f.c.dirty = true; f.w.touched = true;
+            const dst = cellAt(tw, t) || newCell(tw, t, inherit);
+            if (n.string != null) freeString(dst, n, n.string);
+            dst.notes.push(n); dst.notes.sort((a, b) => a.midi - b.midi); dst.dirty = true; tw.touched = true; idIndex.set(n.id, tbi);
+          } else { f.c.notes.sort((a, b) => a.midi - b.midi); f.c.dirty = true; f.w.touched = true; }
+          ok = true; break;
+        }
+        case "note.dur": {
+          const f = find(op.id); if (!f || !(op.durTicks > 0)) break;
+          f.c.fill = false; f.c.maxDur = op.durTicks / f.w.tpb; f.c.dirty = true; f.w.touched = true;
+          ok = true; break;
+        }
+        case "note.string": {
+          const f = find(op.id); const s = op.engIdx;
+          if (!f || s == null || tuning[s] == null || !Number.isInteger(op.fret) || op.fret < 0 || op.fret > _edMaxFret) break;
+          freeString(f.c, f.n, s);
+          f.n.string = +s; f.n.fret = op.fret; f.n.midi = tuning[s] + op.fret;
+          f.c.notes.sort((a, b) => a.midi - b.midi); f.c.dirty = true; f.w.touched = true;
+          ok = true; break;
+        }
+        case "note.tech": {
+          const f = find(op.id); if (!f || f.n.string == null) break;
+          const tags = Array.isArray(op.tech) ? [...new Set(op.tech.filter((x) => TECHNIQUES.includes(x)))] : [];
+          if (tags.length) f.n.tech = tags; else delete f.n.tech;
+          if (tags.includes("bend")) f.n.bend = op.bend > 0 ? op.bend : f.n.bend || 4; else delete f.n.bend;
+          f.c.dirty = true; f.w.touched = true;
+          ok = true; break;
+        }
+        case "chord.refinger": {
+          const bi = byNumber.get(op.bar); if (bi == null) break;
+          const w = cellsOf(bi), c = cellAt(w, Math.round(op.onsetTicks || 0)); if (!c) break;
+          for (const n of c.notes) { delete n.string; delete n.fret; delete n.tech; delete n.bend; }
+          c.dirty = true; c.refinger = true; w.touched = true;
+          ok = true; break;
+        }
+        case "symbol.lock": {
+          const bi = byNumber.get(op.bar); if (bi == null) break;
+          const w = cellsOf(bi), c = cellAt(w, Math.round(op.onsetTicks || 0)); if (!c) break;
+          c.lock = op.symbol ? String(op.symbol) : undefined; c.dirty = true; w.touched = true;
+          ok = true; break;
+        }
+        default: break;
+      }
+    } catch (_) { ok = false; }
+    if (ok) applied++; else skipped++;
+  });
+  let changed = false;
+  const bars = score.bars.map((bar, bi) => {
+    const w = work.get(bi);
+    if (!w || !w.touched) return bar;
+    changed = true;
+    return { ...bar, events: _edRebuildBar(w, useSharp), edited: true };
+  });
+  if (!changed) return skipped ? { ...score, editReport: { applied, skipped } } : score;
+  return { ...score, bars, edited: true, editReport: { applied, skipped } };
+}
+/* One dirty bar back to score events: re-time (gap-filling unless an explicit length),
+ * project notes → midis/frets/tech/bends, re-recognise changed onsets, re-derive the
+ * integer chart grid exactly as the parsers do. Untouched onsets keep every field. */
+function _edRebuildBar(w, useSharp) {
+  const { bpb } = w;
+  const cells = w.cells.filter((c) => c.notes.length || (c.ev && !c.dirty && !(c.ev.midis || []).length)).sort((a, b) => a.qbeat - b.qbeat);
+  const events = cells.map((c, i) => {
+    const gap = (i + 1 < cells.length ? cells[i + 1].qbeat : bpb) - c.qbeat;
+    const qdur = Math.max(1e-4, c.fill ? gap : Math.min(c.maxDur, gap));
+    if (!c.dirty) return { ...c.ev, qdur };
+    // strip the layer's own flags first so a re-application writes them in the same order
+    const { notes: _old, fingered: _f, uncertain: _u, edited: _e, locked: _l, ...base } = c.ev || {};
+    const wasReviewed = !!base.reviewed && !_l;
+    delete base.reviewed;
+    const notes = c.notes.map((n) => { const o = { id: n.id, midi: n.midi }; if (n.string != null) { o.string = n.string; o.fret = n.fret; if (n.tech && n.tech.length) o.tech = n.tech.slice(); if (n.bend) o.bend = n.bend; } return o; });
+    const midis = notes.map((n) => n.midi).sort((a, b) => a - b);
+    const frets = {}, tech = {}, bends = {};
+    for (const n of notes) if (n.string != null) { frets[n.string] = n.fret; if (n.tech) tech[n.string] = n.tech.slice(); if (n.bend) bends[n.string] = n.bend; }
+    const ev = { ...base, midis, qbeat: c.qbeat, qdur, notes, edited: true };
+    if (Object.keys(frets).length) ev.frets = frets; else delete ev.frets;
+    if (Object.keys(tech).length) ev.tech = tech; else delete ev.tech;
+    if (Object.keys(bends).length) ev.bends = bends; else delete ev.bends;
+    if (c.lock) { ev.symbol = c.lock; ev.locked = true; ev.reviewed = true; }
+    else { ev.symbol = midis.length ? symbolForMidis(midis, useSharp) : "—"; if (wasReviewed) ev.reviewed = true; }
+    if (!ev.tuplet) ev.tuplet = 0;
+    return ev;
+  });
+  events.forEach((e) => { e.beat = Math.max(0, Math.min(bpb - 1, Math.round(e.qbeat))); });
+  for (let i = 1; i < events.length; i++) if (events[i].beat <= events[i - 1].beat) events[i].beat = Math.min(bpb - 1, events[i - 1].beat + 1);
+  events.forEach((e, i) => { e.durBeats = (i + 1 < events.length ? events[i + 1].beat : bpb) - e.beat; });
+  return events;
+}
+
+/** Editor ticks ↔ seconds on the RECORDING's clock (bar 1 = score.audioOffset; a tempo map is
+ *  followed bar by bar, exactly as scoreEventTimes plays it). → { tickToSec, secToTick, duration }. */
+function scoreTimeMap(score, bpm) {
+  const bars = (score && score.bars) || [], off = score && isFinite(score.audioOffset) ? score.audioOffset : 0;
+  const tempo = bpm > 0 ? bpm : (score && score.tempo) || 100, bt = scoreBarTempos(score, tempo);
+  const starts = [], secs = [], spt = [];
+  let tick = 0, sec = off;
+  bars.forEach((bar, i) => {
+    const sig = _edSig(score, bar), len = _edBarTicks(sig), q = 60 / (bt ? bt[i] : tempo) / EDIT_PPQ;
+    starts.push(tick); secs.push(sec); spt.push(q); tick += len; sec += len * q;
+  });
+  const lastQ = spt.length ? spt[spt.length - 1] : 60 / tempo / EDIT_PPQ;
+  // an audio chart that carries its tracked beat TIMELINE (beats from bar 1 → recording seconds):
+  // the exact beats, not the simplified tempo map, so loops and the spectrogram sit on the real beats
+  const tl = score && score.timeline && score.timeline.times && score.timeline.times.length >= 2 && !(bpm > 0 && score.tempo > 0 && Math.abs(bpm - score.tempo) > 1e-6) ? score.timeline : null;
+  if (tl) {
+    const tpb0 = EDIT_PPQ * 4 / ((score.timeSig || [4, 4])[1]);
+    return { duration: timelineSecondsAt(tl, tick / tpb0), totalTicks: tick, tickToSec: (t) => timelineSecondsAt(tl, t / tpb0), secToTick: (s2) => timelineBeatsAt(tl, s2) * tpb0 };
+  }
+  const idxOf = (arr, v) => { let lo = 0, hi = arr.length - 1; while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (arr[mid] <= v) lo = mid; else hi = mid - 1; } return lo; };
+  return {
+    duration: sec, totalTicks: tick,
+    tickToSec: (t) => { if (!starts.length) return off + t * lastQ; const i = idxOf(starts, Math.max(0, t)); return secs[i] + (t - starts[i]) * spt[i]; },
+    secToTick: (s) => { if (!secs.length) return (s - off) / lastQ; const i = idxOf(secs, s); return starts[i] + (s - secs[i]) / spt[i]; },
+  };
+}
+/** The recording's spectrogram resampled onto the note editor's grid: one column per `colTicks`
+ *  score ticks (on the recording's clock via scoreTimeMap), one row per semitone, log-compressed
+ *  and normalised to 0..1 — the AnthemScore-style evidence drawn under the piano roll. Pure;
+ *  the UI runs it off-thread. → { cols, rows, minMidi, maxMidi, colTicks, data: Float32Array } */
+function noteRollSpectrogram(samples, sampleRate, score, opts = {}) {
+  const minMidi = opts.minMidi != null ? opts.minMidi : 36, maxMidi = opts.maxMidi != null ? opts.maxMidi : 96;
+  const colTicks = opts.colTicks || 60, rows = maxMidi - minMidi + 1;
+  const lf = logFreqSpectrogram(samples, sampleRate, { minMidi: minMidi - 1, maxMidi: maxMidi + 1, winSec: opts.winSec || 0.128, hopSec: opts.hopSec || 0.025 });
+  const tm = scoreTimeMap(score, opts.bpm);
+  const cols = Math.max(1, Math.ceil(tm.totalTicks / colTicks));
+  const data = new Float32Array(cols * rows);
+  if (!lf.spec.length) return { cols, rows, minMidi, maxMidi, colTicks, data };
+  const hopSec = lf.hop / lf.sampleRate, t0 = lf.times[0];
+  for (let c = 0; c < cols; c++) {
+    const sa = tm.tickToSec(c * colTicks), sb = tm.tickToSec((c + 1) * colTicks);
+    let fa = Math.max(0, Math.floor((sa - t0) / hopSec)), fb = Math.min(lf.spec.length - 1, Math.ceil((sb - t0) / hopSec));
+    if (fb < fa) { if (fa >= lf.spec.length) continue; fb = fa; }
+    for (let r = 0; r < rows; r++) {
+      const jc = (r + 1) * lf.bps;                                      // bin centre of semitone minMidi + r
+      let v = 0;
+      for (let f = fa; f <= fb; f++) { const row = lf.spec[f]; for (let d = -1; d <= 1; d++) { const x = row[jc + d]; if (x > v) v = x; } }
+      data[c * rows + r] = v;
+    }
+  }
+  // log compression, normalised to the 99th percentile so one loud hit can't wash the rest out
+  for (let i = 0; i < data.length; i++) data[i] = Math.log1p(100 * data[i]);
+  const sorted = Array.from(data).filter((x) => x > 0).sort((a, b) => a - b);
+  const top = sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.99))] : 1;
+  for (let i = 0; i < data.length; i++) data[i] = Math.min(1, data[i] / (top || 1));
+  return { cols, rows, minMidi, maxMidi, colTicks, data };
+}
+
+/** Transpose a chord symbol's TEXT (root + slash bass) by n semitones — for a symbol the
+ *  user locked, which must move with the music instead of being re-named from the notes. */
+function transposeSymbol(symbol, n, useSharp = true) {
+  if (!symbol || typeof symbol !== "string" || !n) return symbol;
+  const names = useSharp ? NOTE_SHARP : NOTE_FLAT, up = (pc) => names[(((pc + n) % 12) + 12) % 12];
+  const m = symbol.match(/^([A-G][#b♯♭]?)(.*)$/); if (!m) return symbol;
+  const pc = _PC_ANY[m[1].replace("♯", "#").replace("♭", "b")]; if (pc === undefined) return symbol;
+  let rest = m[2];
+  const bm = rest.match(/^(.*)\/([A-G][#b♯♭]?)$/);
+  if (bm) { const b = _PC_ANY[bm[2].replace("♯", "#").replace("♭", "b")]; if (b !== undefined) rest = `${bm[1]}/${up(b)}`; }
+  return up(pc) + rest;
+}
+
+/** The edit as a short human summary ("3 notes moved · 1 added"), for the editor header. */
+function describeScoreEdit(edit) {
+  const ops = edit && Array.isArray(edit.ops) ? edit.ops : [];
+  const c = {}; for (const o of ops) c[o.t] = (c[o.t] || 0) + 1;
+  const parts = [];
+  const say = (k, one, many) => { if (c[k]) parts.push(`${c[k]} ${c[k] === 1 ? one : many}`); };
+  say("note.add", "note added", "notes added"); say("note.remove", "note removed", "notes removed");
+  say("note.move", "note moved", "notes moved"); say("note.dur", "length changed", "lengths changed");
+  say("note.string", "string changed", "strings changed"); say("note.tech", "technique set", "techniques set");
+  say("chord.refinger", "chord re-fingered", "chords re-fingered"); say("symbol.lock", "chord locked", "chord locks");
+  return parts.join(" · ");
+}
+
+/* ============================================================================
+ *  WORKBENCH · WO-2 — PRACTICE: slow-down, loop, metronome, live chords, coach
+ *  ---------------------------------------------------------------------------
+ *  All pure DSP (no Web Audio, no DOM): the UI hands PCM in and plays PCM out, so
+ *  every piece is headless-tested with synthesized audio.
+ *
+ *  timeStretchChannels / timeStretch — WSOLA (Verhelst & Roelands 1993): overlap-add
+ *    Hann frames at a fixed SYNTHESIS hop, reading the input at hop × rate, each frame
+ *    nudged within ±12 ms to the position whose waveform best continues the previous
+ *    frame (normalised cross-correlation, coarse search on a 4× decimated signal then a
+ *    full-rate refine). Pitch is untouched by construction; a pitch shift is a stretch by
+ *    2^(s/12) followed by the Kaiser-sinc resampler. Stereo channels share ONE set of
+ *    frame positions (found on the mix), so the image doesn't smear.
+ *  loopRegion / clickTimes / renderClicks / clickTrackWav — loop points and metronome
+ *    clicks on the SCORE's own clock (scoreTimeMap: tempo map + recording offset), so a
+ *    loop over an audio chart lands on the recording's real bar lines.
+ *  renderScorePcm — a tiny additive synth, for looping a chart that has no recording.
+ *  practiceCompare — what you played vs what's written: hits / misses / extras /
+ *    timing offsets (notes), or per-chord chroma match (chords).
+ *  createLiveChordTracker — the live-chord readout: per-frame template match against the
+ *    chart vocabulary, a median over the last frames, and HYSTERESIS (a new chord must win
+ *    two frames in a row by a margin and the current one must have been held ≥ 0.4 s), so
+ *    a strum or a passing note can't flicker the display.
+ * ------------------------------------------------------------------------- */
+function _wsolaPositions(mono, sampleRate, tempo, outLen, N, Hs) {
+  const L = mono.length, tol = Math.max(8, Math.round(sampleRate * 0.012)), M = N >> 1, D = 4;
+  const frames = Math.ceil(outLen / Hs) + 1, pos = new Int32Array(frames);
+  pos[0] = 0;
+  for (let k = 1; k < frames; k++) {
+    const nominal = Math.round(k * Hs * tempo), natural = pos[k - 1] + Hs;
+    const lo = Math.max(0, nominal - tol), hi = Math.min(L - N, nominal + tol);
+    if (hi < lo || natural + M > L) { pos[k] = Math.max(0, Math.min(L - N, nominal)); continue; }
+    const score = (p, step) => {
+      let dot = 0, e = 0;
+      for (let i = 0; i < M; i += step) { const a = mono[natural + i], b = mono[p + i]; dot += a * b; e += b * b; }
+      return e > 1e-12 ? dot / Math.sqrt(e) : -Infinity;
+    };
+    let best = Math.max(lo, Math.min(hi, nominal)), bs = -Infinity;
+    for (let p = lo; p <= hi; p += 2) { const s = score(p, D); if (s > bs) { bs = s; best = p; } }
+    const a = Math.max(lo, best - 2), b = Math.min(hi, best + 2);
+    bs = -Infinity; let fine = best;
+    for (let p = a; p <= b; p++) { const s = score(p, 1); if (s > bs) { bs = s; fine = p; } }
+    pos[k] = fine;
+  }
+  return pos;
+}
+/** Time-stretch (and optionally pitch-shift) several channels with shared frame positions.
+ *  rate = playback speed (0.5 = half speed, twice as long); opts.pitchSemitones shifts pitch
+ *  without changing the length. → Float32Array[] (same count as `channels`). */
+function timeStretchChannels(channels, sampleRate, rate = 1, opts = {}) {
+  const chs = (channels || []).filter(Boolean);
+  if (!chs.length) return [];
+  const L = Math.min(...chs.map((c) => c.length));
+  const r = Math.max(0.25, Math.min(4, rate || 1)), semis = opts.pitchSemitones || 0, p = Math.pow(2, semis / 12);
+  if (Math.abs(r - 1) < 1e-6 && !semis) return chs.map((c) => Float32Array.from(c.subarray ? c.subarray(0, L) : c.slice(0, L)));
+  let N = Math.round(sampleRate * (opts.frameSec || 0.042)); N += N & 1;
+  if (L < N * 2) return chs.map((c) => Float32Array.from(c));
+  const Hs = N >> 1, tempo = r / p, outLen = Math.round(L / tempo);
+  const mono = chs.length === 1 ? chs[0] : (() => { const m = new Float32Array(L); for (const c of chs) for (let i = 0; i < L; i++) m[i] += c[i] / chs.length; return m; })();
+  const pos = _wsolaPositions(mono, sampleRate, tempo, outLen, N, Hs);
+  const win = _hann(N), norm = new Float32Array(outLen + N);
+  for (let k = 0; k < pos.length; k++) { const o = k * Hs; for (let i = 0; i < N && o + i < norm.length; i++) norm[o + i] += win[i]; }
+  return chs.map((c) => {
+    const out = new Float32Array(outLen + N);
+    for (let k = 0; k < pos.length; k++) {
+      const o = k * Hs, s = pos[k];
+      for (let i = 0; i < N && o + i < out.length; i++) out[o + i] += (c[s + i] || 0) * win[i];
+    }
+    for (let i = 0; i < out.length; i++) out[i] = norm[i] > 1e-3 ? out[i] / norm[i] : 0;
+    const stretched = out.subarray(0, outLen);
+    if (!semis) return Float32Array.from(stretched);
+    const shifted = resampleTo(stretched, sampleRate * p, sampleRate);
+    const want = Math.round(L / r);
+    if (shifted.length === want) return shifted;
+    const fit = new Float32Array(want); fit.set(shifted.subarray(0, Math.min(want, shifted.length))); return fit;
+  });
+}
+function timeStretch(pcm, sampleRate, rate = 1, opts = {}) { return timeStretchChannels([pcm], sampleRate, rate, opts)[0] || new Float32Array(0); }
+
+/** A loop from bar `startBar` through bar `endBar` (bar numbers, inclusive) on the score's
+ *  clock (the recording's, for an audio chart). → { startSec, endSec, startBar, endBar, bars:[{number,startSec,beats,beatSec}] } */
+function loopRegion(score, opts = {}) {
+  const bars = (score && score.bars) || [];
+  if (!bars.length) return null;
+  const tm = scoreTimeMap(score, opts.bpm), L = scoreNoteList({ ...score, bars: bars.map((b) => ({ ...b, events: [] })) }).bars;
+  const nums = L.map((b) => b.number);
+  const a = Math.max(0, nums.indexOf(opts.startBar != null ? opts.startBar : nums[0]));
+  let b = nums.indexOf(opts.endBar != null ? opts.endBar : nums[nums.length - 1]); if (b < a) b = a;
+  const out = [];
+  for (let i = a; i <= b; i++) {
+    const bar = L[i], tpb = EDIT_PPQ * 4 / bar.timeSig[1], s = tm.tickToSec(bar.startTick), e = tm.tickToSec(bar.startTick + bar.lenTicks);
+    out.push({ number: bar.number, startSec: s, endSec: e, beats: bar.timeSig[0], beatSec: (tm.tickToSec(bar.startTick + tpb) - s), timeSig: bar.timeSig });
+  }
+  return { startSec: out[0].startSec, endSec: out[out.length - 1].endSec, startBar: out[0].number, endBar: out[out.length - 1].number, bars: out };
+}
+/** Metronome click times for a loop region (+ `countInBars` bars of count-in before it, at the
+ *  first bar's beat length). Times are relative to the region start (count-in clicks negative)
+ *  unless `absolute`. accent: 2 = downbeat, 1 = a compound-meter group (6/8 beat 4), 0 = beat. */
+function clickTimes(region, opts = {}) {
+  if (!region) return [];
+  const base = opts.absolute ? 0 : region.startSec, out = [];
+  const first = region.bars[0], n = Math.max(0, Math.round(opts.countInBars || 0));
+  const strong = (k, beats, den) => (k === 0 ? 2 : den === 8 && beats % 3 === 0 && k % 3 === 0 ? 1 : 0);
+  for (let c = n; c > 0; c--) for (let k = 0; k < first.beats; k++) out.push({ t: first.startSec - c * first.beats * first.beatSec + k * first.beatSec - base, accent: strong(k, first.beats, first.timeSig[1]), countIn: true });
+  for (const bar of region.bars) for (let k = 0; k < bar.beats; k++) out.push({ t: bar.startSec + k * bar.beatSec - base, accent: strong(k, bar.beats, bar.timeSig[1]), bar: bar.number, beat: k });
+  return out;
+}
+/** Clicks → PCM (a short damped sine: 1.6 kHz downbeat, 1.2 kHz group, 0.9 kHz beat). */
+function renderClicks(times, sampleRate, durSec, opts = {}) {
+  const n = Math.max(0, Math.ceil(durSec * sampleRate)), out = new Float32Array(n), gain = opts.gain != null ? opts.gain : 0.5;
+  const len = Math.round(sampleRate * 0.03), offset = opts.offsetSec || 0, scale = opts.timeScale || 1;
+  for (const c of times || []) {
+    const s0 = Math.round((c.t * scale + offset) * sampleRate), f = c.accent === 2 ? 1600 : c.accent === 1 ? 1200 : 900, g = gain * (c.accent === 2 ? 1 : 0.7);
+    for (let i = 0; i < len; i++) { const j = s0 + i; if (j < 0 || j >= n) continue; out[j] += g * Math.exp(-i / (len / 5)) * Math.sin((2 * Math.PI * f * i) / sampleRate); }
+  }
+  return out;
+}
+/** A click track WAV for the whole score (or a region), on the score's clock: drag it into a
+ *  DAW under the recording and the clicks sit on the tracked beats. */
+function clickTrackWav(score, opts = {}) {
+  const region = loopRegion(score, opts); if (!region) return null;
+  const sr = opts.sampleRate || 44100, absolute = !!opts.alignToRecording;
+  const times = clickTimes(region, { absolute, countInBars: opts.countInBars || 0 });
+  const lead = absolute ? 0 : (opts.countInBars || 0) * region.bars[0].beats * region.bars[0].beatSec;
+  const dur = (absolute ? region.endSec : region.endSec - region.startSec + lead) + 0.2;
+  return encodeWav16([renderClicks(times, sr, dur, { offsetSec: lead })], sr);
+}
+/** The chart itself as PCM (a small additive synth), from bar a to bar b on the score clock
+ *  minus its recording offset — for looping a chart that has no recording. opts: { startBar,
+ *  endBar, bpm, sampleRate, transpose, gain }. */
+function renderScorePcm(score, opts = {}) {
+  const region = loopRegion(score, opts); if (!region) return new Float32Array(0);
+  const sr = opts.sampleRate || 22050, tr = opts.transpose || 0, gain = opts.gain != null ? opts.gain : 0.25;
+  const dur = region.endSec - region.startSec, out = new Float32Array(Math.ceil((dur + 0.3) * sr));
+  const off = score && isFinite(score.audioOffset) ? score.audioOffset : 0;
+  const evs = scoreEventTimes(score, opts.bpm || score.tempo || 100).events;
+  for (const ev of evs) {
+    const st = ev.start + off - region.startSec; if (st < -1e-6 || st >= dur) continue;
+    const en = Math.min(dur, st + ev.dur), v = gain / Math.max(1, Math.sqrt(ev.midis.length));
+    for (const m0 of ev.midis) {
+      const f = 440 * Math.pow(2, (m0 + tr - 69) / 12), i0 = Math.round(st * sr), i1 = Math.round(en * sr), rel = Math.round(0.08 * sr);
+      for (let i = i0; i < Math.min(out.length, i1 + rel); i++) {
+        const t = (i - i0) / sr, env = Math.min(1, t / 0.008) * (i < i1 ? Math.exp(-t * 1.6) * 0.7 + 0.3 : Math.max(0, 1 - (i - i1) / rel) * 0.3);
+        const ph = 2 * Math.PI * f * t;
+        out[i] += v * env * (Math.sin(ph) + 0.35 * Math.sin(2 * ph) + 0.15 * Math.sin(3 * ph));
+      }
+    }
+  }
+  return out;
+}
+
+/* ---- chord templates on the chart vocabulary (shared by the tracker + the coach) ---- */
+function _chordTemplates(vocabulary = "chart", useSharp = true) {
+  const V = resolveChordVocabulary(vocabulary);
+  const qs = QUALITIES.filter((q) => !V || (V.allow.has(q.suffix) && !V.writeAs[q.suffix]));
+  const names = useSharp ? NOTE_SHARP : NOTE_FLAT, out = [];
+  for (let r = 0; r < 12; r++) for (const q of qs) {
+    const t = new Float64Array(12); for (const iv of q.intervals) t[(r + iv) % 12] = iv === 0 ? 1.15 : 1;
+    let n = 0; for (let i = 0; i < 12; i++) n += t[i] * t[i];
+    out.push({ key: `${r}:${q.suffix}`, root: r, suffix: q.suffix, symbol: names[r] + q.suffix, tones: q.intervals.length, rank: q.rank, t, norm: Math.sqrt(n) });
+  }
+  return out;
+}
+const _chromaCos = (c, tp) => { let d = 0, n = 0; for (let i = 0; i < 12; i++) { d += c[i] * tp.t[i]; n += c[i] * c[i]; } return n > 0 ? d / (Math.sqrt(n) * tp.norm) : 0; };
+const _chromaEntropy = (c) => { let s = 0; for (const v of c) s += Math.max(0, v); if (!(s > 0)) return 1; let h = 0; for (const v of c) { const p = Math.max(0, v) / s; if (p > 0) h -= p * Math.log(p); } return h / Math.log(12); };
+/** Score a chroma vector against chord templates → best first: [{ symbol, root, suffix, confidence }]. */
+function rankChordTemplates(chroma, templates) {
+  return templates.map((tp) => ({ tp, s: _chromaCos(chroma, tp) - 0.012 * Math.max(0, tp.tones - 3) - 0.0004 * tp.rank }))
+    .sort((a, b) => b.s - a.s).map(({ tp, s }) => ({ key: tp.key, symbol: tp.symbol, root: tp.root, suffix: tp.suffix, confidence: Math.max(0, Math.min(1, s)) }));
+}
+/** The live-chord tracker. push(chroma, tSec, energy?) → { symbol|null, confidence, alternatives,
+ *  stableFor, changed }. null symbol = no chord (silence / noise). History in `.history`. */
+function createLiveChordTracker(opts = {}) {
+  const tpl = _chordTemplates(opts.vocabulary || "chart", opts.useSharp !== false);
+  const K = opts.medianFrames || 3, confirm = opts.confirmFrames || 2, minHold = opts.minHoldSec != null ? opts.minHoldSec : 0.4;
+  const margin = opts.switchMargin != null ? opts.switchMargin : 0.05, minConf = opts.minConfidence != null ? opts.minConfidence : 0.62;
+  const flat = opts.flatEntropy != null ? opts.flatEntropy : 0.93, gateRel = opts.energyGate != null ? opts.energyGate : 0.06;
+  let hist = [], cur = null, cand = null, peak = 0;
+  const history = [];
+  const api = {
+    history,
+    reset() { hist = []; cur = null; cand = null; peak = 0; history.length = 0; },
+    push(chroma, t, energy) {
+      hist.push(Array.from(chroma)); if (hist.length > K) hist.shift();
+      const med = new Array(12); for (let i = 0; i < 12; i++) { const v = hist.map((h) => h[i]).sort((a, b) => a - b); med[i] = v[v.length >> 1]; }
+      const mx = Math.max(...med) || 1; for (let i = 0; i < 12; i++) med[i] /= mx;
+      if (energy != null) peak = Math.max(peak * 0.999, energy);
+      const quiet = energy != null && (energy < 1e-4 || energy < gateRel * peak);
+      const ranked = quiet ? [] : rankChordTemplates(med, tpl);
+      const best = !quiet && _chromaEntropy(med) < flat && ranked[0].confidence >= minConf ? ranked[0] : null;
+      const bestKey = best ? best.key : "nc";
+      const curConf = cur && cur.key !== "nc" ? (ranked.find((r) => r.key === cur.key) || { confidence: 0 }).confidence : 0;
+      let changed = false;
+      if (!cur) { cur = { key: bestKey, symbol: best ? best.symbol : null, since: t }; changed = true; }
+      else if (bestKey === cur.key) cand = null;
+      else {
+        cand = cand && cand.key === bestKey ? { ...cand, count: cand.count + 1 } : { key: bestKey, count: 1, best };
+        const strongEnough = bestKey === "nc" || !cur.symbol || (best && best.confidence >= curConf + margin);
+        if (cand.count >= confirm && t - cur.since >= minHold && strongEnough) { cur = { key: bestKey, symbol: best ? best.symbol : null, since: t }; cand = null; changed = true; }
+      }
+      if (changed && (!history.length || history[history.length - 1].symbol !== cur.symbol)) history.push({ symbol: cur.symbol, startSec: t });
+      const conf = cur.symbol ? (ranked.find((r) => r.key === cur.key) || { confidence: 0 }).confidence : 0;
+      return { symbol: cur.symbol, confidence: conf, alternatives: ranked.slice(0, 4).filter((r) => r.key !== cur.key).slice(0, 3), stableFor: t - cur.since, changed };
+    },
+  };
+  return api;
+}
+
+/** Compare what was played against what's written.
+ *  expected: [{ startSec, durSec, midis }]; heard: { notes:[{midi,startSec,durSec}] } (notes mode)
+ *  or { frames:[{ t, chroma }] } (chords mode). opts: { tolSec 0.2, octave (pitch class only), threshold 0.8 }.
+ *  → { mode, hits, misses, extras, wrongPitch, timingOffsets, accuracy, precision, f1, meanOffsetMs, score, detail } */
+function practiceCompare(expected, heard, opts = {}) {
+  const exp = (expected || []).filter((e) => e && e.midis && e.midis.length).slice().sort((a, b) => a.startSec - b.startSec);
+  const mode = opts.mode || (heard && heard.frames && !heard.notes ? "chords" : "notes");
+  if (mode === "chords") {
+    const thr = opts.threshold != null ? opts.threshold : 0.8, frames = (heard && heard.frames) || [], detail = [];
+    let hits = 0; const offs = [];
+    for (const e of exp) {
+      const pcs = [...new Set(e.midis.map((m) => ((m % 12) + 12) % 12))], t = new Float64Array(12); pcs.forEach((p) => (t[p] = 1));
+      const tp = { t, norm: Math.sqrt(pcs.length) };
+      const fs = frames.filter((f) => f.t >= e.startSec && f.t < e.startSec + e.durSec);
+      const avg = new Array(12).fill(0); fs.forEach((f) => f.chroma.forEach((v, i) => (avg[i] += v / fs.length)));
+      const sim = fs.length ? _chromaCos(avg, tp) : 0, ok = sim >= thr;
+      const first = fs.find((f) => _chromaCos(f.chroma, tp) >= thr);
+      if (ok) { hits++; if (first) offs.push(first.t - e.startSec); }
+      detail.push({ startSec: e.startSec, ok, similarity: sim });
+    }
+    const n = exp.length || 1;
+    return { mode, hits, misses: exp.length - hits, extras: 0, wrongPitch: 0, timingOffsets: offs, accuracy: hits / n, precision: hits / n, f1: hits / n, meanOffsetMs: offs.length ? (1000 * offs.reduce((a, b) => a + b, 0)) / offs.length : 0, score: Math.round((100 * hits) / n), detail };
+  }
+  const tol = opts.tolSec != null ? opts.tolSec : 0.2, oct = !!opts.octave;
+  const notes = ((heard && heard.notes) || []).slice().sort((a, b) => a.startSec - b.startSec), used = new Array(notes.length).fill(false);
+  const same = (a, b) => (oct ? ((a - b) % 12 + 12) % 12 === 0 : a === b);
+  const flat = []; exp.forEach((e) => e.midis.forEach((m) => flat.push({ midi: m, startSec: e.startSec })));
+  const offs = [], detail = []; let hits = 0, wrong = 0;
+  for (const e of flat) {
+    let bi = -1, bd = Infinity, near = false;
+    notes.forEach((h, i) => {
+      const d = Math.abs(h.startSec - e.startSec); if (d > tol) return; near = true;
+      if (used[i] || !same(h.midi, e.midi)) return;
+      if (d < bd) { bd = d; bi = i; }
+    });
+    if (bi >= 0) { used[bi] = true; hits++; offs.push(notes[bi].startSec - e.startSec); detail.push({ ...e, ok: true, offsetMs: Math.round(1000 * (notes[bi].startSec - e.startSec)) }); }
+    else { if (near) wrong++; detail.push({ ...e, ok: false, wrongPitch: near }); }
+  }
+  const misses = flat.length - hits, extras = used.filter((u) => !u).length;
+  const accuracy = flat.length ? hits / flat.length : 0, precision = notes.length ? hits / notes.length : 0;
+  const f1 = hits ? (2 * hits) / (2 * hits + misses + extras) : 0;
+  return { mode: "notes", hits, misses, extras, wrongPitch: wrong, timingOffsets: offs, accuracy, precision, f1, meanOffsetMs: offs.length ? (1000 * offs.reduce((a, b) => a + b, 0)) / offs.length : 0, score: Math.round(100 * f1), detail };
+}
+/** A loop region's written events as practice targets: [{ startSec, durSec, midis, symbol, key }]
+ *  on the score clock (recording seconds for an audio chart). */
+function practiceTargets(score, region, bpm) {
+  if (!score || !region) return [];
+  return scoreRecordingTimes(score, bpm || score.tempo).filter((e) => e.midis.length && e.start >= region.startSec - 1e-6 && e.start < region.endSec - 1e-6)
+    .map((e) => { const bar = score.bars.find((b) => b.number === e.bar), ev = bar && bar.events.find((x) => `${bar.number}.${x.beat}` === e.key); return { startSec: e.start, durSec: e.dur, midis: e.midis, symbol: ev ? ev.symbol : "", key: e.key }; });
+}
+
+/* ============================================================================
+ *  WORKBENCH · WO-3 — LYRIC ALIGNMENT + chords-over-lyrics performance sheet
+ *  ---------------------------------------------------------------------------
+ *  LINE-level alignment of a lyric sheet (parseLyrics) to a recording. Sung syllables are
+ *  not cleanly separable from a vocal stem without a phoneme model, so the honest ceiling
+ *  is the LINE, and every line carries a confidence and can be nudged.
+ *
+ *    1. voicedPhrases — the vocal stem's sung phrases: frame RMS (20 ms hop) against a
+ *       level read from the stem itself (noise floor + 12 dB, ≥ the loudest − 30 dB), with
+ *       hysteresis, short gaps bridged, blips dropped.
+ *    2. countSyllables — vowel-group heuristic per word (Intl.Segmenter for word breaks;
+ *       diacritics folded; CJK counts characters).
+ *    3. alignLyrics — each line's PROPORTIONAL start (its syllable share of the voiced
+ *       time) is snapped to a nearby phrase start by a monotonic DP (a line may also stay
+ *       "free" at its proportional time for a fixed cost); lines between two snapped
+ *       anchors are re-proportioned inside that interval. Section labels the chart and the
+ *       sheet share ("Chorus") are hard anchors. Starts snap to the nearest beat of the
+ *       chart. With no recording, lines spread over the chart's bars (low confidence).
+ *  Output: LyricMap { lines:[{ text, section, startSec, endSec, startBar, startBeat, endBar,
+ *  endBeat, confidence, snapped }], source, confidence }. Exporters: LRC, ChordPro with inline
+ *  chords, and the chords-over-lyrics text sheet. Pure; the UI runs the DSP off-thread.
+ * ------------------------------------------------------------------------- */
+const _segWords = (s) => {
+  const t = String(s || "");
+  try { if (typeof Intl !== "undefined" && Intl.Segmenter) return [...new Intl.Segmenter(undefined, { granularity: "word" }).segment(t)].filter((x) => x.isWordLike).map((x) => ({ w: x.segment, i: x.index })); } catch (_) {}
+  const out = []; const re = /[\p{L}\p{N}'’]+/gu; let m; while ((m = re.exec(t))) out.push({ w: m[0], i: m.index }); return out;
+};
+function _wordSyllables(word) {
+  const raw = String(word || "");
+  if (/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(raw)) return [...raw].filter((c) => /\p{L}/u.test(c)).length || 1;
+  let w = raw.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z]/g, "");
+  if (!w) return /\p{N}/u.test(raw) ? 1 : 0;
+  if (w.length <= 3) return 1;
+  w = w.replace(/(?:[^laeiouy]es|ed|[^laeiouy]e)$/, "").replace(/^y/, "").replace(/eau/g, "o");
+  const m = w.match(/[aeiouy]{1,2}/g);
+  return Math.max(1, m ? m.length : 1);
+}
+/** Syllables in a lyric line (≥ 1 for a non-empty line). */
+function countSyllables(line) { const n = _segWords(line).reduce((a, x) => a + _wordSyllables(x.w), 0); return n || (String(line || "").trim() ? 1 : 0); }
+/** A parsed lyric sheet → its lines in order: [{ text, section, stanza, syllables }]. */
+function lyricLines(parsed) {
+  const out = [];
+  ((parsed && parsed.sections) || []).forEach((sec, si) => (sec.blocks || []).forEach((blk, bi) => blk.forEach((text) => {
+    const t = String(text || "").trim(); if (t) out.push({ text: t, section: sec.label || null, sectionIndex: si, stanza: bi, syllables: countSyllables(t) });
+  })));
+  return out;
+}
+/** Sung phrases of a (vocal) signal: [{ startSec, endSec }]. */
+function voicedPhrases(samples, sampleRate, opts = {}) {
+  const hop = Math.max(1, Math.round(sampleRate * (opts.hopSec || 0.02))), win = hop * 2, out = [];
+  const db = [];
+  for (let s = 0; s + win <= samples.length; s += hop) { let e = 0; for (let i = 0; i < win; i++) e += samples[s + i] * samples[s + i]; db.push(10 * Math.log10(e / win + 1e-12)); }
+  if (!db.length) return out;
+  const sorted = db.slice().sort((a, b) => a - b), floor = sorted[Math.floor(sorted.length * 0.1)], peak = sorted[Math.floor(sorted.length * 0.95)];
+  const on = Math.max(floor + (opts.aboveFloorDb || 12), peak - (opts.belowPeakDb || 30)), off = on - 6;
+  const gap = opts.minGapSec != null ? opts.minGapSec : 0.25, minLen = opts.minPhraseSec != null ? opts.minPhraseSec : 0.25, dt = hop / sampleRate;
+  let cur = null;
+  db.forEach((v, k) => {
+    const t = k * dt;
+    if (!cur && v >= on) cur = { startSec: t, endSec: t + dt };
+    else if (cur && v >= off) cur.endSec = t + dt;
+    else if (cur && t - cur.endSec > gap) { out.push(cur); cur = null; }
+  });
+  if (cur) out.push(cur);
+  const merged = [];
+  for (const p of out) { const l = merged[merged.length - 1]; if (l && p.startSec - l.endSec < gap) l.endSec = p.endSec; else merged.push({ ...p }); }
+  return merged.filter((p) => p.endSec - p.startSec >= minLen).map((p) => ({ startSec: +p.startSec.toFixed(3), endSec: +(p.endSec + win / sampleRate / 2).toFixed(3) }));
+}
+/* voiced-time ↔ real-time over a phrase list */
+function _voicedClock(phrases) {
+  const cum = []; let v = 0; for (const p of phrases) { cum.push(v); v += p.endSec - p.startSec; }
+  const toReal = (x) => { if (!phrases.length) return x; let k = 0; while (k + 1 < phrases.length && cum[k + 1] <= x) k++; return phrases[k].startSec + Math.min(x - cum[k], phrases[k].endSec - phrases[k].startSec); };
+  const toVoiced = (t) => { let acc = 0; for (const p of phrases) { if (t <= p.startSec) return acc; if (t < p.endSec) return acc + (t - p.startSec); acc += p.endSec - p.startSec; } return acc; };
+  return { total: v, toReal, toVoiced };
+}
+/* the chart's beats (recording clock) + bar/beat lookup */
+function _beatGrid(score, bpm) {
+  const beats = [];
+  if (!score || !score.bars || !score.bars.length) return { beats, at: () => null };
+  const tm = scoreTimeMap(score, bpm), L = scoreNoteList({ ...score, bars: score.bars.map((b) => ({ ...b, events: [] })) });
+  L.bars.forEach((b) => { const tpb = EDIT_PPQ * 4 / b.timeSig[1]; for (let k = 0; k < b.timeSig[0]; k++) beats.push({ t: tm.tickToSec(b.startTick + k * tpb), bar: b.number, beat: k + 1 }); });
+  const at = (t) => { let best = null, bd = Infinity; for (const x of beats) { const d = Math.abs(x.t - t); if (d < bd) { bd = d; best = x; } else if (x.t > t) break; } return best ? { ...best, dist: bd } : null; };
+  return { beats, at, end: tm.duration, tm, bars: L.bars };
+}
+const _secNorm = (s) => String(s || "").toLowerCase().replace(/[^a-z]/g, "").replace(/(verse|chorus|bridge|intro|outro|prechorus|refrain|hook|solo|interlude|tag|coda).*/, "$1");
+/** Align a parsed lyric sheet to a recording (evidence = { samples, sampleRate } or
+ *  { phrases }) or, with no evidence, to the chart's bars. opts: { bpm, snapBeats (true),
+ *  useSections (true) }. → LyricMap. */
+function alignLyrics(parsed, score, evidence, opts = {}) {
+  const lines = lyricLines(parsed);
+  const grid = _beatGrid(score, opts.bpm);
+  if (!lines.length) return { lines: [], source: "none", confidence: 0 };
+  let phrases = evidence && evidence.phrases ? evidence.phrases : evidence && evidence.samples ? voicedPhrases(evidence.samples, evidence.sampleRate, opts) : null;
+  const source = phrases && phrases.length ? "vocal" : "grid";
+  if (source === "grid") {
+    // spread the lines over the chart's bars, each starting on a bar line
+    const bars = grid.bars || [];
+    if (!bars.length) return { lines: lines.map((l) => ({ ...l, startSec: 0, endSec: 0, confidence: 0 })), source, confidence: 0 };
+    const first = (score.bars.findIndex((b) => (b.events || []).some((e) => e.midis && e.midis.length)) + 1) || 1;
+    const t0 = grid.tm.tickToSec(bars[first - 1].startTick), t1 = grid.end;
+    phrases = [{ startSec: t0, endSec: t1 }];
+  }
+  // section anchors: the chart's section starts that the sheet's sections name, in order
+  const anchors = [];
+  if (opts.useSections !== false && score && score.bars && grid.tm) {
+    const L = grid.bars, secs = [];
+    score.bars.forEach((b, i) => { if (b.section) secs.push({ name: _secNorm(b.section), t: grid.tm.tickToSec(L[i].startTick) }); });
+    let si = 0, prevLabel = null;
+    lines.forEach((l, i) => {
+      if (l.section === prevLabel) return; prevLabel = l.section;
+      const n = _secNorm(l.section); if (!n) return;
+      for (let k = si; k < secs.length; k++) if (secs[k].name === n) { anchors.push({ line: i, t: secs[k].t }); si = k + 1; break; }
+    });
+  }
+  const groups = [];                                               // [{ from, to, t0, t1 }]
+  const cuts = [{ line: 0, t: phrases[0].startSec }].concat(anchors.filter((a) => a.line > 0));
+  cuts.forEach((c, k) => groups.push({ from: c.line, to: k + 1 < cuts.length ? cuts[k + 1].line : lines.length, t0: c.t, t1: k + 1 < cuts.length ? cuts[k + 1].t : Math.max(phrases[phrases.length - 1].endSec, c.t + 1) }));
+  const starts = new Array(lines.length), snapped = new Array(lines.length).fill(false), conf = new Array(lines.length).fill(source === "grid" ? 0.25 : 0.35);
+  for (const g of groups) {
+    const ph = phrases.map((p) => ({ startSec: Math.max(p.startSec, g.t0), endSec: Math.min(p.endSec, g.t1) })).filter((p) => p.endSec - p.startSec > 0.05);
+    const use = ph.length ? ph : [{ startSec: g.t0, endSec: g.t1 }];
+    const clock = _voicedClock(use), idx = []; for (let i = g.from; i < g.to; i++) idx.push(i);
+    const S = idx.reduce((a, i) => a + lines[i].syllables, 0) || 1;
+    let acc = 0; const prop = idx.map((i) => { const t = clock.toReal((acc / S) * clock.total); acc += lines[i].syllables; return t; });
+    if (source === "grid") { idx.forEach((i, k) => { starts[i] = prop[k]; }); continue; }
+    // DP: each line either snaps to a phrase start near its proportional time or stays free
+    const meanDur = clock.total / Math.max(1, idx.length), W = Math.max(2, 1.5 * meanDur), sig = Math.max(0.8, 0.6 * meanDur), FREE = 1.1;
+    const cands = idx.map((i, k) => {
+      const c = [{ t: prop[k], snap: false, cost: FREE }];
+      for (const p of use) if (Math.abs(p.startSec - prop[k]) <= W) c.push({ t: p.startSec, snap: true, cost: Math.abs(p.startSec - prop[k]) / sig });
+      if (k === 0) c.push({ t: use[0].startSec, snap: true, cost: Math.abs(use[0].startSec - prop[0]) / sig * 0.5 });
+      return c;
+    });
+    const dp = cands.map((c) => c.map(() => ({ cost: Infinity, from: -1 })));
+    cands[0].forEach((c, j) => { dp[0][j].cost = c.cost; });
+    for (let k = 1; k < cands.length; k++) cands[k].forEach((c, j) => {
+      cands[k - 1].forEach((p, q) => {
+        if (!(c.t > p.t + 0.3) || (c.snap && p.snap && c.t === p.t)) return;
+        const v = dp[k - 1][q].cost + c.cost; if (v < dp[k][j].cost) dp[k][j] = { cost: v, from: q };
+      });
+    });
+    let j = dp[dp.length - 1].reduce((b, x, q, arr) => (x.cost < arr[b].cost ? q : b), 0);
+    const pick = new Array(cands.length);
+    for (let k = cands.length - 1; k >= 0; k--) { pick[k] = cands[k][j] || cands[k][0]; j = dp[k][j] ? dp[k][j].from : 0; if (j < 0) j = 0; }
+    pick.forEach((c, k) => { starts[idx[k]] = c.t; snapped[idx[k]] = c.snap; if (c.snap) conf[idx[k]] = Math.max(0.5, Math.min(0.95, 1 - Math.abs(c.t - prop[k]) / (2 * W))); });
+    // re-proportion free lines between two snapped neighbours, inside that interval's voiced time
+    for (let k = 0; k < idx.length; k++) {
+      if (snapped[idx[k]]) continue;
+      let a = k - 1; while (a >= 0 && !snapped[idx[a]]) a--;
+      let b = k + 1; while (b < idx.length && !snapped[idx[b]]) b++;
+      const ta = a >= 0 ? starts[idx[a]] : g.t0, tb = b < idx.length ? starts[idx[b]] : g.t1;
+      const from = a >= 0 ? a : -1, sylBefore = idx.slice(from < 0 ? 0 : from, k).reduce((x, i) => x + lines[i].syllables, 0), sylAll = idx.slice(from < 0 ? 0 : from, b < idx.length ? b : idx.length).reduce((x, i) => x + lines[i].syllables, 0) || 1;
+      const sub = use.filter((p) => p.endSec > ta && p.startSec < tb).map((p) => ({ startSec: Math.max(p.startSec, ta), endSec: Math.min(p.endSec, tb) }));
+      const cl = _voicedClock(sub.length ? sub : [{ startSec: ta, endSec: tb }]);
+      starts[idx[k]] = Math.max(ta + 0.3, Math.min(tb - 0.3, cl.toReal((sylBefore / sylAll) * cl.total)));
+    }
+    if (anchors.find((x) => x.line === g.from)) { starts[g.from] = Math.max(starts[g.from], g.t0); }
+  }
+  // ends: the last sung phrase end before the next line, else the next start
+  const out = lines.map((l, i) => {
+    const st = starts[i], nx = i + 1 < lines.length ? starts[i + 1] : Infinity;
+    const inside = phrases.filter((p) => p.startSec < nx && p.endSec > st);
+    let en = inside.length ? Math.min(nx, inside[inside.length - 1].endSec) : Math.min(nx, st + Math.max(1, l.syllables * 0.3));
+    if (!isFinite(en) || en <= st) en = st + Math.max(0.5, l.syllables * 0.25);
+    return { text: l.text, section: l.section, stanza: l.stanza, syllables: l.syllables, startSec: st, endSec: en, confidence: conf[i], snapped: snapped[i] };
+  });
+  if (opts.snapBeats !== false && grid.beats.length) out.forEach((l) => {
+    const b = grid.at(l.startSec);
+    if (b && b.dist <= (source === "grid" ? 10 : 0.35)) { l.startSec = b.t; }
+    const sb = grid.at(l.startSec), eb = grid.at(l.endSec);
+    if (sb) { l.startBar = sb.bar; l.startBeat = sb.beat; }
+    if (eb) { l.endBar = eb.bar; l.endBeat = eb.beat; }
+  });
+  for (let i = 1; i < out.length; i++) if (out[i].startSec <= out[i - 1].startSec) out[i].startSec = out[i - 1].startSec + 0.05;
+  out.forEach((l, i) => { if (i + 1 < out.length && l.endSec > out[i + 1].startSec) l.endSec = out[i + 1].startSec; l.startSec = +l.startSec.toFixed(3); l.endSec = +l.endSec.toFixed(3); });
+  const mean = out.reduce((a, l) => a + l.confidence, 0) / out.length;
+  return { lines: out, source, confidence: +mean.toFixed(3), title: parsed.title || null, artist: parsed.subtitle || null };
+}
+/** Move one line's start by `deltaSec` (its neighbours' bounds follow); keeps the order. Pass the
+ *  chart (`score`, `bpm`) to refresh the line's bar/beat. */
+function nudgeLyricLine(map, index, deltaSec, score, bpm) {
+  if (!map || !map.lines || !map.lines[index]) return map;
+  const lines = map.lines.map((l) => ({ ...l }));
+  const lo = index > 0 ? lines[index - 1].startSec + 0.1 : 0, hi = index + 1 < lines.length ? lines[index + 1].startSec - 0.1 : Infinity;
+  const l = lines[index], len = l.endSec - l.startSec;
+  l.startSec = +Math.max(lo, Math.min(hi, l.startSec + deltaSec)).toFixed(3);
+  l.endSec = +Math.min(index + 1 < lines.length ? lines[index + 1].startSec : Infinity, l.startSec + Math.max(0.3, len)).toFixed(3);
+  if (index > 0) lines[index - 1].endSec = Math.min(lines[index - 1].endSec, l.startSec);
+  l.confidence = 1; l.manual = true;
+  if (score) { const g = _beatGrid(score, bpm), sb = g.at(l.startSec), eb = g.at(l.endSec); if (sb) { l.startBar = sb.bar; l.startBeat = sb.beat; } if (eb) { l.endBar = eb.bar; l.endBeat = eb.beat; } }
+  return { ...map, lines };
+}
+const lyricLineAt = (map, sec) => { if (!map || !map.lines) return -1; let k = -1; map.lines.forEach((l, i) => { if (l.startSec <= sec + 1e-6) k = i; }); return k; };
+const _lrcTime = (t) => { const m = Math.floor(t / 60), s = t - m * 60; return `${String(m).padStart(2, "0")}:${s.toFixed(2).padStart(5, "0")}`; };
+/** LyricMap → LRC (simple LRC: one [mm:ss.xx] stamp per line + ti/ar/length tags). */
+function lyricsToLRC(map, opts = {}) {
+  const L = [];
+  const ti = opts.title || (map && map.title), ar = opts.artist || (map && map.artist);
+  if (ti) L.push(`[ti:${ti}]`);
+  if (ar) L.push(`[ar:${ar}]`);
+  const last = map && map.lines && map.lines.length ? map.lines[map.lines.length - 1].endSec : 0;
+  if (last) L.push(`[length:${_lrcTime(last).slice(0, 5)}]`);
+  L.push("[by:Tab Translator Pro]");
+  for (const l of (map && map.lines) || []) L.push(`[${_lrcTime(l.startSec)}]${l.text}`);
+  return L.join("\n") + "\n";
+}
+/* chords of the score on the line's clock: [{ t, symbol }] with consecutive repeats collapsed */
+function _lyricChords(score, opts) {
+  const ov = opts.overrides || {}, evs = scoreRecordingTimes(score, opts.bpm || score.tempo), out = [];
+  for (const e of evs) {
+    const bar = score.bars.find((b) => b.number === e.bar), ev = bar && bar.events.find((x) => `${bar.number}.${x.beat}` === e.key);
+    let sym = ov[e.key] != null ? ov[e.key] : ev ? ev.symbol : "";
+    if (!sym || sym === "—") sym = e.midis.length ? sym : "N.C.";
+    if (!sym) continue;
+    if (out.length && out[out.length - 1].symbol === sym) continue;
+    out.push({ t: e.start, symbol: sym });
+  }
+  return out;
+}
+/* chord placements inside one line: [{ col, symbol }] at word starts by syllable timing. Chords in
+ * a long instrumental gap after the words (> `gapSec`) are NOT piled onto the line's end — they
+ * come back as `after` (their own chord-only line). Two chords on the same syllable: the later wins. */
+function _placeChords(line, chords, nextStart, restate, gapSec = 3) {
+  const words = _segWords(line.text), syl = [];
+  words.forEach((w) => { const n = Math.max(1, _wordSyllables(w.w)); for (let k = 0; k < n; k++) syl.push(w.i); });
+  const end = Math.min(nextStart, Math.max(line.endSec, line.startSec + 0.5)), span = Math.max(0.2, end - line.startSec);
+  const cut = Math.min(nextStart, end + gapSec);
+  const inLine = chords.filter((c) => c.t >= line.startSec - 0.12 && c.t < cut - 0.12);
+  const after = chords.filter((c) => c.t >= cut - 0.12 && c.t < nextStart - 0.12);
+  const before = chords.filter((c) => c.t < line.startSec - 0.12).pop();
+  const out = [];
+  if (restate && before) out.push({ col: 0, symbol: before.symbol });
+  for (const c of inLine) {
+    const f = (c.t - line.startSec) / span;
+    const col = f >= 0.999 || !syl.length ? line.text.length : syl[Math.max(0, Math.min(syl.length - 1, Math.floor(f * syl.length)))];
+    if (out.length && out[out.length - 1].col === col) out.pop();
+    if (out.length && out[out.length - 1].symbol === c.symbol) continue;
+    out.push({ col, symbol: c.symbol });
+  }
+  return { places: out, after: after.filter((c, i, a) => i === 0 || a[i - 1].symbol !== c.symbol) };
+}
+/** The chords-over-lyrics sheet as ROWS (what the UI renders line by line):
+ *  [{ type:"title"|"section"|"chords"|"line"|"blank", text, chordLine?, index? }]. */
+function lyricSheetRows(score, map, opts = {}) {
+  const chords = _lyricChords(score, opts), R = [], lines = (map && map.lines) || [];
+  const title = opts.title || (map && map.title), artist = opts.artist || (map && map.artist);
+  if (title) R.push({ type: "title", text: title }); if (artist) R.push({ type: "title", text: artist }); if (title || artist) R.push({ type: "blank" });
+  const intro = lines.length ? chords.filter((c) => c.t < lines[0].startSec - 0.12) : chords;
+  if (intro.length) { R.push({ type: "section", text: "Intro" }); R.push({ type: "chords", text: intro.map((c) => c.symbol).join("   ") }); R.push({ type: "blank" }); }
+  let sec = null, stanza = null;
+  lines.forEach((l, i) => {
+    if (l.section !== sec) { if (R.length && R[R.length - 1].type !== "blank") R.push({ type: "blank" }); if (l.section) R.push({ type: "section", text: l.section }); sec = l.section; stanza = l.stanza; }
+    else if (l.stanza !== stanza) { R.push({ type: "blank" }); stanza = l.stanza; }
+    const { places: pl, after } = _placeChords(l, chords, i + 1 < lines.length ? lines[i + 1].startSec : Infinity, opts.restate !== false);
+    let lyric = l.text, chordLine = "", shift = 0;
+    for (const p of pl) {
+      let col = p.col + shift;
+      if (chordLine.length && col < chordLine.length + 1) { const pad = chordLine.length + 1 - col; lyric = lyric.slice(0, col) + " ".repeat(pad) + lyric.slice(col); shift += pad; col += pad; }
+      chordLine = chordLine.padEnd(col) + p.symbol;
+    }
+    R.push({ type: "line", index: i, text: lyric.replace(/\s+$/, ""), chordLine: chordLine.replace(/\s+$/, "") });
+    if (after.length) { R.push({ type: "blank" }); R.push({ type: "chords", text: after.map((c) => c.symbol).join("   ") }); }
+  });
+  return R;
+}
+/** Chords-over-lyrics text (the ultimate-guitar layout), from a score + a LyricMap. */
+function scoreToLyricsSheet(score, map, opts = {}) {
+  const L = [];
+  for (const r of lyricSheetRows(score, map, opts)) {
+    if (r.type === "blank") L.push("");
+    else if (r.type === "section") L.push(`[${r.text}]`);
+    else if (r.type === "line") { if (r.chordLine) L.push(r.chordLine); L.push(r.text); }
+    else L.push(r.text);
+  }
+  return L.join("\n").replace(/\n{3,}/g, "\n\n") + "\n";
+}
+/** ChordPro with inline [chords] in the lyric lines (round-trips through parseLyrics). */
+function scoreToChordProWithLyrics(score, map, opts = {}) {
+  const chords = _lyricChords(score, opts), L = [], lines = (map && map.lines) || [];
+  const title = opts.title || (map && map.title), artist = opts.artist || (map && map.artist);
+  if (title) L.push(`{title: ${title}}`); if (artist) L.push(`{artist: ${artist}}`);
+  const kn = _exportKeyName(opts); if (kn) L.push(`{key: ${kn}}`);
+  if (opts.tempo) L.push(`{tempo: ${Math.round(opts.tempo)}}`);
+  const intro = lines.length ? chords.filter((c) => c.t < lines[0].startSec - 0.12) : chords;
+  if (intro.length) { L.push(""); L.push("{comment: Intro}"); L.push(intro.map((c) => `[${c.symbol}]`).join(" ")); }
+  let sec = null, env = null, stanza = null;
+  const close = () => { if (env) L.push(`{end_of_${env}}`); env = null; };
+  lines.forEach((l, i) => {
+    if (l.section !== sec) {
+      close(); L.push("");
+      const n = _secNorm(l.section);
+      if (n === "chorus" || n === "refrain") { env = "chorus"; L.push(`{start_of_chorus${l.section ? ": " + l.section : ""}}`); }
+      else if (n === "verse") { env = "verse"; L.push(`{start_of_verse: ${l.section}}`); }
+      else if (n === "bridge") { env = "bridge"; L.push(`{start_of_bridge: ${l.section}}`); }
+      else if (l.section) L.push(`{comment: ${l.section}}`);
+      sec = l.section; stanza = l.stanza;
+    } else if (l.stanza !== stanza) { L.push(""); stanza = l.stanza; }
+    const { places: pl, after } = _placeChords(l, chords, i + 1 < lines.length ? lines[i + 1].startSec : Infinity, opts.restate !== false);
+    let text = l.text;
+    for (let k = pl.length - 1; k >= 0; k--) text = text.slice(0, pl[k].col) + `[${pl[k].symbol}]` + text.slice(pl[k].col);
+    L.push(text);
+    if (after.length) L.push(after.map((c) => `[${c.symbol}]`).join(" "));
+  });
+  close();
+  return L.join("\n").replace(/\n{3,}/g, "\n\n").replace(/^\n+/, "") + "\n";
+}
+
+/* ============================================================================
+ *  WORKBENCH · WO-4 — INSTRUMENT COVERAGE + ARRANGEMENT LEVELS
+ *  ---------------------------------------------------------------------------
+ *  The chord-voicing modal was guitar-only. These voice any chord symbol the voicing
+ *  grammar reads (voicingFormula) on:
+ *    - FRETTED instruments of any string count and tuning — ukulele (re-entrant GCEA),
+ *      baritone uke, mandolin (GDAE, fifths), 4/5-string bass (double-stops), guitar —
+ *      by enumerating every playable grip inside a hand span (a HARD constraint; open
+ *      strings free), keeping only grips whose every note is a chord tone and that hold
+ *      the required tones. On 4 strings a 5-note chord drops its 5th, then its root
+ *      (marked rootless), exactly as players do. Ranked by position, span, mutes and
+ *      open strings; fingered by the same finger model as the guitar modal.
+ *    - PIANO: close position + inversions, shells, rootless A/B (jazz), open/spread
+ *      and two-hand voicings, each hand within a 9th (14 semitones), ranked by
+ *      voice-leading distance to the previous chord when given.
+ *  arrangementLevels(score, "beginner" | "intermediate" | "advanced") derives a chart at a
+ *  playing level from the same engine passes (simplify, respell with a vocabulary,
+ *  arrangeScore, transpose) — never mutates the source; re-applying a level is stable.
+ * ------------------------------------------------------------------------- */
+const INSTRUMENTS = {
+  guitar: { id: "guitar", name: "Guitar", kind: "fretted", strings: [40, 45, 50, 55, 59, 64], maxFret: 15, maxSpan: 4, minNotes: 3, maxMute: 2 },
+  ukulele: { id: "ukulele", name: "Ukulele", kind: "fretted", strings: [67, 60, 64, 69], maxFret: 15, maxSpan: 4, minNotes: 3, maxMute: 1, reentrant: true },
+  baritone: { id: "baritone", name: "Baritone uke", kind: "fretted", strings: [50, 55, 59, 64], maxFret: 15, maxSpan: 4, minNotes: 3, maxMute: 1 },
+  mandolin: { id: "mandolin", name: "Mandolin", kind: "fretted", strings: [55, 62, 69, 76], maxFret: 15, maxSpan: 5, minNotes: 3, maxMute: 1 },
+  bass4: { id: "bass4", name: "Bass (4)", kind: "fretted", strings: [28, 33, 38, 43], maxFret: 12, maxSpan: 4, minNotes: 2, maxNotes: 3, bass: true },
+  bass5: { id: "bass5", name: "Bass (5)", kind: "fretted", strings: [23, 28, 33, 38, 43], maxFret: 12, maxSpan: 4, minNotes: 2, maxNotes: 3, bass: true },
+  piano: { id: "piano", name: "Piano", kind: "keyboard" },
+};
+const INSTRUMENT_ORDER = ["guitar", "piano", "ukulele", "mandolin", "bass4", "baritone", "bass5"];
+/** Generic N-string grip enumerator → voicings in the guitar modal's shape
+ *  ({ frets, fingers, barres, baseFret, fretCount, labels, midi, title, group, rootless }). */
+function fretVoicings(rootPc, formula, inst, opts = {}) {
+  const capo = opts.capo || 0, open = inst.strings.map((m) => m + capo), n = open.length;
+  const maxFret = Math.max(4, (opts.maxFret || inst.maxFret || 12) - capo), span = opts.handSpan || inst.maxSpan || 4;
+  const pcs = new Set(formula.tones.map((t) => (rootPc + t.semi) % 12));
+  const bassPc = opts.bassPc != null ? opts.bassPc : null;
+  if (bassPc != null) pcs.add(bassPc);
+  // required pitch classes, shed to fit the string count: 5th first, then the root
+  let req = formula.required.slice();
+  const cap = inst.maxNotes || n;
+  if (req.length > cap && req.includes(7)) req = req.filter((x) => x !== 7);
+  let rootlessOK = false;
+  // an extended chord (5+ tones) on 4 strings may leave the root to the bass player, as uke and
+  // mandolin players do; the cost below still prefers a grip that keeps it
+  if (req.includes(0) && (req.length > cap || (cap <= 4 && req.length >= cap && formula.tones.length >= 5))) { req = req.filter((x) => x !== 0); rootlessOK = true; }
+  if (inst.bass) req = [0];
+  const reqPc = req.map((x) => (rootPc + x) % 12);
+  const out = new Map();
+  const frets = new Array(n).fill(-1);
+  const consider = () => {
+    const sounding = frets.map((f, s) => (f >= 0 ? s : -1)).filter((s) => s >= 0);
+    if (sounding.length < Math.min(inst.minNotes || 2, formula.tones.length <= 2 ? 2 : 9) || sounding.length > (inst.maxNotes || n)) return;
+    if (n - sounding.length > (inst.maxMute != null ? inst.maxMute : n)) return;
+    const fr = sounding.map((s) => frets[s]).filter((f) => f > 0);
+    if (fr.length && Math.max(...fr) - Math.min(...fr) > span - 1) return;
+    const midi = sounding.map((s) => open[s] + frets[s]), have = new Set(midi.map((m) => m % 12));
+    for (const p of reqPc) if (!have.has(p)) return;
+    if (formula.requireAny && !formula.requireAny.some((x) => have.has((rootPc + x) % 12))) return;
+    if (!have.has(rootPc) && !rootlessOK && !inst.bass) return;
+    const low = Math.min(...midi), lowPc = low % 12;
+    if (inst.bass) { if (lowPc !== (bassPc != null ? bassPc : rootPc)) return; if (sounding.some((s, i) => i > 0 && s - sounding[i - 1] > 2)) return; }
+    if (bassPc != null && !inst.reentrant && lowPc !== bassPc) return;
+    const fg = assignChordFingers(frets);
+    if (!fg) return;
+    const sig = frets.join(",");
+    if (out.has(sig)) return;
+    const minF = fr.length ? Math.min(...fr) : 0, maxF = fr.length ? Math.max(...fr) : 0;
+    const baseFret = maxF <= 4 ? 1 : minF;
+    const rootLow = lowPc === rootPc, missingOpt = formula.tones.filter((t) => !have.has((rootPc + t.semi) % 12)).length;
+    const opens = frets.filter((f) => f === 0).length, mutes = n - sounding.length;
+    const cost = minF * 0.55 + (fr.length ? maxF - minF : 0) * 0.35 + mutes * (inst.reentrant ? 2 : 0.9) + missingOpt * 0.45 - opens * 0.3
+      + (!inst.reentrant && !rootLow ? 1.2 : 0) + (have.has(rootPc) ? 0 : 0.8) + (fg.barres.length ? 0.25 : 0);
+    const labels = frets.map((f, s) => (f < 0 ? null : _vcLabel(formula, rootPc, (open[s] + f) % 12)));
+    const title = inst.bass ? sounding.map((s) => labels[s]).join(" + ") : !rootLow && !inst.reentrant ? `${labels[sounding[0]]} in the bass` : "";
+    out.set(sig, { frets: frets.slice(), fingers: fg.fingers.slice(), barres: fg.barres, baseFret, fretCount: Math.max(4, maxF - baseFret + 1), labels, midi: midi.slice().sort((a, b) => a - b),
+      title, group: maxF <= 5 ? "low" : "up", source: "gen", rootless: !have.has(rootPc), rootLow, cost, capo });
+  };
+  const rec = (s) => {
+    if (s === n) { consider(); return; }
+    frets[s] = -1; rec(s + 1);
+    for (let f = 0; f <= maxFret; f++) {
+      if (!pcs.has((open[s] + f) % 12)) continue;
+      if (f > 0) { const fr = frets.slice(0, s).filter((x) => x > 0); if (fr.length && (Math.max(f, ...fr) - Math.min(f, ...fr) > span - 1)) continue; }
+      frets[s] = f; rec(s + 1);
+    }
+    frets[s] = -1;
+  };
+  rec(0);
+  return [...out.values()].sort((a, b) => a.cost - b.cost);
+}
+/* ---- piano ---- */
+const _pnRaise = (m, floor) => { while (m < floor) m += 12; return m; };
+function _pnVoicing(midis, label, group, hands) {
+  const sorted = midis.slice().sort((a, b) => a - b);
+  return { midi: sorted, label, group, hands: hands || { left: [], right: sorted }, span: sorted[sorted.length - 1] - sorted[0] };
+}
+/** Voice-leading distance between two voicings: notes paired in order (the shorter list against
+ *  the nearest notes of the longer), summed semitones. */
+function voiceLeadingDistance(a, b) {
+  if (!a || !b || !a.length || !b.length) return 0;
+  const A = a.slice().sort((x, y) => x - y), B = b.slice().sort((x, y) => x - y);
+  const [S, Lg] = A.length <= B.length ? [A, B] : [B, A];
+  let d = 0; for (const x of S) d += Math.min(...Lg.map((y) => Math.abs(x - y)));
+  return d + 2 * (Lg.length - S.length);
+}
+/** Piano voicings for a parsed chord: close position + inversions, shells, rootless A/B,
+ *  open/spread, two hands. Each hand ≤ `handSpan` (14 = a 9th). opts.previous (a midi list)
+ *  ranks every group by voice-leading distance. */
+function pianoVoicings(rootPc, formula, opts = {}) {
+  const span = opts.handSpan || 14, center = opts.center || 60, out = [];
+  const tones = formula.tones.map((t) => t.semi).sort((a, b) => a - b);
+  const has = (x) => tones.includes(x);
+  const third = has(4) ? 4 : has(3) ? 3 : has(5) ? 5 : has(2) ? 2 : null;
+  const seventh = has(11) ? 11 : has(10) ? 10 : has(9) && !has(4) && tones.length === 4 && has(3) && has(6) ? 9 : has(9) ? 9 : null;
+  const fifth = has(7) ? 7 : has(6) ? 6 : has(8) ? 8 : null;
+  const exts = tones.filter((x) => [1, 2, 3, 5, 6, 8, 9].includes(x) && x !== third && x !== fifth && x !== seventh);
+  const rootMidi = _pnRaise(48 + rootPc, center - 12);                // LH root around C3
+  // close position + inversions (right hand) over the bass root
+  const core = [0, third, fifth, seventh].filter((x) => x != null);
+  const coreNotes = core.length >= 3 ? core : tones.slice(0, 4);
+  for (let inv = 0; inv < coreNotes.length; inv++) {
+    const ord = coreNotes.slice(inv).concat(coreNotes.slice(0, inv)), m = [];
+    let prev = _pnRaise(rootPc + ord[0] + 48, center - 5);
+    m.push(prev);
+    for (let k = 1; k < ord.length; k++) { let x = rootPc + ord[k] + 48; while (x <= prev) x += 12; m.push(x); prev = x; }
+    if (m[m.length - 1] - m[0] <= span) out.push(_pnVoicing(m, inv === 0 ? "root position" : `${["", "1st", "2nd", "3rd"][inv]} inversion`, "close", { left: [], right: m }));
+  }
+  // full chord close (with extensions) when it fits a hand
+  if (tones.length > coreNotes.length) {
+    const m = []; let prev = _pnRaise(rootPc + 48, center - 5); m.push(prev);
+    for (const x0 of tones.slice(1)) { let x = rootPc + x0 + 48; while (x <= prev) x += 12; m.push(x); prev = x; }
+    if (m[m.length - 1] - m[0] <= span) out.push(_pnVoicing(m, "all tones, close", "close"));
+  }
+  // shells: R-3-7 and R-7-3 (left hand), the 7th chord's skeleton
+  if (third != null && seventh != null) {
+    const r = rootMidi;
+    out.push(_pnVoicing([r, r + third, r + seventh], "shell R–3–7", "shell", { left: [r, r + third, r + seventh], right: [] }));
+    out.push(_pnVoicing([r, r + seventh, r + 12 + third], "shell R–7–3", "shell", { left: [r], right: [r + seventh, r + 12 + third] }));   // the 10th is split across the hands
+  }
+  // rootless A (3-5-7-9) and B (7-9-3-5) — the jazz pianist's left hand; the bass plays the root
+  if (third != null && seventh != null && !exts.some((x) => x === 1 || x === 2 || x === 3)) {
+    // no written 9th: rootless 3·5·7 / 7·3·5 (chord tones only — adding a 9 is the player's call)
+    const b3 = _pnRaise(rootPc + third + 48, center - 10), a = [b3, b3 + ((fifth != null ? fifth : 9) - third + 12) % 12, b3 + ((seventh - third + 12) % 12)].sort((x, y) => x - y);
+    out.push(_pnVoicing(a, "rootless 3·5·7", "rootless", { left: a, right: [] }));
+    const b7 = _pnRaise(rootPc + seventh + 48, center - 10), bb = [b7, b7 + ((third - seventh + 24) % 12), b7 + ((third - seventh + 24) % 12) + (((fifth != null ? fifth : 9) - third + 12) % 12)];
+    if (bb[2] - bb[0] <= span) out.push(_pnVoicing(bb, "rootless 7·3·5", "rootless", { left: bb, right: [] }));
+  }
+  if (third != null && seventh != null && exts.some((x) => x === 1 || x === 2 || x === 3)) {
+    const nine = exts.includes(2) ? 2 : exts.includes(1) ? 1 : 3, five = exts.includes(9) && !has(7) ? 9 : fifth != null ? fifth : 9;
+    const base = _pnRaise(rootPc + third + 48, center - 10);
+    const a = [base], up = (x) => { let v = rootPc + x + 48; while (v <= a[a.length - 1]) v += 12; a.push(v); };
+    up(five); up(seventh); up(nine);
+    if (a[3] - a[0] <= span) out.push(_pnVoicing(a, "rootless A (3·5·7·9)", "rootless", { left: a, right: [] }));
+    const bb = [_pnRaise(rootPc + seventh + 48, center - 10)], upb = (x) => { let v = rootPc + x + 48; while (v <= bb[bb.length - 1]) v += 12; bb.push(v); };
+    upb(nine); upb(third); upb(five);
+    if (bb[3] - bb[0] <= span) out.push(_pnVoicing(bb, "rootless B (7·9·3·5)", "rootless", { left: bb, right: [] }));
+  }
+  // open / spread: root + 5th low, 3rd (+7th) an octave up
+  if (third != null) {
+    const r = rootMidi, f = fifth != null ? r + fifth : r + 12;
+    const right = [r + 12 + third].concat(seventh != null ? [r + 12 + seventh] : [r + 24]).concat(exts.length ? [r + 12 + exts[exts.length - 1] + (exts[exts.length - 1] < third ? 12 : 0)] : []);
+    const rs = right.sort((x, y) => x - y);
+    if (rs[rs.length - 1] - rs[0] <= span) out.push(_pnVoicing([r, f, ...rs], "open (spread)", "open", { left: [r, f], right: rs }));
+  }
+  // two hands: LH root + 7th (or 5th), RH guide tones + colour
+  {
+    const r = rootMidi, lh = [r, r + (seventh != null ? seventh : fifth != null ? fifth : 12)];
+    const rhT = [third, seventh != null ? null : fifth, ...exts, seventh != null ? (fifth != null ? fifth : null) : null].filter((x) => x != null && x !== 0);
+    const rh = []; let prev = _pnRaise(rootPc + (rhT[0] != null ? rhT[0] : 7) + 48, center);
+    if (rhT.length) { rh.push(prev); for (const x0 of rhT.slice(1)) { let x = rootPc + x0 + 48; while (x <= prev) x += 12; if (x - rh[0] <= span) { rh.push(x); prev = x; } } }
+    if (rh.length >= 2) out.push(_pnVoicing([...lh, ...rh], "two hands", "hands", { left: lh, right: rh }));
+  }
+  // more inversions of the full tone set, up an octave (so there are always ≥ 6 shapes)
+  for (let inv = 0; inv < tones.length && out.length < 8; inv++) {
+    const ord = tones.slice(inv).concat(tones.slice(0, inv)), m = []; let prev = _pnRaise(rootPc + ord[0] + 48, center + 2);
+    m.push(prev); for (const x0 of ord.slice(1)) { let x = rootPc + x0 + 48; while (x <= prev) x += 12; m.push(x); prev = x; }
+    const sig = m.join(",");
+    if (m[m.length - 1] - m[0] <= span && !out.some((v) => v.midi.join(",") === sig)) out.push(_pnVoicing(m, "upper register", "close"));
+  }
+  // small chords (a power chord): octave doublings so there are still a handful of shapes
+  for (const v of out.slice()) { if (out.length >= 6) break; const m = v.midi.concat([v.midi[0] + 12]); if (m[m.length - 1] - m[0] <= span) out.push(_pnVoicing(m, `${v.label} + octave`, v.group)); }
+  if (out.length < 6) { const r = rootMidi; for (const m of [[r - 12, r, r + 7], [r, r + 7, r + 12, r + 19], [r - 12, r + 7, r + 12]]) if (out.length < 6) out.push(_pnVoicing(m, "two hands, doubled", "hands", { left: m.filter((x) => x < r + 1), right: m.filter((x) => x > r) })); }
+  // labels + voice-leading rank
+  out.forEach((v) => { v.labels = v.midi.map((m) => _vcLabel(formula, rootPc, m % 12)); v.distance = opts.previous ? voiceLeadingDistance(opts.previous, v.midi) : 0; });
+  if (opts.previous) out.sort((a, b) => a.distance - b.distance);
+  const seen = new Set();
+  return out.filter((v) => { const k = v.midi.join(","); if (seen.has(k)) return false; seen.add(k); return true; });
+}
+const _INST_GROUPS = {
+  low: ["Common shapes", "Grips in the first five frets."],
+  up: ["Up the neck", "The same chord higher up."],
+  close: ["Close position + inversions", "One hand, notes as close as they go."],
+  shell: ["Shells", "Root, 3rd and 7th — the skeleton, left hand."],
+  rootless: ["Rootless (A / B)", "Left hand without the root — the bass player has it."],
+  open: ["Open / spread", "Root and 5th low, the colour an octave up."],
+  hands: ["Two hands", "Left hand bass, right hand guide tones and colour."],
+};
+/** Voicings of a chord symbol on an instrument → { ok, parsed, instrument, groups, total }.
+ *  Guitar with a chord dictionary goes through chordVoicings (opts.dict); every other instrument
+ *  (and guitar without a dictionary) through the generic voicers above. */
+function voicingsForInstrument(symbol, instrumentId = "guitar", opts = {}) {
+  const inst = INSTRUMENTS[instrumentId] || INSTRUMENTS.guitar;
+  if (inst.id === "guitar" && opts.dict !== undefined && !opts.capo) return { ...chordVoicings(opts.dict, symbol, opts), instrument: inst.id };
+  const parsed = parseChordSymbolForVoicings(symbol);
+  if (!parsed.ok) return { ok: false, parsed, instrument: inst.id, groups: [], total: 0 };
+  const groups = [];
+  if (inst.kind === "keyboard") {
+    const vs = pianoVoicings(parsed.rootPc, parsed.formula, { previous: opts.previous, handSpan: opts.handSpan });
+    if (parsed.bassPc != null) vs.forEach((v) => { const b = _pnRaise(36 + parsed.bassPc, 36); if (!v.hands.left.length || v.hands.left[0] % 12 !== parsed.bassPc) { v.hands = { left: [b], right: v.hands.right.length ? v.hands.right : v.hands.left }; v.midi = [b, ...v.midi.filter((m) => m !== b)].sort((x, y) => x - y); v.labels = v.midi.map((m) => _vcLabel(parsed.formula, parsed.rootPc, m % 12)); } });
+    for (const g of ["close", "shell", "rootless", "open", "hands"]) { const list = vs.filter((v) => v.group === g); if (list.length) groups.push({ id: g, title: _INST_GROUPS[g][0], blurb: _INST_GROUPS[g][1], voicings: list }); }
+  } else {
+    const max = opts.max || 12, fo = { capo: opts.capo, maxFret: opts.maxFret, handSpan: opts.handSpan, bassPc: parsed.bassPc };
+    let vs = fretVoicings(parsed.rootPc, parsed.formula, inst, fo);
+    if (vs.length < 6 && !opts.handSpan) {                  // too few inside the hand: allow a one-fret stretch, marked
+      const seen = new Set(vs.map((v) => v.frets.join(",")));
+      vs = vs.concat(fretVoicings(parsed.rootPc, parsed.formula, inst, { ...fo, handSpan: (inst.maxSpan || 4) + 1 }).filter((v) => !seen.has(v.frets.join(","))).map((v) => ({ ...v, title: v.title ? `${v.title} · stretch` : "stretch", stretch: true, cost: v.cost + 1.5 })));
+    }
+    if (opts.previous) vs.forEach((v) => { v.distance = voiceLeadingDistance(opts.previous, v.midi); });
+    for (const g of ["low", "up"]) { const list = vs.filter((v) => v.group === g).slice(0, max); if (list.length) groups.push({ id: g, title: _INST_GROUPS[g][0], blurb: inst.bass ? "Double-stops over the root — what a bassist can hold under the chord." : _INST_GROUPS[g][1], voicings: list }); }
+  }
+  return { ok: true, parsed, instrument: inst.id, groups, total: groups.reduce((a, g) => a + g.voicings.length, 0) };
+}
+
+/* ---- arrangement levels ---- */
+const _LEVEL_VOCAB = {
+  beginner: { label: "Beginner", qualities: ["", "m"], inversions: {}, hidden: { "": [4, 7], m: [3, 7] }, foreign: {}, writeAs: { "7": "", maj7: "", m7: "m", "6": "", m6: "m", sus4: "", sus2: "", add9: "", "6/9": "", "9": "", maj9: "", m9: "m", "5": "" } },
+  intermediate: { label: "Intermediate", qualities: ["", "m", "7", "maj7", "m7", "m7♭5", "dim7", "sus4", "7sus4"], inversions: { "": [4, 7], "7": [4, 10] }, hidden: { m: [3, 7], maj7: [4, 7, 11], m7: [7, 10], "m7♭5": [6, 10], sus4: [7], "7sus4": [7], "6": [4, 7] }, foreign: {}, writeAs: { "6/9": "maj7", "6": "maj7", sus2: "", add9: "", "9": "7", maj9: "maj7", m9: "m7", m11: "m7", "7♭9": "7" } },
+};
+const ARRANGEMENT_LEVELS = ["beginner", "intermediate", "advanced"];
+const _EASY_MAJOR = [0, 7, 2, 9, 4];                 // C G D A E — open-chord keys
+const _EASY_MINOR = [9, 4, 2];                       // Am Em Dm
+/** A playing level of a chart → { score, level, vocabulary, transposedBy, capo }.
+ *  beginner: one chord per bar, plain triads, quarter-note strums, moved to the nearest open-chord
+ *  key (capo given to play along with the record). intermediate: 7ths + triad inversions, straight
+ *  eighths. advanced: the full Pro vocabulary, rhythm as written (or opts.template). */
+function arrangementLevels(score, level = "advanced", opts = {}) {
+  if (!score || !score.bars) return { score, level, vocabulary: "chart", transposedBy: 0, capo: 0 };
+  const useSharp = opts.useSharp !== false;
+  if (level === "advanced") {
+    const s = opts.template ? arrangeScore(score, opts.template) : score;
+    return { score: s, level, vocabulary: "chart", transposedBy: 0, capo: 0 };
+  }
+  const vocab = _LEVEL_VOCAB[level] || _LEVEL_VOCAB.intermediate;
+  let s = level === "beginner" || isMelodicScore(score) ? simplifyScore(score, useSharp) : score;
+  let t = 0;
+  if (level === "beginner") {
+    // the key of the chart AS WRITTEN (a collapsed melody part can read a wrong key) or the user's
+    const k = opts.key || analyzeKey(score);
+    if (k && typeof k.tonic === "number") {
+      const easy = k.mode === "minor" ? _EASY_MINOR : _EASY_MAJOR;
+      // the nearest open-chord key at or BELOW the chart's key, so a capo plays along with the record
+      let best = 0, bd = Infinity;
+      for (const e of easy) { const down = ((k.tonic - e) % 12 + 12) % 12; if (down < bd) { bd = down; best = down ? -down : 0; } }
+      t = best;
+    }
+    if (t) s = transposeScore(s, t, useSharp);
+  }
+  s = respellScore(s, vocab, { useSharp });
+  s = arrangeScore(s, level === "beginner" ? "quarters" : "eighths");
+  const capo = t < 0 ? -t : t > 0 ? 12 - t : 0;
+  return { score: { ...s, level }, level, vocabulary: vocab, transposedBy: t, capo: capo > 0 && capo <= 7 ? capo : 0 };
+}
+
+/* ============================================================================
+ *  WORKBENCH · WO-5 — DRUM + PIANO NOTATION, complete all-parts deliverables
+ *  ---------------------------------------------------------------------------
+ *  DRUMS. transcribeDrums finds onsets with a 3-component semi-adaptive NMF
+ *  (kick / snare / hats) — that path is validated and stays the default. With
+ *  `kit: "full"` each onset is then CLASSIFIED from the raw signal around it:
+ *    - low / mid family (NMF kick + snare): the body's peak frequency (40–400 Hz)
+ *      and how much broadband noise sits on top (1–8 kHz share) separate kick
+ *      (< 95 Hz), floor / mid / high tom (tonal, 95–260 Hz) and snare (noisy);
+ *      a coincident kick + snare pair stays a pair;
+ *    - cymbal family (NMF hats): the high band's DECAY RATE over the first 80 ms
+ *      separates a closed hat (fast) from ringing cymbals, and the ringing ones split
+ *      by spectral SHAPE — a ride's tonal "ping" (peaky 2–6 kHz), a crash's broad wash
+ *      (energy down into 1–3 kHz), an open hat's narrow top end.
+ *  Rim-shot / clap are not separated (they read as snare) — an honest limit.
+ *  drumHitsToMusicXML writes a percussion part (two voices: hands up, feet down; GM
+ *  <midi-unpitched>; x / circle-x noteheads for cymbals), drumHitsToAsciiTab the classic
+ *  CR/RD/HH/SD/T1/T2/FT/BD grid.
+ *  PIANO. pianoScoreFromNotes splits notes into hands at an adaptive hinge (2-means over
+ *  pitch, pulled toward C4; a chord wider than a hand spills to the other hand);
+ *  scoreToPianoMusicXML writes ONE part on a grand staff (<staves>2</staves>, treble +
+ *  bass), each hand quantised by the same metric notation pass the vocal score uses.
+ * ------------------------------------------------------------------------- */
+const DRUM_KIT = {
+  kick: { gm: 36, step: "F", oct: 4, voice: 2, row: "BD", name: "Bass Drum", mark: "o" },
+  snare: { gm: 38, step: "C", oct: 5, voice: 1, row: "SD", name: "Snare", mark: "o" },
+  hat: { gm: 42, step: "G", oct: 5, head: "x", voice: 1, row: "HH", name: "Closed Hi-Hat", mark: "x" },
+  openHat: { gm: 46, step: "G", oct: 5, head: "circle-x", voice: 1, row: "HH", name: "Open Hi-Hat", mark: "o" },
+  pedalHat: { gm: 44, step: "D", oct: 4, head: "x", voice: 2, row: "HF", name: "Pedal Hi-Hat", mark: "x" },
+  crash: { gm: 49, step: "A", oct: 5, head: "x", voice: 1, row: "CR", name: "Crash Cymbal", mark: "x" },
+  ride: { gm: 51, step: "F", oct: 5, head: "x", voice: 1, row: "RD", name: "Ride Cymbal", mark: "x" },
+  tomHigh: { gm: 50, step: "E", oct: 5, voice: 1, row: "T1", name: "High Tom", mark: "o" },
+  tomMid: { gm: 47, step: "D", oct: 5, voice: 1, row: "T2", name: "Mid Tom", mark: "o" },
+  tomLow: { gm: 43, step: "A", oct: 4, voice: 1, row: "FT", name: "Floor Tom", mark: "o" },
+};
+const DRUM_ROWS = ["CR", "RD", "HH", "SD", "T1", "T2", "FT", "BD", "HF"];
+/* features of one onset, from short FFTs of the raw signal around it:
+ *  body / bodyLate — the low body's pitch (40–400 Hz, zero-padded + parabolic) early and 46 ms
+ *  later (a kick's beater sweep drops; a tom barely moves); body2 — a second, separate low peak
+ *  (a kick and a tom struck together); lowShare / noiseShare — of the whole spectrum; above 1 kHz:
+ *  highRise (vs the 46 ms before the onset), decayDb (4–16 kHz over 80 ms, the pre-onset level
+ *  subtracted, so a ringing crash under a hat can't hide its decay), peakiness (a ride's tonal
+ *  ping) and flatness (a crash's wash). */
+function _drumHitFeatures(x, sr, t) {
+  let N = 1; while (N < 0.046 * sr) N <<= 1;
+  const spec = (t0, n, pad) => {
+    const M = pad || n, re = new Float64Array(M), im = new Float64Array(M), w = _hann(n), s0 = Math.round(t0 * sr);
+    for (let i = 0; i < n; i++) re[i] = (x[s0 + i] || 0) * w[i];
+    _fft(re, im); const mag = new Float64Array(M >> 1); for (let k = 1; k < M >> 1; k++) mag[k] = re[k] * re[k] + im[k] * im[k]; return mag;
+  };
+  const band = (P, M, lo, hi) => { let e = 0; const a = Math.max(1, Math.floor((lo * M) / sr)), b = Math.min((M >> 1) - 1, Math.ceil((hi * M) / sr)); for (let k = a; k <= b; k++) e += P[k]; return e; };
+  const top = Math.min(16000, sr / 2 - 1);
+  const A = spec(t - 0.004, N), pre = spec(t - 0.004 - N / sr, N);
+  const all = band(A, N, 40, top) || 1e-18, low = band(A, N, 40, 400), noise = band(A, N, 1000, 8000);
+  const above = band(A, N, 1000, top) || 1e-18;
+  // the low body's pitch: zero-padded ×4 + parabolic interpolation; two separate peaks if present
+  const M = N * 4, peaks = (P) => {
+    const lo = Math.floor((40 * M) / sr), hi = Math.ceil((400 * M) / sr), out = [];
+    for (let k = lo + 1; k < hi; k++) if (P[k] > P[k - 1] && P[k] >= P[k + 1]) {
+      const a = Math.log(P[k - 1] + 1e-30), b = Math.log(P[k] + 1e-30), c = Math.log(P[k + 1] + 1e-30), den = a - 2 * b + c;
+      out.push({ f: ((k + (den < 0 ? Math.max(-0.5, Math.min(0.5, (0.5 * (a - c)) / den)) : 0)) * sr) / M, p: P[k] });
+    }
+    return out.sort((u, v) => v.p - u.p);
+  };
+  const P0 = spec(t, N, M), Pp = spec(t - 0.004 - N / sr, N, M), pk = peaks(P0), pkL = peaks(spec(t + N / sr, N, M));
+  const body = pk.length ? pk[0].f : 0, bodyLate = pkL.length ? pkL[0].f : body;
+  const fresh = (q) => { const k = Math.round((q.f * M) / sr); return q.p > 3 * (Pp[k] || 0); };       // not the previous drum still ringing
+  const second = pk.find((q) => q.p >= 0.3 * pk[0].p && (q.f / body > 1.35 || body / q.f > 1.35) && fresh(q));
+  // above 1 kHz: onset rise, decay over the first 80 ms (pre-onset level subtracted), tonality
+  const preHi = band(pre, N, 3000, top), hiA = band(A, N, 3000, top), n2 = 512, preD = band(spec(t - 0.03, n2), n2, 4000, top), dec = [];
+  for (let k = 0; k < 9; k++) dec.push(Math.max(1e-18, band(spec(t + k * 0.01, n2), n2, 4000, top) - preD));
+  const decayDb = 10 * Math.log10(Math.max(...dec.slice(0, 3)) / ((dec[7] + dec[8]) / 2));
+  const a2 = Math.floor((2000 * N) / sr), b2 = Math.min((N >> 1) - 1, Math.ceil((8000 * N) / sr));
+  let mx = 0, sum = 0, lg = 0, c = 0; for (let k = a2; k <= b2; k++) { const v = A[k] + 1e-24; mx = Math.max(mx, v); sum += v; lg += Math.log(v); c++; }
+  return { body, bodyLate, body2: second ? second.f : 0, lowShare: low / all, noiseShare: noise / all, highRise: hiA / (preHi + 1e-18), decayDb,
+    peakiness: c ? mx / (sum / c) : 0, flatness: c ? Math.exp(lg / c) / (sum / c) : 0, midRel: band(A, N, 1000, 3000) / above, highRel: band(A, N, 6000, top) / above };
+}
+function _classifyFullKit(x, sr, hits) {
+  const out = [], sorted = hits.slice().sort((a, b) => a.t - b.t), used = new Set();
+  const peakOf = {}; for (const h of sorted) peakOf[h.type] = Math.max(peakOf[h.type] || 0, h.strength || 0);
+  const tom = (f) => (f < 118 ? "tomLow" : f < 172 ? "tomMid" : "tomHigh");
+  const RIDE = 22;                                                 // peakiness of a ride's ping (noise ≈ 5–10)
+  const cymbal = (f) => (f.decayDb > 9 ? "hat" : f.peakiness > RIDE ? "ride" : f.decayDb > 1.9 ? "openHat" : "crash");
+  const lowKind = (f) => (f.body < 80 || f.body / Math.max(1, f.bodyLate) > 1.25 ? "kick" : tom(f.bodyLate || f.body));
+  const nearCym = (t) => out.some((h) => ["hat", "openHat", "crash", "ride"].includes(h.type) && Math.abs(h.t - t) < 0.03);
+  for (let i = 0; i < sorted.length; i++) {
+    if (used.has(i)) continue;
+    const h = sorted[i];
+    if (h.type === "hat") {
+      const f = _drumHitFeatures(x, sr, h.t); used.add(i);
+      // a tom's stick click lends the hat component a weak rise: a body-dominated onset next to a tonal
+      // drum, at under half the hats' own peak, is that click — not a hi-hat
+      const nearTom = sorted.some((o) => o.type !== "hat" && Math.abs(o.t - h.t) < 0.03);
+      if (nearTom && f.lowShare > 0.5 && f.noiseShare < 0.12 && f.body >= 80 && (h.strength || 0) < 0.5 * (peakOf.hat || 1)) continue;
+      out.push({ ...h, type: cymbal(f), features: f }); continue;
+    }
+    const grp = [i]; for (let j = i + 1; j < sorted.length && sorted[j].t - h.t < 0.03; j++) if (sorted[j].type !== "hat") grp.push(j);
+    grp.forEach((k) => used.add(k));
+    const t0 = Math.min(...grp.map((k) => sorted[k].t)), f = _drumHitFeatures(x, sr, t0);
+    const best = grp.reduce((a, k) => (sorted[k].strength > sorted[a].strength ? k : a), grp[0]), base = sorted[best];
+    if (f.lowShare < 0.04) { if (!nearCym(t0)) out.push({ ...base, type: cymbal(f), features: f }); continue; }   // no body: a cymbal NMF filed low
+    const types = new Set(grp.map((k) => sorted[k].type)), tonal = f.noiseShare < 0.12;
+    // NMF can re-fire inside a ringing tom: a "hit" with no new transient right after another drum
+    const lastLow = [...out].reverse().find((o) => !["hat", "openHat", "crash", "ride"].includes(o.type));
+    if (tonal && f.highRise < 1.5 && lastLow && t0 - lastLow.t < 0.12) continue;
+    if (tonal) {
+      const k1 = lowKind(f);
+      out.push({ ...base, type: k1, features: f });
+      if (f.body2) { const k2 = f.body2 < 95 ? "kick" : tom(f.body2); if (k2 !== k1) out.push({ ...base, type: k2, features: f }); }
+    } else if (types.has("kick") && types.has("snare")) grp.forEach((k) => out.push({ ...sorted[k], features: f }));
+    else out.push({ ...base, type: f.body < 95 && f.lowShare > 0.6 ? "kick" : "snare", features: f });
+    // a cymbal struck WITH this drum: a fresh rise above 3 kHz that keeps ringing (a snare's
+    // wires die within ~80 ms; a crash or ride does not)
+    if (f.highRise > 3 && (f.decayDb < 6 || f.peakiness > RIDE) && !nearCym(t0) && !sorted.some((o, k) => k !== i && o.type === "hat" && Math.abs(o.t - t0) < 0.03)) out.push({ ...base, type: f.peakiness > RIDE ? "ride" : f.decayDb < 1.9 ? "crash" : "openHat", features: f });
+  }
+  // hats NMF missed under a ringing crash / open hat: a sharp LOG-domain rise of the 6–16 kHz band
+  // (relative to the wash, so a loud cymbal can't mask it) with no drum or cymbal already there
+  for (const t of _highBandOnsets(x, sr)) {
+    if (out.some((o) => Math.abs(o.t - t) < 0.035)) continue;
+    const f = _drumHitFeatures(x, sr, t);
+    // only a clearly-decaying CLOSED hat is rescued: crashes / rides are loud enough for NMF
+    if (f.lowShare > 0.3 || f.decayDb < 6) continue;
+    out.push({ t: +t.toFixed(3), type: "hat", strength: 0, features: f, rescued: true });
+  }
+  return out.sort((a, b) => a.t - b.t);
+}
+function _highBandOnsets(x, sr, opts = {}) {
+  const n = 512, hop = Math.round(sr * 0.005), top = Math.min(16000, sr / 2 - 1), a = Math.floor((6000 * n) / sr), b = Math.min((n >> 1) - 1, Math.ceil((top * n) / sr));
+  const w = _hann(n), re = new Float64Array(n), im = new Float64Array(n), db = [];
+  for (let s0 = 0; s0 + n <= x.length; s0 += hop) {
+    for (let i = 0; i < n; i++) { re[i] = x[s0 + i] * w[i]; im[i] = 0; }
+    _fft(re, im); let e = 0; for (let k = a; k <= b; k++) e += re[k] * re[k] + im[k] * im[k];
+    db.push(10 * Math.log10(e + 1e-12));
+  }
+  const rise = opts.riseDb || 2.5, out = [], mx = Math.max(...db);
+  for (let k = 6; k + 2 < db.length; k++) {
+    const before = Math.min(db[k - 6], db[k - 5], db[k - 4]), now = Math.max(db[k], db[k + 1]);
+    if (now - before < rise || db[k] < mx - 45 || !(db[k] - db[k - 1] > 1 && db[k] >= db[k - 1])) continue;
+    const t = (k * hop + n / 2) / sr;
+    if (out.length && t - out[out.length - 1] < 0.06) continue;
+    out.push(t);
+  }
+  return out;
+}
+/* hits ({ type, t } seconds or { type, beat } quarter beats) → quarter beats from bar 1 */
+function _drumBeats(hits, opts = {}) {
+  const bpm = opts.bpm || 120, tl = opts.timeline && opts.timeline.times && opts.timeline.times.length >= 2 ? opts.timeline : null;
+  return (hits || []).filter((h) => h && DRUM_KIT[h.type]).map((h) => ({ type: h.type, beat: h.beat != null ? h.beat : tl ? timelineBeatsAt(tl, h.t) : (h.t * bpm) / 60, accent: !!h.accent }))
+    .filter((h) => isFinite(h.beat) && h.beat > -0.1).sort((a, b) => a.beat - b.beat);
+}
+/** Drum hits → classic ASCII drum tab: one row per drum (CR RD HH SD T1 T2 FT BD), `sub` slots per
+ *  beat (16ths in 4/4), "x" cymbal / "o" drum or open hat, bars split by "|", `barsPerLine` per block. */
+function drumHitsToAsciiTab(hits, opts = {}) {
+  const bpb = opts.beatsPerBar || 4, sub = opts.subdivisions || 4, per = opts.barsPerLine || 4;
+  const hb = _drumBeats(hits, opts);
+  const rowsUsed = new Set(hb.map((h) => DRUM_KIT[h.type].row));
+  const rows = DRUM_ROWS.filter((r) => rowsUsed.has(r));
+  if (!rows.length) return "";
+  const slots = bpb * sub, nb = Math.max(1, Math.floor((hb.length ? hb[hb.length - 1].beat : 0) / bpb) + 1);
+  const grid = new Map(rows.map((r) => [r, Array.from({ length: nb }, () => new Array(slots).fill("-"))]));
+  for (const h of hb) {
+    const s = Math.round(h.beat * sub), bar = Math.floor(s / slots), pos = s - bar * slots;
+    if (bar < 0 || bar >= nb) continue;
+    const k = DRUM_KIT[h.type], cell = grid.get(k.row)[bar];
+    cell[pos] = h.type === "openHat" ? "o" : k.mark === "x" ? "x" : h.accent ? "O" : "o";
+  }
+  const L = [];
+  if (opts.title) L.push(opts.title, "");
+  for (let b0 = 0; b0 < nb; b0 += per) {
+    const count = []; for (let b = b0; b < Math.min(nb, b0 + per); b++) { const c = new Array(slots).fill(" "); for (let k = 0; k < bpb; k++) c[k * sub] = String(k + 1); count.push(c.join("")); }
+    L.push(`   ${count.join(" ")}`);
+    for (const r of rows) L.push(`${r.padEnd(2)}|${grid.get(r).slice(b0, b0 + per).map((c) => c.join("")).join("|")}|`);
+    L.push("");
+  }
+  L.push("x = cymbal / hi-hat · o = drum (open hi-hat on HH) · " + `${sub} slots per beat`);
+  return L.join("\n") + "\n";
+}
+/** Drum hits → a MusicXML percussion part (percussion clef, GM instruments, two voices: hands
+ *  stems-up, feet stems-down, a 16th grid, rests filling each voice). */
+function drumHitsToMusicXML(hits, opts = {}) {
+  const bpb = opts.beatsPerBar || 4, bt = opts.beatType || 4, div = 4, q = 4 / bt, barQ = bpb * q, sub = 4;
+  const hb = _drumBeats(hits, opts);
+  const used = [...new Set(hb.map((h) => h.type))];
+  const nb = Math.max(opts.minBars || 1, hb.length ? Math.floor(hb[hb.length - 1].beat / barQ) + 1 : 1);
+  const slotsBar = Math.round(barQ * sub);
+  const L = ['<?xml version="1.0" encoding="UTF-8"?>', '<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 3.1 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">', '<score-partwise version="3.1">'];
+  if (opts.title) L.push("  <work><work-title>" + _xmlEsc(opts.title) + "</work-title></work>");
+  L.push("  <part-list>", '    <score-part id="P1">', "      <part-name>" + _xmlEsc(opts.partName || "Drums") + "</part-name>");
+  for (const t of used) L.push(`      <score-instrument id="P1-${t}"><instrument-name>${DRUM_KIT[t].name}</instrument-name></score-instrument>`);
+  for (const t of used) L.push(`      <midi-instrument id="P1-${t}"><midi-channel>10</midi-channel><midi-unpitched>${DRUM_KIT[t].gm + 1}</midi-unpitched></midi-instrument>`);
+  L.push("    </score-part>", "  </part-list>", '  <part id="P1">');
+  const vals = [[16, "whole"], [8, "half"], [4, "quarter"], [2, "eighth"], [1, "16th"]];
+  const spell = (len, at) => { const out = []; let a = at, n = len; while (n > 0) { const v = vals.find(([s]) => s <= n && a % s === 0) || [1, "16th"]; out.push(v); a += v[0]; n -= v[0]; } return out; };
+  for (let b = 0; b < nb; b++) {
+    L.push(`    <measure number="${b + 1}">`);
+    if (b === 0) {
+      L.push("      <attributes>", `        <divisions>${div}</divisions>`, "        <key><fifths>0</fifths></key>", `        <time><beats>${bpb}</beats><beat-type>${bt}</beat-type></time>`,
+        "        <clef><sign>percussion</sign></clef>", "      </attributes>");
+      if (opts.tempo) L.push(`      <direction placement="above"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>${Math.round(opts.tempo)}</per-minute></metronome></direction-type><sound tempo="${Math.round(opts.tempo)}"/></direction>`);
+    }
+    for (const voice of [1, 2]) {
+      if (voice === 2) L.push(`      <backup><duration>${slotsBar}</duration></backup>`);
+      const slots = new Map();
+      for (const h of hb) {
+        if (DRUM_KIT[h.type].voice !== voice) continue;
+        const s = Math.round(h.beat * sub) - b * slotsBar; if (s < 0 || s >= slotsBar) continue;
+        if (!slots.has(s)) slots.set(s, new Set()); slots.get(s).add(h.type);
+      }
+      const on = [...slots.keys()].sort((x, y) => x - y);
+      let pos = 0;
+      const rest = (a, n) => { for (const [s, ty] of spell(n, a)) L.push(`      <note><rest/><duration>${s}</duration><voice>${voice}</voice><type>${ty}</type></note>`); };
+      if (!on.length) { L.push(`      <note><rest measure="yes"/><duration>${slotsBar}</duration><voice>${voice}</voice></note>`); continue; }
+      on.forEach((s, i) => {
+        if (s > pos) rest(pos, s - pos);
+        const next = i + 1 < on.length ? on[i + 1] : slotsBar, len = Math.min(next - s, s % 4 === 0 ? 4 : s % 2 === 0 ? 2 : 1), [d0, ty] = spell(len, s)[0];
+        [...slots.get(s)].forEach((t, ci) => {
+          const k = DRUM_KIT[t];
+          L.push("      <note>" + (ci ? "<chord/>" : "") + `<unpitched><display-step>${k.step}</display-step><display-octave>${k.oct}</display-octave></unpitched><duration>${d0}</duration><instrument id="P1-${t}"/><voice>${voice}</voice><type>${ty}</type><stem>${voice === 1 ? "up" : "down"}</stem>` + (k.head ? `<notehead>${k.head}</notehead>` : "") + "</note>");
+        });
+        pos = s + d0;
+      });
+      if (pos < slotsBar) rest(pos, slotsBar - pos);
+    }
+    if (b === nb - 1) L.push('      <barline location="right"><bar-style>light-heavy</bar-style></barline>');
+    L.push("    </measure>");
+  }
+  L.push("  </part>", "</score-partwise>", "");
+  return L.join("\n");
+}
+/** Drum hits → GM MIDI for every kit piece (channel 10), the full-kit superset of drumHitsToMidi. */
+function drumKitToMidi(hits, opts = {}) {
+  const PPQ = 480, bpm = Math.max(20, Math.min(400, Math.round(opts.bpm || 120))), uspq = Math.round(60000000 / bpm);
+  const evs = [{ tick: 0, o: 0, b: [0xff, 0x51, 0x03, (uspq >> 16) & 255, (uspq >> 8) & 255, uspq & 255] }];
+  for (const h of _drumBeats(hits, opts)) {
+    const tick = Math.max(0, Math.round(h.beat * PPQ)), n = DRUM_KIT[h.type].gm;
+    evs.push({ tick, o: 2, b: [0x99, n, h.accent ? 120 : 100] }, { tick: tick + 60, o: 1, b: [0x89, n, 0] });
+  }
+  evs.sort((a, b) => a.tick - b.tick || a.o - b.o);
+  evs.push({ tick: (evs.length ? evs[evs.length - 1].tick : 0) + PPQ, o: 3, b: [0xff, 0x2f, 0x00] });
+  const body = []; let t = 0; const vlq = (v) => { const st = [v & 0x7f]; while ((v >>= 7)) st.unshift((v & 0x7f) | 0x80); return st; };
+  for (const e of evs) { body.push(...vlq(e.tick - t), ...e.b); t = e.tick; }
+  const u32 = (v) => [(v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255];
+  return Uint8Array.from([0x4d, 0x54, 0x68, 0x64, 0, 0, 0, 6, 0, 0, 0, 1, (PPQ >> 8) & 255, PPQ & 255, 0x4d, 0x54, 0x72, 0x6b, ...u32(body.length), ...body]);
+}
+
+/* ---- piano: hands + grand staff ---- */
+/** Split notes ([{ midi, startSec, durSec }] or beat notes) into right and left hand. The hinge is a
+ *  2-means split of the pitches pulled toward C4 (60); a chord spanning more than a 10th at one
+ *  onset sends its outer notes to the other hand. → { right, left, hinge } */
+function pianoScoreFromNotes(notes, opts = {}) {
+  const ns = (notes || []).filter((n) => n && isFinite(n.midi)).slice();
+  if (!ns.length) return { right: [], left: [], hinge: 60 };
+  let a = 48, b = 72;
+  for (let it = 0; it < 12; it++) {
+    const A = ns.filter((n) => Math.abs(n.midi - a) <= Math.abs(n.midi - b)), B = ns.filter((n) => Math.abs(n.midi - a) > Math.abs(n.midi - b));
+    const na = A.length ? A.reduce((s, n) => s + n.midi, 0) / A.length : a, nb2 = B.length ? B.reduce((s, n) => s + n.midi, 0) / B.length : b;
+    if (Math.abs(na - a) < 0.01 && Math.abs(nb2 - b) < 0.01) break; a = na; b = nb2;
+  }
+  const hinge = opts.hinge != null ? opts.hinge : Math.round(Math.max(52, Math.min(67, 0.6 * ((a + b) / 2) + 0.4 * 60)));
+  const t = (n) => (n.startSec != null ? n.startSec : n.onsetBeat), d = (n) => (n.durSec != null ? n.durSec : n.durBeat);
+  const right = [], left = [];
+  // group by onset (within 30 ms / a 16th of a beat) so a wide chord can be shared between the hands
+  const sorted = ns.sort((x, y) => t(x) - t(y) || x.midi - y.midi);
+  for (let i = 0; i < sorted.length;) {
+    let j = i + 1; while (j < sorted.length && t(sorted[j]) - t(sorted[i]) < (sorted[i].startSec != null ? 0.03 : 0.0625)) j++;
+    const grp = sorted.slice(i, j).sort((x, y) => x.midi - y.midi);
+    let R = grp.filter((n) => n.midi >= hinge), Lh = grp.filter((n) => n.midi < hinge);
+    while (R.length > 1 && R[R.length - 1].midi - R[0].midi > 16) { Lh.push(R.shift()); }
+    while (Lh.length > 1 && Lh[Lh.length - 1].midi - Lh[0].midi > 16) { R.unshift(Lh.pop()); }
+    right.push(...R); left.push(...Lh);
+    i = j;
+  }
+  return { right, left, hinge, durOf: d };
+}
+/** A two-handed piano part → one MusicXML part on a grand staff (treble + bass). hands = { right,
+ *  left } of [{ midi, startSec, durSec }] (with opts.bpm / opts.timeline) or beat notes
+ *  [{ midi, onsetBeat, durBeat }]. Key from opts.key, else read from the notes (keyFromNotes). */
+function scoreToPianoMusicXML(hands, opts = {}) {
+  const bpb = opts.beatsPerBar || 4, bt = opts.beatType || 4, div = 480, bpm = opts.bpm || 120;
+  const tl = opts.timeline && opts.timeline.times && opts.timeline.times.length >= 2 ? opts.timeline : null;
+  // every note in the bar's BEAT unit (what the notation pass counts in): seconds via the timeline or
+  // ♩=, beat notes as given
+  const beatsPerQ = bt / 4;
+  const toBeat = (n) => {
+    if (n.onsetBeat != null) return { on: n.onsetBeat, dur: n.durBeat };
+    const on = tl ? timelineBeatsAt(tl, n.startSec) : (n.startSec * bpm) / 60, off = tl ? timelineBeatsAt(tl, n.startSec + n.durSec) : on + (n.durSec * bpm) / 60;
+    return { on: on * beatsPerQ, dur: (off - on) * beatsPerQ };
+  };
+  const chordify = (list) => {
+    const out = [], src = (list || []).map((n) => ({ midi: n.midi, ...toBeat(n) })).sort((x, y) => x.on - y.on);
+    for (const n of src) {
+      const last = out[out.length - 1];
+      if (last && Math.abs(last.onsetBeat - n.on) < 0.06) { if (!last.midis.includes(n.midi)) last.midis.push(n.midi); last.durBeat = Math.max(last.durBeat, n.dur); }
+      else out.push({ onsetBeat: n.on, durBeat: n.dur, midis: [n.midi] });
+    }
+    out.forEach((c) => c.midis.sort((x, y) => x - y));
+    return out;
+  };
+  const rh = chordify(hands.right), lh = chordify(hands.left);
+  const all = (hands.right || []).concat(hands.left || []).map((n) => ({ midi: n.midi, durSec: n.durSec != null ? n.durSec : n.durBeat || 1 }));
+  const key = opts.key || (all.length ? keyFromNotes(all) : null), spell = _keySpeller(key), fifths = _keyFifths(key);
+  const mOpts = { beatsPerBar: bpb, beatType: bt, div, grid: opts.grid || 4 };
+  const mr = _voiceNotationMeasures(rh, mOpts), ml = _voiceNotationMeasures(lh, mOpts);
+  const nb = Math.max(mr.measures.length, ml.measures.length, opts.minBars || 1), measDiv = mr.measDiv;
+  const L = ['<?xml version="1.0" encoding="UTF-8"?>', '<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 3.1 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">', '<score-partwise version="3.1">'];
+  if (opts.title) L.push("  <work><work-title>" + _xmlEsc(opts.title) + "</work-title></work>");
+  L.push("  <part-list>", '    <score-part id="P1">', "      <part-name>" + _xmlEsc(opts.partName || "Piano") + "</part-name>",
+    '      <score-instrument id="P1-I1"><instrument-name>Acoustic Grand Piano</instrument-name></score-instrument>',
+    '      <midi-instrument id="P1-I1"><midi-channel>1</midi-channel><midi-program>1</midi-program></midi-instrument>', "    </score-part>", "  </part-list>", '  <part id="P1">');
+  const writeStaff = (cells, staff, voice, acc) => {
+    for (const c of cells) {
+      if (c.rest || !c.midis || !c.midis.length) {
+        L.push("      <note>" + (c.wholeMeasure ? '<rest measure="yes"/>' : "<rest/>") + `<duration>${c.divs}</duration><voice>${voice}</voice>` + (c.type && !c.wholeMeasure ? `<type>${c.type}</type>` + (c.dot ? "<dot/>" : "") : "") + `<staff>${staff}</staff></note>`);
+        continue;
+      }
+      c.midis.forEach((m, ci) => {
+        const p = spell(m), a = acc.need(p, c.tieStop);
+        L.push("      <note>" + (ci ? "<chord/>" : "") + `<pitch><step>${p.step}</step>${p.alter ? `<alter>${p.alter}</alter>` : ""}<octave>${p.oct}</octave></pitch><duration>${c.divs}</duration>`
+          + (c.tieStop ? '<tie type="stop"/>' : "") + (c.tieStart ? '<tie type="start"/>' : "") + `<voice>${voice}</voice>` + (c.type ? `<type>${c.type}</type>` + (c.dot ? "<dot/>" : "") : "")
+          + (a != null ? `<accidental>${_ACC_XML[a]}</accidental>` : "") + `<staff>${staff}</staff>`
+          + (c.tieStart || c.tieStop ? "<notations>" + (c.tieStop ? '<tied type="stop"/>' : "") + (c.tieStart ? '<tied type="start"/>' : "") + "</notations>" : "") + "</note>");
+      });
+    }
+  };
+  const accR = _accidentalTracker(key), accL = _accidentalTracker(key);
+  const empty = [{ rest: true, midis: null, type: null, dot: false, divs: measDiv, wholeMeasure: true }];
+  for (let b = 0; b < nb; b++) {
+    accR.newBar(); accL.newBar();
+    L.push(`    <measure number="${b + 1}">`);
+    if (b === 0) {
+      L.push("      <attributes>", `        <divisions>${div}</divisions>`, `        <key><fifths>${fifths}</fifths>${key ? `<mode>${key.mode || "major"}</mode>` : ""}</key>`, `        <time><beats>${bpb}</beats><beat-type>${bt}</beat-type></time>`,
+        "        <staves>2</staves>", '        <clef number="1"><sign>G</sign><line>2</line></clef>', '        <clef number="2"><sign>F</sign><line>4</line></clef>', "      </attributes>");
+      if (opts.tempo) L.push(`      <direction placement="above"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>${Math.round(opts.tempo)}</per-minute></metronome></direction-type><staff>1</staff><sound tempo="${Math.round(opts.tempo)}"/></direction>`);
+    }
+    writeStaff(mr.measures[b] || empty, 1, 1, accR);
+    L.push(`      <backup><duration>${measDiv}</duration></backup>`);
+    writeStaff(ml.measures[b] || empty, 2, 5, accL);
+    if (b === nb - 1) L.push('      <barline location="right"><bar-style>light-heavy</bar-style></barline>');
+    L.push("    </measure>");
+  }
+  L.push("  </part>", "</score-partwise>", "");
+  return L.join("\n");
+}
+/** A score's events as piano notes in beats (for a chord chart or an ML note score). */
+function scoreToPianoHands(score, opts = {}) {
+  const bn = _scoreToBeatNotes(score), notes = [];
+  for (const n of bn) for (const m of n.midis) notes.push({ midi: m, onsetBeat: n.onsetBeat, durBeat: n.durBeat });
+  return pianoScoreFromNotes(notes, opts);
+}
+
+
+/* ============================================================================
+ *  WORKBENCH · WO-6 — PROJECT LIBRARY, SETLISTS, PROJECT BUNDLES (pure half)
+ *  ---------------------------------------------------------------------------
+ *  The app restored exactly one session. A local library is the zero-server
+ *  stand-in for a catalog: every opened file becomes a PROJECT RECORD (metadata
+ *  only — the bytes live in OPFS / IndexedDB, browser glue in the UI file) that
+ *  re-opens through the SAME validated parsers, with its edits re-applied. This half
+ *  is pure: the record shape, search / sort / tags, setlist operations, and the
+ *  portable project bundle (a STORED zip: manifest.json + source bytes + edits.json).
+ * ------------------------------------------------------------------------- */
+const PROJECT_SCHEMA = 1;
+const PROJECT_KINDS = ["pdf", "xml", "alphatex", "audio"];
+const _projId = (now) => "p" + Math.floor(now).toString(36) + Math.floor(Math.random() * 1e6).toString(36);
+/** A project record. meta = the session meta (overrides, scoreEdit, keyOverride, partIndex, useSharp…). */
+function makeProjectRecord(o = {}) {
+  const now = o.now != null ? o.now : Date.now();
+  const kind = PROJECT_KINDS.includes(o.kind) ? o.kind : "xml";
+  return {
+    v: PROJECT_SCHEMA, id: o.id || _projId(now), title: String(o.title || o.filename || "Untitled").replace(/\.[^.]+$/, "").slice(0, 200),
+    artist: o.artist ? String(o.artist).slice(0, 200) : "", filename: o.filename || "", kind,
+    createdAt: o.createdAt || now, updatedAt: now, bytes: o.bytes || 0, duration: o.duration || 0, bars: o.bars || 0,
+    key: o.key || "", bpm: o.bpm ? Math.round(o.bpm) : 0, tags: Array.isArray(o.tags) ? [...new Set(o.tags.map((t) => String(t).trim().toLowerCase()).filter(Boolean))].slice(0, 20) : [],
+    meta: o.meta && typeof o.meta === "object" ? o.meta : {},
+  };
+}
+function isProjectRecord(x) {
+  return !!x && x.v === PROJECT_SCHEMA && typeof x.id === "string" && typeof x.title === "string" && PROJECT_KINDS.includes(x.kind) && Array.isArray(x.tags) && typeof x.updatedAt === "number";
+}
+/** Search + filter + sort project records. q matches title / artist / filename / key / tags
+ *  (every word must match, case- and accent-insensitive); tags = all required. */
+function searchProjects(records, opts = {}) {
+  const fold = (s) => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+  const words = fold(opts.q).split(/\s+/).filter(Boolean), need = (opts.tags || []).map(fold);
+  const sort = opts.sort || "updated", dir = opts.dir === "asc" ? 1 : opts.dir === "desc" ? -1 : sort === "title" || sort === "key" ? 1 : -1;
+  const out = [];
+  for (const r of records || []) {
+    if (!r) continue;
+    if (need.length && !need.every((t) => r.tags.includes(t))) continue;
+    if (words.length) { const hay = fold([r.title, r.artist, r.filename, r.key, r.kind, ...r.tags].join(" ")); if (!words.every((w) => hay.includes(w))) continue; }
+    out.push(r);
+  }
+  const val = (r) => (sort === "title" ? fold(r.title) : sort === "key" ? fold(r.key) : sort === "bpm" ? r.bpm || 0 : sort === "created" ? r.createdAt : r.updatedAt);
+  return out.sort((a, b) => { const x = val(a), y = val(b); return (x < y ? -1 : x > y ? 1 : 0) * dir || (b.updatedAt - a.updatedAt); });
+}
+/** Tags in use with counts, most used first. */
+function projectTags(records) {
+  const m = new Map(); for (const r of records || []) for (const t of r.tags || []) m.set(t, (m.get(t) || 0) + 1);
+  return [...m.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).map(([tag, count]) => ({ tag, count }));
+}
+/* ---- setlists: an ordered list of project ids with per-item transpose / capo / note ---- */
+function createSetlist(name, now = Date.now()) { return { v: 1, id: "s" + Math.floor(now).toString(36) + Math.floor(Math.random() * 1e6).toString(36), name: String(name || "Setlist").slice(0, 120), items: [], createdAt: now, updatedAt: now }; }
+const _setItem = (projectId, o = {}) => ({ projectId, transpose: Math.max(-11, Math.min(11, o.transpose | 0)), capo: Math.max(0, Math.min(12, o.capo | 0)), note: o.note ? String(o.note).slice(0, 200) : "" });
+function setlistAdd(set, projectId, o = {}) { return { ...set, items: set.items.concat([_setItem(projectId, o)]), updatedAt: o.now || Date.now() }; }
+function setlistRemove(set, index) { return { ...set, items: set.items.filter((_, i) => i !== index), updatedAt: Date.now() }; }
+function setlistMove(set, from, to) {
+  if (from < 0 || from >= set.items.length) return set;
+  const items = set.items.slice(), [it] = items.splice(from, 1); items.splice(Math.max(0, Math.min(items.length, to)), 0, it);
+  return { ...set, items, updatedAt: Date.now() };
+}
+function setlistUpdateItem(set, index, patch) {
+  if (!set.items[index]) return set;
+  const items = set.items.slice(); items[index] = _setItem(items[index].projectId, { ...items[index], ...patch });
+  return { ...set, items, updatedAt: Date.now() };
+}
+/** Drop items whose project no longer exists. */
+function setlistPrune(set, ids) { const have = new Set(ids); return { ...set, items: set.items.filter((it) => have.has(it.projectId)) }; }
+/* ---- the portable project bundle ---- */
+const BUNDLE_MANIFEST = "ttp-project.json";
+/** A project → a STORED zip: ttp-project.json (the record, schema-versioned), source/<filename>
+ *  (the original file), and edits.json (the session meta — chord overrides, note edits, key…). */
+function exportProjectBundle(project, files = {}) {
+  const enc = (s) => (typeof TextEncoder !== "undefined" ? new TextEncoder().encode(s) : _utf8(s));
+  const rec = { ...project, meta: undefined };
+  const entries = [{ name: BUNDLE_MANIFEST, data: enc(JSON.stringify({ format: "tab-translator-pro/project", version: 1, project: rec }, null, 2)) }];
+  if (files.source) entries.push({ name: "source/" + (project.filename || "source.bin").replace(/[\\/]/g, "_"), data: files.source });
+  entries.push({ name: "edits.json", data: enc(JSON.stringify(project.meta || {}, null, 2)) });
+  return zipStore(entries);
+}
+/** The inverse: → { project (a fresh id unless keepId), source: { name, bytes } | null, meta }. */
+async function importProjectBundle(u8, opts = {}) {
+  const entries = _zipEntries(u8), dec = (b) => new TextDecoder("utf-8").decode(b);
+  const man = entries.find((e) => e.name === BUNDLE_MANIFEST);
+  if (!man) throw new Error("Not a Tab Translator Pro project bundle (no ttp-project.json).");
+  const doc = JSON.parse(dec(await _zipRead(u8, man)));
+  if (!doc || doc.format !== "tab-translator-pro/project" || !doc.project) throw new Error("Unrecognised project bundle.");
+  const ed = entries.find((e) => e.name === "edits.json");
+  const meta = ed ? JSON.parse(dec(await _zipRead(u8, ed))) : {};
+  const src = entries.find((e) => e.name.startsWith("source/") && !e.name.endsWith("/"));
+  const bytes = src ? await _zipRead(u8, src) : null;
+  const p = doc.project;
+  const project = makeProjectRecord({ ...p, id: opts.keepId ? p.id : undefined, meta, now: opts.now, createdAt: p.createdAt, bytes: bytes ? bytes.length : 0 });
+  return { project, source: src ? { name: src.name.slice("source/".length), bytes } : null, meta };
+}
+
+/* ============================================================================
+ *  WORKBENCH · WO-7 — TECHNIQUES FROM AUDIO + TUNING / CAPO DETECTION
+ *  ---------------------------------------------------------------------------
+ *  Scoped, as the roadmap says, to the guitar model's NOTE STREAM (one line at a
+ *  time — chords are left alone): each transcribed note gets a pitch track around
+ *  its own pitch (a normalised squared-difference search over only the lags within
+ *  ±7 semitones of the note — 30-ish lags instead of hundreds, so a whole solo is
+ *  cheap), and a few rules read the techniques from it:
+ *    bend     the pitch rises ≥ 0.9 st above the note and holds (size in quarter-tones)
+ *    vibrato  the detrended pitch oscillates at 4–8 Hz, ≥ 20 cents deep, ≥ 150 ms
+ *    slide    two consecutive notes with NO new attack and a pitch GLIDE between them
+ *             (≥ 50 ms, ≥ 2 st) → slide on the first
+ *    hammer   no new attack but a JUMP (< 50 ms) → hammer-on / pull-off on the first
+ *    palmMute dark (spectral centroid < 3.2 × f0) and short-lived (−12 dB within 150 ms)
+ *    ghost    far softer than the line's median note
+ *  An "attack" is a jump of the RMS or of the 2–6 kHz pick noise across the onset.
+ *  Harmonics are not detected (an honest limit). Notes come back with `tech` and
+ *  `bend`; polyNotesToScore → audioEventsToScore carry them per pitch (`ntech`), and
+ *  fingerScore files them under the string each pitch lands on, so AlphaTex writes them.
+ *
+ *  detectTuningAndCapo ranks every GUITAR_TUNINGS × capo 0–7 for a transcribed part:
+ *  rankGuitarTunings' fingering cost + prior, plus how much of the part sits on OPEN
+ *  strings of that tuning + capo. MEASURED LIMIT (GP corpus, 202 standard parts vs the same
+ *  parts moved up 2/3/5 frets as a capo would): from PITCHES a capo is almost indistinguishable
+ *  from a transposition — open-string share mostly tracks the KEY, and the fingering-cost cue
+ *  overlaps. So a capo is suggested only past thresholds measured at ≤ 0.5 % false positives
+ *  (it then finds ~2 % of real capo parts); a tuning only through suggestGuitarTuning's
+ *  "standard can't play these" gate (0 / 192 false, 12 / 18 named). Suggest, never apply.
+ * ------------------------------------------------------------------------- */
+function _noteTrack(pcm, sr, midi, t0, t1, hopSec = 0.01) {
+  const f0 = 440 * Math.pow(2, (midi - 69) / 12);
+  const tauLo = Math.max(2, Math.floor(sr / (f0 * Math.pow(2, 7 / 12)))), tauHi = Math.ceil(sr / (f0 * Math.pow(2, -7 / 12)));
+  const W = Math.max(Math.round(sr * 0.025), 2 * tauHi + 2), hop = Math.max(1, Math.round(sr * hopSec));
+  const out = [];
+  for (let s = Math.max(0, Math.round(t0 * sr)); s + W + tauHi < pcm.length && s <= t1 * sr; s += hop) {
+    let best = Infinity, bt = -1; const dn = new Float64Array(tauHi + 2);
+    for (let tau = tauLo; tau <= tauHi; tau++) {
+      let d = 0, e = 0;
+      for (let j = 0; j < W; j++) { const a = pcm[s + j], b = pcm[s + j + tau]; d += (a - b) * (a - b); e += a * a + b * b; }
+      dn[tau] = e > 1e-12 ? d / e : 1;
+      if (dn[tau] < best) { best = dn[tau]; bt = tau; }
+    }
+    let tau = bt;
+    if (bt > tauLo && bt < tauHi) { const a = dn[bt - 1], b = dn[bt], c = dn[bt + 1], den = a - 2 * b + c; if (den > 0) tau = bt + 0.5 * (a - c) / den; }
+    let rms = 0; for (let j = 0; j < W; j++) rms += pcm[s + j] * pcm[s + j];
+    out.push({ t: (s + W / 2) / sr, midi: bt > 0 ? 69 + 12 * Math.log2(sr / tau / 440) : NaN, clarity: 1 - best, rms: Math.sqrt(rms / W) });
+  }
+  return out;
+}
+/** A pitch track of the whole line (only around the given notes): [{ t, midi, clarity, rms }]. */
+function pitchTrack(pcm, sr, notes, opts = {}) {
+  const out = [];
+  for (const n of notes || []) out.push(..._noteTrack(pcm, sr, n.midi, Math.max(0, n.startSec - 0.05), n.startSec + n.durSec, opts.hopSec));
+  return out.sort((a, b) => a.t - b.t);
+}
+function _bandEnergy(pcm, sr, t, len, lo, hi) {
+  let N = 1; while (N < len * sr) N <<= 1;
+  const s0 = Math.max(0, Math.round(t * sr)), re = new Float64Array(N), im = new Float64Array(N), w = _hann(N);
+  for (let i = 0; i < N; i++) re[i] = (pcm[s0 + i] || 0) * w[i];
+  _fft(re, im); let e = 0, ce = 0, tot = 0;
+  for (let k = 1; k < N >> 1; k++) { const f = (k * sr) / N, p = re[k] * re[k] + im[k] * im[k]; if (f >= lo && f <= hi) e += p; ce += f * p; tot += p; }
+  return { e, centroid: tot > 0 ? ce / tot : 0 };
+}
+/** Read the playing techniques of a single-line part from its audio. notes: [{ midi, startSec,
+ *  durSec }] (the guitar model's). → the same notes with `tech` (TECHNIQUES tags) and `bend`
+ *  (quarter-tones) where found; the input is not mutated. opts: { attackRatio 1.8 }. */
+function detectGuitarTechniques(pcm, sr, notes, opts = {}) {
+  const ns = (notes || []).map((n) => ({ ...n })).sort((a, b) => a.startSec - b.startSec);
+  if (!ns.length || !pcm || !pcm.length) return ns;
+  // a "line" note: nothing else sounding at its onset (chords keep their notes as they are)
+  const solo = ns.map((n, i) => !ns.some((o, j) => j !== i && Math.abs(o.startSec - n.startSec) < 0.03));
+  const rmsAt = (t, len) => { const a = Math.max(0, Math.round(t * sr)), b = Math.min(pcm.length, Math.round((t + len) * sr)); let s = 0; for (let i = a; i < b; i++) s += pcm[i] * pcm[i]; return b > a ? Math.sqrt(s / (b - a)) : 0; };
+  const attack = (t) => {
+    const r = rmsAt(t, 0.03) / Math.max(1e-6, rmsAt(t - 0.035, 0.03));
+    const hf = _bandEnergy(pcm, sr, t - 0.002, 0.02, 2000, 6000).e / Math.max(1e-12, _bandEnergy(pcm, sr, t - 0.03, 0.02, 2000, 6000).e);
+    return r > (opts.attackRatio || 1.8) || hf > 4;
+  };
+  const tracks = ns.map((n, i) => (solo[i] ? _noteTrack(pcm, sr, n.midi, Math.max(0, n.startSec - 0.12), n.startSec + n.durSec) : []));
+  const peak = ns.map((n) => rmsAt(n.startSec, 0.05)), med = peak.slice().sort((a, b) => a - b)[peak.length >> 1] || 1e-6;
+  const add = (n, tag) => { n.tech = n.tech || []; if (!n.tech.includes(tag)) n.tech.push(tag); };
+  ns.forEach((n, i) => {
+    if (!solo[i]) return;
+    const tr = tracks[i].filter((f) => f.t >= n.startSec + 0.015 && f.t <= n.startSec + n.durSec - 0.01 && f.clarity > 0.6 && Math.abs(f.midi - n.midi) < 3.5);
+    if (tr.length >= 4) {
+      const dev = tr.map((f) => f.midi - n.midi);
+      // bend: a sustained rise ≥ 0.9 st (median of the top quarter) reached by a mostly-rising path
+      const sorted = dev.slice().sort((a, b) => a - b), top = sorted[Math.floor(sorted.length * 0.85)], startDev = dev.slice(0, 2).reduce((a, b) => a + b, 0) / Math.min(2, dev.length);
+      const peakIdx = dev.indexOf(Math.max(...dev)), rising = dev.slice(0, peakIdx + 1).reduce((a, d, k, arr) => a + (k && d >= arr[k - 1] - 0.05 ? 1 : 0), 0) / Math.max(1, peakIdx);
+      // (a bend rises ABOVE the note — a slide's destination arrives from below and is not one)
+      if (top >= 0.9 && top - startDev >= 0.9 && peakIdx >= 4 && rising >= 0.7) { add(n, "bend"); n.bend = Math.max(1, Math.min(8, Math.round((top - startDev) * 2))); }
+      // vibrato: detrended oscillation 4–8 Hz, ≥ 20 cents, over ≥ 150 ms
+      if (tr.length >= 15) {
+        const k = 7, det = dev.map((d, j) => { const a = Math.max(0, j - k), b = Math.min(dev.length, j + k + 1); let s = 0; for (let q = a; q < b; q++) s += dev[q]; return d - s / (b - a); });
+        let zc = 0; for (let j = 1; j < det.length; j++) if ((det[j - 1] < 0) !== (det[j] < 0)) zc++;
+        const span = tr[tr.length - 1].t - tr[0].t, rate = zc / 2 / Math.max(0.01, span), depth = (Math.max(...det) - Math.min(...det)) * 50;
+        if (span >= 0.15 && rate >= 4 && rate <= 8.5 && depth >= 20 && !n.tech?.includes("bend")) add(n, "vibrato");
+      }
+    }
+    // ghost: far softer than the line
+    if (peak[i] < 0.3 * med && n.durSec < 0.25) { add(n, "ghost"); return; }
+    // palm mute: dark and short-lived (the decay is measured INSIDE the note)
+    if (n.durSec >= 0.18) {
+      const sp = _bandEnergy(pcm, sr, n.startSec + 0.005, 0.06, 40, sr / 2), f0 = 440 * Math.pow(2, (n.midi - 69) / 12);
+      const decayed = rmsAt(n.startSec + 0.14, 0.03) < 0.25 * Math.max(1e-6, rmsAt(n.startSec + 0.005, 0.03));
+      if (sp.centroid < 3.2 * f0 && decayed) add(n, "palmMute");
+    }
+  });
+  // legato pairs: no new attack at B → slide (a glide) or hammer-on / pull-off (a jump), on A
+  for (let i = 0; i + 1 < ns.length; i++) {
+    const A = ns[i], B = ns[i + 1];
+    if (!solo[i] || !solo[i + 1] || B.midi === A.midi || Math.abs(B.midi - A.midi) > 7) continue;
+    if (B.startSec - (A.startSec + A.durSec) > 0.08 || attack(B.startSec)) continue;
+    const tr = _noteTrack(pcm, sr, (A.midi + B.midi) / 2, Math.max(A.startSec, B.startSec - 0.25), B.startSec + 0.12).filter((f) => f.clarity > 0.6);
+    const lo = Math.min(A.midi, B.midi) + 0.4, hi = Math.max(A.midi, B.midi) - 0.4, mid = tr.filter((f) => f.midi > lo && f.midi < hi);
+    const glide = mid.length ? mid[mid.length - 1].t - mid[0].t + 0.01 : 0;
+    add(A, glide >= 0.05 && Math.abs(B.midi - A.midi) >= 2 ? "slide" : "hammer");
+  }
+  return ns;
+}
+
+/** Rank tuning × capo for a part, with the open-string share → { best, ranked, capo, tuning } where
+ *  `tuning` (non-standard, via suggestGuitarTuning's gate) and `capo` (> 0) are suggestions or null. */
+function detectTuningAndCapo(score, opts = {}) {
+  if (!score || !score.bars) return null;
+  const midis = []; for (const b of score.bars) for (const e of b.events || []) for (const m of e.midis || []) midis.push(m);
+  if (!midis.length) return null;
+  const capos = opts.capos || [0, 1, 2, 3, 4, 5, 6, 7];
+  const ranked = rankGuitarTunings(score, { ...opts, capos }).map((r) => {
+    const open = new Set(capoTuning(r.midi, r.capo).filter((m) => m != null)), share = midis.filter((m) => open.has(m)).length / midis.length;
+    const lowest = Math.min(...capoTuning(r.midi, r.capo).filter((m) => m != null));
+    return { ...r, openShare: share, below: midis.filter((m) => m < lowest).length, score: r.cost - (opts.openWeight != null ? opts.openWeight : 2.5) * share + 0.06 * r.capo };
+  }).sort((a, b) => a.score - b.score);
+  const tun = suggestGuitarTuning(score, opts);
+  const tid = tun ? tun.id : "standard";
+  const rows = ranked.filter((r) => r.id === tid), zero = rows.find((r) => r.capo === 0);
+  let capo = null;
+  const minGain = opts.minOpenGain != null ? opts.minOpenGain : 0.25, minShare = opts.minOpenShare != null ? opts.minOpenShare : 0.35, minCost = opts.minCostGain != null ? opts.minCostGain : 1.0;
+  for (const r of rows) {
+    if (!r.capo || r.below || r.unplayable || !zero) continue;
+    if (r.openShare - zero.openShare >= minGain && r.openShare >= minShare && zero.perNote - r.perNote >= minCost) { capo = { capo: r.capo, openShare: r.openShare, openShare0: zero.openShare, confidence: Math.min(0.95, 0.55 + (r.openShare - zero.openShare)) }; break; }
+  }
+  // the tuning suggestion's confidence: how much of the part standard cannot reach at all
+  const total = midis.length, tconf = tun ? Math.min(0.97, 0.6 + Math.min(0.37, (tun.standard.unplayable / total) * 5)) : 0;
+  return { ranked, tuning: tun ? { ...tun, confidence: tconf } : null, capo, best: ranked[0] };
 }
 
 export {
@@ -9346,4 +11217,77 @@ export {
   capoTuning,
   rankGuitarTunings,
   suggestGuitarTuning,
+  EDIT_PPQ,
+  EDIT_OPS,
+  EDIT_SNAPS,
+  eventNotes,
+  scoreNoteList,
+  snapTicks,
+  emptyScoreEdit,
+  isScoreEdit,
+  editPush,
+  editUndo,
+  editRedo,
+  editCanUndo,
+  editCanRedo,
+  applyScoreEdits,
+  transposeSymbol,
+  describeScoreEdit,
+  scoreTimeMap,
+  noteRollSpectrogram,
+  timeStretchChannels,
+  timeStretch,
+  loopRegion,
+  clickTimes,
+  renderClicks,
+  clickTrackWav,
+  renderScorePcm,
+  rankChordTemplates,
+  createLiveChordTracker,
+  practiceCompare,
+  practiceTargets,
+  countSyllables,
+  lyricLines,
+  voicedPhrases,
+  alignLyrics,
+  nudgeLyricLine,
+  lyricLineAt,
+  lyricsToLRC,
+  scoreToLyricsSheet,
+  scoreToChordProWithLyrics,
+  lyricSheetRows,
+  INSTRUMENTS,
+  INSTRUMENT_ORDER,
+  fretVoicings,
+  voiceLeadingDistance,
+  pianoVoicings,
+  voicingsForInstrument,
+  ARRANGEMENT_LEVELS,
+  arrangementLevels,
+  DRUM_KIT,
+  DRUM_ROWS,
+  drumHitsToAsciiTab,
+  drumHitsToMusicXML,
+  drumKitToMidi,
+  pianoScoreFromNotes,
+  scoreToPianoMusicXML,
+  scoreToPianoHands,
+  PROJECT_SCHEMA,
+  PROJECT_KINDS,
+  makeProjectRecord,
+  isProjectRecord,
+  searchProjects,
+  projectTags,
+  createSetlist,
+  setlistAdd,
+  setlistRemove,
+  setlistMove,
+  setlistUpdateItem,
+  setlistPrune,
+  BUNDLE_MANIFEST,
+  exportProjectBundle,
+  importProjectBundle,
+  pitchTrack,
+  detectGuitarTechniques,
+  detectTuningAndCapo,
 };
