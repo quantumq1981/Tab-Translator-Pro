@@ -265,6 +265,19 @@ import {
   scoreRecordingTimes,
   timelineBeatsAt,
   partsZip,
+  EDIT_PPQ,
+  EDIT_SNAPS,
+  scoreNoteList,
+  snapTicks,
+  isScoreEdit,
+  editPush,
+  editUndo,
+  editRedo,
+  editCanUndo,
+  editCanRedo,
+  applyScoreEdits,
+  describeScoreEdit,
+  noteRollSpectrogram,
 } from "./engine.tsx";
 
 async function extractTokens(buf) {
@@ -564,7 +577,7 @@ export default function TabDecoderPro() {
   const onFile = async (e) => {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
-    setPdfErr(""); setPdfBusy(true); setChart(null); clearSel(); setSysShifts({});
+    setPdfErr(""); setPdfBusy(true); setChart(null); clearSel(); setSysShifts({}); setScoreEdit(null);
     try {
       const buf = await f.arrayBuffer();
       const bytes = new Uint8Array(buf.slice(0)); // copy for the session cache (PDF.js may detach buf)
@@ -614,7 +627,7 @@ export default function TabDecoderPro() {
   const onXml = async (e) => {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
-    setXmlErr(""); setXmlScore(null); setTexDoc(null); setXmlBusy(true); clearSel();
+    setXmlErr(""); setXmlScore(null); setTexDoc(null); setXmlBusy(true); clearSel(); setScoreEdit(null);
     try {
       const bytes = new Uint8Array(await f.arrayBuffer());
       const tex = alphaTexFromBytes(bytes);
@@ -701,6 +714,17 @@ export default function TabDecoderPro() {
    * rides in the session meta next to the chord `overrides` — a corrected chart must
    * restore corrected, or the correction is worthless on the next visit. */
   const [keyOverride, setKeyOverride] = useState("");
+  /* WO-1 note edits (ScoreEdit op list). Scoped to the chart they were made on (`target`), so a
+   * PDF chart's edits never replay over a Guitar Pro part. Persisted in the session meta next to
+   * `overrides`, re-applied after the restore re-parse (ids are positional and reproduced exactly). */
+  const [scoreEdit, setScoreEdit] = useState(null);
+  const editTarget = mode === "pdf" && chart ? `pdf:${chart.fileName}` : mode === "xml" && xmlScore ? `xml:${xmlName}:${xmlScore.partIndex || 0}` : "";
+  const editFor = (target) => (scoreEdit && scoreEdit.target === target ? scoreEdit : null);
+  const setEditFor = (target) => (upd) => setScoreEdit((prev) => {
+    const cur = prev && prev.target === target ? prev : null;
+    const next = typeof upd === "function" ? upd(cur) : upd;
+    return next && next.ops && next.ops.length + (next.redo ? next.redo.length : 0) ? { ...next, target } : null;
+  });
 
   /* ---- Session persistence (Wave 1 #2) -----------------------------------
    * SAVE: the upload handlers cache the raw bytes once (saveSessionFile); this
@@ -717,8 +741,8 @@ export default function TabDecoderPro() {
                  : (mode === "xml" && xmlScore) ? { kind: "xml", filename: xmlName }
                  : (mode === "xml" && texDoc) ? { kind: "alphatex", filename: texDoc.name } : null;
     if (!active) return;
-    saveSessionMeta({ v: 1, kind: active.kind, filename: active.filename, useSharp, overrides, sysShifts, keyOverride, partIndex: xmlScore ? (xmlScore.partIndex || 0) : 0 });
-  }, [mode, chart, xmlScore, xmlName, texDoc, overrides, useSharp, keyOverride]);
+    saveSessionMeta({ v: 1, kind: active.kind, filename: active.filename, useSharp, overrides, sysShifts, keyOverride, scoreEdit, partIndex: xmlScore ? (xmlScore.partIndex || 0) : 0 });
+  }, [mode, chart, xmlScore, xmlName, texDoc, overrides, useSharp, keyOverride, scoreEdit]);
 
   const restoreRef = useRef(null);
   const [restoreReq, setRestoreReq] = useState(0);
@@ -766,6 +790,7 @@ export default function TabDecoderPro() {
         }
         if (meta.overrides && Object.keys(meta.overrides).length) setOverrides(meta.overrides);
         if (meta.keyOverride) setKeyOverride(meta.keyOverride);
+        if (meta.scoreEdit && isScoreEdit(meta.scoreEdit) && typeof meta.scoreEdit.target === "string") setScoreEdit(meta.scoreEdit);
         setRestored(true);
         saveSessionMeta(meta); // re-affirm the restored state in one clean write
       } catch (err) { console.warn("session restore failed:", err); }
@@ -775,7 +800,7 @@ export default function TabDecoderPro() {
 
   const startFresh = async () => {
     try { await clearSession(); } catch (_) {}
-    setChart(null); setXmlScore(null); setTexDoc(null); setXmlName(""); setMode("manual"); clearSel(); setRestored(false); setKeyOverride("");
+    setChart(null); setXmlScore(null); setTexDoc(null); setXmlName(""); setMode("manual"); clearSel(); setRestored(false); setKeyOverride(""); setScoreEdit(null);
   };
 
   const pickChord = (key, e) => { setSelKey(key); setSelFrets(e.frets || null); setSelMidis(e.midis || null); };
@@ -843,7 +868,7 @@ export default function TabDecoderPro() {
         .meas:hover{border-color:#ff6b3588!important;}
         .tdp-cols{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:16px;}
         .tdp-cols.manual{grid-template-columns:minmax(0,1fr) minmax(0,1fr);}
-        @media (max-width:760px){.tdp-cols,.tdp-cols.manual{grid-template-columns:1fr;}}
+        @media (max-width:760px){.tdp-cols,.tdp-cols.manual{grid-template-columns:minmax(0,1fr);}}  /* minmax(0,…): a wide child (the note editor's roll) must scroll inside, not widen the page */
         @media print {
           /* scroll boxes only print their visible slice → everything below the fold
              was being cut off. Expand them so the whole chart prints. */
@@ -863,7 +888,7 @@ export default function TabDecoderPro() {
             <span style={{ fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: 22, letterSpacing: 1 }}>TAB<span style={{ color: C.amber }}>·</span>DECODER</span>
             <span style={{ color: C.dim, fontSize: 12, letterSpacing: 3 }}>TABTRANSLATOR PRO</span>
           </div>
-          <div style={{ display: "flex", gap: 6 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, maxWidth: "100%" }}>
             {[["manual", "Manual"], ["pdf", "PDF Chart"], ["xml", "MusicXML / GP"], ["audio", "Audio 🎵"], ["lyrics", "Lyrics 🎙️"], ["tuner", "Tuner 🎤"]].map(([m, lbl]) => (
               <button key={m} onClick={() => { setMode(m); clearSel(); }} style={{ ...toggle(C), padding: "6px 14px", flex: "none", ...(mode === m ? activeToggle(C) : {}) }}>
                 {lbl}
@@ -947,7 +972,8 @@ export default function TabDecoderPro() {
                   <ChartPanel score={scoreView} title={chart.fileName}
                     meta={`${scoreView.bars.length} bars · ${chart.systemsFound} systems · ${chart.pages} pp · 4/4 assumed`}
                     C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey={selKey} onPick={pickChord}
-                    keyOverride={keyOverride} setKeyOverride={setKeyOverride} />
+                    keyOverride={keyOverride} setKeyOverride={setKeyOverride}
+                    scoreEdit={editFor(editTarget)} setScoreEdit={setEditFor(editTarget)} />
                 )}
                 {scoreView && chart.systems && chart.systems.length > 0 && (
                   <StringShiftPanel systems={chart.systems} shifts={sysShifts} onBump={bumpSystemShift} C={C} />
@@ -992,7 +1018,8 @@ export default function TabDecoderPro() {
                   <ChartPanel score={xmlScore} title={xmlName}
                     meta={`${xmlScore.bars.length} bars · ${xmlScore.tuning} tuning · ${xmlScore.timeSig.join("/")}`}
                     C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey={selKey} onPick={pickChord}
-                    keyOverride={keyOverride} setKeyOverride={setKeyOverride} />
+                    keyOverride={keyOverride} setKeyOverride={setKeyOverride}
+                    scoreEdit={editFor(editTarget)} setScoreEdit={setEditFor(editTarget)} />
                 )}
               </>
             )}
@@ -1077,7 +1104,15 @@ export default function TabDecoderPro() {
  * the same shape, so the renderer, editor and exporters are identical. Edits are
  * lifted to the parent as an `overrides` map ("<bar>.<beat>" -> symbol) so they
  * survive view/transpose changes and feed straight into export. */
-function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, selKey, onPick, keyOverride, setKeyOverride, autoSimplify = true, defaultView = "chart", vocabPicker = true }) {
+function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setOverrides, selKey, onPick, keyOverride, setKeyOverride, autoSimplify = true, defaultView = "chart", vocabPicker = true, scoreEdit: scoreEditProp, setScoreEdit: setScoreEditProp, getAudio }) {
+  /* WO-1: note-level corrections. The edit is an op list replayed over the parsed score
+   * (applyScoreEdits); controlled when the parent persists it (session meta), local otherwise.
+   * Everything downstream — simplify, arrange, transpose, respell, every view and export — reads
+   * the EDITED score; with no edit it is the parsed score itself (same object). */
+  const [localEdit, setLocalEdit] = useState(null);
+  const scoreEdit = setScoreEditProp ? scoreEditProp : localEdit;
+  const setScoreEdit = setScoreEditProp || setLocalEdit;
+  const score = useMemo(() => applyScoreEdits(rawScore, scoreEdit, { useSharp }), [rawScore, scoreEdit, useSharp]);
   const [view, setView] = useState(defaultView);
   const [voicingChoices, setVoicingChoices] = useState(null);   // chord(s) whose voicing modal is open
   const [editMode, setEditMode] = useState(false);
@@ -1105,10 +1140,10 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   // each bar's notes into one inferred chord — the right tool there — so it's AUTO-ENABLED
   // for a melodic chart (a densely arpeggiated GP part would otherwise export "quartered",
   // a chord per note), with the raw per-onset view one toggle away.
-  const melodic = useMemo(() => isMelodicScore(score), [score]);
+  const melodic = useMemo(() => isMelodicScore(rawScore), [rawScore]);
   // autoSimplify={false}: a chart whose notes ARE the content (the guitar tab) never collapses to
   // one chord per bar on its own — every note, and its string, must reach the export.
-  const [simplify, setSimplify] = useState(() => autoSimplify && (isMelodicScore(score) || !!score.merged));
+  const [simplify, setSimplify] = useState(() => autoSimplify && (isMelodicScore(rawScore) || !!rawScore.merged));
   const [arrange, setArrange] = useState("off"); // off | block | quarters | eighths | shuffle
 
   const simp = useMemo(() => (simplify ? simplifyScore(score, useSharp) : score), [simplify, score, useSharp]);
@@ -1166,11 +1201,11 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   // Re-apply the melodic auto-default whenever a new score loads (upload / part switch /
   // decode / restore) — a melodic part auto-simplifies, a block-harmony part reverts to
   // per-onset. Mid-session the user's manual toggle stands until the next score change.
-  useEffect(() => { setSimplify(autoSimplify && (isMelodicScore(score) || !!score.merged)); }, [score, autoSimplify]);
+  useEffect(() => { setSimplify(autoSimplify && (isMelodicScore(rawScore) || !!rawScore.merged)); }, [rawScore, autoSimplify]);
   const stopPlay = () => { if (player.current) { player.current.stop(); player.current = null; } setPlaying(false); setPlayKey(""); };
   const stopRef = () => { const s = refAudio.current; if (s.raf) cancelAnimationFrame(s.raf); if (s.src) { try { s.src.stop(); } catch (_) {} s.src = null; } if (s.ctx && s.ctx.state !== "closed") { try { s.ctx.close(); } catch (_) {} s.ctx = null; } s.raf = null; setRefPlaying(false); setPlayKey(""); };
   useEffect(() => () => { stopPlay(); stopRef(); }, []); // stop on unmount
-  useEffect(() => { stopPlay(); stopRef(); setAlignSegs(null); }, [score, semis]); // music changed → stop + drop the stale alignment
+  useEffect(() => { stopPlay(); stopRef(); setAlignSegs(null); }, [rawScore, semis]); // music changed → stop + drop the stale alignment
   const togglePlay = () => {
     if (playing) { stopPlay(); return; }
     stopRef();
@@ -1244,11 +1279,11 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
   // The tab as AlphaTex: what the Tab view draws AND what the AlphaTex export writes, so the two can
   // never disagree. Computed only while one of them is showing (it fingers every note).
   const wantTex = view === "tab" || (exp && exp.fmt === "alphatex");
-  const tabTex = useMemo(() => {
-    if (!wantTex) return { text: "", error: "" };
+  const makeTex = () => {
     try { return { text: scoreToAlphaTex(tabScore, { title, tempo: bpm, trackName: title, key }), error: "" }; }
     catch (e) { return { text: "", error: e && e.message ? e.message : "AlphaTex export failed" }; }
-  }, [wantTex, tabScore, title, bpm, key]);
+  };
+  const tabTex = useMemo(() => (wantTex ? makeTex() : { text: "", error: "" }), [wantTex, tabScore, title, bpm, key]); // eslint-disable-line
   const doExport = (fmt) => {
     const opts = { overrides, title, key, useSharp, tempo: bpm, spellKey: keySpelled };
     if (fmt === "midi") { setExp({ fmt, bytes: scoreToMidi(tscore, opts) }); setCopied(false); setDownloaded(false); return; } // binary
@@ -1257,7 +1292,9 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
       : fmt === "csmpn" ? scoreToCSMPN(tscore, opts)
       : fmt === "csml" ? scoreToCSML(tscore, opts)
       : fmt === "music" ? scoreToMusicPrompt(tscore, opts).command
-      : fmt === "alphatex" ? (tabTex.error ? `⚠ ${tabTex.error}` : tabTex.text)
+      // the SAME makeTex the Tab view draws — called here because the tabTex memo only runs while the
+      // Tab view is open (exporting from Chart / Grid / Notes used to save an EMPTY .alphatex)
+      : fmt === "alphatex" ? ((t) => (t.error ? `⚠ ${t.error}` : t.text))(view === "tab" ? tabTex : makeTex())
       : scoreToChordPro(tscore, opts);
     setExp({ fmt, text }); setCopied(false); setDownloaded(false);
   };
@@ -1331,7 +1368,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
         </div>
       )}
       <div className="no-print" style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
-        {[["chart", "Chart"], ["grid", "Grid"], ["tab", "Tab"]].map(([v, lbl]) => (
+        {[["chart", "Chart"], ["grid", "Grid"], ["tab", "Tab"], ["edit", "Notes"]].map(([v, lbl]) => (
           <button key={v} onClick={() => setView(v)} style={{ ...chip(C), padding: "3px 9px", borderColor: view === v ? C.amber : C.border, color: view === v ? C.amber : C.dim }}>{lbl}</button>
         ))}
         <button onClick={() => { setEditMode((m) => !m); setEditKey(""); }} disabled={view !== "chart"}
@@ -1402,7 +1439,9 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
 
       {autoSimplify && melodic && !simplify && <MelodicNudge C={C} onSimplify={() => setSimplify(true)} />}
 
-      {view === "tab"
+      {view === "edit"
+        ? <NoteEditorView score={score} edit={scoreEdit} setEdit={setScoreEdit} C={C} useSharp={useSharp} playKey={playKey} getAudio={getAudio} bpm={bpm} semis={semis} />
+        : view === "tab"
         ? (tabTex.error
             ? <div style={{ fontSize: 12, color: C.dim, padding: "10px 4px" }}>{tabTex.error}</div>
             : <>
@@ -1416,7 +1455,7 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
         : <GridView score={tscore} C={C} symOf={symOf} selKey={selKey} onPick={onPick} onVoicings={setVoicingChoices} />}
       {voicingChoices && <ChordVoicingModal key={voicingChoices.map((c) => c.symbol).join("|")} choices={voicingChoices} onClose={() => setVoicingChoices(null)} C={C} useSharp={useSharp} />}
 
-      <ExportPanel exp={exp} setExp={setExp} C={C} bpm={bpm} semis={semis}
+      <ExportPanel exp={exp} setExp={setExp} C={C} bpm={bpm} semis={semis} score={tscore}
         copy={copy} download={download} copied={copied} downloaded={downloaded} extOf={(f) => (f === "abc" ? abcExt : _EXPORT_EXT[f] || "txt")}
         abcExt={abcExt} setAbcExt={setAbcExt} />
     </>
@@ -1429,6 +1468,326 @@ function ChartPanel({ score, title, meta, C, useSharp, overrides, setOverrides, 
  * bloating as new views (Audio/Practice, Wave 3) land — each is just another
  * sibling here, switched on `view`, with no shared-state entanglement. Pure
  * props in, JSX out — no engine internals, no own persistent state. */
+/* ---- WO-1 · note-level correction editor --------------------------------------
+ * Three synchronised panes over ONE horizontal scroller: a chord/bar ruler, a piano roll
+ * (x = time, y = pitch; drag a note to move it, drag its right edge to change its length)
+ * with an optional spectrogram of the recording underneath, and a tab grid (drag a fret
+ * number to another string; tap to edit the fret). Every gesture becomes ScoreEdit ops
+ * (engine.tsx · applyScoreEdits) — the parsed score is never touched, so undo/redo is a
+ * pop of the op stack and the edits persist and re-apply after a re-parse.
+ * Rendering is windowed to the visible bars, so a 300-bar score stays light on a phone. */
+const _NE_DUR = [["𝅝", 1920, "whole"], ["𝅗𝅥", 960, "half"], ["♩", 480, "quarter"], ["♪", 240, "eighth"], ["𝅘𝅥𝅯", 120, "16th"]];
+const _NE_TECH = [["bend", "bend"], ["slide", "slide"], ["hammer", "h/p"], ["vibrato", "vib"], ["palmMute", "P.M."], ["harmonic", "harm"], ["letRing", "let ring"], ["staccato", "stacc"], ["accent", ">"], ["ghost", "ghost"], ["dead", "x"], ["tap", "tap"]];
+const _NE_STR = ["E", "A", "D", "G", "B", "e"];
+let _neSeq = 0;
+const _neId = () => `u${Date.now().toString(36)}${(_neSeq++).toString(36)}`;
+function _nePlay(midis) {
+  try { playScore({ timeSig: [4, 4], bars: [{ number: 1, timeSig: [4, 4], events: [{ symbol: "", midis, beat: 0, durBeats: 1, qbeat: 0, qdur: 1 }] }] }, 120); } catch (_) {}
+}
+function _neSpecImage(sp) {
+  try {
+    const cv = document.createElement("canvas"); cv.width = sp.cols; cv.height = sp.rows;
+    const g = cv.getContext("2d"); const img = g.createImageData(sp.cols, sp.rows);
+    for (let c = 0; c < sp.cols; c++) for (let r = 0; r < sp.rows; r++) {
+      const v = sp.data[c * sp.rows + r], y = sp.rows - 1 - r, o = (y * sp.cols + c) * 4;
+      img.data[o] = Math.round(255 * Math.min(1, v * 1.6 - 0.4 > 0 ? v * 1.6 - 0.4 : 0));     // dark → cyan → yellow
+      img.data[o + 1] = Math.round(255 * Math.min(1, v * 1.2));
+      img.data[o + 2] = Math.round(255 * Math.min(1, 0.25 + v * 0.9) * (1 - v * 0.6));
+      img.data[o + 3] = Math.round(255 * Math.min(1, v * 1.3));
+    }
+    g.putImageData(img, 0, 0);
+    return cv.toDataURL("image/png");
+  } catch (_) { return null; }
+}
+
+function NoteEditorView({ score, edit, setEdit, C, useSharp, playKey, getAudio, bpm, semis }) {
+  const L = useMemo(() => scoreNoteList(score), [score]);
+  // where the tab would put the notes that have no written string (the same choice the AlphaTex export makes)
+  const auto = useMemo(() => {
+    const out = new Map();
+    if (!L.notes.some((n) => n.string == null)) return out;
+    try {
+      const fa = fingerScore(score), fb = fingerScore(score, { overwrite: true }), tun = L.tuning;
+      for (const n of L.notes) {
+        if (n.string != null) continue;
+        const ev = score.bars[n.barIndex].events[n.eventIndex];
+        const taken = new Set((ev.notes || []).filter((m) => m.string != null).map((m) => String(m.string)));
+        for (const src of [(fa.bars[n.barIndex].events[n.eventIndex] || {}).frets || {}, (fb.bars[n.barIndex].events[n.eventIndex] || {}).frets || {}]) {
+          const k = Object.keys(src).find((s) => !taken.has(s) && tun[+s] + src[s] === n.midi);
+          if (k != null) { out.set(n.id, { string: +k, fret: src[k] }); taken.add(k); break; }
+        }
+      }
+    } catch (_) {}
+    return out;
+  }, [score, L]);
+  const [tool, setTool] = useState("select");                       // select | draw | erase
+  const [snap, setSnap] = useState("1/16");
+  const [len, setLen] = useState(240);
+  const [zoom, setZoom] = useState(1);
+  const [sel, setSel] = useState(null);                             // note id
+  const [drag, setDrag] = useState(null);                           // live gesture
+  const [fretDraft, setFretDraft] = useState("");
+  const [spec, setSpec] = useState(null);                           // { url, minMidi, maxMidi, cols, colTicks } | { busy } | { err }
+  const [view, setView] = useState({ left: 0, width: 900 });
+  const scroller = useRef(null);
+  const svgRef = useRef(null);
+
+  const PX = 0.15 * zoom;                                           // px per tick (a 16th ≈ 18 px at 1×)
+  const ROW = 10, HEAD = 30, KEYW = 34, TABROW = 16, GAP = 12;
+  const pitches = L.notes.map((n) => n.midi);
+  const lo0 = pitches.length ? Math.min(...pitches) : 52, hi0 = pitches.length ? Math.max(...pitches) : 76;
+  const mid = Math.round((lo0 + hi0) / 2), span = Math.max(24, hi0 - lo0 + 6);
+  const lo = Math.max(24, Math.min(lo0 - 3, mid - Math.floor(span / 2))), hi = Math.min(108, Math.max(hi0 + 3, lo + span));
+  const rows = hi - lo + 1, rollH = rows * ROW;
+  const strings = L.tuning.map((m, k) => (m == null ? -1 : k)).filter((k) => k >= 0);
+  const tabTop = HEAD + rollH + GAP, tabH = strings.length * TABROW + 8;
+  const H = tabTop + tabH, W = Math.max(320, Math.ceil(L.totalTicks * PX) + 40);
+  const yOf = (midi) => HEAD + (hi - midi) * ROW;
+  const xOf = (tick) => tick * PX;
+  const strY = (k) => tabTop + 8 + (strings.length - 1 - strings.indexOf(k)) * TABROW;
+  const names = useSharp ? NOTE_SHARP : NOTE_FLAT;
+  const nameOf = (m) => names[((m % 12) + 12) % 12] + (Math.floor(m / 12) - 1);
+  const byId = useMemo(() => new Map(L.notes.map((n) => [n.id, n])), [L]);
+  const selN = sel ? byId.get(sel) : null;
+  const posOf = (n) => (n.string != null ? { string: n.string, fret: n.fret, auto: false } : auto.has(n.id) ? { ...auto.get(n.id), auto: true } : null);
+  const playOnsets = useMemo(() => {
+    const s = new Set();
+    if (!playKey) return s;
+    L.onsets.forEach((o, i) => { const e = score.bars[o.barIndex].events[o.eventIndex]; if (`${o.bar}.${e.beat}` === playKey) s.add(i); });
+    return s;
+  }, [playKey, L, score]);
+  const barAt = (abs) => { const bs = L.bars; let lo2 = 0, hi2 = bs.length - 1; while (lo2 < hi2) { const m = (lo2 + hi2 + 1) >> 1; if (bs[m].startTick <= abs) lo2 = m; else hi2 = m - 1; } return bs[lo2]; };
+  const push = (ops) => setEdit((prev) => editPush(prev, ops));
+
+  useEffect(() => { if (sel && !byId.has(sel)) setSel(null); }, [byId, sel]);
+  useEffect(() => { setFretDraft(selN && posOf(selN) ? String(posOf(selN).fret) : ""); }, [sel, score]); // eslint-disable-line
+  useEffect(() => {
+    const el = scroller.current; if (!el) return;
+    const on = () => setView({ left: el.scrollLeft, width: el.clientWidth });
+    on(); el.addEventListener("scroll", on, { passive: true }); window.addEventListener("resize", on);
+    return () => { el.removeEventListener("scroll", on); window.removeEventListener("resize", on); };
+  }, []);
+  // keep the playing onset in view
+  useEffect(() => {
+    const el = scroller.current; if (!el || !playOnsets.size) return;
+    const o = L.onsets[[...playOnsets][0]]; const x = xOf(o.absTick);
+    if (x < el.scrollLeft + 40 || x > el.scrollLeft + el.clientWidth - 80) el.scrollTo({ left: Math.max(0, x - 80), behavior: "smooth" });
+  }, [playOnsets]); // eslint-disable-line
+
+  /* ---- gestures ---- */
+  const svgPt = (e) => { const r = svgRef.current.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+  const onNoteDown = (e, n, mode) => {
+    e.stopPropagation();
+    if (tool === "erase") { push({ t: "note.remove", id: n.id }); return; }
+    setSel(n.id);
+    if (tool !== "select") return;
+    const p = svgPt(e);
+    try { svgRef.current.setPointerCapture(e.pointerId); } catch (_) {}
+    setDrag({ id: n.id, mode, x0: p.x, y0: p.y, dx: 0, dy: 0, moved: false });
+  };
+  const onBgDown = (e) => {
+    if (tool !== "draw") { if (tool === "select") setSel(null); return; }
+    const p = svgPt(e); setDrag({ mode: "draw", x0: p.x, y0: p.y, dx: 0, dy: 0, moved: false });
+  };
+  const onMove = (e) => {
+    if (!drag) return;
+    const p = svgPt(e), dx = p.x - drag.x0, dy = p.y - drag.y0;
+    setDrag((d) => d && { ...d, dx, dy, moved: d.moved || Math.abs(dx) > 5 || Math.abs(dy) > 5 });
+  };
+  const onUp = () => {
+    const d = drag; setDrag(null);
+    if (!d) return;
+    if (d.mode === "draw") {
+      if (d.moved || d.y0 < HEAD || d.y0 > HEAD + rollH) return;
+      const abs = Math.max(0, Math.min(L.totalTicks - 1, snapTicks(d.x0 / PX - (EDIT_SNAPS[snap] || 0) / 2, snap)));
+      const midi = hi - Math.floor((d.y0 - HEAD) / ROW), bar = barAt(abs), id = _neId();
+      push({ t: "note.add", id, bar: bar.number, onsetTicks: abs - bar.startTick, midi, durTicks: len });
+      setSel(id); _nePlay([midi]);
+      return;
+    }
+    const n = byId.get(d.id); if (!n || !d.moved) return;
+    if (d.mode === "roll") {
+      const abs = Math.max(0, Math.min(L.totalTicks - 1, snapTicks(n.absTick + d.dx / PX, snap)));
+      const midi = Math.max(0, Math.min(127, n.midi - Math.round(d.dy / ROW)));
+      const bar = barAt(abs), op = { t: "note.move", id: n.id };
+      if (midi !== n.midi) op.midi = midi;
+      if (abs !== n.absTick) { op.bar = bar.number; op.onsetTicks = abs - bar.startTick; }
+      if (op.midi != null || op.bar != null) { push(op); if (op.midi != null) _nePlay([midi]); }
+    } else if (d.mode === "dur") {
+      const durTicks = Math.max(EDIT_SNAPS[snap] || 60, snapTicks(n.durTicks + d.dx / PX, snap));
+      if (durTicks !== n.durTicks) push({ t: "note.dur", id: n.id, durTicks });
+    } else if (d.mode === "tab") {
+      const pos = posOf(n); if (!pos) return;
+      const k = strings[Math.max(0, Math.min(strings.length - 1, strings.indexOf(pos.string) - Math.round(d.dy / TABROW)))];
+      const fret = n.midi - L.tuning[k];
+      if (k !== pos.string && fret >= 0 && fret <= 24) push({ t: "note.string", id: n.id, engIdx: k, fret });
+    }
+  };
+
+  /* ---- selected-note actions ---- */
+  const nudgePitch = (d) => { if (selN) { push({ t: "note.move", id: selN.id, midi: selN.midi + d }); _nePlay([selN.midi + d]); } };
+  const nudgeTime = (d) => {
+    if (!selN) return;
+    const abs = Math.max(0, Math.min(L.totalTicks - 1, snapTicks(selN.absTick + d * (EDIT_SNAPS[snap] || 120), snap))), bar = barAt(abs);
+    push({ t: "note.move", id: selN.id, bar: bar.number, onsetTicks: abs - bar.startTick });
+  };
+  const moveString = (d) => {
+    if (!selN) return; const pos = posOf(selN); if (!pos) return;
+    let i = strings.indexOf(pos.string) + d;
+    while (i >= 0 && i < strings.length) { const k = strings[i], f = selN.midi - L.tuning[k]; if (f >= 0 && f <= 24) { push({ t: "note.string", id: selN.id, engIdx: k, fret: f }); return; } i += d; }
+  };
+  const setFret = () => {
+    if (!selN) return; const pos = posOf(selN), f = parseInt(fretDraft, 10);
+    if (!pos || !Number.isInteger(f) || f < 0 || f > 24 || (f === pos.fret && !pos.auto)) return;
+    push({ t: "note.string", id: selN.id, engIdx: pos.string, fret: f }); _nePlay([L.tuning[pos.string] + f]);
+  };
+  const toggleTech = (t) => {
+    if (!selN) return; const pos = posOf(selN); if (!pos) return;
+    const cur = selN.tech || [], next = cur.includes(t) ? cur.filter((x) => x !== t) : cur.concat([t]);
+    const ops = [];
+    if (pos.auto) ops.push({ t: "note.string", id: selN.id, engIdx: pos.string, fret: pos.fret });  // a technique belongs to a string
+    ops.push({ t: "note.tech", id: selN.id, tech: next }); push(ops);
+  };
+  const selOnset = selN ? L.onsets.find((o) => o.barIndex === selN.barIndex && o.eventIndex === selN.eventIndex) : null;
+  const toggleLock = () => { if (selOnset) push({ t: "symbol.lock", bar: selOnset.bar, onsetTicks: selOnset.onTick, symbol: selOnset.locked ? "" : selOnset.symbol }); };
+  const refinger = () => { if (selOnset) push({ t: "chord.refinger", bar: selOnset.bar, onsetTicks: selOnset.onTick }); };
+  const onKey = (e) => {
+    const mod = e.metaKey || e.ctrlKey;
+    if (mod && (e.key === "z" || e.key === "Z")) { e.preventDefault(); setEdit((p) => (e.shiftKey ? editRedo(p) : editUndo(p))); return; }
+    if (!selN || (e.target && /input|select|textarea/i.test(e.target.tagName))) return;
+    if (e.key === "Delete" || e.key === "Backspace") { e.preventDefault(); push({ t: "note.remove", id: selN.id }); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); nudgePitch(e.shiftKey ? 12 : 1); }
+    else if (e.key === "ArrowDown") { e.preventDefault(); nudgePitch(e.shiftKey ? -12 : -1); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); nudgeTime(-1); }
+    else if (e.key === "ArrowRight") { e.preventDefault(); nudgeTime(1); }
+  };
+  const loadSpec = async () => {
+    if (spec && spec.url) { setSpec(null); return; }
+    const a = getAudio && getAudio(); if (!a || !a.samples) { setSpec({ err: "No recording for this chart." }); return; }
+    setSpec({ busy: true });
+    try {
+      const args = [a.samples, a.sr, score, { bpm, minMidi: lo, maxMidi: hi, colTicks: 60 }];
+      let sp; try { sp = await _engineRPC("noteRollSpectrogram", args); } catch (_) { sp = noteRollSpectrogram(...args); }
+      const url = _neSpecImage(sp);
+      setSpec(url ? { url, ...sp, data: null } : { err: "Couldn't draw the spectrogram." });
+    } catch (_) { setSpec({ err: "Couldn't analyse the recording." }); }
+  };
+
+  /* ---- windowed render ---- */
+  const t0 = Math.max(0, (view.left - 200) / PX), t1 = (view.left + view.width + 200) / PX;
+  const vis = (a, b) => b >= t0 && a <= t1;
+  const visBars = L.bars.filter((b) => vis(b.startTick, b.startTick + b.lenTicks));
+  const visNotes = L.notes.filter((n) => vis(n.absTick, n.absTick + n.durTicks));
+  const ghost = drag && drag.moved && drag.id && byId.get(drag.id);
+  const chip2 = (on, col) => ({ ...chip(C), padding: "3px 9px", borderColor: on ? (col || C.amber) : C.border, color: on ? (col || C.amber) : C.dim });
+  const summary = describeScoreEdit(edit);
+  const report = score.editReport;
+
+  return (
+    <div onKeyDown={onKey} tabIndex={0} style={{ outline: "none" }}>
+      <div className="no-print" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 5, marginBottom: 6, fontSize: 11, color: C.dim }}>
+        {[["select", "↖ Select"], ["draw", "✎ Draw"], ["erase", "⌫ Erase"]].map(([t, l]) => <button key={t} onClick={() => setTool(t)} style={chip2(tool === t)}>{l}</button>)}
+        <select value={snap} onChange={(e) => setSnap(e.target.value)} title="snap" style={{ ...chip(C), padding: "3px 6px", background: C.raised, color: C.dim }}>
+          {Object.keys(EDIT_SNAPS).map((k) => <option key={k} value={k}>snap {k}</option>)}
+        </select>
+        <span style={{ display: "inline-flex", gap: 2 }} title="length for new notes / Set length">
+          {_NE_DUR.map(([g, t, nm]) => <button key={t} onClick={() => setLen(t)} title={nm} style={{ ...chip2(len === t), padding: "1px 7px", fontSize: 14 }}>{g}</button>)}
+        </span>
+        <button onClick={() => setEdit((p) => editUndo(p))} disabled={!editCanUndo(edit)} style={{ ...chip2(false), opacity: editCanUndo(edit) ? 1 : 0.4 }} title="undo (⌘Z)">↶ Undo</button>
+        <button onClick={() => setEdit((p) => editRedo(p))} disabled={!editCanRedo(edit)} style={{ ...chip2(false), opacity: editCanRedo(edit) ? 1 : 0.4 }} title="redo (⇧⌘Z)">↷ Redo</button>
+        <button onClick={() => setZoom((z) => Math.max(0.35, z / 1.4))} style={chip2(false)}>−</button>
+        <button onClick={() => setZoom((z) => Math.min(4, z * 1.4))} style={chip2(false)}>+</button>
+        {getAudio && <button onClick={loadSpec} style={chip2(spec && spec.url, C.cyan)} title="draw the recording's spectrogram under the notes">{spec && spec.busy ? "analysing…" : "🌈 Spectrogram"}</button>}
+        {editCanUndo(edit) && <button onClick={() => { if (window.confirm("Discard every note edit on this chart?")) setEdit(null); }} style={chip2(false)}>Clear edits</button>}
+      </div>
+      <div style={{ fontSize: 10, color: C.dim, marginBottom: 6, lineHeight: 1.5 }}>
+        {summary ? <span style={{ color: C.green }}>✓ {summary}</span> : "Drag a note to move it (pitch + time), its right edge to change its length; drag a fret number to another string. Draw adds notes, Erase removes them."}
+        {report && report.skipped > 0 && <span style={{ color: C.amber }}> · {report.skipped} edit{report.skipped === 1 ? "" : "s"} no longer match this chart (re-timed or re-parsed)</span>}
+        {semis ? <span> · notes shown untransposed</span> : null}
+        {spec && spec.err && <span style={{ color: C.red }}> · {spec.err}</span>}
+      </div>
+      {selN && (
+        <div className="no-print" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 5, marginBottom: 6, padding: "6px 8px", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 11, color: C.dim }}>
+          <b style={{ color: C.chord, fontFamily: "'Space Mono', monospace" }}>{nameOf(selN.midi)}</b>
+          <span>bar {selN.bar} · beat {(selN.onTick / (EDIT_PPQ * 4 / (L.bars[selN.barIndex].timeSig[1])) + 1).toFixed(2).replace(/\.00$/, "")}</span>
+          {posOf(selN) && <span>· {_NE_STR[posOf(selN).string] || posOf(selN).string + 1} string fret {posOf(selN).fret}{posOf(selN).auto ? " (auto)" : ""}</span>}
+          <span>· chord <b style={{ color: C.text }}>{selN.symbol}</b>{selN.locked ? " 🔒" : ""}</span>
+          <span style={{ flexBasis: "100%", height: 0 }} />
+          <button onClick={() => _nePlay([selN.midi])} style={chip2(false)}>▶</button>
+          <button onClick={() => nudgePitch(1)} style={chip2(false)} title="up a semitone (↑, ⇧↑ octave)">▲</button>
+          <button onClick={() => nudgePitch(-1)} style={chip2(false)} title="down a semitone (↓)">▼</button>
+          <button onClick={() => nudgeTime(-1)} style={chip2(false)} title="earlier by the snap (←)">◀</button>
+          <button onClick={() => nudgeTime(1)} style={chip2(false)} title="later by the snap (→)">▶|</button>
+          <button onClick={() => push({ t: "note.dur", id: selN.id, durTicks: len })} style={chip2(false)} title="set this onset's length to the chosen value">len {(_NE_DUR.find((d) => d[1] === len) || [""])[0]}</button>
+          {posOf(selN) && <>
+            <button onClick={() => moveString(1)} style={chip2(false)} title="same pitch, next higher string">str ↑</button>
+            <button onClick={() => moveString(-1)} style={chip2(false)} title="same pitch, next lower string">str ↓</button>
+            <input value={fretDraft} onChange={(e) => setFretDraft(e.target.value.replace(/[^0-9]/g, "").slice(0, 2))} onBlur={setFret} onKeyDown={(e) => { if (e.key === "Enter") setFret(); }}
+              inputMode="numeric" aria-label="fret" style={{ width: 34, background: C.raised, color: C.text, border: `1px solid ${C.border}`, borderRadius: 6, padding: "3px 4px", fontSize: 11, fontFamily: "inherit" }} />
+          </>}
+          <button onClick={refinger} style={chip2(false)} title="forget the strings of this chord and let the fingering choose">🎸 auto-finger</button>
+          <button onClick={toggleLock} style={chip2(selOnset && selOnset.locked, C.green)} title="keep this chord name when its notes change">{selOnset && selOnset.locked ? "🔒 locked" : "🔓 lock chord"}</button>
+          <button onClick={() => push({ t: "note.remove", id: selN.id })} style={{ ...chip2(false), color: C.red }}>🗑</button>
+          {posOf(selN) && <span style={{ display: "inline-flex", flexWrap: "wrap", gap: 3 }}>
+            {_NE_TECH.map(([t, l]) => <button key={t} onClick={() => toggleTech(t)} style={{ ...chip2((selN.tech || []).includes(t), C.cyan), padding: "1px 6px", fontSize: 10 }}>{l}</button>)}
+          </span>}
+        </div>
+      )}
+      <div style={{ display: "flex", border: `1px solid ${C.border}`, borderRadius: 8, overflow: "hidden", background: C.bg, maxWidth: "100%" }}>
+        <svg width={KEYW} height={H} style={{ flex: "none", background: C.panel, borderRight: `1px solid ${C.border}` }}>
+          {Array.from({ length: rows }, (_, i) => { const m = hi - i, blk = [1, 3, 6, 8, 10].includes(((m % 12) + 12) % 12); return (
+            <g key={m}><rect x={0} y={HEAD + i * ROW} width={KEYW} height={ROW} fill={blk ? "#15151b" : "#202029"} />
+              {m % 12 === 0 && <text x={3} y={HEAD + i * ROW + ROW - 1} fontSize={8} fill={C.dim}>{nameOf(m)}</text>}</g>); })}
+          {strings.map((k) => <text key={k} x={6} y={strY(k) + 4} fontSize={10} fill={C.dim}>{nameOf(L.tuning[k]).replace(/-?\d+$/, "")}</text>)}
+          <text x={3} y={HEAD - 8} fontSize={8} fill={C.dim}>bar</text>
+        </svg>
+        <div ref={scroller} className="tdp-scroll" style={{ overflowX: "auto", overflowY: "hidden", flex: 1, minWidth: 0, WebkitOverflowScrolling: "touch" }}>
+          <svg ref={svgRef} width={W} height={H} onPointerDown={onBgDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={() => setDrag(null)}
+            style={{ display: "block", touchAction: tool === "draw" ? "none" : "pan-x", userSelect: "none", WebkitUserSelect: "none" }}>
+            {Array.from({ length: rows }, (_, i) => { const m = hi - i; return ((m % 12) + 12) % 12 === 0 || [1, 3, 6, 8, 10].includes(((m % 12) + 12) % 12)
+              ? <rect key={m} x={view.left - 200 < 0 ? 0 : view.left - 200} y={HEAD + i * ROW} width={view.width + 400} height={ROW} fill={((m % 12) + 12) % 12 === 0 ? "#1d1d26" : "#121218"} /> : null; })}
+            {spec && spec.url && <image href={spec.url} x={0} y={yOf(spec.maxMidi)} width={spec.cols * spec.colTicks * PX} height={(spec.maxMidi - spec.minMidi + 1) * ROW} preserveAspectRatio="none" opacity={0.85} style={{ imageRendering: "pixelated" }} />}
+            {visBars.map((b) => {
+              const tpb = EDIT_PPQ * 4 / b.timeSig[1];
+              return (<g key={b.number}>
+                {Array.from({ length: b.timeSig[0] }, (_, k) => <line key={k} x1={xOf(b.startTick + k * tpb)} x2={xOf(b.startTick + k * tpb)} y1={HEAD} y2={HEAD + rollH} stroke={k ? "#26262f" : "#4a4a57"} />)}
+                <line x1={xOf(b.startTick)} x2={xOf(b.startTick)} y1={0} y2={H} stroke="#4a4a57" />
+                <text x={xOf(b.startTick) + 3} y={11} fontSize={9} fill={C.dim}>{b.number}{b.section ? ` · ${b.section}` : ""}</text>
+              </g>);
+            })}
+            {L.onsets.filter((o) => vis(o.absTick, o.absTick + o.durTicks)).map((o, i) => (
+              <text key={`s${o.barIndex}.${o.eventIndex}`} x={xOf(o.absTick) + 2} y={24} fontSize={10} fontFamily="'Space Mono', monospace" fill={o.locked ? C.green : o.edited ? C.cyan : C.chord}>{o.symbol}{o.locked ? "🔒" : ""}</text>
+            ))}
+            {strings.map((k) => <line key={k} x1={0} x2={W} y1={strY(k)} y2={strY(k)} stroke="#3a3a45" />)}
+            {visNotes.map((n) => {
+              const on = n.id === sel, playingN = playOnsets.size && [...playOnsets].some((i) => L.onsets[i].barIndex === n.barIndex && L.onsets[i].eventIndex === n.eventIndex);
+              const edited = !!(score.bars[n.barIndex].events[n.eventIndex] || {}).edited;
+              const fill = on ? C.amber : playingN ? C.green : edited ? C.cyan : "#c9a27e";
+              const pos = posOf(n);
+              return (<g key={n.id}>
+                <rect x={xOf(n.absTick) + 0.5} y={yOf(n.midi) + 1} width={Math.max(3, xOf(n.durTicks) - 1.5)} height={ROW - 2} rx={2} fill={fill} opacity={on ? 1 : 0.9}
+                  stroke={on ? "#fff" : "none"} strokeWidth={on ? 1 : 0} style={{ touchAction: "none", cursor: tool === "erase" ? "not-allowed" : "grab" }}
+                  onPointerDown={(e) => onNoteDown(e, n, "roll")} />
+                {on && tool === "select" && <rect x={xOf(n.absTick + n.durTicks) - 5} y={yOf(n.midi) - 1} width={9} height={ROW + 2} fill="#fff" opacity={0.75} rx={2}
+                  style={{ touchAction: "none", cursor: "ew-resize" }} onPointerDown={(e) => onNoteDown(e, n, "dur")} />}
+                {pos && <text x={xOf(n.absTick) + 2} y={strY(pos.string) + 4} fontSize={11} fontWeight={on ? 700 : 500} fill={on ? C.amber : pos.auto ? C.dim : edited ? C.cyan : C.text}
+                  style={{ touchAction: "none", cursor: "ns-resize" }} onPointerDown={(e) => onNoteDown(e, n, "tab")}>{pos.fret}{(n.tech || []).length ? "ʼ" : ""}</text>}
+              </g>);
+            })}
+            {ghost && drag.mode === "roll" && <rect x={xOf(snapTicks(ghost.absTick + drag.dx / PX, snap))} y={yOf(ghost.midi - Math.round(drag.dy / ROW)) + 1} width={Math.max(3, xOf(ghost.durTicks) - 1.5)} height={ROW - 2} rx={2} fill="none" stroke={C.amber} strokeDasharray="3 2" />}
+            {ghost && drag.mode === "dur" && <rect x={xOf(ghost.absTick)} y={yOf(ghost.midi) + 1} width={Math.max(3, xOf(Math.max(60, snapTicks(ghost.durTicks + drag.dx / PX, snap))))} height={ROW - 2} rx={2} fill="none" stroke={C.amber} strokeDasharray="3 2" />}
+            {ghost && drag.mode === "tab" && posOf(ghost) && (() => { const i = Math.max(0, Math.min(strings.length - 1, strings.indexOf(posOf(ghost).string) - Math.round(drag.dy / TABROW))), k = strings[i], f = ghost.midi - L.tuning[k];
+              return <text x={xOf(ghost.absTick) + 2} y={strY(k) + 4} fontSize={11} fill={f >= 0 && f <= 24 ? C.amber : C.red}>{f >= 0 && f <= 24 ? f : "✕"}</text>; })()}
+          </svg>
+        </div>
+      </div>
+      <div style={{ fontSize: 10, color: C.dim, marginTop: 6, lineHeight: 1.5 }}>
+        Fret numbers in grey are the automatic fingering (what the tab export will write); white ones are written, cyan ones edited. An edited chord is re-named from its notes unless you 🔒 lock it. Keys: ←→ time · ↑↓ pitch (⇧ octave) · ⌫ delete · ⌘Z undo.
+      </div>
+    </div>
+  );
+}
+
 /* Key picker — "Key: auto (D)" plus the 24 keys. The runners-up the analysis actually
  * weighed are listed first (with their scores) so correcting a call is one tap and the
  * user can see WHY it chose what it chose — the relative major/minor mix-up that made
@@ -1890,6 +2249,7 @@ const _VOCAB_KEY = "ttp:chordVocab";
 const VOCAB_CHOICES = [
   ["chart", "Pro", "professional chart names: triads, 7ths, maj7, m7, m7♭5, dim7, sus4, 9ths, m11, 7♭9 — a 6/9 is written maj9 (or maj7), sus2/add9 as the triad, a chord is read from its bass (C#m11, not E6/9/C#); slash only for C/E, C/G, C7/B♭, F/G, D/C, Am/G"],
   ["basic", "Basic", "triads, 7ths, maj7, m7, m7♭5, dim7, sus4 — never a slash; for dense vocal harmony"],
+  ["lite", "Lite", "for phones: only triads, 7, maj7, m7 in root position — extensions and slashes fall to the nearest plain chord (C6/9 → C); the lightest analysis"],
   ["full", "Full", "every chord the engine knows (6/9, add9, sus2, altered…) and every inversion as a slash"],
 ];
 /* One live, per-device preference shared by every component that reads it — the Audio panel's
@@ -1936,7 +2296,7 @@ function ChordVocabPicker({ C, value, onChange, sixNine, onSixNine, disabled }) 
         <button key={k} onClick={() => value !== k && onChange(k)} disabled={disabled} title={tip}
           style={{ ...chip(C), padding: "4px 9px", borderColor: value === k ? C.cyan : C.border, color: value === k ? C.cyan : C.dim }}>{lbl}{value === k ? " ✓" : ""}</button>
       ))}
-      {onSixNine && value !== "full" && (
+      {onSixNine && value !== "full" && value !== "lite" && (
         <label title="a heard 6/9 is written as… (a 6 is written maj7) — the tonic-major chart convention; triad = don't detect 6 or 6/9" style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
           6/9 →
           <select value={sixNine} onChange={(ev) => onSixNine(ev.target.value)} disabled={disabled} style={{ ...chip(C), padding: "3px 6px", background: C.raised }}>
@@ -1948,7 +2308,7 @@ function ChordVocabPicker({ C, value, onChange, sixNine, onSixNine, disabled }) 
   );
 }
 /* Export preview: the generated text (or MIDI byte summary) + copy/download. */
-function ExportPanel({ exp, setExp, C, bpm, semis, copy, download, copied, downloaded, extOf, abcExt, setAbcExt }) {
+function ExportPanel({ exp, setExp, C, bpm, semis, copy, download, copied, downloaded, extOf, abcExt, setAbcExt, score }) {
   if (!exp) return null;
   return (
     <div style={{ marginTop: 12 }}>
@@ -1962,7 +2322,7 @@ function ExportPanel({ exp, setExp, C, bpm, semis, copy, download, copied, downl
       </div>
       {exp.bytes ? (
         <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, padding: "12px 12px", fontSize: 12, color: C.dim, lineHeight: 1.6 }}>
-          🎹 Standard MIDI File · {exp.bytes.length.toLocaleString()} bytes · ♩={score.tempoMap ? "~" : ""}{Math.round(bpm * 10) / 10}{score.tempoMap ? ` (${score.tempoMap.length} tempo changes)` : ""}{semis ? ` · transposed ${semis > 0 ? "+" : ""}${semis} st` : ""}. Binary, so there's nothing to copy — hit <b style={{ color: C.cyan }}>⬇ download</b> to save the <b>.mid</b> and open it in any DAW or notation app.
+          🎹 Standard MIDI File · {exp.bytes.length.toLocaleString()} bytes · ♩={score && score.tempoMap ? "~" : ""}{Math.round(bpm * 10) / 10}{score && score.tempoMap ? ` (${score.tempoMap.length} tempo changes)` : ""}{semis ? ` · transposed ${semis > 0 ? "+" : ""}${semis} st` : ""}. Binary, so there's nothing to copy — hit <b style={{ color: C.cyan }}>⬇ download</b> to save the <b>.mid</b> and open it in any DAW or notation app.
         </div>
       ) : (
         <textarea readOnly value={exp.text} spellCheck={false} className="tdp-scroll"
@@ -3337,7 +3697,8 @@ function AudioImport({ C, useSharp }) {
             ? <ChartPanel score={mlDisplayScore}
                 title={(name || "Vocals") + (voiceCount > 1 ? ` · voice ${voiceIdx + 1}/${voiceCount}` : " · voices")}
                 meta={`${mlDisplayScore.bars.length} bars · from ML notes${voiceCount > 1 ? ` · voice ${voiceIdx + 1} of ${voiceCount}` : ""}`}
-                C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey="" onPick={() => {}} />
+                C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey="" onPick={() => {}}
+                getAudio={() => (ref.current.cur ? { samples: ref.current.cur, sr: ref.current.sr } : null)} />
             : <div style={{ fontSize: 11, color: C.dim, padding: 8 }}>Voice {voiceIdx + 1} of {voiceCount} — no notes fell into this slot on this stem.</div>}
         </div>
       )}
@@ -3369,7 +3730,8 @@ function AudioImport({ C, useSharp }) {
           <div style={{ marginBottom: 6 }}><CheckByEar C={C} score={gtrScore} getBuffer={() => ref.current.audioBuf} onStart={stopPlay} /></div>
           <ChartPanel score={gtrScore} title={(name || "Guitar") + " · tab"}
             meta={`${gtrScore.bars.length} bars · ${gtrNotes.length} notes · from the guitar ML model · ${guitarTuning(gtrTuning).name}${gtrCapo ? ` · capo ${gtrCapo}` : ""}`}
-            C={C} useSharp={useSharp} overrides={gtrOvr} setOverrides={setGtrOvr} selKey="" onPick={() => {}} autoSimplify={false} defaultView="tab" />
+            C={C} useSharp={useSharp} overrides={gtrOvr} setOverrides={setGtrOvr} selKey="" onPick={() => {}} autoSimplify={false} defaultView="tab"
+            getAudio={() => (ref.current.mono ? { samples: ref.current.mono, sr: ref.current.sr } : null)} />
         </div>
       )}
 
@@ -3397,7 +3759,8 @@ function AudioImport({ C, useSharp }) {
             </span>
           </div>
           <ChordReview events={raw} C={C} fmt={fmt} onSeek={(t) => play(t)} onCommit={commitChoices} auto={autoPick} onAuto={toggleAuto} />
-          <ChartPanel score={audioScore} vocabPicker={false} title={name || "Audio stem"} meta={`${audioScore.bars.length} bars · ♩=${bg.grid.follow ? "~" + Math.round(bpm) + " (follows the performance)" : +bpm.toFixed(1)} · from audio`} C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey="" onPick={() => {}} />
+          <ChartPanel score={audioScore} vocabPicker={false} title={name || "Audio stem"} meta={`${audioScore.bars.length} bars · ♩=${bg.grid.follow ? "~" + Math.round(bpm) + " (follows the performance)" : +bpm.toFixed(1)} · from audio`} C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey="" onPick={() => {}}
+            getAudio={() => (ref.current.cur ? { samples: ref.current.cur, sr: ref.current.sr } : null)} />
           <div style={{ fontSize: 11, color: C.dim, marginTop: 10, lineHeight: 1.6 }}>
             Decoded with <b>SynHarmonics v2</b> (note-level NNLS transcription, tuning compensation, inversions + slash chords, calibrated confidence). Faded chords with a <b style={{ color: C.amber }}>?</b> are the uncertain ones — fix them from the review list or <b>✎ Edit</b>, check the bar lines with <b>🎧 Check by ear</b>, then <b>CSMPN</b> / <b>→ Chord Sheet Maker Pro</b> to send it on. Dense voicings / heavy bleed still mislabel.
           </div>

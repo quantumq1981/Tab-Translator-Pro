@@ -112,6 +112,17 @@ const CHORD_VOCABULARIES = {
     foreign: {},
     writeAs: { "6/9": "maj7", "6": "maj7", sus2: "", add9: "" },
   },
+  // phones: 5 qualities × 12 roots, root position only = 61 HMM states (memory ∝ states). No
+  // writeAs on purpose — every writeAs source is decoded as its own state; an extended chord
+  // simply decodes to its nearest core chord (C6/9 → C).
+  lite: {
+    label: "Lite",
+    qualities: ["", "m", "7", "maj7", "m7"],
+    inversions: {},
+    hidden: {},
+    foreign: {},
+    writeAs: {},
+  },
   full: { label: "Full", qualities: null, inversions: null, hidden: null, foreign: null, writeAs: null },
 };
 /* A vocabulary name or object → { allow:Set, inversions, hidden, foreign, writeAs } (null =
@@ -3868,10 +3879,13 @@ function transposeScore(score, n, useSharp) {
   if (!n) return score;
   const bars = score.bars.map((b) => ({
     ...b,
-    events: b.events.map((e) => {
+    events: b.events.map((e0) => {
+      // `notes` (the editor's per-note ids, WO-1) are position-specific like frets: dropped.
+      const { notes: _notes, ...e } = e0;
       const midis = (e.midis || []).map((m) => m + n);
       // frets and the string-keyed techniques are position-specific; fingerScore can re-finger.
-      return { ...e, midis, frets: undefined, tech: undefined, bends: undefined, symbol: midis.length ? symbolForMidis(midis, useSharp) : e.symbol };
+      // A chord the user LOCKED keeps its own name, moved with the music (not re-named).
+      return { ...e, midis, frets: undefined, tech: undefined, bends: undefined, symbol: e.locked ? transposeSymbol(e.symbol, n, useSharp) : midis.length ? symbolForMidis(midis, useSharp) : e.symbol };
     }),
   }));
   return { ...score, bars, transposedBy: n };
@@ -8977,6 +8991,396 @@ function chordSubstitutions(symbol, useSharp = true) {
   }
 }
 
+/* ============================================================================
+ *  WORKBENCH · WO-1 — NOTE-LEVEL CORRECTION (the ScoreEdit layer)
+ *  ---------------------------------------------------------------------------
+ *  The parsed / transcribed score is NEVER mutated. A correction is a small,
+ *  serialisable list of operations — `{ v:1, ops:[…], groups:[…], redo:[…] }` —
+ *  that `applyScoreEdits(score, edit)` replays on top of it. That is what lets an
+ *  edit survive a re-parse (the session stores the source bytes + the ops, never
+ *  the derived score), the ♯♭ toggle, and a reload: the parsers are deterministic,
+ *  so the positional note ids the ops reference are reproduced exactly.
+ *
+ *  NOTE IDENTITY. A note is one pitch of one event. Its id is positional in the
+ *  BASE score — `n<bar>.<onsetTick>.<midi>` (+ `.<k>` for the k-th unison of the
+ *  same pitch at that onset) — with ticks at EDIT_PPQ = 480 per QUARTER note (the
+ *  MIDI convention; divisible by 3 for triplets, 16 for 64ths). An edited event
+ *  carries `notes:[{id, midi, string?, fret?, tech?, bend?}]`, so a MOVED note keeps
+ *  its id and a later op can still find it. Added notes take the op's `id`.
+ *
+ *  THE SCORE MODEL IS HARMONIC (one onset = one event, its duration = the gap to the
+ *  next onset — every parser fills that way). So a duration edit is an ONSET edit:
+ *  `note.dur` shortens/extends that onset (a rest opens behind it). Untouched bars are
+ *  returned by reference and their events untouched — `edit = null` (or no ops) is a
+ *  strict passthrough, which keeps the whole validated corpus byte-identical.
+ *
+ *  RE-RECOGNITION. When an onset's notes change, its chord symbol is re-run through
+ *  the engine (`symbolForMidis`) — the engine stays the oracle — unless a
+ *  `symbol.lock` pins it. A locked event is flagged `reviewed` so the chart-vocabulary
+ *  respell leaves it alone, and `transposeScore` transposes its TEXT instead of
+ *  re-naming it.
+ *
+ *  Op set (all positions are bar-relative ticks at EDIT_PPQ; `bar` = bar.number):
+ *    note.add     { bar, onsetTicks, midi, durTicks?, string?, fret?, tech?, bend?, id? }
+ *    note.remove  { id }
+ *    note.move    { id, midi?, bar?, onsetTicks? }          pitch and/or time
+ *    note.dur     { id, durTicks }                           the onset's length
+ *    note.string  { id, engIdx, fret }                       tab position (sets the pitch)
+ *    note.tech    { id, tech:[…TECHNIQUES], bend? }          needs a string
+ *    chord.refinger { bar, onsetTicks }                      forget strings → auto-finger
+ *    symbol.lock  { bar, onsetTicks, symbol }                "" / null unlocks
+ * ------------------------------------------------------------------------- */
+const EDIT_PPQ = 480;
+const EDIT_OPS = ["note.add", "note.remove", "note.move", "note.dur", "note.string", "note.tech", "chord.refinger", "symbol.lock"];
+const EDIT_SNAPS = { "1/4": 480, "1/8": 240, "1/16": 120, "1/32": 60, "1/8T": 160, "1/16T": 80 };
+const _edTpb = (sig) => (EDIT_PPQ * 4) / sig[1];                        // ticks per BEAT of the bar
+const _edBarTicks = (sig) => Math.round(sig[0] * _edTpb(sig));
+const _edSig = (score, bar) => (bar && bar.timeSig) || (score && score.timeSig) || [4, 4];
+function _edTuning(score) {
+  const open = (score && (score.tuningMidi || TUNINGS[score.tuning])) || TUNINGS.Standard;
+  return capoTuning(open, (score && score.soundingCapo) || 0);
+}
+const _edMaxFret = 24;
+
+/** The notes of one event, with ids (positional unless the event already carries them). */
+function eventNotes(e, barNo, onTick, tuning) {
+  if (Array.isArray(e.notes)) return e.notes.map((n) => ({ ...n, tech: n.tech ? n.tech.slice() : undefined }));
+  const seen = {}, used = new Set();
+  return (e.midis || []).map((m) => {
+    seen[m] = (seen[m] || 0) + 1;
+    const n = { id: `n${barNo}.${onTick}.${m}${seen[m] > 1 ? "." + seen[m] : ""}`, midi: m };
+    for (const [k, f] of Object.entries(e.frets || {})) {
+      if (used.has(k) || tuning[+k] == null || tuning[+k] + f !== m) continue;
+      used.add(k); n.string = +k; n.fret = f;
+      const tg = e.tech && e.tech[k]; if (tg && tg.length) n.tech = tg.slice();
+      const bd = e.bends && e.bends[k]; if (bd) n.bend = bd;
+      break;
+    }
+    return n;
+  });
+}
+
+/** A flat, editor-shaped view of a score: every note with its id, absolute tick and tab
+ *  position, plus each bar's tick range. This is the editor's grid model — pure, so the
+ *  piano roll / tab grid render from it and the tests can assert on it. */
+function scoreNoteList(score) {
+  const out = { ppq: EDIT_PPQ, bars: [], notes: [], onsets: [], totalTicks: 0 };
+  if (!score || !score.bars) return out;
+  const tuning = _edTuning(score);
+  let abs = 0;
+  score.bars.forEach((bar, bi) => {
+    const sig = _edSig(score, bar), tpb = _edTpb(sig), len = _edBarTicks(sig), no = bar.number != null ? bar.number : bi + 1;
+    out.bars.push({ number: no, index: bi, startTick: abs, lenTicks: len, timeSig: sig, section: bar.section || null });
+    (bar.events || []).forEach((e, ei) => {
+      const on = Math.round((e.qbeat != null ? e.qbeat : e.beat || 0) * tpb);
+      const dur = Math.max(1, Math.round((e.qdur != null ? e.qdur : e.durBeats || 1) * tpb));
+      out.onsets.push({ bar: no, barIndex: bi, eventIndex: ei, onTick: on, absTick: abs + on, durTicks: dur, symbol: e.symbol, locked: !!e.locked, edited: !!e.edited });
+      for (const n of eventNotes(e, no, on, tuning))
+        out.notes.push({ ...n, bar: no, barIndex: bi, eventIndex: ei, onTick: on, absTick: abs + on, durTicks: dur, symbol: e.symbol, locked: !!e.locked });
+    });
+    abs += len;
+  });
+  out.totalTicks = abs;
+  out.tuning = tuning;
+  return out;
+}
+
+/** Snap a tick to a grid ("1/16", "1/8T", …, or a tick count). */
+function snapTicks(t, grid) {
+  const g = typeof grid === "number" ? grid : EDIT_SNAPS[grid] || 0;
+  return g > 0 ? Math.round(t / g) * g : Math.round(t);
+}
+
+/* ---- the edit record (pure undo/redo stack) ---------------------------------- */
+function emptyScoreEdit() { return { v: 1, ops: [], groups: [], redo: [] }; }
+function isScoreEdit(x) {
+  return !!x && x.v === 1 && Array.isArray(x.ops) && Array.isArray(x.groups)
+    && x.ops.every((o) => o && EDIT_OPS.includes(o.t))
+    && x.groups.every((g) => Number.isInteger(g) && g > 0)
+    && x.groups.reduce((a, b) => a + b, 0) === x.ops.length;
+}
+/** Append one undoable step (one op or several applied as a unit). Clears redo. */
+function editPush(edit, ops) {
+  const e = isScoreEdit(edit) ? edit : emptyScoreEdit();
+  const list = (Array.isArray(ops) ? ops : [ops]).filter((o) => o && EDIT_OPS.includes(o.t));
+  if (!list.length) return e;
+  return { v: 1, ops: e.ops.concat(list), groups: e.groups.concat([list.length]), redo: [] };
+}
+function editUndo(edit) {
+  if (!isScoreEdit(edit) || !edit.groups.length) return edit;
+  const n = edit.groups[edit.groups.length - 1];
+  return { v: 1, ops: edit.ops.slice(0, edit.ops.length - n), groups: edit.groups.slice(0, -1), redo: (edit.redo || []).concat([edit.ops.slice(edit.ops.length - n)]) };
+}
+function editRedo(edit) {
+  if (!isScoreEdit(edit) || !edit.redo || !edit.redo.length) return edit;
+  const step = edit.redo[edit.redo.length - 1];
+  return { v: 1, ops: edit.ops.concat(step), groups: edit.groups.concat([step.length]), redo: edit.redo.slice(0, -1) };
+}
+const editCanUndo = (edit) => isScoreEdit(edit) && edit.groups.length > 0;
+const editCanRedo = (edit) => isScoreEdit(edit) && !!edit.redo && edit.redo.length > 0;
+
+/* ---- apply ------------------------------------------------------------------- */
+/** Replay `edit` over `score`. Non-mutating; untouched bars are returned by reference;
+ *  `edit` absent / empty → `score` itself. Ops that no longer resolve (an id the source
+ *  doesn't have any more) are skipped and counted in `score.editReport`. Re-applying the
+ *  same edit to its own output is a no-op (ids are absolute; an add whose id exists is
+ *  skipped), so the layer is idempotent. */
+function applyScoreEdits(score, edit, opts = {}) {
+  const ops = Array.isArray(edit) ? edit : edit && Array.isArray(edit.ops) ? edit.ops : null;
+  if (!score || !score.bars || !ops || !ops.length) return score;
+  const useSharp = opts.useSharp !== false;
+  const tuning = _edTuning(score);
+  const byNumber = new Map();
+  score.bars.forEach((b, bi) => byNumber.set(b.number != null ? b.number : bi + 1, bi));
+  const work = new Map();                                            // barIndex → working cells
+  const idIndex = new Map();                                         // note id → barIndex
+  score.bars.forEach((bar, bi) => {
+    const sig = _edSig(score, bar), tpb = _edTpb(sig), no = bar.number != null ? bar.number : bi + 1;
+    for (const e of bar.events || []) {
+      const on = Math.round((e.qbeat != null ? e.qbeat : e.beat || 0) * tpb);
+      for (const n of eventNotes(e, no, on, tuning)) idIndex.set(n.id, bi);
+    }
+  });
+  const cellsOf = (bi) => {
+    if (work.has(bi)) return work.get(bi);
+    const bar = score.bars[bi], sig = _edSig(score, bar), tpb = _edTpb(sig), bpb = sig[0], no = bar.number != null ? bar.number : bi + 1;
+    const evs = bar.events || [];
+    const cells = evs.map((e, i) => {
+      const qbeat = e.qbeat != null ? e.qbeat : e.beat || 0;
+      const nextQ = i + 1 < evs.length ? (evs[i + 1].qbeat != null ? evs[i + 1].qbeat : evs[i + 1].beat || 0) : bpb;
+      const qdur = e.qdur != null ? e.qdur : e.durBeats || (nextQ - qbeat);
+      const fill = qdur >= nextQ - qbeat - 0.5 / tpb;                 // gap-filling, as every parser writes
+      return { ev: e, qbeat, onTick: Math.round(qbeat * tpb), notes: eventNotes(e, no, Math.round(qbeat * tpb), tuning), fill, maxDur: qdur, dirty: false, lock: e.locked ? e.symbol : undefined };
+    });
+    const w = { bi, sig, tpb, bpb, cells, touched: false };
+    work.set(bi, w);
+    return w;
+  };
+  const find = (id) => {
+    const bi = idIndex.get(id);
+    if (bi == null) return null;
+    const w = cellsOf(bi);
+    for (const c of w.cells) { const k = c.notes.findIndex((n) => n.id === id); if (k >= 0) return { w, c, k, n: c.notes[k] }; }
+    return null;
+  };
+  const cellAt = (w, onTick) => w.cells.find((c) => c.onTick === onTick);
+  const durOf = (w, c) => {                                          // the onset's current length in beats
+    const s = w.cells.slice().sort((a, b) => a.qbeat - b.qbeat), i = s.indexOf(c);
+    const gap = (i + 1 < s.length ? s[i + 1].qbeat : w.bpb) - c.qbeat;
+    return c.fill ? gap : Math.min(c.maxDur, gap);
+  };
+  const newCell = (w, onTick, inherit) => {
+    const qbeat = onTick / w.tpb, c = { ev: null, qbeat, onTick, notes: [], fill: inherit ? inherit.fill : true, maxDur: inherit ? inherit.maxDur : Infinity, dirty: true };
+    w.cells.push(c); return c;
+  };
+  const clampTick = (w, t) => Math.max(0, Math.min(_edBarTicks(w.sig) - 1, Math.round(t)));
+  const fitString = (n, midi) => {
+    if (n.string == null) return;
+    const f = midi - (tuning[n.string] == null ? NaN : tuning[n.string]);
+    if (Number.isInteger(f) && f >= 0 && f <= _edMaxFret) n.fret = f;
+    else { delete n.string; delete n.fret; delete n.tech; delete n.bend; }
+  };
+  const freeString = (c, keep, s) => { for (const o of c.notes) if (o !== keep && o.string === s) { delete o.string; delete o.fret; delete o.tech; delete o.bend; } };
+  let applied = 0, skipped = 0;
+  ops.forEach((op, oi) => {
+    let ok = false;
+    try {
+      switch (op && op.t) {
+        case "note.add": {
+          const bi = byNumber.get(op.bar), midi = Math.round(op.midi);
+          const id = op.id || `+${oi}`;
+          if (bi == null || !Number.isFinite(midi) || idIndex.has(id)) break;
+          const w = cellsOf(bi), t = clampTick(w, op.onsetTicks || 0);
+          const c = cellAt(w, t) || newCell(w, t, op.durTicks > 0 ? { fill: false, maxDur: op.durTicks / w.tpb } : null);
+          if (op.durTicks > 0 && c.ev) { c.fill = false; c.maxDur = op.durTicks / w.tpb; }
+          const n = { id, midi };
+          if (op.string != null && tuning[op.string] != null) { n.string = +op.string; n.fret = op.fret != null ? op.fret : midi - tuning[op.string]; fitString(n, midi); if (n.string != null) freeString(c, n, n.string); }
+          if (n.string != null && Array.isArray(op.tech) && op.tech.length) n.tech = op.tech.filter((x) => TECHNIQUES.includes(x));
+          if (n.string != null && op.bend > 0) n.bend = op.bend;
+          c.notes.push(n); c.notes.sort((a, b) => a.midi - b.midi); c.dirty = true; w.touched = true; idIndex.set(id, bi);
+          ok = true; break;
+        }
+        case "note.remove": {
+          const f = find(op.id); if (!f) break;
+          f.c.notes.splice(f.k, 1); f.c.dirty = true; f.w.touched = true; idIndex.delete(op.id);
+          ok = true; break;
+        }
+        case "note.move": {
+          const f = find(op.id); if (!f) break;
+          const n = f.n;
+          const midi = op.midi != null ? Math.round(op.midi) : n.midi;
+          const tbi = op.bar != null ? byNumber.get(op.bar) : f.w.bi;
+          if (tbi == null || !Number.isFinite(midi)) break;
+          if (midi !== n.midi) { n.midi = midi; fitString(n, midi); }
+          const tw = cellsOf(tbi), t = op.onsetTicks != null ? clampTick(tw, op.onsetTicks) : f.c.onTick;
+          if (tw !== f.w || t !== f.c.onTick) {
+            const inherit = { fill: f.c.fill, maxDur: f.c.fill ? Infinity : durOf(f.w, f.c) };
+            f.c.notes.splice(f.k, 1); f.c.dirty = true; f.w.touched = true;
+            const dst = cellAt(tw, t) || newCell(tw, t, inherit);
+            if (n.string != null) freeString(dst, n, n.string);
+            dst.notes.push(n); dst.notes.sort((a, b) => a.midi - b.midi); dst.dirty = true; tw.touched = true; idIndex.set(n.id, tbi);
+          } else { f.c.notes.sort((a, b) => a.midi - b.midi); f.c.dirty = true; f.w.touched = true; }
+          ok = true; break;
+        }
+        case "note.dur": {
+          const f = find(op.id); if (!f || !(op.durTicks > 0)) break;
+          f.c.fill = false; f.c.maxDur = op.durTicks / f.w.tpb; f.c.dirty = true; f.w.touched = true;
+          ok = true; break;
+        }
+        case "note.string": {
+          const f = find(op.id); const s = op.engIdx;
+          if (!f || s == null || tuning[s] == null || !Number.isInteger(op.fret) || op.fret < 0 || op.fret > _edMaxFret) break;
+          freeString(f.c, f.n, s);
+          f.n.string = +s; f.n.fret = op.fret; f.n.midi = tuning[s] + op.fret;
+          f.c.notes.sort((a, b) => a.midi - b.midi); f.c.dirty = true; f.w.touched = true;
+          ok = true; break;
+        }
+        case "note.tech": {
+          const f = find(op.id); if (!f || f.n.string == null) break;
+          const tags = Array.isArray(op.tech) ? [...new Set(op.tech.filter((x) => TECHNIQUES.includes(x)))] : [];
+          if (tags.length) f.n.tech = tags; else delete f.n.tech;
+          if (tags.includes("bend")) f.n.bend = op.bend > 0 ? op.bend : f.n.bend || 4; else delete f.n.bend;
+          f.c.dirty = true; f.w.touched = true;
+          ok = true; break;
+        }
+        case "chord.refinger": {
+          const bi = byNumber.get(op.bar); if (bi == null) break;
+          const w = cellsOf(bi), c = cellAt(w, Math.round(op.onsetTicks || 0)); if (!c) break;
+          for (const n of c.notes) { delete n.string; delete n.fret; delete n.tech; delete n.bend; }
+          c.dirty = true; c.refinger = true; w.touched = true;
+          ok = true; break;
+        }
+        case "symbol.lock": {
+          const bi = byNumber.get(op.bar); if (bi == null) break;
+          const w = cellsOf(bi), c = cellAt(w, Math.round(op.onsetTicks || 0)); if (!c) break;
+          c.lock = op.symbol ? String(op.symbol) : undefined; c.dirty = true; w.touched = true;
+          ok = true; break;
+        }
+        default: break;
+      }
+    } catch (_) { ok = false; }
+    if (ok) applied++; else skipped++;
+  });
+  let changed = false;
+  const bars = score.bars.map((bar, bi) => {
+    const w = work.get(bi);
+    if (!w || !w.touched) return bar;
+    changed = true;
+    return { ...bar, events: _edRebuildBar(w, useSharp), edited: true };
+  });
+  if (!changed) return skipped ? { ...score, editReport: { applied, skipped } } : score;
+  return { ...score, bars, edited: true, editReport: { applied, skipped } };
+}
+/* One dirty bar back to score events: re-time (gap-filling unless an explicit length),
+ * project notes → midis/frets/tech/bends, re-recognise changed onsets, re-derive the
+ * integer chart grid exactly as the parsers do. Untouched onsets keep every field. */
+function _edRebuildBar(w, useSharp) {
+  const { bpb } = w;
+  const cells = w.cells.filter((c) => c.notes.length || (c.ev && !c.dirty && !(c.ev.midis || []).length)).sort((a, b) => a.qbeat - b.qbeat);
+  const events = cells.map((c, i) => {
+    const gap = (i + 1 < cells.length ? cells[i + 1].qbeat : bpb) - c.qbeat;
+    const qdur = Math.max(1e-4, c.fill ? gap : Math.min(c.maxDur, gap));
+    if (!c.dirty) return { ...c.ev, qdur };
+    // strip the layer's own flags first so a re-application writes them in the same order
+    const { notes: _old, fingered: _f, uncertain: _u, edited: _e, locked: _l, ...base } = c.ev || {};
+    const wasReviewed = !!base.reviewed && !_l;
+    delete base.reviewed;
+    const notes = c.notes.map((n) => { const o = { id: n.id, midi: n.midi }; if (n.string != null) { o.string = n.string; o.fret = n.fret; if (n.tech && n.tech.length) o.tech = n.tech.slice(); if (n.bend) o.bend = n.bend; } return o; });
+    const midis = notes.map((n) => n.midi).sort((a, b) => a - b);
+    const frets = {}, tech = {}, bends = {};
+    for (const n of notes) if (n.string != null) { frets[n.string] = n.fret; if (n.tech) tech[n.string] = n.tech.slice(); if (n.bend) bends[n.string] = n.bend; }
+    const ev = { ...base, midis, qbeat: c.qbeat, qdur, notes, edited: true };
+    if (Object.keys(frets).length) ev.frets = frets; else delete ev.frets;
+    if (Object.keys(tech).length) ev.tech = tech; else delete ev.tech;
+    if (Object.keys(bends).length) ev.bends = bends; else delete ev.bends;
+    if (c.lock) { ev.symbol = c.lock; ev.locked = true; ev.reviewed = true; }
+    else { ev.symbol = midis.length ? symbolForMidis(midis, useSharp) : "—"; if (wasReviewed) ev.reviewed = true; }
+    if (!ev.tuplet) ev.tuplet = 0;
+    return ev;
+  });
+  events.forEach((e) => { e.beat = Math.max(0, Math.min(bpb - 1, Math.round(e.qbeat))); });
+  for (let i = 1; i < events.length; i++) if (events[i].beat <= events[i - 1].beat) events[i].beat = Math.min(bpb - 1, events[i - 1].beat + 1);
+  events.forEach((e, i) => { e.durBeats = (i + 1 < events.length ? events[i + 1].beat : bpb) - e.beat; });
+  return events;
+}
+
+/** Editor ticks ↔ seconds on the RECORDING's clock (bar 1 = score.audioOffset; a tempo map is
+ *  followed bar by bar, exactly as scoreEventTimes plays it). → { tickToSec, secToTick, duration }. */
+function scoreTimeMap(score, bpm) {
+  const bars = (score && score.bars) || [], off = score && isFinite(score.audioOffset) ? score.audioOffset : 0;
+  const tempo = bpm > 0 ? bpm : (score && score.tempo) || 100, bt = scoreBarTempos(score, tempo);
+  const starts = [], secs = [], spt = [];
+  let tick = 0, sec = off;
+  bars.forEach((bar, i) => {
+    const sig = _edSig(score, bar), len = _edBarTicks(sig), q = 60 / (bt ? bt[i] : tempo) / EDIT_PPQ;
+    starts.push(tick); secs.push(sec); spt.push(q); tick += len; sec += len * q;
+  });
+  const lastQ = spt.length ? spt[spt.length - 1] : 60 / tempo / EDIT_PPQ;
+  const idxOf = (arr, v) => { let lo = 0, hi = arr.length - 1; while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (arr[mid] <= v) lo = mid; else hi = mid - 1; } return lo; };
+  return {
+    duration: sec, totalTicks: tick,
+    tickToSec: (t) => { if (!starts.length) return off + t * lastQ; const i = idxOf(starts, Math.max(0, t)); return secs[i] + (t - starts[i]) * spt[i]; },
+    secToTick: (s) => { if (!secs.length) return (s - off) / lastQ; const i = idxOf(secs, s); return starts[i] + (s - secs[i]) / spt[i]; },
+  };
+}
+/** The recording's spectrogram resampled onto the note editor's grid: one column per `colTicks`
+ *  score ticks (on the recording's clock via scoreTimeMap), one row per semitone, log-compressed
+ *  and normalised to 0..1 — the AnthemScore-style evidence drawn under the piano roll. Pure;
+ *  the UI runs it off-thread. → { cols, rows, minMidi, maxMidi, colTicks, data: Float32Array } */
+function noteRollSpectrogram(samples, sampleRate, score, opts = {}) {
+  const minMidi = opts.minMidi != null ? opts.minMidi : 36, maxMidi = opts.maxMidi != null ? opts.maxMidi : 96;
+  const colTicks = opts.colTicks || 60, rows = maxMidi - minMidi + 1;
+  const lf = logFreqSpectrogram(samples, sampleRate, { minMidi: minMidi - 1, maxMidi: maxMidi + 1, winSec: opts.winSec || 0.128, hopSec: opts.hopSec || 0.025 });
+  const tm = scoreTimeMap(score, opts.bpm);
+  const cols = Math.max(1, Math.ceil(tm.totalTicks / colTicks));
+  const data = new Float32Array(cols * rows);
+  if (!lf.spec.length) return { cols, rows, minMidi, maxMidi, colTicks, data };
+  const hopSec = lf.hop / lf.sampleRate, t0 = lf.times[0];
+  for (let c = 0; c < cols; c++) {
+    const sa = tm.tickToSec(c * colTicks), sb = tm.tickToSec((c + 1) * colTicks);
+    let fa = Math.max(0, Math.floor((sa - t0) / hopSec)), fb = Math.min(lf.spec.length - 1, Math.ceil((sb - t0) / hopSec));
+    if (fb < fa) { if (fa >= lf.spec.length) continue; fb = fa; }
+    for (let r = 0; r < rows; r++) {
+      const jc = (r + 1) * lf.bps;                                      // bin centre of semitone minMidi + r
+      let v = 0;
+      for (let f = fa; f <= fb; f++) { const row = lf.spec[f]; for (let d = -1; d <= 1; d++) { const x = row[jc + d]; if (x > v) v = x; } }
+      data[c * rows + r] = v;
+    }
+  }
+  // log compression, normalised to the 99th percentile so one loud hit can't wash the rest out
+  for (let i = 0; i < data.length; i++) data[i] = Math.log1p(100 * data[i]);
+  const sorted = Array.from(data).filter((x) => x > 0).sort((a, b) => a - b);
+  const top = sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.99))] : 1;
+  for (let i = 0; i < data.length; i++) data[i] = Math.min(1, data[i] / (top || 1));
+  return { cols, rows, minMidi, maxMidi, colTicks, data };
+}
+
+/** Transpose a chord symbol's TEXT (root + slash bass) by n semitones — for a symbol the
+ *  user locked, which must move with the music instead of being re-named from the notes. */
+function transposeSymbol(symbol, n, useSharp = true) {
+  if (!symbol || typeof symbol !== "string" || !n) return symbol;
+  const names = useSharp ? NOTE_SHARP : NOTE_FLAT, up = (pc) => names[(((pc + n) % 12) + 12) % 12];
+  const m = symbol.match(/^([A-G][#b♯♭]?)(.*)$/); if (!m) return symbol;
+  const pc = _PC_ANY[m[1].replace("♯", "#").replace("♭", "b")]; if (pc === undefined) return symbol;
+  let rest = m[2];
+  const bm = rest.match(/^(.*)\/([A-G][#b♯♭]?)$/);
+  if (bm) { const b = _PC_ANY[bm[2].replace("♯", "#").replace("♭", "b")]; if (b !== undefined) rest = `${bm[1]}/${up(b)}`; }
+  return up(pc) + rest;
+}
+
+/** The edit as a short human summary ("3 notes moved · 1 added"), for the editor header. */
+function describeScoreEdit(edit) {
+  const ops = edit && Array.isArray(edit.ops) ? edit.ops : [];
+  const c = {}; for (const o of ops) c[o.t] = (c[o.t] || 0) + 1;
+  const parts = [];
+  const say = (k, one, many) => { if (c[k]) parts.push(`${c[k]} ${c[k] === 1 ? one : many}`); };
+  say("note.add", "note added", "notes added"); say("note.remove", "note removed", "notes removed");
+  say("note.move", "note moved", "notes moved"); say("note.dur", "length changed", "lengths changed");
+  say("note.string", "string changed", "strings changed"); say("note.tech", "technique set", "techniques set");
+  say("chord.refinger", "chord re-fingered", "chords re-fingered"); say("symbol.lock", "chord locked", "chord locks");
+  return parts.join(" · ");
+}
+
 export {
   makeMask,
   popcount,
@@ -9346,4 +9750,22 @@ export {
   capoTuning,
   rankGuitarTunings,
   suggestGuitarTuning,
+  EDIT_PPQ,
+  EDIT_OPS,
+  EDIT_SNAPS,
+  eventNotes,
+  scoreNoteList,
+  snapTicks,
+  emptyScoreEdit,
+  isScoreEdit,
+  editPush,
+  editUndo,
+  editRedo,
+  editCanUndo,
+  editCanRedo,
+  applyScoreEdits,
+  transposeSymbol,
+  describeScoreEdit,
+  scoreTimeMap,
+  noteRollSpectrogram,
 };

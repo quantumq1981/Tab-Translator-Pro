@@ -3263,7 +3263,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   // the tab chart must not auto-Simplify (a guitar line is "melodic" → one chord per bar → notes lost
   // from the AlphaTex export: the real-app run exported 87 of 117 notes before this) nor share the
   // chord chart's edits
-  expect(/autoSimplify && \(isMelodicScore\(score\) \|\| !!score\.merged\)/.test(ui) && /score=\{gtrScore\}[\s\S]{0,400}overrides=\{gtrOvr\}[\s\S]{0,120}autoSimplify=\{false\}/.test(ui), "the guitar tab chart keeps every note (no auto-Simplify) and has its own overrides");
+  expect(/autoSimplify && \(isMelodicScore\(rawScore\) \|\| !!rawScore\.merged\)/.test(ui) && /score=\{gtrScore\}[\s\S]{0,400}overrides=\{gtrOvr\}[\s\S]{0,120}autoSimplify=\{false\}/.test(ui), "the guitar tab chart keeps every note (no auto-Simplify) and has its own overrides");
   // the core, driven with a fake ORT at the import seam: one session, heads mapped, released once
   const gcore = await import(path.join(repo, "guitar-model-core.js") + "?t=" + Date.now());
   let created = 0, released = 0, seen = null;
@@ -3318,7 +3318,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   expect(/window\.TTP_TAB_VIEW = \{ mount/.test(tv) && /new URL\("\.\/vendor\/alphatab-1\.8\.4\/", import\.meta\.url\)/.test(tv) && !/^import /m.test(tv) && /import\(\/\* @vite-ignore \*\/ BASE \+ "alphaTab\.mjs"\)/.test(tv) && /_lib = null; throw e/.test(tv), "tab-view.js: same-origin vendor path, lazy import (nothing at boot), retry after a failed load");
   expect(/PlayerMode\.EnabledSynthesizer/.test(tv) && /sonivox\.sf3/.test(tv) && /Bravura\.woff2/.test(tv) && /StaveProfile\.Tab/.test(tv) && /api\.destroy\(\)/.test(tv), "tab-view.js: synth player with the vendored sound font, the vendored font, tab-only profile, destroy");
   expect(/<script type="module" src="\.\/tab-view\.js"><\/script>/.test(html) && /cp tab-view\.js _site\//.test(pages) && /cp -r vendor\/alphatab-1\.8\.4\/\. _site\/vendor\/alphatab-1\.8\.4\//.test(pages) && /tab-view\.js\?v=\$\{BUILD\}/.test(pages), "index.html loads tab-view.js; pages.yml ships it + the vendored alphaTab and stamps it");
-  expect(/\["tab", "Tab"\]/.test(ui) && /view === "tab"/.test(ui) && /<TabView tex=\{tabTex\.text\}/.test(ui) && /fmt === "alphatex" \? \(tabTex\.error/.test(ui), "ChartPanel has a Tab view, drawn from the SAME AlphaTex the export writes");
+  expect(/\["tab", "Tab"\]/.test(ui) && /view === "tab"/.test(ui) && /<TabView tex=\{tabTex\.text\}/.test(ui) && /tabTex = useMemo\(\(\) => \(wantTex \? makeTex\(\)/.test(ui) && /fmt === "alphatex" \? \(\(t\) => [^\n]*\(view === "tab" \? tabTex : makeTex\(\)\)/.test(ui), "ChartPanel has a Tab view, drawn from the SAME AlphaTex the export writes");
   expect(/if \(!simplify\) return tscore;\s*const t = respellScore\(transposeScore\(arrange === "off" \? score : arrangeScore\(score, arrange\), semis, useSharp\), vocab/.test(ui), "the tab (view + AlphaTex export) skips Simplify — a tab shows the notes played, not one inferred chord per bar");
   expect(/defaultView="tab"/.test(ui) && /const tex = alphaTexFromBytes\(bytes\);\s*if \(tex != null\)/.test(ui) && /meta\.kind === "alphatex"/.test(ui) && /<TabView tex=\{texDoc\.text\}/.test(ui), "the guitar tab opens on the Tab view; a saved .alphatex upload (and its session restore) opens in the viewer");
 }
@@ -3501,7 +3501,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   expect(/selectPart\(HARMONY_PART\)/.test(ui) && /Harmony \(all pitched parts\)/.test(ui) && /prev\._midbuf\) next = parseMidiFile\(prev\._midbuf, sharp, idx\)/.test(ui) && /next\._midbuf = prev\._midbuf/.test(ui),
     "UI: Harmony chip in the part picker; MIDI re-parse keeps its bytes for ♯♭ / part switch");
   expect(/meta\.partIndex != null && meta\.partIndex !== sc\.partIndex/.test(ui), "restore re-applies a saved part only when it differs from where the file lands (a zip lands on Harmony)");
-  expect(/_usePref\(_SPELL_KEY, "key"/.test(ui) && /keySpelled \? spellScoreForKey\(nscore, key\) : nscore/.test(ui) && /spellKey: keySpelled/.test(ui) && /analyzeKeyCandidates\(nscore/.test(ui) && /isMelodicScore\(score\) \|\| !!score\.merged/.test(ui),
+  expect(/_usePref\(_SPELL_KEY, "key"/.test(ui) && /keySpelled \? spellScoreForKey\(nscore, key\) : nscore/.test(ui) && /spellKey: keySpelled/.test(ui) && /analyzeKeyCandidates\(nscore/.test(ui) && /isMelodicScore\(rawScore\) \|\| !!rawScore\.merged/.test(ui),
     "UI: spelling for the key by default (after naming, key read from the unspelled chart); a Harmony reading simplifies to one chord per bar");
 }
 
