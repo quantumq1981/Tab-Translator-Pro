@@ -208,6 +208,10 @@ import {
   freqToMidi,
   midiToFreq,
   midiToNoteName,
+  TUNER_PRESETS,
+  TUNER_DEFAULT,
+  tunerPreset,
+  tunerReading,
   midiToStaffPos,
   staffLayout,
   detectPitch,
@@ -3315,8 +3319,14 @@ function ExportPanel({ exp, setExp, C, bpm, semis, copy, download, copied, downl
  * note at a time) — the foundation Practice mode (#12) will build on. */
 function LiveTuner({ C, useSharp }) {
   const [listening, setListening] = useState(false);
-  const [pitch, setPitch] = useState(null);   // { note, freq, cents, clarity }
+  const [pitch, setPitch] = useState(null);   // { note, freq, cents, clarity, target, string }
   const [err, setErr] = useState("");
+  // Reference tuning (per device). Default = the stretch preset (engine TUNER_DEFAULT): each
+  // string's preset Hz reads 0¢. Read through a ref so the rAF loop sees a change at once.
+  const [presetId, setPresetId] = _usePref("ttp:tunerPreset", TUNER_DEFAULT, (x) => TUNER_PRESETS.some((p) => p.id === x));
+  const presetRef = useRef(presetId);
+  presetRef.current = presetId;
+  const preset = tunerPreset(presetId);
   const ref = useRef({});
 
   const stop = () => {
@@ -3353,10 +3363,8 @@ function LiveTuner({ C, useSharp }) {
         if (now - (s.last || 0) > 70) {                       // throttle UI updates
           s.last = now;
           const p = detectPitch(s.buf, s.ctx.sampleRate, { useSharp });
-          if (p && p.clarity > 0.7) {
-            const cents = Math.round((freqToMidi(p.freq) - p.midi) * 100);
-            setPitch({ note: p.note, freq: p.freq, cents, clarity: p.clarity });
-          }
+          const r = p && p.clarity > 0.7 ? tunerReading(p.freq, presetRef.current, useSharp) : null;
+          if (r) setPitch({ note: r.note, freq: p.freq, cents: Math.round(r.cents), clarity: p.clarity, target: r.target, string: r.string });
         }
         s.raf = requestAnimationFrame(tick);
       };
@@ -3377,6 +3385,7 @@ function LiveTuner({ C, useSharp }) {
           {pitch ? pitch.note : listening ? "…" : "—"}
         </div>
         {pitch && <div style={{ marginTop: 10, fontSize: 12, color: C.dim }}>{pitch.freq.toFixed(1)} Hz · {pitch.cents > 0 ? "+" : ""}{pitch.cents}¢ · clarity {Math.round(pitch.clarity * 100)}%</div>}
+        {pitch && <div style={{ marginTop: 4, fontSize: 11, color: C.dim }}>{pitch.string ? `String ${pitch.string} · ` : ""}target {pitch.target.toFixed(1)} Hz</div>}
         {!pitch && listening && <div style={{ marginTop: 10, fontSize: 12, color: C.dim }}>Listening… play a single note.</div>}
       </div>
 
@@ -3386,6 +3395,18 @@ function LiveTuner({ C, useSharp }) {
         {pitch && <div style={{ position: "absolute", top: 1, bottom: 1, width: 6, borderRadius: 3, background: centsColor, left: `calc(${50 + Math.max(-50, Math.min(50, pitch.cents))}% - 3px)`, transition: "left .08s linear, background .1s" }} />}
       </div>
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: C.dim, marginBottom: 18 }}><span>♭ −50¢</span><span style={{ color: inTune ? C.green : C.dim }}>{inTune ? "IN TUNE" : "0"}</span><span>+50¢ ♯</span></div>
+
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 6, fontSize: 12, color: C.dim }}>
+        <label htmlFor="ttp-tuner-preset">Tuning</label>
+        <select id="ttp-tuner-preset" value={presetId} onChange={(e) => setPresetId(e.target.value)} style={{ background: C.bg, color: C.text, border: `1px solid ${C.border}`, borderRadius: 6, padding: "4px 6px", fontSize: 12 }}>
+          {TUNER_PRESETS.map((p) => <option key={p.id} value={p.id}>{p.label}{p.id === TUNER_DEFAULT ? " — default" : ""}</option>)}
+        </select>
+      </div>
+      {preset.strings.length > 0 && (
+        <div style={{ textAlign: "center", fontSize: 10, color: C.dim, marginBottom: 14, fontFamily: "'Space Mono', monospace" }}>
+          {[...preset.strings].reverse().map((x) => `${midiToNoteName(x.midi, useSharp)} ${x.freq.toFixed(1)}`).join(" · ")} Hz
+        </div>
+      )}
 
       <div style={{ textAlign: "center" }}>
         <button onClick={listening ? stop : start} style={{ ...toggle(C), display: "inline-block", flex: "none", padding: "10px 26px", fontSize: 14, ...(listening ? activeToggle(C) : {}), borderColor: listening ? C.green : C.border, color: listening ? C.green : C.text }}>

@@ -4787,6 +4787,46 @@ function midiToNoteName(midi, useSharp = true) {
   return names[((m % 12) + 12) % 12] + (Math.floor(m / 12) - 1);
 }
 
+/* ---- Live tuner reference tunings (pure) -----------------------------------
+ * The tuner measures cents against a PER-STRING target, not only against the
+ * A440 equal-temperament grid. `TUNER_PRESETS` lists the targets; the DEFAULT
+ * (`TUNER_DEFAULT`) is the owner's STRETCH tuning, in Hz, low E → high e. Each
+ * string's target IS its 0¢ ("in tune"), exactly as if it were the
+ * equal-tempered pitch. Its offsets from A440 ET are tiny (E2 82.3 = −2.3¢,
+ * D3 146.8 = −0.4¢, B3 246.6 = −2.4¢, E4 329.2 = −2.3¢; G3/A2 exact), so the
+ * ET-rounded note still names the right string. A pitch that is not one of the
+ * preset's open strings is measured against ET (offset 0) — the stretch is
+ * defined only for the six strings. `equal` = plain A440 ET for those strings;
+ * `chromatic` (strings: []) = every note against ET, the original behaviour. */
+const TUNER_PRESETS = [
+  { id: "stretch", label: "Stretch (guitar)", strings: [
+    { string: 6, midi: 40, freq: 82.3 },   // E2 — low E
+    { string: 5, midi: 45, freq: 110.0 },  // A2
+    { string: 4, midi: 50, freq: 146.8 },  // D3
+    { string: 3, midi: 55, freq: 196.0 },  // G3
+    { string: 2, midi: 59, freq: 246.6 },  // B3
+    { string: 1, midi: 64, freq: 329.2 },  // E4 — high e
+  ] },
+  { id: "equal", label: "Equal temperament (A440)", strings: [40, 45, 50, 55, 59, 64].map((midi, i) => ({ string: 6 - i, midi, freq: midiToFreq(midi) })) },
+  { id: "chromatic", label: "Chromatic (A440, any note)", strings: [] },
+];
+const TUNER_DEFAULT = "stretch";
+function tunerPreset(id) {
+  return TUNER_PRESETS.find((p) => p.id === id) || TUNER_PRESETS.find((p) => p.id === TUNER_DEFAULT);
+}
+/* tunerReading — a detected frequency → { midi, note, target, cents, string }.
+ * `midi` is the nearest ET note; `target` the Hz that reads 0¢ for it under the
+ * preset (the string's preset frequency, else ET); `cents` = 1200·log2(freq/
+ * target), unrounded; `string` = 1..6 when the note is an open string of the
+ * preset, else null. null for a non-positive / non-finite frequency. */
+function tunerReading(freq, presetId = TUNER_DEFAULT, useSharp = true) {
+  if (!(freq > 0) || !Number.isFinite(freq)) return null;
+  const midi = Math.round(freqToMidi(freq));
+  const s = tunerPreset(presetId).strings.find((x) => x.midi === midi) || null;
+  const target = s ? s.freq : midiToFreq(midi);
+  return { midi, note: midiToNoteName(midi, useSharp), target, cents: 1200 * Math.log2(freq / target), string: s ? s.string : null };
+}
+
 /* ---- staff layout (digital staff view) -------------------------------------
  * Pure pitch→staff-position math for the UI's SVG staff renderer (the musician-
  * friendly display of an extracted note line). The spelling tables already
@@ -11097,6 +11137,10 @@ export {
   freqToMidi,
   midiToFreq,
   midiToNoteName,
+  TUNER_PRESETS,
+  TUNER_DEFAULT,
+  tunerPreset,
+  tunerReading,
   midiToStaffPos,
   staffLayout,
   detectPitch,
