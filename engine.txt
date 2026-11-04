@@ -4807,6 +4807,17 @@ const TUNER_PRESETS = [
     { string: 2, midi: 59, freq: 246.6 },  // B3
     { string: 1, midi: 64, freq: 329.2 },  // E4 — high e
   ] },
+  // Z Temperament (owner's second set, 2026-11-04): every string flat of A440 ET, more toward the
+  // bass — E4 −3.0¢ · B3 −6.0 · G3 −4.0 · D3 −7.9 · A2 −9.9 · E2 −12.0¢. Still well inside ±50¢,
+  // so the nearest ET note names the right string.
+  { id: "z", label: "Z Temperament", strings: [
+    { string: 6, midi: 40, freq: 81.84 },  // E2 — low E
+    { string: 5, midi: 45, freq: 109.37 }, // A2
+    { string: 4, midi: 50, freq: 146.16 }, // D3
+    { string: 3, midi: 55, freq: 195.55 }, // G3
+    { string: 2, midi: 59, freq: 246.09 }, // B3
+    { string: 1, midi: 64, freq: 329.06 }, // E4 — high e
+  ] },
   { id: "equal", label: "Equal temperament (A440)", strings: [40, 45, 50, 55, 59, 64].map((midi, i) => ({ string: 6 - i, midi, freq: midiToFreq(midi) })) },
   { id: "chromatic", label: "Chromatic (A440, any note)", strings: [] },
 ];

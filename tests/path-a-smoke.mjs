@@ -768,6 +768,16 @@ expect(eng.detectPitch(new Float32Array(2048), SR) === null, "silence → no pit
   expect(c4.note === "C4" && c4.string === null && Math.abs(c4.cents) < 0.1, "stretch: C4 (not a string) measured against ET");
   expect(eng.tunerReading(82.3, "chromatic").string === null, "chromatic: no string targets");
   expect(eng.tunerPreset("nope").id === "stretch", "unknown preset → default");
+  // Z Temperament: a second per-string set, selectable, not the default
+  const zWant = [[40, 81.84, 6], [45, 109.37, 5], [50, 146.16, 4], [55, 195.55, 3], [59, 246.09, 2], [64, 329.06, 1]];
+  const z = eng.tunerPreset("z");
+  expect(z.id === "z" && z.label === "Z Temperament", "Z Temperament preset exists with its label");
+  expect(JSON.stringify(z.strings.map((x) => [x.midi, x.freq, x.string])) === JSON.stringify(zWant), `Z Temperament strings = ${JSON.stringify(zWant)}`);
+  for (const [midi, f, string] of zWant) {
+    const r = eng.tunerReading(f, "z");
+    expect(r && r.midi === midi && r.string === string && Math.abs(r.cents) < 1e-9, `Z: ${f} Hz → string ${string}, 0¢ (got ${JSON.stringify(r)})`);
+  }
+  expect(Math.abs(eng.tunerReading(82.3, "z").cents - 9.7) < 0.2, "Z: the stretch low E (82.3 Hz) reads ≈ +9.7¢");
   expect(eng.tunerReading(0) === null && eng.tunerReading(NaN) === null, "tunerReading: bad frequency → null");
   // end to end: a 146.8 Hz tone (stretched D3) through YIN reads within 3¢ of string 4's target
   const d3 = eng.detectPitch(tone(146.8, 0.05), SR);

@@ -1130,6 +1130,12 @@ ET. UI: a "Tuning" select in `LiveTuner` (per device, `localStorage["ttp:tunerPr
 the six targets, 0¢ at each, the ET↔stretch offsets, the fallbacks, a YIN tone end to end, and the
 UI wiring (mutation-tested: default → `equal` fails 8 checks). Mic glue stays device-only.
 
+**Z Temperament** (`id: "z"`, added 2026-11-04, selectable, not the default): E2 **81.84** · A2
+**109.37** · D3 **146.16** · G3 **195.55** · B3 **246.09** · E4 **329.06** Hz — every string flat of ET,
+more toward the bass (−12.0 / −9.9 / −7.9 / −4.0 / −6.0 / −3.0¢), all well inside ±50¢, so string
+identification is still unambiguous. Appears in the Tuning select automatically (it lists
+`TUNER_PRESETS`); `npm test` pins its six targets at 0¢.
+
 ### StaffView — extracted note lines on a real staff (2026-07-15)
 
 The Notes (bass/lead/vocal) results were a flat card list — musically illegible for
