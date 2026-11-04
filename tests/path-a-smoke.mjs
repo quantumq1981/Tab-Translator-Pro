@@ -746,6 +746,38 @@ for (const [f, m] of [[110, 45], [261.63, 60], [329.63, 64], [493.88, 71]]) {
 }
 // silence → no confident pitch
 expect(eng.detectPitch(new Float32Array(2048), SR) === null, "silence → no pitch");
+// Live tuner reference tunings: the STRETCH preset is the default, and each of its
+// string targets reads 0¢ (as if it were the equal-tempered pitch).
+{
+  expect(eng.TUNER_DEFAULT === "stretch", "tuner default preset = stretch");
+  const want = [[40, 82.3, 6], [45, 110.0, 5], [50, 146.8, 4], [55, 196.0, 3], [59, 246.6, 2], [64, 329.2, 1]];
+  const st = eng.tunerPreset(eng.TUNER_DEFAULT).strings;
+  expect(JSON.stringify(st.map((x) => [x.midi, x.freq, x.string])) === JSON.stringify(want), `stretch preset strings = ${JSON.stringify(want)}`);
+  for (const [midi, f, string] of want) {
+    const r = eng.tunerReading(f);                                   // default preset
+    expect(r && r.midi === midi && r.string === string && Math.abs(r.cents) < 1e-9 && r.target === f, `stretch: ${f} Hz → string ${string}, 0¢ (got ${JSON.stringify(r)})`);
+  }
+  // ET pitches of the stretched strings read off by the stretch offset (≈ +2.3¢ on E4)…
+  const e4 = eng.tunerReading(329.63);
+  expect(e4.string === 1 && e4.cents > 2 && e4.cents < 2.6, `stretch: ET E4 329.63 Hz reads ≈ +2.3¢, got ${e4.cents}`);
+  // …while the equal preset reads them 0¢ and the stretch target ≈ −2.3¢.
+  expect(Math.abs(eng.tunerReading(329.63, "equal").cents) < 0.1, "equal: 329.63 Hz reads 0¢");
+  expect(Math.abs(eng.tunerReading(329.2, "equal").cents + 2.26) < 0.05, "equal: 329.2 Hz reads ≈ −2.3¢");
+  // a non-string note is measured against ET; chromatic has no strings; bad input → null
+  const c4 = eng.tunerReading(261.63);
+  expect(c4.note === "C4" && c4.string === null && Math.abs(c4.cents) < 0.1, "stretch: C4 (not a string) measured against ET");
+  expect(eng.tunerReading(82.3, "chromatic").string === null, "chromatic: no string targets");
+  expect(eng.tunerPreset("nope").id === "stretch", "unknown preset → default");
+  expect(eng.tunerReading(0) === null && eng.tunerReading(NaN) === null, "tunerReading: bad frequency → null");
+  // end to end: a 146.8 Hz tone (stretched D3) through YIN reads within 3¢ of string 4's target
+  const d3 = eng.detectPitch(tone(146.8, 0.05), SR);
+  const rd = d3 && eng.tunerReading(d3.freq);
+  expect(rd && rd.string === 4 && Math.abs(rd.cents) < 3, `YIN 146.8 Hz → string 4, |cents| < 3 (got ${rd && rd.cents})`);
+  // UI: the tuner reads its targets from the engine preset, stretch by default, persisted per device
+  const ui = fs.readFileSync(UI, "utf8");
+  expect(/function LiveTuner[\s\S]*?_usePref\("ttp:tunerPreset", TUNER_DEFAULT/.test(ui), "LiveTuner defaults to TUNER_DEFAULT and persists the preset");
+  expect(/function LiveTuner[\s\S]*?tunerReading\(p\.freq, presetRef\.current/.test(ui), "LiveTuner measures cents with tunerReading against the chosen preset");
+}
 // monophonic transcription: A4 (0.3s) then C5 (0.3s) → two note events 69, 72
 const buf = new Float32Array(Math.floor(0.6 * SR));
 buf.set(tone(440, 0.3), 0); buf.set(tone(523.25, 0.3), Math.floor(0.3 * SR));

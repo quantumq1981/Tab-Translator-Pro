@@ -1115,6 +1115,21 @@ MIDI, silence → `null`, an A4→C5 buffer transcribes to two notes 69 & 72). T
 shared substrate for **#12 Practice mode** (compare `detectPitch` output against the
 chart's expected chord tones).
 
+### Tuner reference tunings — stretch tuning is the default (2026-11-04)
+
+The Live Tuner measures cents against a **per-string target**, not only the A440 ET grid.
+`TUNER_PRESETS` (engine, pure) — **`stretch` = `TUNER_DEFAULT`** (owner's values, low → high:
+E2 **82.3** · A2 **110.0** · D3 **146.8** · G3 **196.0** · B3 **246.6** · E4 **329.2** Hz), `equal`
+(the same six strings at A440 ET) and `chromatic` (no string targets = the old behaviour).
+`tunerReading(freq, presetId, useSharp)` → `{ midi, note, target, cents, string }`: the nearest ET
+note names the string; cents = `1200·log2(freq/target)`, so each preset frequency reads **0¢**, as if
+it were the equal-tempered pitch. Offsets from ET are tiny (E2/E4/B3 ≈ −2.3¢, D3 −0.4¢), so string
+identification is unambiguous; a note that isn't an open string of the preset is measured against
+ET. UI: a "Tuning" select in `LiveTuner` (per device, `localStorage["ttp:tunerPreset"]` via
+`_usePref`), the preset's Hz list, and "String n · target … Hz" under the reading. `npm test` pins
+the six targets, 0¢ at each, the ET↔stretch offsets, the fallbacks, a YIN tone end to end, and the
+UI wiring (mutation-tested: default → `equal` fails 8 checks). Mic glue stays device-only.
+
 ### StaffView — extracted note lines on a real staff (2026-07-15)
 
 The Notes (bass/lead/vocal) results were a flat card list — musically illegible for
