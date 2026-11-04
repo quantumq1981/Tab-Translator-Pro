@@ -10848,6 +10848,47 @@ function detectTuningAndCapo(score, opts = {}) {
   return { ranked, tuning: tun ? { ...tun, confidence: tconf } : null, capo, best: ranked[0] };
 }
 
+
+/* ============================================================================
+ *  WORKBENCH · quick wins — Nashville numbers, the chart as an image
+ * ========================================================================== */
+const _NNS_DEG = { 0: "1", 1: "b2", 2: "2", 3: "b3", 4: "3", 5: "4", 6: "#4", 7: "5", 8: "b6", 9: "6", 10: "b7", 11: "7" };
+const _NNS_DEG_MIN = { 0: "1", 1: "b2", 2: "2", 3: "3", 4: "#3", 5: "4", 6: "b5", 7: "5", 8: "6", 9: "#6", 10: "7", 11: "#7" };
+/** A chord symbol as a Nashville number in a key: C → 1, Dm7 → 2m7, G7 → 57, F/A → 4/6, Bb → b7 in C;
+ *  a minor key counts from its own tonic (Am → 1m, C → 3, G → 7). Unparseable → the symbol itself. */
+function nashvilleFor(symbol, key) {
+  const p = _parseSym(symbol);
+  if (p.pc == null || !key || typeof key.tonic !== "number") return symbol;
+  const T = key.mode === "minor" ? _NNS_DEG_MIN : _NNS_DEG;
+  const deg = (pc) => T[(pc - key.tonic + 12) % 12];
+  // the suffix from the symbol itself (_parseSym splits on every "/", which would cut 6/9)
+  const mm = String(symbol).match(/^[A-G][#b♯♭]?(.*?)(?:\/[A-G][#b♯♭]?)?$/), suf = mm ? mm[1] : p.suffix;
+  const q = p.cls === "dim" ? (/m7♭5|m7b5/.test(suf) ? "ø" + "7" : suf === "dim7" ? "°7" : "°") : p.cls === "aug" ? "+" + suf.replace(/^aug/, "") : suf;
+  return deg(p.pc) + q + (p.bassPc != null ? "/" + deg(p.bassPc) : "");
+}
+/** The chart as a standalone SVG chord grid (title, key line, bars in rows of `barsPerRow`, every
+ *  chord of a bar, section labels) — the "copy as image" source. Light theme, no external fonts. */
+function scoreToGridSVG(score, opts = {}) {
+  const per = opts.barsPerRow || 4, W = opts.width || 880, ov = opts.overrides || {}, pad = 24, cell = (W - 2 * pad) / per, rowH = 58, head = opts.title ? 64 : 24;
+  const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const bars = (score && score.bars) || [], rows = Math.max(1, Math.ceil(bars.length / per)), H = head + rows * rowH + pad;
+  const L = [`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" font-family="Helvetica, Arial, sans-serif">`, `<rect width="100%" height="100%" fill="#ffffff"/>`];
+  if (opts.title) L.push(`<text x="${pad}" y="34" font-size="22" font-weight="700" fill="#111">${esc(opts.title)}</text>`);
+  if (opts.subtitle) L.push(`<text x="${pad}" y="54" font-size="12" fill="#555">${esc(opts.subtitle)}</text>`);
+  bars.forEach((b, i) => {
+    const r = Math.floor(i / per), c = i % per, x = pad + c * cell, y = head + r * rowH;
+    L.push(`<line x1="${x}" y1="${y + 8}" x2="${x}" y2="${y + rowH - 8}" stroke="#222" stroke-width="1.5"/>`);
+    if (c === per - 1 || i === bars.length - 1) L.push(`<line x1="${x + cell}" y1="${y + 8}" x2="${x + cell}" y2="${y + rowH - 8}" stroke="#222" stroke-width="${i === bars.length - 1 ? 3 : 1.5}"/>`);
+    if (b.section) L.push(`<text x="${x + 4}" y="${y + 6}" font-size="10" font-weight="700" fill="#a8401a">${esc(b.section)}</text>`);
+    L.push(`<text x="${x + 4}" y="${y + rowH - 10}" font-size="9" fill="#888">${b.number}</text>`);
+    const syms = []; for (const e of b.events || []) { const s = ov[`${b.number}.${e.beat}`] != null ? ov[`${b.number}.${e.beat}`] : e.symbol; if (s && (!syms.length || syms[syms.length - 1] !== s)) syms.push(s === "—" ? "N.C." : s); }
+    const fs = syms.length > 2 ? 14 : 20;
+    syms.forEach((s, k) => L.push(`<text x="${x + 10 + (k * (cell - 16)) / Math.max(1, syms.length)}" y="${y + rowH / 2 + 7}" font-size="${fs}" font-weight="700" fill="#111">${esc(s)}</text>`));
+  });
+  L.push("</svg>");
+  return L.join("\n");
+}
+
 export {
   makeMask,
   popcount,
@@ -11290,4 +11331,6 @@ export {
   pitchTrack,
   detectGuitarTechniques,
   detectTuningAndCapo,
+  nashvilleFor,
+  scoreToGridSVG,
 };

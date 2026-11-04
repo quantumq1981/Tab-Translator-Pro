@@ -319,6 +319,8 @@ import {
   importProjectBundle,
   detectGuitarTechniques,
   detectTuningAndCapo,
+  nashvilleFor,
+  scoreToGridSVG,
 } from "./engine.tsx";
 
 async function extractTokens(buf) {
@@ -1248,6 +1250,7 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
   const refAudio = useRef({});
 
   const [showRoman, setShowRoman] = useState(false);
+  const [nashville, setNashville] = useState(false);           // the numerals toggle's 2nd state: 1·5·6m
   const [practice, setPractice] = useState(false);                // WO-2 practice player open
   // WO-6: print / PDF (a light copy of the current view; window.print → iOS "Save as PDF")
   const [printing, setPrinting] = useState(false);
@@ -1326,11 +1329,19 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
   // summary (complexity + human tags) of whatever the chart currently is (post
   // simplify/arrange/transpose). Pure metadata; never touches recognition.
   const describe = useMemo(() => describeScore(tscore, { useSharp, title, key }), [tscore, useSharp, title, key]);
+  /* Chord edits (overrides) are stored in the UNTRANSPOSED key and shown / exported transposed — they
+   * used to stay in the original key when the chart was transposed (an "A7" edit read A7 at +2). */
+  const ovT = useMemo(() => (semis ? Object.fromEntries(Object.entries(overrides || {}).map(([k, v]) => [k, transposeSymbol(v, semis, useSharp)])) : overrides || {}), [overrides, semis, useSharp]);
+  const setOverridesT = (upd) => setOverrides((o) => {
+    const shown = semis ? Object.fromEntries(Object.entries(o || {}).map(([k, v]) => [k, transposeSymbol(v, semis, useSharp)])) : o || {};
+    const next = typeof upd === "function" ? upd(shown) : upd;
+    return semis ? Object.fromEntries(Object.entries(next || {}).map(([k, v]) => [k, transposeSymbol(v, -semis, useSharp)])) : next;
+  });
   // the chart's chords in order (repeats collapsed), for the voicing modal's ◀ / ▶
   const chordSeq = useMemo(() => {
     const out = []; for (const b of tscore.bars) for (const e of b.events) { const sym = symOfRaw(b, e); if (!sym || sym === "—" || (out.length && out[out.length - 1].symbol === sym)) continue; out.push({ symbol: sym, frets: e.frets }); }
     return out;
-  }, [tscore, overrides]); // eslint-disable-line
+  }, [tscore, ovT]); // eslint-disable-line
 
   useEffect(() => { setBpm(score.tempo || 100); }, [score.tempo]);
   // Re-apply the melodic auto-default whenever a new score loads (upload / part switch /
@@ -1410,8 +1421,8 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
     } catch (_) { setRefErr("Playback failed."); stopRef(); }
   };
   const bumpBpm = (d) => setBpm((b) => Math.max(40, Math.min(240, b + d)));
-  const symOf = (bar, e) => { const v = overrides[`${bar.number}.${e.beat}`]; return v != null ? v : e.symbol; };
-  function symOfRaw(bar, e) { const v = overrides[`${bar.number}.${e.beat}`]; return v != null ? v : e.symbol; }
+  const symOf = (bar, e) => { const v = ovT[`${bar.number}.${e.beat}`]; return v != null ? v : e.symbol; };
+  function symOfRaw(bar, e) { const v = ovT[`${bar.number}.${e.beat}`]; return v != null ? v : e.symbol; }
   // The tab as AlphaTex: what the Tab view draws AND what the AlphaTex export writes, so the two can
   // never disagree. Computed only while one of them is showing (it fingers every note).
   const wantTex = view === "tab" || (exp && exp.fmt === "alphatex");
@@ -1421,7 +1432,7 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
   };
   const tabTex = useMemo(() => (wantTex ? makeTex() : { text: "", error: "" }), [wantTex, tabScore, title, bpm, key]); // eslint-disable-line
   const doExport = (fmt) => {
-    const opts = { overrides, title, key, useSharp, tempo: bpm, spellKey: keySpelled };
+    const opts = { overrides: ovT, title, key, useSharp, tempo: bpm, spellKey: keySpelled };
     if (fmt === "midi") { setExp({ fmt, bytes: scoreToMidi(tscore, opts) }); setCopied(false); setDownloaded(false); return; } // binary
     const text = fmt === "abc" ? scoreToABC(tscore, opts)
       : fmt === "musicxml" ? scoreToMusicXML(tscore, opts)
@@ -1467,7 +1478,7 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
    * blocking. Wrapped in try/catch so a failure never wedges the UI. */
   const sendToPro = () => {
     try {
-      const opts = { overrides, title, key, useSharp, tempo: bpm, spellKey: keySpelled };
+      const opts = { overrides: ovT, title, key, useSharp, tempo: bpm, spellKey: keySpelled };
       const formats = { csmpn: scoreToCSMPN(tscore, opts), chordpro: scoreToChordPro(tscore, opts) };
       try { const xml = scoreToMusicXML(tscore, opts); if (xml && xml.length < 1500000) formats.musicxml = xml; } catch (_) {}
       const env = {
@@ -1503,6 +1514,20 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
       try { window.print(); } catch (_) { done(); }
     }, 450);
   };
+  const [imgDone, setImgDone] = useState(false);
+  const copyImage = async () => {
+    try {
+      const svg = scoreToGridSVG(tscore, { title: String(title || "Chart").replace(/\.[^.]+$/, ""), subtitle: [key ? `key ${kName(key)}` : "", `♩=${Math.round(bpm)}`, (tscore.timeSig || [4, 4]).join("/")].filter(Boolean).join(" · "), overrides: ovT });
+      const img = new Image(), url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
+      await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; });
+      const cv = document.createElement("canvas"); cv.width = img.width * 2; cv.height = img.height * 2;
+      const g = cv.getContext("2d"); g.scale(2, 2); g.drawImage(img, 0, 0); URL.revokeObjectURL(url);
+      const blob = await new Promise((res) => cv.toBlob(res, "image/png"));
+      const base = (title || "chart").replace(/\.[^.]+$/, "").replace(/[^\w.-]+/g, "_") || "chart";
+      if (navigator.clipboard && window.ClipboardItem && navigator.clipboard.write) { try { await navigator.clipboard.write([new window.ClipboardItem({ "image/png": blob })]); setImgDone(true); setTimeout(() => setImgDone(false), 1500); return; } catch (_) { /* fall through */ } }
+      await shareOrDownload(blob, `${base}.png`, "image/png"); setImgDone(true); setTimeout(() => setImgDone(false), 1500);
+    } catch (_) { setImgDone(false); }
+  };
   const share = async () => {
     if (!exp) return;
     const ext = exp.fmt === "abc" ? abcExt : (_EXPORT_EXT[exp.fmt] || "txt");
@@ -1534,8 +1559,8 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
         ))}
         <button onClick={() => { setEditMode((m) => !m); setEditKey(""); }} disabled={view !== "chart"}
           style={{ ...chip(C), padding: "3px 9px", opacity: view !== "chart" ? 0.4 : 1, borderColor: editMode ? C.green : C.border, color: editMode ? C.green : C.dim }}>{editMode ? "✓ Editing" : "✎ Edit"}</button>
-        <button onClick={() => setShowRoman((r) => !r)} title={key ? `key of ${kName(key)}` : "key analysis"}
-          style={{ ...chip(C), padding: "3px 9px", borderColor: showRoman ? C.cyan : C.border, color: showRoman ? C.cyan : C.dim }}>{showRoman ? "I·V·vi ✓" : "I·V·vi"}</button>
+        <button onClick={() => { if (!showRoman) { setShowRoman(true); setNashville(false); } else if (!nashville) setNashville(true); else { setShowRoman(false); setNashville(false); } }} title={key ? `key of ${kName(key)} · tap again for Nashville numbers` : "key analysis"}
+          style={{ ...chip(C), padding: "3px 9px", borderColor: showRoman ? C.cyan : C.border, color: showRoman ? C.cyan : C.dim }}>{showRoman ? (nashville ? "1·5·6m ✓" : "I·V·vi ✓") : "I·V·vi"}</button>
         <KeyPicker C={C} value={keyOv} onChange={setKeyOv} cands={keyCands} useSharp={useSharp} semis={semis} />
         <button onClick={() => setSimplify((s) => !s)} title="aggregate each bar's notes into one chord (for dense transcriptions)"
           style={{ ...chip(C), padding: "3px 9px", borderColor: simplify ? C.green : C.border, color: simplify ? C.green : C.dim }}>{simplify ? "1 chord/bar ✓" : "Simplify"}</button>
@@ -1589,6 +1614,7 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
       </div>
 
       <div className="no-print" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, marginBottom: 10, fontSize: 11, color: C.dim }}>
+        <button onClick={copyImage} title="the chord chart as a PNG — on the clipboard where the browser allows, else the share sheet / a download" style={{ ...chip(C), padding: "4px 10px", color: imgDone ? C.green : C.dim, borderColor: imgDone ? C.green : C.border }}>{imgDone ? "image ✓" : "⧉ Image"}</button>
         <button onClick={doPrint} title="print this view, or save it as a PDF (iOS: share sheet → Save as PDF): header, the chords used as diagrams, the chart / grid / lyrics / tab"
           style={{ ...chip(C), padding: "4px 10px", borderColor: printing ? C.green : C.border, color: printing ? C.green : C.dim }}>🖨 Print / PDF</button>
         <select value={paper} onChange={(e) => setPaper(e.target.value)} title="paper size" style={{ ...chip(C), padding: "3px 6px", background: C.raised, color: C.dim }}>
@@ -1615,9 +1641,9 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
 
       {autoSimplify && melodic && !simplify && <MelodicNudge C={C} onSimplify={() => setSimplify(true)} />}
 
-      {printing && <PrintSheet score={tscore} title={title} keyLabel={key ? kName(key) : ""} bpm={bpm} view={view === "edit" ? "chart" : view} overrides={overrides} musicKey={key} semis={semis} levelLabel={lvl ? `${level} level` : ""} capo={lvl ? lvl.capo : 0} lib={printLib} dict={printDict} />}
+      {printing && <PrintSheet score={tscore} title={title} keyLabel={key ? kName(key) : ""} bpm={bpm} view={view === "edit" ? "chart" : view} overrides={ovT} musicKey={key} semis={semis} levelLabel={lvl ? `${level} level` : ""} capo={lvl ? lvl.capo : 0} lib={printLib} dict={printDict} />}
       {view === "lyrics"
-        ? <LyricsSheetView C={C} score={tscore} title={title} overrides={overrides} playKey={playKey} getAudio={getAudio} getBuffer={getBuffer} bpm={bpm} exportKey={key} keySpelled={keySpelled} />
+        ? <LyricsSheetView C={C} score={tscore} title={title} overrides={ovT} playKey={playKey} getAudio={getAudio} getBuffer={getBuffer} bpm={bpm} exportKey={key} keySpelled={keySpelled} />
         : view === "edit"
         ? <NoteEditorView score={score} edit={scoreEdit} setEdit={setScoreEdit} C={C} useSharp={useSharp} playKey={playKey} getAudio={getAudio} bpm={bpm} semis={semis} />
         : view === "tab"
@@ -1628,9 +1654,9 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
                 <div className={printing ? "tdp-print-keep" : undefined}><TabView tex={tabTex.text} title={title} C={C} /></div>
               </>)
         : view === "chart"
-        ? <LeadSheetView score={tscore} C={C} overrides={overrides} setOverrides={setOverrides} editMode={editMode}
+        ? <LeadSheetView score={tscore} C={C} overrides={ovT} setOverrides={setOverridesT} editMode={editMode}
             editKey={editKey} setEditKey={setEditKey} draft={draft} setDraft={setDraft} selKey={selKey}
-            playKey={playKey} showRoman={showRoman} musicKey={key} onPick={onPick} symOf={symOf} onVoicings={setVoicingChoices} />
+            playKey={playKey} showRoman={showRoman} nashville={nashville} musicKey={key} onPick={onPick} symOf={symOf} onVoicings={setVoicingChoices} />
         : <GridView score={tscore} C={C} symOf={symOf} selKey={selKey} onPick={onPick} onVoicings={setVoicingChoices} />}
       {voicingChoices && <ChordVoicingModal key={voicingChoices.map((c) => c.symbol).join("|")} choices={voicingChoices} onClose={() => setVoicingChoices(null)} C={C} useSharp={useSharp} sequence={chordSeq} />}
 
@@ -2707,7 +2733,7 @@ function MelodicNudge({ C, onSimplify }) {
 }
 /* Lead-sheet view: chords on their beat, barlines, inline relabel in Edit mode.
  * `musicKey` is the detected key (named to avoid clashing with React list keys). */
-function LeadSheetView({ score, C, overrides, setOverrides, editMode, editKey, setEditKey, draft, setDraft, selKey, playKey, showRoman, musicKey, onPick, symOf, onVoicings }) {
+function LeadSheetView({ score, C, overrides, setOverrides, editMode, editKey, setEditKey, draft, setDraft, selKey, playKey, showRoman, nashville, musicKey, onPick, symOf, onVoicings }) {
   let prevSig = null;
   return (
     <>
@@ -2740,7 +2766,7 @@ function LeadSheetView({ score, C, overrides, setOverrides, editMode, editKey, s
                     <button key={i} onClick={() => (editMode ? (setEditKey(k), setDraft(cur)) : (onPick(k, e), onVoicings && onVoicings([{ symbol: cur, frets: e.frets }])))} title={editMode ? "click to re-label" : `beat ${e.beat + 1} · tap for guitar voicings`}
                       style={{ gridColumn: gridCol, justifySelf: "start", textAlign: "left", background: isPlaying ? `${C.green}22` : "transparent", borderRadius: 4, border: "none", borderBottom: isSel ? `2px solid ${C.amber}` : "2px solid transparent", padding: "0 2px", cursor: "pointer", color: isPlaying ? C.green : edited ? C.green : isSel ? C.amber : C.cyan, fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: cur.length > 4 ? 13 : 16, lineHeight: 1.2, transition: "background .1s, color .1s" }}>
                       <span style={{ display: "block", opacity: e.uncertain && !edited ? 0.55 : 1, borderBottom: e.uncertain && !edited ? `1px dashed ${C.amber}` : "none" }} title={e.uncertain && !edited ? "uncertain — see the review list" : undefined}>{cur}{edited ? "*" : ""}{e.uncertain && !edited ? <sup style={{ color: C.amber, fontSize: 9 }}>?</sup> : null}</span>
-                      {showRoman && musicKey && <span style={{ display: "block", fontSize: 9, fontWeight: 400, color: C.dim, marginTop: 1 }}>{romanFor(cur, musicKey)}</span>}
+                      {showRoman && musicKey && <span style={{ display: "block", fontSize: 9, fontWeight: 400, color: C.dim, marginTop: 1 }}>{nashville ? nashvilleFor(cur, musicKey) : romanFor(cur, musicKey)}</span>}
                     </button>
                   );
                 })}

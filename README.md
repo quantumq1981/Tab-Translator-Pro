@@ -6,8 +6,8 @@ Tab Decoder Pro is a lightweight, high-precision utility that translates raw gui
 
 Hosted on GitHub Pages: **https://quantumq1981.github.io/Tab-Translator-Pro/**
 
-It's a zero-build static page — `index.html` fetches the single-file React
-component (`TabDecoderPro.tsx`) and transpiles it in the browser, with
+It's a zero-build static page — `index.html` fetches the pure recognition engine
+(`engine.tsx`) and the React UI (`TabDecoderPro.tsx`) and transpiles both in the browser, with
 dependencies loaded from a CDN at runtime (the same pattern the PDF mode already
 uses for PDF.js). Pushes to `main` redeploy via `.github/workflows/pages.yml`.
 
@@ -15,6 +15,30 @@ The workflow enables Pages itself (`configure-pages` with `enablement: true`),
 so no manual Settings toggle is required. If your org/repo policy blocks that,
 set **Settings → Pages → Build and deployment → Source** to **GitHub Actions**
 once and re-run the workflow.
+
+## Fix it, practise it, perform it
+
+Every chart — from a PDF, Guitar Pro, MusicXML, MIDI, Power Tab or audio — gets the same tools:
+
+- **Notes** view — correct the transcription note by note: piano roll + tab grid (+ the
+  recording's spectrogram), drag pitch / time / length / string, techniques, undo/redo. Chord
+  names follow the notes unless you lock them; edits survive a reload.
+- **🎯 Practice** — loop bars A–B, slow down to 50 % (or speed up) without changing pitch,
+  transpose ±6, metronome + count-in, a click-track WAV, and *Wait for me* (the mic waits until
+  you play the next chord). **Live chords** mode names what you play into the mic.
+- **Lyrics** view — paste a lyric sheet, auto-align its lines to the recording, nudge any line,
+  export LRC / ChordPro / chords-over-lyrics, or send it timed to Chord Sheet Maker Pro.
+- **Voicings** for guitar, ukulele, baritone uke, mandolin, 4/5-string bass and piano (keyboard
+  diagrams), left-handed, with a capo, stepping through the chart with smooth voice leading.
+  **Level**: Beginner (open-chord key + capo hint, triads), Intermediate, Advanced.
+- **Drums + piano notation** from stems (full kit, drum tab), a piano grand staff, and an
+  **⬇ All parts (zip)** that includes them.
+- **Library** — every file you open is kept on the device; search, tags, setlists with per-song
+  transpose / capo and *Play set*, portable project bundles. **🖨 Print / PDF** (A4 / Letter),
+  **⧉ Image** (the chart as a PNG), share sheet.
+- Guitar → Tab marks **bends, slides, hammer-ons, vibrato, palm mutes and ghost notes**, and
+  suggests an alternate **tuning** when standard can't reach the notes. Roman numerals have a
+  **Nashville** (1·5·6m) setting; chord edits move with the transpose.
 
 ## Vocal harmony → rehearsal-ready vocal score
 
