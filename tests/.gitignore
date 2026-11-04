@@ -7,3 +7,4 @@ bench/.engine*.mjs
 bench/*.png
 bench/*.pdf
 bench/*.ttp.zip
+.engine.chordreading.mjs

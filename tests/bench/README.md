@@ -219,3 +219,21 @@ node bench/quickwins-e2e.mjs   --deps $D/out   # edits follow transpose, Nashvil
 
 `drums-e2e.mjs` and `techniques-e2e.mjs` take their rendered audio (`renderKit`, `renderLine`) and
 their F1 from `tests/workbench.mjs`, so the browser run and the headless test score the same signal.
+
+## Chord reading — full mixes, the song key, chord length (2026-11-04)
+
+```sh
+node bench/run.mjs --resample sinc --variants v2chart --gtvocab chart   # renders the 5 stem conditions (once)
+node bench/fullmix.mjs                                                  # adds fullmix + fullmixdet (once)
+node bench/rhythm-key.mjs --split test --conds clean,noise,room,detune,bleed,fullmix,fullmixdet --byCond 1
+node bench/reading-e2e.mjs --deps <dir>                                 # the real app on a G-major full mix
+```
+
+- `fullmix.mjs` — every pitched track of the Guitar Pro song (other guitars, keys, bass) + the tune voiced
+  as a vibrato lead on top + a drum kit, scored against the comp track's chords. `fullmixdet` = +45 ¢.
+- `rhythm-key.mjs` — scores against the vocabulary truth and adds chord changes per minute (vs the
+  truth's rate), the share of sub-beat chords, and the share of time outside the song's key. Groups:
+  `diaton` (< 20 % of the TRUE chart outside the key), `pop`, `jazz`. "Oracle key" = `analyzeKey` over
+  the notated chords — what a player who knows the song would type in.
+- `reading-e2e.mjs` — weak-evidence banner, Song key (prefer / only key chords), the chart's key picker
+  driving the decode, chord-change length, review-list delete and merge, no overflow at 390 px.

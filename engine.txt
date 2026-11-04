@@ -6573,7 +6573,7 @@ function chordStatesV2(opts = {}) {
 /* Emission score per (beat, state). Cosine of the treble chroma to the template, plus
  * the bass register's vote for the state's bass note, minus a rarity prior (`rank`,
  * as in `recognise`) and an inversion prior; optional diatonic key bonus. */
-function _emitV2(seg, states, opts, keyFit) {
+function _emitV2(seg, states, opts, keyFit, keyPen) {
   const S = states.length, out = new Float64Array(S + 1);
   const c = seg.chroma, b = seg.bass;
   let cn = 0; for (let p = 0; p < 12; p++) cn += c[p] * c[p];
@@ -6599,6 +6599,7 @@ function _emitV2(seg, states, opts, keyFit) {
     if (st.inversion) sc -= st.foreign ? slashPen : invPen;
     if (st.quality.intervals.length === 2) sc -= powPen;
     if (keyFit) sc += keyW * keyFit[s];
+    if (keyPen) sc -= keyPen[s];
     out[s] = sc;
   }
   out[S] = opts.ncScore != null ? opts.ncScore : 0.55;
@@ -6676,6 +6677,117 @@ function hmmChordDecode(E, gated, opts = {}) {
   path[T - 1] = end;
   for (let t = T - 1; t > 0; t--) path[t - 1] = back[t][path[t]];
   return { path, post };
+}
+
+/* ---- Harmonic rhythm: a MINIMUM chord length (semi-Markov Viterbi) -------------------
+ * The beat HMM above only charges a fixed price per change, so on a busy mix it still flips
+ * every half-beat wherever two labels are close (G → G/D → Gsus4 inside one second — a real
+ * report: 120+ "chords" in the first minutes of a soul record). A chart writes chords that
+ * LAST: a beat, half a bar, a bar. Here every chord segment must be at least `minUnits` grid
+ * units long (a rest may be shorter; the first and last segment may be short — pickups and
+ * endings). Exact DP over (end, label): a segment of any length ≥ minUnits is a chain of
+ * same-label pieces of length minUnits … 2·minUnits−1, and same-label neighbours cost no
+ * change, so that window is complete. O(T · 2·minUnits · K) with per-label prefix sums.
+ * Same score model as `hmmChordDecode`'s Viterbi (Σ emission − changePenalty · #changes).
+ * Returns the per-unit label path. */
+function minDurationChordPath(E, gated, minUnits, opts = {}) {
+  const T = E.length;
+  if (!T) return [];
+  const K = E[0].length, NC = K - 1;
+  const cp = opts.changePenalty != null ? opts.changePenalty : 0.14;
+  const D = Math.max(1, Math.round(minUnits));
+  if (D <= 1) return null;                                        // caller keeps the HMM's Viterbi
+  const Lmax = 2 * D - 1;
+  const emit = (t, k) => gated && gated[t] === "skip" ? (k === NC ? -cp : 0) : gated && gated[t] ? (k === NC ? 0 : -1e9) : E[t][k];
+  // prefix sums per label, row-major: P[t*K + k] = Σ_{u<t} emit(u,k)
+  const P = new Float64Array((T + 1) * K);
+  for (let t = 0; t < T; t++) for (let k = 0; k < K; k++) P[(t + 1) * K + k] = P[t * K + k] + emit(t, k);
+  const V = new Float64Array((T + 1) * K).fill(-Infinity);
+  const bestL = new Uint16Array((T + 1) * K), prevK = new Int32Array((T + 1) * K).fill(-1);
+  const top1 = new Int32Array(T + 1).fill(-1), top2 = new Int32Array(T + 1).fill(-1);
+  for (let t = 1; t <= T; t++) {
+    for (let k = 0; k < K; k++) {
+      let best = -Infinity, bL = 0, bP = -1;
+      const lo = k === NC || t === T ? 1 : D;                     // rests and the final segment may be short
+      for (let L = lo; L <= Math.min(Lmax, t); L++) {
+        const u = t - L;
+        if (u > 0 && L < D && k !== NC && t !== T) continue;
+        let base, from;
+        if (u === 0) { base = 0; from = -1; }
+        else {
+          const a = top1[u], same = V[u * K + k];
+          const other = a === k ? (top2[u] >= 0 ? V[u * K + top2[u]] : -Infinity) : (a >= 0 ? V[u * K + a] : -Infinity);
+          const oK = a === k ? top2[u] : a;
+          if (same >= other - cp) { base = same; from = k; } else { base = other - cp; from = oK; }
+          if (!(base > -Infinity)) continue;
+        }
+        const sc = base + P[t * K + k] - P[u * K + k];
+        if (sc > best) { best = sc; bL = L; bP = from; }
+      }
+      // the first segment (u = 0) may be shorter than D: a pickup before the first full chord
+      if (t < D && k !== NC) {
+        const sc = P[t * K + k];
+        if (sc > best) { best = sc; bL = t; bP = -1; }
+      }
+      V[t * K + k] = best; bestL[t * K + k] = bL; prevK[t * K + k] = bP;
+    }
+    let a = -1, b = -1;
+    for (let k = 0; k < K; k++) {
+      const v = V[t * K + k];
+      if (a < 0 || v > V[t * K + a]) { b = a; a = k; } else if (b < 0 || v > V[t * K + b]) b = k;
+    }
+    top1[t] = a; top2[t] = b;
+  }
+  const path = new Array(T);
+  let t = T, k = top1[T];
+  while (t > 0 && k >= 0) {
+    const L = bestL[t * K + k] || 1, pk = prevK[t * K + k];
+    for (let u = t - L; u < t; u++) path[u] = k;
+    t -= L; k = pk;
+  }
+  for (let u = 0; u < T; u++) if (path[u] == null) path[u] = NC;
+  return path;
+}
+
+/* ---- Key lock: the user TELLS the decoder the key ------------------------------------
+ * The automatic key prior (opts.keyScale, weight 0.08) only tips close calls. When the
+ * player knows the key, that knowledge is worth far more: a chord with tones outside the
+ * key should need real evidence to be written. Per state: the number of its tones (plus a
+ * written / foreign bass) outside the key's scale. Common MODE MIXTURE is not "outside" —
+ * in a major key ♭VII, ♭VI, ♭III and iv (F, Eb, Bb, Cm in G: rock, soul and Motown use them
+ * constantly), in a minor key IV, V/V7 and the leading tone (harmonic/melodic minor) — so
+ * those count as at most half a tone. Returns per-state penalties to SUBTRACT:
+ *   "guide"  — `keyLockWeight` (default 0.04) × out-of-key tones: a chromatic chord can still
+ *              win with clear evidence (a secondary dominant, a passing diminished);
+ *   "strict" — only the key's chords and that mode mixture; everything else is removed. */
+const _KEY_SCALE = { major: [0, 2, 4, 5, 7, 9, 11], minor: [0, 2, 3, 5, 7, 8, 10, 11] };
+const _KEY_MIXTURE = { major: { roots: [10, 8, 3, 5], tones: [3, 8, 10] }, minor: { roots: [5, 7, 2], tones: [9, 11] } };
+function _keyOf(key) {
+  if (!key) return null;
+  if (typeof key === "string") return parseKeyName(key);
+  if (typeof key.tonic === "number") return { tonic: ((key.tonic % 12) + 12) % 12, mode: key.mode === "minor" ? "minor" : "major" };
+  return null;
+}
+function keyLockPenalties(states, key, opts = {}) {
+  const k = _keyOf(key);
+  if (!k) return null;
+  const mode = opts.keyLock === "strict" ? "strict" : "guide";
+  const w = opts.keyLockWeight != null ? opts.keyLockWeight : 0.04;
+  const inScale = new Array(12).fill(false), inMix = new Array(12).fill(false);
+  for (const r of _KEY_SCALE[k.mode]) inScale[r] = true;
+  const mix = _KEY_MIXTURE[k.mode];
+  for (const r of mix.tones) inMix[r] = true;
+  return states.map((st) => {
+    const relRoot = (st.root - k.tonic + 12) % 12;
+    const q = st.writeQ || st.quality;
+    const rels = q.intervals.map((i) => (relRoot + i) % 12);
+    if (st.showBass || st.foreign) rels.push((st.bassPc - k.tonic + 12) % 12);
+    const out = rels.filter((r) => !inScale[r]).length;
+    if (!out) return 0;
+    const borrowed = mix.roots.indexOf(relRoot) >= 0 && rels.every((r) => inScale[r] || inMix[r]);
+    if (mode === "strict") return borrowed ? 0 : 1e3;
+    return w * (borrowed ? 0.5 : out);
+  });
 }
 
 /* ---- Stage D: repetition-aware smoothing ----------------------------------
@@ -6815,8 +6927,17 @@ function transcribeChordsV2(samples, sampleRate, opts = {}) {
   if (opts.keyScale && opts.keyScale.length === 12) {
     keyFit = states.map((st) => st.quality.intervals.reduce((a, i) => a + (opts.keyScale[(st.root + i) % 12] ? 1 : 0), 0) / st.quality.intervals.length);
   }
-  const E = segs.map((s) => _emitV2(s, states, opts, keyFit));
-  const { path, post } = hmmChordDecode(E, gated, opts);
+  // the user's key (opts.key, "G" / { tonic, mode }) — see keyLockPenalties
+  const keyPen = opts.key && opts.keyLock !== "off" ? keyLockPenalties(states, opts.key, opts) : null;
+  const E = segs.map((s) => _emitV2(s, states, opts, keyFit, keyPen));
+  const hm = hmmChordDecode(E, gated, opts);
+  const post = hm.post;
+  /* Minimum chord length in BEATS (opts.minChordBeats; 0/absent = as decoded, one grid unit).
+   * On the beat grid a unit is 1/subdivide beat; on the fixed 0.25 s grid a beat is taken as
+   * 0.5 s. The posteriors (confidence, alternatives) stay the HMM's. */
+  const unitsPerBeat = bt.beats && bt.beats.length >= 3 && opts.grid !== "fixed" ? Math.max(1, opts.subdivide != null ? opts.subdivide : 2) : 0.5 / (opts.gridSec || 0.25);
+  const minUnits = opts.minChordBeats > 0 ? Math.round(opts.minChordBeats * unitsPerBeat) : 0;
+  const path = (minUnits > 1 && minDurationChordPath(E, gated, minUnits, opts)) || hm.path;
   const S = states.length, K = S + 1;
   const useSharp = opts.useSharp !== false, names = useSharp ? NOTE_SHARP : NOTE_FLAT;
   const symOf = (st) => names[st.root] + (st.writeQ || st.quality).suffix + (st.showBass ? "/" + names[st.bassPc] : "");
@@ -6868,6 +6989,29 @@ function transcribeChordsV2(samples, sampleRate, opts = {}) {
   return { events: out, tuning: fr.tuning, beats: bt.beats || [], bpm: bt.bpm, segments: segs.length };
 }
 
+/* EVIDENCE-ADAPTIVE decoding. A full mix (vocal, horns, drums and bass over the chords) or a
+ * noisy stem gives the HMM weak, contradictory evidence, and its fixed change price then lets
+ * it flip on every passing melody note — measured on rendered full mixes: 74 chord changes a
+ * minute against a true 48, 22 % of chords shorter than a beat. The decoder's own calibrated
+ * posterior says when that is happening: when the duration-weighted mean probability of the
+ * chosen chords is below `adaptiveBelow` (0.72), it re-decodes with a higher change price
+ * (`weakChangePenalty`, 0.3) and at least one beat per chord. Mutates `base` so a second
+ * (key) pass inherits it. `opts.adaptive:false`, or an explicit changePenalty /
+ * minChordBeats, turns it off. r.evidence = that mean probability; r.adapted = true when used. */
+function _adaptToEvidence(r, base, samples, sampleRate, opts) {
+  const ev = r.events || [];
+  let tot = 0, w = 0; for (const e of ev) { tot += e.durSec; w += e.prob * e.durSec; }
+  const evidence = tot ? w / tot : 1;
+  r.evidence = +evidence.toFixed(3);
+  if (opts.adaptive === false || opts.changePenalty != null || !ev.length) return r;
+  if (evidence >= (opts.adaptiveBelow != null ? opts.adaptiveBelow : 0.72)) return r;
+  base.changePenalty = opts.weakChangePenalty != null ? opts.weakChangePenalty : 0.3;
+  if (base.minChordBeats == null) base.minChordBeats = 1;
+  const r2 = transcribeChordsV2(samples, sampleRate, base);
+  r2.evidence = r.evidence; r2.adapted = true;
+  return r2.events.length ? r2 : r;
+}
+
 /* The v2 panel entry point (same contract as analyzeAudioChords, plus `tuning`).
  * Two passes like v1: decode, read the key off the decode, re-decode with the
  * diatonic prior when the key reading is confident. The NNLS front-end is computed
@@ -6878,7 +7022,17 @@ function analyzeAudioChordsV2(samples, sampleRate, opts = {}) {
   const bt = opts.beats && opts.beats.length >= 3 ? { beats: opts.beats, bpm: opts.bpm || 0 } : detectBeats(samples, sampleRate, opts);
   const fr = opts._frames || nnlsChromagram(samples, sampleRate, opts);
   const base = { ...opts, beats: bt.beats && bt.beats.length >= 3 ? bt.beats : null, bpm: bt.bpm, _frames: fr };
+  /* The user's key: decode ONCE with it (the diatonic prior + the key lock); no guessing. */
+  const userKey = _keyOf(opts.key);
+  if (userKey) {
+    const scale = new Array(12).fill(false);
+    for (const rel of _KEY_SCALE[userKey.mode]) scale[(userKey.tonic + rel) % 12] = true;
+    const kb = { ...base, key: userKey, keyScale: scale };
+    const r1 = _adaptToEvidence(transcribeChordsV2(samples, sampleRate, kb), kb, samples, sampleRate, opts);
+    return { events: r1.events, bpm: base.beats ? bt.bpm : 0, beats: bt.beats || [], key: { ...userKey, confidence: 1, set: true }, evidence: r1.evidence, adapted: !!r1.adapted, tuning: +fr.tuning.toFixed(1), tuningMeasured: fr.tuningMeasured != null ? +fr.tuningMeasured.toFixed(1) : null, tuningReliability: fr.tuningReliability, method: base.beats ? "synharmonics-v2" : "synharmonics-v2-grid" };
+  }
   let r = transcribeChordsV2(samples, sampleRate, base);
+  r = _adaptToEvidence(r, base, samples, sampleRate, opts);
   let key = null;
   if (r.events.length && opts.keyPrior !== false) {
     const bpb = opts.beatsPerBar || 4, spb = 60 / (bt.bpm || 120);
@@ -6889,10 +7043,10 @@ function analyzeAudioChordsV2(samples, sampleRate, opts = {}) {
       const scale = new Array(12).fill(false);
       for (const rel of Object.keys(idx)) scale[(key.tonic + Number(rel)) % 12] = true;
       const second = transcribeChordsV2(samples, sampleRate, { ...base, keyScale: scale });
-      if (second.events.length) r = second;
+      if (second.events.length) { second.evidence = r.evidence; second.adapted = r.adapted; r = second; }
     } else key = null;
   }
-  return { events: r.events, bpm: base.beats ? bt.bpm : 0, beats: bt.beats || [], key, tuning: +fr.tuning.toFixed(1), method: base.beats ? "synharmonics-v2" : "synharmonics-v2-grid" };
+  return { events: r.events, bpm: base.beats ? bt.bpm : 0, beats: bt.beats || [], key, evidence: r.evidence, adapted: !!r.adapted, tuning: +fr.tuning.toFixed(1), tuningMeasured: fr.tuningMeasured != null ? +fr.tuningMeasured.toFixed(1) : null, tuningReliability: fr.tuningReliability, method: base.beats ? "synharmonics-v2" : "synharmonics-v2-grid" };
 }
 
 /* ============================================================================
@@ -7786,6 +7940,45 @@ function commitChordChoices(events, picks) {
  * stays one tap away rather than being hidden. */
 function autoResolveChords(events) {
   return (events || []).map((e) => (e && e.ambiguous ? { ...e, ambiguous: false, autoResolved: true } : e));
+}
+/* DELETE chords from a decoded timeline (the review list's ✕ and "merge short chords"). A deleted
+ * chord is not a rest: its time goes to the chord before it (the one still ringing), or — for the
+ * first chord — to the one after. Consecutive same-symbol neighbours that the delete leaves side
+ * by side are joined into one event. Indices refer to `events`; returns a NEW array; never
+ * mutates. `mergeShortChords(events, minSec)` deletes every chord shorter than minSec. */
+function removeChordEvents(events, indices) {
+  const src = (events || []).filter(Boolean);
+  const drop = new Set((indices || []).filter((i) => i >= 0 && i < src.length));
+  if (!drop.size) return src.slice();
+  const keep = src.map((e, i) => (drop.has(i) ? null : { ...e }));
+  if (keep.every((e) => !e)) return [];
+  for (let i = 0; i < src.length; i++) {
+    if (keep[i]) continue;
+    const e = src[i], end = e.startSec + e.durSec;
+    let p = i - 1; while (p >= 0 && !keep[p]) p--;
+    // the previous kept chord rings on, as long as nothing silent sits between them
+    if (p >= 0) { const q = keep[p]; q.durSec = +(Math.max(q.startSec + q.durSec, end) - q.startSec).toFixed(3); continue; }
+    let n = i + 1; while (n < src.length && !keep[n]) n++;
+    if (n < src.length) { const q = keep[n], qEnd = q.startSec + q.durSec; q.startSec = e.startSec; q.durSec = +(qEnd - e.startSec).toFixed(3); }
+  }
+  const out = [];
+  for (const e of keep) {
+    if (!e) continue;
+    const last = out[out.length - 1];
+    if (last && last.symbol === e.symbol && Math.abs(last.startSec + last.durSec - e.startSec) < 0.05) {
+      last.durSec = +(e.startSec + e.durSec - last.startSec).toFixed(3);
+      last.reviewed = last.reviewed || e.reviewed;
+      continue;
+    }
+    out.push(e);
+  }
+  return out;
+}
+function mergeShortChords(events, minSec) {
+  const src = (events || []).filter(Boolean);
+  const idx = [];
+  src.forEach((e, i) => { if (e.durSec < minSec && !e.reviewed) idx.push(i); });
+  return removeChordEvents(src, idx);
 }
 function reopenAutoChords(events) {
   return (events || []).map((e) => (e && e.autoResolved && !e.reviewed ? { ...e, ambiguous: true, autoResolved: false } : e));
@@ -11179,6 +11372,10 @@ export {
   repetitionSmooth,
   transcribeChordsV2,
   analyzeAudioChordsV2,
+  minDurationChordPath,
+  keyLockPenalties,
+  removeChordEvents,
+  mergeShortChords,
   stemRoleFromName,
   STEM_ROLE_NAMES,
   transcribeDrums,
