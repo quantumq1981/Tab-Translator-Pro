@@ -3362,6 +3362,64 @@ Mic (Live chords, Wait-for-me), Web Audio practice loop, print-to-PDF on iOS, `n
 clipboard images and IndexedDB/OPFS quotas are device-only — smoke-test on a real iPhone/iPad. Drum
 classification and technique detection are validated on rendered audio only; lyric alignment is line-level.
 
+## Chord reading — full mixes, the song key, chord length, review delete (2026-11-04)
+
+**Report (iPad, a Motown full mix the owner says is in G):** the review list held 120–133 "chords",
+several per second (0:00, 0:01, 0:01 …); Am7 / A7 / A / Gm / Ab7 / Bbmaj7 everywhere; picking a key or
+Simplify changed the labels but not what was decoded; no way to delete a chord. Measured before building
+(`tests/bench/rhythm-key.mjs`, `tests/bench/fullmix.mjs`):
+
+- **The bench had no full-mix condition.** `fullmix.mjs` adds one (every pitched GP track + a vibrato lead
+  + drums, truth = the comp track). It reproduces the report: root **77 % on a stem → 55 % on a full mix**,
+  **74 chord changes/min vs the truth's 48**, 22 % of chords shorter than a beat.
+- **Tuning was ruled out:** the same mix +45 ¢ (an old tape running fast) decodes as well (55.3 vs 54.4).
+- **Am7 in G is not a bug:** it is ii7 (A C E G, all in G). In G the out-of-key chords are A / A7 (C♯),
+  Gm (B♭), A♭7, B♭maj7, E (G♯). Say this plainly when it comes up again.
+
+**What shipped (engine pure + tested; UI glue in AudioImport / ChordReview / StemsPanel):**
+- `minDurationChordPath(E, gated, minUnits, opts)` — exact semi-Markov Viterbi: every chord ≥ `minUnits`
+  grid units (rests and the two end runs may be shorter); proven optimal against brute force (60 random
+  cases in `tests/chord-reading.mjs`). `transcribeChordsV2({ minChordBeats })`; posteriors stay the HMM's.
+- **Evidence-adaptive decoding** (`_adaptToEvidence`, default on): if the duration-weighted mean chord
+  probability is < `adaptiveBelow` 0.72, re-decode with `changePenalty` 0.3 and ≥ 1 beat per chord. Results
+  carry `evidence` + `adapted`; the UI shows a "Weak chord evidence — sounds like a full mix" banner that
+  points at the stem split. Off with `adaptive:false` or an explicit `changePenalty` / `minChordBeats`.
+  A hard stem-vs-mix classifier was tried first: the decoder's statistics overlap (prob p50 0.80 stems vs
+  0.67 mixes, wide tails), so the rule adapts to evidence, not to a guessed source type.
+- **The song key** (`opts.key` "G" / {tonic,mode}, `keyLock` "guide" | "strict"; `keyLockPenalties`):
+  guide = 0.04 × out-of-key tones; strict = only the key's chords. Mode mixture counts as in key at half
+  cost / allowed: major ♭VII ♭VI ♭III iv, minor IV V7 (harmonic/melodic). With a key, `analyzeAudioChordsV2`
+  decodes ONCE in it (no auto-key pass) and returns `key.set`.
+- `removeChordEvents` / `mergeShortChords` — delete = the chord before rings on (the first chord's time goes
+  to the next); same-symbol neighbours rejoin; reviewed chords are never merged away.
+- UI: **Song key** select + Prefer key / Only key chords (per device `ttp:keyUse`) + **Chord changes**
+  Auto / ≥1 beat / ≥½ bar / ≥1 bar (`ttp:chordChanges`) → any change re-decodes; the audio chart's own key
+  picker IS the song key (picking a key there re-reads the chords); ChordReview rows show duration, ✕ per
+  row, ✕ Delete selected, ⇤ Merge chords shorter than a beat; the stem charts take the same reading opts
+  and re-chart (no re-split) when they change.
+
+**Measured on the held-out half** (Pro names, 7 conditions incl. full mix; before → after):
+root 69.2 → 68.5, majmin 70.5 → 70.0, seg 77.6 → 77.6, **changes/min 57.1 → 47.2 (truth 48.5)**, sub-beat
+chords **17.7 → 10.2 %**; full mix alone: majmin 56.0 → 56.8, seg 71.2 → 73.2, changes 71.8 → 54.6.
+The default is a readability win at ±1 accuracy. ≥½ bar / ≥1 bar cost −6 / −15 root (options, not defaults).
+
+**The song key does NOT make chords more correct — do not re-derive.** With the TRUE key (analyzeKey over the
+notated chords): prefer −0.2 root held-out (diatonic songs −0.2), only-key −5.4 (diatonic −1.8); weight 0.09
+cost −1.2 on dev; on full mixes it is ±0.3. Real songs, even "diatonic" ones, spend time on chromatic chords
+(the corpus: 0–95 % of the true chart outside the key, blues/jazz/soul 37–77 %), and the decoder's own auto-key
+prior already tips close calls. What the key DOES do: out-of-key time 33 → 29 % (prefer) / 20 % (only), the
+review alternatives obey it, and the chart/exports are named in it. That is why it is opt-in and the tooltip
+says "only key chords" is wrong for blues/jazz.
+
+**The real lever for a full mix is separation**: split → the Full band / Guitar / keys chart (chords from the
+guitar+keys stem, bass from the bass stem). Measured before (SCNet real run): mix 51.6/54.3 root/majmin →
+separated 56.7/58.7 → perfect stems 65.2/64.1. Slow on a phone (Low-memory ≈ 4–6× real time).
+
+Tests: `tests/chord-reading.mjs` (in `npm test`). Benches: `rhythm-key.mjs`, `fullmix.mjs`, `reading-e2e.mjs`
+(the real app on a G-major full mix: banner, key re-decode 2 → 0 out-of-key chords, chart key picker → decode,
+≥1 bar 49 → 30 chords, delete 8 → 7, merge 7 → 5, no overflow at 390 px). Device check remaining: the owner's
+own recording on the iPad.
+
 ## Path B (scans / photos) — OUT OF SCOPE
 
 Raster tab (a photo or scanned page) has no text layer and needs an OMR/Vision

@@ -241,6 +241,8 @@ import {
   commitChordChoices,
   autoResolveChords,
   reopenAutoChords,
+  removeChordEvents,
+  mergeShortChords,
   stemRoleFromName,
   STEM_ROLE_NAMES,
   chartsFromStems,
@@ -3259,6 +3261,49 @@ function useSpellingPref() {
 function useSixNine() {
   return _usePref(_SIX9_KEY, "maj9", (x) => SIX9_CHOICES.some(([k]) => k === x));
 }
+/* How the AUDIO decoder reads chords (engine analyzeAudioChordsV2 opts), shared by the chord panel
+ * and the stem charts. Per device: how strictly a key the user names is used, and how long a chord
+ * must last. The key itself belongs to the song, so the caller owns it (not remembered).
+ *   key      "" = the decoder reads the key itself; else the decode is re-run IN that key
+ *   keyUse   prefer = out-of-key chords need clearer evidence (chromatic chords still allowed)
+ *            only   = only the key's chords plus common borrowed ones (♭VII ♭VI ♭III iv in major;
+ *                     IV V7 in minor) — for diatonic songs; wrong for blues / jazz
+ *   changes  auto = at least a beat when the evidence is weak (full mixes), else as heard;
+ *            1 / 2 / 4 = every chord lasts at least that many beats */
+const KEY_USE_CHOICES = [["prefer", "Prefer key", "chords outside the key need clearer evidence; a real chromatic chord (secondary dominant, blues 7th) can still win"], ["only", "Only key chords", "only the key's own chords, plus the common borrowed ones (♭VII, ♭VI, ♭III, iv in a major key; IV and V7 in a minor key) — best for simple diatonic songs, wrong for blues / jazz"]];
+const CHANGE_CHOICES = [["auto", "Auto", "as heard — but at least a beat per chord when the evidence is weak (a full mix)"], ["1", "≥ 1 beat", "no chord shorter than a beat"], ["2", "≥ ½ bar", "every chord lasts at least two beats"], ["4", "≥ 1 bar", "one chord per bar at most — a coarse sketch; misses quick changes"]];
+function useKeyUse() { return _usePref("ttp:keyUse", "prefer", (x) => x === "prefer" || x === "only"); }
+function useChordChanges() { return _usePref("ttp:chordChanges", "auto", (x) => CHANGE_CHOICES.some(([k]) => k === x)); }
+/* → the engine opts for a decode */
+function chordReadingOpts(songKey, keyUse, changes) {
+  const o = {};
+  if (songKey) { const k = parseKeyName(songKey); if (k) { o.key = { tonic: k.tonic, mode: k.mode }; o.keyLock = keyUse === "only" ? "strict" : "guide"; } }
+  if (changes && changes !== "auto") o.minChordBeats = Number(changes);
+  return o;
+}
+function ChordReadingControls({ C, songKey, onSongKey, detectedKey, keyUse, onKeyUse, changes, onChanges, disabled, useSharp }) {
+  const det = detectedKey && typeof detectedKey.tonic === "number" ? keyName(detectedKey, useSharp) : null;
+  return (
+    <span style={{ display: "inline-flex", flexWrap: "wrap", gap: 4, alignItems: "center", fontSize: 11, color: C.dim }}>
+      <select value={songKey || ""} onChange={(e) => onSongKey(e.target.value)} disabled={disabled}
+        title="the song's key: pick it and the chords are re-read IN that key (and the chart, numerals and exports use it)"
+        style={{ ...chip(C), padding: "3px 9px", borderColor: songKey ? C.green : C.border, color: songKey ? C.green : C.dim, background: C.raised, maxWidth: 170 }}>
+        <option value="">{det ? `Song key: auto (${det})` : "Song key: auto"}</option>
+        <optgroup label="Major">{KEY_CHOICES.filter((k) => k.mode === "major").map((k) => <option key={"M" + k.name} value={k.name}>{k.name} major</option>)}</optgroup>
+        <optgroup label="Minor">{KEY_CHOICES.filter((k) => k.mode === "minor").map((k) => <option key={"m" + k.name} value={k.name}>{k.name.replace(/m$/, "")} minor</option>)}</optgroup>
+      </select>
+      {songKey && KEY_USE_CHOICES.map(([k, lbl, tip]) => (
+        <button key={k} onClick={() => keyUse !== k && onKeyUse(k)} disabled={disabled} title={tip}
+          style={{ ...chip(C), padding: "4px 9px", borderColor: keyUse === k ? C.green : C.border, color: keyUse === k ? C.green : C.dim }}>{lbl}{keyUse === k ? " ✓" : ""}</button>
+      ))}
+      <span style={{ marginLeft: 4 }}>Chord changes:</span>
+      {CHANGE_CHOICES.map(([k, lbl, tip]) => (
+        <button key={k} onClick={() => changes !== k && onChanges(k)} disabled={disabled} title={tip}
+          style={{ ...chip(C), padding: "4px 9px", borderColor: changes === k ? C.cyan : C.border, color: changes === k ? C.cyan : C.dim }}>{lbl}{changes === k ? " ✓" : ""}</button>
+      ))}
+    </span>
+  );
+}
 function ChordVocabPicker({ C, value, onChange, sixNine, onSixNine, disabled }) {
   return (
     <span style={{ display: "inline-flex", flexWrap: "wrap", gap: 4, alignItems: "center", fontSize: 11, color: C.dim }}>
@@ -4161,6 +4206,13 @@ function AudioImport({ C, useSharp, incoming, onLoaded }) {
   const [secSens, setSecSens] = useState("balanced");// how finely to cut the song
   const [vocab, setVocab] = useChordVocab();          // which chord names the decode may write (Chart by default)
   const [sixNine, setSixNine] = useSixNine();        // how a detected 6/9 is written (maj9 by default)
+  /* How the chords are READ: the song's key (the user's — "" = the decoder reads it), how strictly
+   * that key is used, and how long a chord must last. Any change re-decodes (see chordReadingOpts). */
+  const [songKey, setSongKey] = useState("");
+  const [keyUse, setKeyUse] = useKeyUse();
+  const [changes, setChanges] = useChordChanges();
+  const readRef = useRef({ songKey: "", keyUse, changes });
+  readRef.current = { songKey, keyUse, changes };
   // ⚡ Auto: uncertain chords take the decoder's best match with nothing left pending (per device)
   const [autoPick, setAutoPick] = useState(() => { try { return localStorage.getItem("ttp:autoPick") === "1"; } catch (_) { return false; } });
   const autoPickRef = useRef(autoPick);
@@ -4191,7 +4243,8 @@ function AudioImport({ C, useSharp, incoming, onLoaded }) {
     // (guarded by confidence + gap length) so a chart isn't littered with false N.C. bars.
     // chords: SynHarmonics v2 (the engine default) — NNLS front-end + HMM posteriors; the
     // legacy sliding-window knobs (hopSec/smoothSec/recoverGaps) are v1-only.
-    const opts = k === "notes" ? { hop: Math.floor(sr * 0.08) } : { useSharp, vocabulary: vocab, sixNine };
+    const rd = readRef.current;
+    const opts = k === "notes" ? { hop: Math.floor(sr * 0.08) } : { useSharp, vocabulary: vocab, sixNine, ...chordReadingOpts(rd.songKey, rd.keyUse, rd.changes) };
     setTimeout(async () => {                          // let "Analyzing…" paint first
       try {
         if (k === "notes") { setRaw((await analyzeAudioOffThread(ds, sr, k, opts)) || []); }
@@ -4203,7 +4256,7 @@ function AudioImport({ C, useSharp, incoming, onLoaded }) {
           const r = (await analyzeChordsOffThread(ds, sr, opts)) || {};
           setRaw(autoPickRef.current ? autoResolveChords(r.events || []) : (r.events || []));
           setTracked(r.beats && r.beats.length ? r.beats : null);
-          setBeatInfo(r.bpm || r.tuning != null ? { bpm: r.bpm || 0, method: r.method, tuning: r.tuning, key: r.key } : null);
+          setBeatInfo(r.bpm || r.tuning != null ? { bpm: r.bpm || 0, method: r.method, tuning: r.tuning, key: r.key, evidence: r.evidence, adapted: r.adapted } : null);
           // cache the beat grid: the structure pass reuses it instead of tracking twice
           ref.current.beats = r.beats && r.beats.length ? r.beats : null;
           ref.current.beatBpm = r.bpm || 0;
@@ -4213,7 +4266,7 @@ function AudioImport({ C, useSharp, incoming, onLoaded }) {
     }, 30);
   };
 
-  const resetFor = (label) => { setErr(""); setName(label); setBusy(true); setRaw([]); setTracked(null); bg.reset(); setOverrides({}); setAb(null); setMlNotes(null); setGtrNotes(null); setVoiceIdx(0); setSections([]); ref.current.mlRaw = null; stopPlay(); };
+  const resetFor = (label) => { setErr(""); setName(label); setSongKey(""); readRef.current = { ...readRef.current, songKey: "" }; setBusy(true); setRaw([]); setTracked(null); bg.reset(); setOverrides({}); setAb(null); setMlNotes(null); setGtrNotes(null); setVoiceIdx(0); setSections([]); ref.current.mlRaw = null; stopPlay(); };
   const onFile = async (e) => {
     const f = e.target.files && e.target.files[0]; if (!f) return;
     resetFor(f.name);
@@ -4278,6 +4331,17 @@ function AudioImport({ C, useSharp, incoming, onLoaded }) {
   // Re-analyse when the chord vocabulary / 6/9 convention changes — `run` reads the fresh values.
   const vocabRef = useRef(vocab + "|" + sixNine);
   useEffect(() => { const k = vocab + "|" + sixNine; if (vocabRef.current !== k) { vocabRef.current = k; const s = ref.current; if (s.cur) run(s.cur, s.sr, kind); } }, [vocab, sixNine]);
+  // …and when the song key, how it is used, or the chord-change length changes (a key choice
+  // re-reads the chords IN that key — the chart, the review list and every export follow)
+  const readSeen = useRef("");
+  useEffect(() => {
+    const k = songKey + "|" + keyUse + "|" + changes;
+    if (!readSeen.current) { readSeen.current = k; return; }
+    if (readSeen.current !== k) { readSeen.current = k; const s = ref.current; if (s.cur && kind === "chords") { setOverrides({}); run(s.cur, s.sr, kind); } }
+  }, [songKey, keyUse, changes]);
+  // Review list: delete chords (the one before rings on) / merge every chord shorter than a beat
+  const removeChords = (idx) => setRaw((evs) => removeChordEvents(evs, idx));
+  const mergeShort = () => setRaw((evs) => mergeShortChords(evs, 60 / Math.max(30, bpm || 120) * 0.95));
   const toggleIsolate = () => { const v = !isolate; setIsolate(v); setOverrides({}); prepare(v, kind); };
   /* Per-voice ML note transcription (basic-pitch). Pure-JS multi-F0 can't do dense vocal
    * harmony, so this runs a PLUGGABLE, hosted model — `window.TTP_NOTE_MODEL(pcm, sr)` →
@@ -4560,6 +4624,7 @@ function AudioImport({ C, useSharp, incoming, onLoaded }) {
         <button onClick={toggleIsolate} disabled={busy} title="isolate the center channel (where vocals usually sit) before analysing — for scoring sung harmony from a full mix"
           style={{ ...chip(C), padding: "5px 10px", borderColor: isolate ? C.green : C.border, color: isolate ? C.green : C.dim }}>{isolate ? "🎤 Vocals isolated ✓" : "🎤 Isolate vocals"}</button>
         {kind === "chords" && <ChordVocabPicker C={C} value={vocab} onChange={(v) => { setVocab(v); setOverrides({}); }} sixNine={sixNine} onSixNine={(v) => { setSixNine(v); setOverrides({}); }} disabled={busy} />}
+        {kind === "chords" && <ChordReadingControls C={C} songKey={songKey} onSongKey={setSongKey} detectedKey={beatInfo && !songKey ? beatInfo.key : null} keyUse={keyUse} onKeyUse={setKeyUse} changes={changes} onChanges={setChanges} disabled={busy} useSharp={useSharp} />}
         {kind === "chords" && <button onClick={voices} disabled={busy} title="per-VOICE note transcription (the actual sung notes, not just a chord) via a pluggable ML model — for dense vocal harmony"
           style={{ ...chip(C), padding: "5px 10px", borderColor: mlScore ? C.green : C.border, color: mlScore ? C.green : C.dim }}>🎼 Voices (ML)</button>}
         <button onClick={guitarTab} disabled={busy} title="guitar (or any plucked-string) stem → every note + the string it's on, as an editable tab chart (ML note model ≈ 25 MB, downloaded once; runs on this device)"
@@ -4771,7 +4836,7 @@ function AudioImport({ C, useSharp, incoming, onLoaded }) {
       )}
 
       {/* STEMS → split a full mix (or import stems) → a chart per instrument */}
-      <StemsPanel C={C} useSharp={useSharp} vocab={vocab} setVocab={setVocab} sixNine={sixNine} setSixNine={setSixNine} getSource={() => ref.current.audioBuf || null} sourceName={name} fmt={fmt} loading={busy} />
+      <StemsPanel C={C} useSharp={useSharp} vocab={vocab} setVocab={setVocab} sixNine={sixNine} setSixNine={setSixNine} reading={chordReadingOpts(songKey, keyUse, changes)} getSource={() => ref.current.audioBuf || null} sourceName={name} fmt={fmt} loading={busy} />
 
       {/* SONG STRUCTURE → detected + editable, applied to the chart below */}
       {!!raw.length && !!ref.current.cur && (
@@ -4793,8 +4858,16 @@ function AudioImport({ C, useSharp, incoming, onLoaded }) {
               {beatInfo && beatInfo.tuning != null && Math.abs(beatInfo.tuning) >= 5 && <> · tuning <b style={{ color: C.amber }}>{beatInfo.tuning > 0 ? "+" : ""}{Math.round(beatInfo.tuning)}¢</b> (compensated)</>}
             </span>
           </div>
-          <ChordReview events={raw} C={C} fmt={fmt} onSeek={(t) => play(t)} onCommit={commitChoices} auto={autoPick} onAuto={toggleAuto} />
-          <ChartPanel score={audioScore} vocabPicker={false} title={name || "Audio stem"} meta={`${audioScore.bars.length} bars · ♩=${bg.grid.follow ? "~" + Math.round(bpm) + " (follows the performance)" : +bpm.toFixed(1)} · from audio`} C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey="" onPick={() => {}}
+          {beatInfo && beatInfo.adapted && (
+            <div style={{ fontSize: 11, color: C.amber, background: `${C.amber}12`, border: `1px solid ${C.amber}55`, borderRadius: 8, padding: "7px 10px", marginBottom: 8, lineHeight: 1.6 }}>
+              ⚠ <b>Weak chord evidence</b> ({Math.round(100 * (beatInfo.evidence || 0))}% average confidence) — this sounds like a <b>full mix</b> (vocals, drums, bass and horns over the chords), so the chords were read more steadily: at least a beat each, fewer changes.
+              {" "}On rendered full mixes this decoder is right about the root ~55% of the time, against ~77% on a clean guitar/keys stem — for a chart you can rely on, <button onClick={() => { const el = document.getElementById("ttp-stems"); if (el) el.scrollIntoView({ behavior: "smooth", block: "start" }); }} style={{ ...chip(C), padding: "1px 8px", borderColor: C.amber, color: C.amber }}>✂ split the mix</button> and use the <b>Full band</b> or <b>Guitar / keys</b> chart (chords from the guitar + keys stem, bass from the bass stem).
+              {songKey ? null : <> Knowing the key? Pick <b>Song key</b> above — the chords are re-read in it.</>}
+            </div>
+          )}
+          <ChordReview events={raw} C={C} fmt={fmt} onSeek={(t) => play(t)} onCommit={commitChoices} auto={autoPick} onAuto={toggleAuto} onRemove={removeChords} onMergeShort={mergeShort} beatSec={60 / Math.max(30, bpm || 120)} />
+          <ChartPanel score={audioScore} vocabPicker={false} title={name || "Audio stem"} meta={`${audioScore.bars.length} bars · ♩=${bg.grid.follow ? "~" + Math.round(bpm) + " (follows the performance)" : +bpm.toFixed(1)} · from audio${songKey ? ` · read in ${songKey}` : ""}`} C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey="" onPick={() => {}}
+            keyOverride={songKey} setKeyOverride={(k) => setSongKey(k || "")}
             getAudio={() => (ref.current.cur ? { samples: ref.current.cur, sr: ref.current.sr } : null)} getBuffer={() => ref.current.audioBuf || null} />
           <div style={{ fontSize: 11, color: C.dim, marginTop: 10, lineHeight: 1.6 }}>
             Decoded with <b>SynHarmonics v2</b> (note-level NNLS transcription, tuning compensation, inversions + slash chords, calibrated confidence). Faded chords with a <b style={{ color: C.amber }}>?</b> are the uncertain ones — fix them from the review list or <b>✎ Edit</b>, check the bar lines with <b>🎧 Check by ear</b>, then <b>CSMPN</b> / <b>→ Chord Sheet Maker Pro</b> to send it on. Dense voicings / heavy bleed still mislabel.
@@ -4936,7 +5009,7 @@ const STEM_STAGE_TEXT = {
   runtime: "starting the AI runtime (older devices: a minute or more)…",
   separating: "separating…",
 };
-function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, getSource, sourceName, fmt, loading }) {
+function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, reading, getSource, sourceName, fmt, loading }) {
   const [tracks, setTracks] = useState(null);           // { sampleRate, list:[{ role, name, L, R }] } at FULL rate
   const [busy, setBusy] = useState(""), [prog, setProg] = useState(null), [err, setErr] = useState("");
   const [res, setRes] = useState(null);                 // chartsFromStems result
@@ -5015,7 +5088,7 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, getSour
         if (role === "drums") drumsFull = mono;
         byRole[role] = await resampleOffThread(mono, sr, asr, { transfer: role !== "drums" });
       }
-      const r = await chartsFromStemsOffThread(byRole, asr, { useSharp, vocabulary: vocab, sixNine, kit: fullKit ? "full" : undefined, fullRate: drumsFull ? { drums: drumsFull, sampleRate: sr } : undefined }, { transfer: true });
+      const r = await chartsFromStemsOffThread(byRole, asr, { useSharp, vocabulary: vocab, sixNine, ...(readRefS.current || {}), kit: fullKit ? "full" : undefined, fullRate: drumsFull ? { drums: drumsFull, sampleRate: sr } : undefined }, { transfer: true });
       setRes(r); setOvr({});
       // a NEW split/import starts from the detected grid; re-charting the same stems (a chord-
       // vocabulary change) keeps the user's Tempo & bars corrections
@@ -5025,8 +5098,12 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, getSour
     setBusy(""); setProg(null);
   };
   // a new chord vocabulary re-charts the stems already split (seconds), never re-runs the separator
-  const vocabSeen = useRef(vocab + "|" + sixNine + "|" + fullKit);
-  useEffect(() => { const k = vocab + "|" + sixNine + "|" + fullKit; if (vocabSeen.current !== k) { vocabSeen.current = k; if (tracks && res && !busy) analyse(tracks); } }, [vocab, sixNine, fullKit]);
+  // …and so does a new song key / key use / chord-change length (the panel's "chord reading")
+  const readRefS = useRef(reading);
+  readRefS.current = reading;
+  const readKey = JSON.stringify(reading || {});
+  const vocabSeen = useRef(vocab + "|" + sixNine + "|" + fullKit + "|" + readKey);
+  useEffect(() => { const k = vocab + "|" + sixNine + "|" + fullKit + "|" + readKey; if (vocabSeen.current !== k) { vocabSeen.current = k; if (tracks && res && !busy) analyse(tracks); } }, [vocab, sixNine, fullKit, readKey]);
 
   /* Keep the screen on for the length of a split. iOS suspends a Safari tab when the screen auto-locks (or Safari
    * goes to the background) — on a slow device a split outlasts the auto-lock, stalls, and is eventually killed.
@@ -5211,7 +5288,7 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, getSour
   };
 
   return (
-    <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 12, marginBottom: 14 }}>
+    <div id="ttp-stems" style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 12, marginBottom: 14 }}>
       <div style={{ fontSize: 11, color: C.dim, letterSpacing: 2, marginBottom: 6 }}>STEMS → PER-INSTRUMENT CHARTS</div>
       <div style={{ fontSize: 11, color: C.dim, lineHeight: 1.6, marginBottom: 8 }}>
         Split a <b>full mix</b> into vocals · drums · bass · other (guitar/keys) on your device, or import stems you already have (Moises can export guitar and piano separately). Every chart shares one beat grid, so bars line up across instruments.
@@ -5327,7 +5404,7 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, getSour
  * candidate via the pure engine `commitChordChoices`. ⚡ Auto commits the decoder's own best
  * choice for every uncertain chord automatically (`autoResolveChords`); those rows stay
  * listed as "auto" so the choice can still be audited or changed. Pure presentational. */
-function ChordReview({ events, C, fmt, onSeek, onCommit, auto, onAuto }) {
+function ChordReview({ events, C, fmt, onSeek, onCommit, auto, onAuto, onRemove, onMergeShort, beatSec }) {
   const [open, setOpen] = useState(false);
   const [sel, setSel] = useState(() => new Set());
   const [choice, setChoice] = useState({});                 // row index → chosen candidate symbol
@@ -5339,8 +5416,14 @@ function ChordReview({ events, C, fmt, onSeek, onCommit, auto, onAuto }) {
     <button onClick={onAuto} title="Auto: every uncertain chord takes the decoder's best match automatically (still listed here, so you can change it)"
       style={{ ...chip(C), padding: "2px 10px", borderColor: auto ? C.green : C.border, color: auto ? C.green : C.dim }}>{auto ? "⚡ Auto ✓" : "⚡ Auto"}</button>
   ) : null;
+  // chords shorter than a beat — almost always a passing note / drum hit read as a chord
+  const shortN = beatSec ? (events || []).filter((e) => e && e.durSec < 0.95 * beatSec && !e.reviewed).length : 0;
+  const mergeBtn = onMergeShort && shortN ? (
+    <button onClick={onMergeShort} title="delete every chord shorter than one beat — the chord before each rings on"
+      style={{ ...chip(C), padding: "2px 10px", color: C.amber }}>⇤ Merge {shortN} chord{shortN === 1 ? "" : "s"} shorter than a beat</button>
+  ) : null;
   if (!rows.length) {
-    return scored ? <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: C.dim, marginBottom: 8 }}>{autoBtn}<span>✓ All {scored} chords decoded with confidence — none to review.</span></div> : null;
+    return scored ? <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: C.dim, marginBottom: 8 }}>{autoBtn}<span>✓ All {scored} chords decoded with confidence — none to review.</span>{mergeBtn}</div> : null;
   }
   const pending = rows.filter(({ e }) => e.ambiguous).length, autoN = rows.length - pending;
   const shown = open ? rows : rows.slice(0, 6);
@@ -5361,6 +5444,9 @@ function ChordReview({ events, C, fmt, onSeek, onCommit, auto, onAuto }) {
         <button onClick={() => setSel(allSel ? new Set() : new Set(rows.map(({ i }) => i)))} style={{ ...chip(C), padding: "2px 10px" }}>{allSel ? "☐ Clear" : "☑ Select all"}</button>
         <button onClick={() => commit([...sel])} disabled={!sel.size} style={{ ...chip(C), padding: "2px 10px", color: sel.size ? C.cyan : C.dim, opacity: sel.size ? 1 : 0.6 }}>✓ Commit selected ({sel.size})</button>
         <button onClick={() => commit(rows.map(({ i }) => i))} style={{ ...chip(C), padding: "2px 10px", color: C.green }}>✓✓ Commit all ({rows.length})</button>
+        {onRemove && <button onClick={() => onRemove([...sel])} disabled={!sel.size} title="delete the selected chords — the chord before each one rings on through its time"
+          style={{ ...chip(C), padding: "2px 10px", color: sel.size ? C.red : C.dim, opacity: sel.size ? 1 : 0.6 }}>✕ Delete selected ({sel.size})</button>}
+        {mergeBtn}
       </div>
       <div style={{ display: "grid", gap: 6 }}>
         {shown.map(({ e, i }) => {
@@ -5370,6 +5456,7 @@ function ChordReview({ events, C, fmt, onSeek, onCommit, auto, onAuto }) {
             <div key={i} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, fontSize: 12 }}>
               <input type="checkbox" checked={sel.has(i)} onChange={() => toggle(i)} aria-label={`select chord at ${fmt(e.startSec)}`} />
               <button onClick={() => onSeek(e.startSec)} title="play from here" style={{ ...chip(C), padding: "2px 8px" }}>▶ {fmt(e.startSec)}</button>
+              <span title="how long this chord lasts" style={{ fontSize: 10, color: beatSec && e.durSec < 0.95 * beatSec ? C.amber : C.dim, minWidth: 34 }}>{e.durSec < 10 ? e.durSec.toFixed(1) : Math.round(e.durSec)}s</span>
               {e.autoResolved ? <span style={{ fontSize: 9, color: C.green }}>auto</span> : null}
               {cands.map((a) => (
                 <button key={a.symbol} onClick={() => pick(i, a.symbol)} title={a.symbol === e.symbol ? `keep ${a.symbol}` : `use ${a.symbol}`}
@@ -5377,6 +5464,8 @@ function ChordReview({ events, C, fmt, onSeek, onCommit, auto, onAuto }) {
                   {a.symbol} <span style={{ fontWeight: 400, color: C.dim }}>{pct(a.prob)}</span>
                 </button>
               ))}
+              {onRemove && <button onClick={() => onRemove([i])} title="delete this chord — the chord before it rings on through its time" aria-label={`delete chord at ${fmt(e.startSec)}`}
+                style={{ ...chip(C), padding: "2px 8px", color: C.red }}>✕</button>}
             </div>
           );
         })}
