@@ -4,3 +4,6 @@ package-lock.json
 bench/.cache/
 bench/.engine*.mjs
 .engine.workbench.mjs
+bench/*.png
+bench/*.pdf
+bench/*.ttp.zip

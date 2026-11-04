@@ -3209,6 +3209,138 @@ the growing 16-bit stems). Next levers if a phone still dies there: stream finis
 splitting (the worker would no longer hold whole stems), and drop the page's own float copy of the decoded song
 during the split. **Device check remaining:** re-run Adelaide on the iPhone.
 
+## Workbench — the TTP audit work orders WO-1 … WO-7 + quick wins (2026-11-03 → 04)
+
+Source of the plan: `docs/TTP Audit & work order roadmap.md`. All seven work orders shipped in order
+(PR #134, merged 2026-11-03), the quick wins in the follow-up PR. **Every piece is additive**: with a
+feature off or given no input, the engine returns its input / its old output, so the validated corpus
+stays byte-identical. Pure logic lives in `engine.tsx` (each WO has a `WORKBENCH · WO-n` header block —
+read it before editing); browser glue in `TabDecoderPro.tsx`. **Tests:** `tests/workbench.mjs` (runs
+inside `npm test`, 191 checks) + one real-app e2e per WO (`tests/bench/*-e2e.mjs`, recipe in
+`tests/bench/README.md`). Keep `engine.txt` / `TabDecoderPro.txt` mirrored.
+
+### WO-1 — note-level correction (the ScoreEdit layer + Notes view)
+- **The parsed score is never mutated.** A correction is an op list `{ v:1, ops, groups, redo }`
+  (`EDIT_OPS`: `note.add/remove/move/dur/string/tech`, `chord.refinger`, `symbol.lock`) that
+  `applyScoreEdits(score, edit)` replays. No edit → the SAME object; untouched bars by reference.
+- **Note ids are positional** in the BASE score, `n<bar>.<tick>.<midi>` (+`.<k>` for unisons) at
+  `EDIT_PPQ` 480 per quarter — the parsers are deterministic, so a re-parse (restore, ♯♭, part switch)
+  reproduces them and the session stores bytes + ops, never the derived score. An edited event carries
+  `notes[]` so a moved note keeps its id. Re-applying an edit to its own output changes nothing.
+- The score model is harmonic, so `note.dur` is an ONSET edit (a rest opens behind it).
+- An edited onset is **re-recognised** by the engine (`symbolForMidis`) unless `symbol.lock`; a locked
+  event is `reviewed` (respell skips it) and `transposeScore` moves its TEXT (`transposeSymbol`).
+  `transposeScore` drops `notes` (positional ids don't survive a transpose).
+- Pure undo/redo (`editPush/Undo/Redo`, `isScoreEdit` guards a restore), `scoreNoteList`, `snapTicks`
+  (`EDIT_SNAPS` incl. triplets), `scoreTimeMap` (follows `score.timeline`), `noteRollSpectrogram`.
+- UI: **Notes** view (piano roll + tab grid + optional recording spectrogram on one scroller, windowed to
+  the visible bars), select/draw/erase, drag pitch/time/length/string, fret entry, techniques, auto-finger,
+  lock, shortcuts. Edits persist in the session meta, scoped to the chart they were made on.
+- Measured: 60 ops on 400 events ≈ 2 ms (apply + AlphaTex ≈ 10 ms; target < 150 ms).
+
+### WO-2 — practice
+- `timeStretchChannels`/`timeStretch`: **WSOLA** (±12 ms tolerance, coarse search on a 4× decimated
+  signal + full-rate refine; stereo shares one set of frame positions). Pitch shift = stretch by 2^(s/12)
+  + the Kaiser-sinc resampler. 0.6× and +2 st land within 0.1 ¢; 60 s of audio in ~0.8 s.
+- `loopRegion` / `clickTimes` / `renderClicks` / `clickTrackWav` on the score's own clock (tempo map +
+  recording offset); `renderScorePcm` (additive synth for charts without audio); `practiceCompare`,
+  `practiceTargets`.
+- `createLiveChordTracker`: template match on the chart vocabulary + median + **hysteresis** (2 frames,
+  a margin, ≥ 0.4 s held) + energy/flatness no-chord gate. 16/16 bars right at 100 and 140 bpm.
+- UI: ChartPanel **🎯 Practice** (A–B bars loop, 50–125 %, ±6 st, metronome, count-in, sample-exact Web
+  Audio loop, click-track WAV, Wait-for-me mic coach) and a **Live chords** mode (mic → tracker, capo
+  shapes, trainer). Real app with Chromium's fake mic reads C G Am F in order.
+
+### WO-3 — lyric alignment + chords-over-lyrics sheet
+- **Line-level, by design** (syllables aren't separable from a vocal stem without a phoneme model):
+  `voicedPhrases` (RMS vs the stem's own floor, hysteresis) → `countSyllables` (Intl.Segmenter, vowel
+  groups) → `alignLyrics` (proportional syllable model snapped to phrase starts by a monotonic DP, free
+  lines allowed, section labels as hard anchors, beat snap; no recording → spread over the bars at low
+  confidence). Every line carries a confidence and can be nudged (`nudgeLyricLine`).
+- Exporters: `lyricsToLRC`, `scoreToChordProWithLyrics` (round-trips through `parseLyrics`),
+  `scoreToLyricsSheet` / `lyricSheetRows` (chords over words, collision padding — the later chord wins).
+- `csm:lyrics:v1` gains optional `timing.lines` (CSMP Perform Lyrics can scroll on time).
+- Measured: synthetic sung stem → median line-start error within one beat; Peg vocal stem, 10 lines in
+  0.17 s in the real app.
+
+### WO-4 — instruments + arrangement levels
+- `INSTRUMENTS` (guitar, uke GCEA re-entrant, baritone, mandolin GDAE, 4/5-string bass, piano).
+  `fretVoicings`: generic N-string grip enumerator, **hand span is a HARD constraint**, capo, required-tone
+  shedding on 4 strings (5th, then root → rootless), bass double-stops, a marked one-fret stretch fallback.
+  `pianoVoicings`: close + inversions, shells (R–7–3 split across hands when wider than a 9th), rootless
+  A/B **only when a 9th is written**, spread, two hands, each hand ≤ a 9th, ranked by
+  `voiceLeadingDistance`. `assignChordFingers` / `voicingToSVGuitar` take N strings (6-string output
+  unchanged) + left-handed mirroring.
+- `arrangementLevels(score, "beginner"|"intermediate"|"advanced")`: beginner = one chord/bar, triads,
+  quarters, nearest open-chord key at or below + a capo hint (key read from the ORIGINAL score, not the
+  simplified melody); intermediate = 7ths + inversions, eighths; advanced = as written. Non-mutating, stable.
+- Coverage: every quality × 3 roots ≥ 6 shapes on uke/mandolin/baritone/bass and piano — **except
+  baritone dim7 = 5** (symmetric chord; documented, not a bug).
+
+### WO-5 — drum + piano notation, all-parts deliverables
+- `transcribeDrums(…, { kit:"full" })`: the validated 3-NMF still finds the onsets (default path
+  unchanged); `_classifyFullKit` then classifies each from the signal around it — body pitch + pitch drop,
+  broadband share, high-band decay above the pre-onset level (open-hat vs crash boundary 1.9 dB), ride
+  peakiness (> 22) — into kick / snare / closed + open hat / crash / ride / 3 toms, with tom re-trigger and
+  stick-click rejection. Rim-shot / clap read as snare (honest limit).
+- `drumHitsToMusicXML` (percussion clef, hands up / feet down, GM `<midi-unpitched>`, x / circle-x heads),
+  `drumHitsToAsciiTab`, `drumKitToMidi`; `drumPattern` adds rows only for pieces that occur.
+- `pianoScoreFromNotes` (2-means hinge pulled toward C4; a too-wide chord spills to the other hand) +
+  `scoreToPianoMusicXML` (one part, grand staff).
+- `partsZip` adds drum `.musicxml`/`.txt`, a piano `_grand-staff.musicxml`, and merges the drums into
+  `full_score.musicxml`; `parseScoreZip` prefers `full_score.musicxml`.
+- Measured on a rendered 9-piece kit (4 seeds × 44.1/48 kHz): every class F1 ≥ 0.88 — **synthetic, the
+  same kit tuned and scored, so optimistic**. Real-drum calibration is still open.
+
+### WO-6 — library, setlists, bundles, print, share
+- Pure: `makeProjectRecord` / `isProjectRecord` (`PROJECT_SCHEMA` 1), `searchProjects` (every word,
+  accent-folded, tags; 200 projects ≪ 1 ms), setlist ops, `exportProjectBundle` / `importProjectBundle`
+  (STORED zip: `ttp-project.json` + source + `edits.json`).
+- Glue: IndexedDB `ttp-projects` (`projects`, `setlists`, `files`) with source bytes in OPFS
+  `projects/<id>.bin` (IndexedDB fallback). Every opened file joins the library automatically and follows
+  its session meta; opening one replays the validated restore path. Setlists with per-song
+  transpose/capo and Play set (Prev / Next).
+- **Print / PDF**: a light `PrintSheet` (header, chords used as diagrams, chart / grid / lyrics; the tab
+  prints its own alphaTab pages), A4 / Letter, `:has()` print CSS. **Load-bearing:** the page declares
+  `color-scheme: dark`, which made the PRINT canvas (margins) dark — printing sets
+  `html.style.colorScheme = "light"` + white backgrounds and restores afterwards. Exports can go to the
+  share sheet (`navigator.share`, download fallback).
+
+### WO-7 — techniques from audio + tuning / capo
+- `pitchTrack`: normalised squared difference over only the lags within ±7 st of each transcribed note
+  (cheap on a whole solo). `detectGuitarTechniques` on the guitar model's single-line notes — bend (rises
+  ≥ 0.9 st ABOVE the note; a slide's destination is not a bend), vibrato (4–8.5 Hz, ≥ 20 ¢, ≥ 150 ms), slide vs
+  hammer/pull (no new attack; glide vs jump), ghost (checked first: < 0.3 of the line's median peak and < 0.25 s),
+  palm mute (≥ 0.18 s, centroid < 3.2 × f0, RMS down to < 0.25 within 140 ms). Chords untouched. Harmonics not detected.
+- Techniques ride per pitch (`ntech`) through `polyNotesToScore` → `audioEventsToScore`; `fingerScore`
+  files them under each pitch's string, so AlphaTex writes them. Absent → scores unchanged.
+- `detectTuningAndCapo`: tuning via the validated "standard can't play these" gate; **capo only past
+  thresholds measured at ≤ 0.5 % false positives** (`minOpenGain 0.25, minOpenShare 0.35, minCostGain
+  1.0`) — and that finds only ~2 % of simulated capo parts: **from pitches a capo is almost
+  indistinguishable from a transposition** (open-string share tracks the key). Suggest + Apply/Undo, never
+  auto-apply. Don't loosen the thresholds without real capo recordings.
+- Measured: rendered phrase with 8 techniques + negatives → 8/8, 0 false at 20 dB SNR; real app with the
+  real CRNN → all 17 notes, one extra bend.
+
+### Quick wins (follow-up PR)
+- **Chord edits follow the transpose.** `overrides` are stored in the UNTRANSPOSED key; ChartPanel shows,
+  exports, prints and hands off `ovT` (transposed via `transposeSymbol`) and writes back through
+  `setOverridesT` (transposed back). Before, an `A7` edit still read `A7` at +2. Persisted meta unchanged.
+  ⚠ `ovT` is declared ABOVE `chordSeq` — `chordSeq`'s memo calls `symOfRaw` → `ovT`, and a later
+  `const` is a temporal-dead-zone crash that blanked every chart. Keep the order.
+- **Nashville numbers**: the numerals toggle cycles `I·V·vi` → `1·5·6m` → off; `nashvilleFor(symbol, key)`
+  (minor keys count from their own tonic; the suffix is read from the symbol so `6/9` survives).
+- **⧉ Image**: `scoreToGridSVG(score, opts)` (pure, light theme, no external fonts) → canvas at 2× → PNG on
+  the clipboard (`ClipboardItem`), else the share sheet / a download.
+- Already in WO-1: 390 px overflow (`minmax(0,1fr)` + `minWidth:0`, wrapping mode tabs).
+- e2e: `bench/quickwins-e2e.mjs` (edit A7 → B7 at +2 → A7 at 0; I·V·vi → Nashville → off; 1760-px PNG on
+  the clipboard; no console errors).
+
+### Honest limits / device checks remaining
+Mic (Live chords, Wait-for-me), Web Audio practice loop, print-to-PDF on iOS, `navigator.share`,
+clipboard images and IndexedDB/OPFS quotas are device-only — smoke-test on a real iPhone/iPad. Drum
+classification and technique detection are validated on rendered audio only; lyric alignment is line-level.
+
 ## Path B (scans / photos) — OUT OF SCOPE
 
 Raster tab (a photo or scanned page) has no text layer and needs an OMR/Vision
@@ -3408,6 +3540,12 @@ accordingly.
   `partsZip` file list, a well-formed multi-part `full_score.musicxml` that re-imports, format-1
   `score.mid` with the kick on ch. 10; `scoreRecordingTimes`; the beat model's SHA-256 pin = the committed
   file, NOTICE, glue / worker / loader / pages.yml contracts, and the UI wiring.
+- **Workbench WO-1 … WO-7 + quick wins** (`tests/workbench.mjs`, inside `npm test`): edit layer
+  (passthrough identity, positional ids, idempotence, re-recognition, lock, undo/redo), WSOLA pitch/
+  duration, live-chord hysteresis, lyric alignment + exporters, N-string / piano voicing coverage,
+  arrangement levels, full-kit drums + drum/piano MusicXML, project records / setlists / bundles,
+  techniques + tuning/capo gates, Nashville + grid SVG, plus UI contract guards. Real-app checks:
+  `tests/bench/*-e2e.mjs` (see "Workbench" above).
 - **Lyrics import (`parseLyrics`)**: `npm test` asserts the strict chord matcher accepts
   real chords and rejects note-letter lyric words (Add/Cab/Bad/Fed/Gem/Bee/Ace), the
   line-level `isChordLine` catches chord lines but spares lyric/blank lines, a full
@@ -3479,6 +3617,9 @@ contract). Build strictly in this order; each wave depends on the prior.
     a live tuner/listen UI (device-only).
 12. **Practice mode** — match mic input against known expected chords (reuses #11).
 13. **AI arrangement** — optional upgrade over #8.
+
+**Workbench (2026-11-03/04):** the TTP audit work orders WO-1 … WO-7 + quick wins are built — see
+"Workbench" above. Wave 1 #4 (OPFS handoff) / #5 (Service Worker) and Wave 3 #10 ONNX swap remain open.
 
 **Wave 4 — Visionary:** system-audio/polyphonic capture → Path B OMR (keep
 SEPARATE from Path A) → WebRTC collab → live Web MIDI / DAW I/O.

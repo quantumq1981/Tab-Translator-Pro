@@ -197,3 +197,25 @@ screenshots and lists which alphaTab files loaded and any failed requests.
 ```sh
 node bench/tab-view-e2e.mjs --deps $D/out [--gp blue-sky.gp] [--tex saved.alphatex] [--ua "<UA>"] [--width 390 --height 844] [--out <dir>]
 ```
+
+## Workbench e2e — the work orders in the real app (2026-11-04)
+
+One shared harness, `e2e-app.mjs` (`startApp({ deps, width, height, context })`): it serves the repo,
+boots the real app in headless Chromium with React + Babel from `--deps` (the bundle above), routes
+the boot CDNs locally (the blanket abort route is registered FIRST — in Playwright the route
+registered later wins), and collects console errors. Each script prints `OK`/`FAIL` per step and
+exits non-zero on a failure.
+
+```sh
+node bench/note-editor-e2e.mjs --deps $D/out   # WO-1 Notes view: nudge, drag, re-string, undo/redo, export, reload
+node bench/practice-e2e.mjs    --deps $D/out   # WO-2 loop / speed / metronome, Live chords via Chromium's fake mic
+node bench/lyrics-e2e.mjs      --deps $D/out   # WO-3 Lyrics view: align, nudge, LRC / ChordPro / TXT, timed handoff
+node bench/instruments-e2e.mjs --deps $D/out   # WO-4 uke / mandolin / bass / piano voicings, left-handed, capo, levels
+node bench/drums-e2e.mjs       --deps $D/out   # WO-5 full-kit drums (rendered kit), drum MusicXML / tab, piano staff
+node bench/library-e2e.mjs     --deps $D/out   # WO-6 library, search, setlists, bundles, print, IndexedDB reload
+node bench/techniques-e2e.mjs  --deps $D/out   # WO-7 techniques on the guitar line, tuning / capo suggestions
+node bench/quickwins-e2e.mjs   --deps $D/out   # edits follow transpose, Nashville numbers, ⧉ Image (clipboard PNG)
+```
+
+`drums-e2e.mjs` and `techniques-e2e.mjs` take their rendered audio (`renderKit`, `renderLine`) and
+their F1 from `tests/workbench.mjs`, so the browser run and the headless test score the same signal.

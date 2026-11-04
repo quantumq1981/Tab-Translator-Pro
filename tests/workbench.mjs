@@ -721,5 +721,25 @@ function renderLine(sr, seed = 3) {
   expect(/Apply/.test(uiSrc) && /gtrTechOn/.test(uiSrc), "technique detection is a toggle; tuning / capo suggestions apply on a tap");
 }
 
+/* ============================================================================
+ *  Quick wins
+ * ========================================================================== */
+section("quick wins");
+{
+  const C = { tonic: 0, mode: "major" }, Am = { tonic: 9, mode: "minor" };
+  const nn = (s, k) => eng.nashvilleFor(s, k);
+  expect(J(["C", "Dm7", "G7", "F/A", "Bb", "Bm7♭5", "C6/9", "Fmaj7", "Ab", "E7"].map((s) => nn(s, C))) === J(["1", "2m7", "57", "4/6", "b7", "7ø7", "16/9", "4maj7", "b6", "37"]),
+    `Nashville in C: ${["C", "Dm7", "G7", "F/A", "Bb", "Bm7♭5", "C6/9", "Fmaj7", "Ab", "E7"].map((s) => nn(s, C)).join(" ")}`);
+  expect(J(["Am", "C", "G", "E7", "Dm7"].map((s) => nn(s, Am))) === J(["1m", "3", "7", "57", "4m7"]) && nn("N.C.", C) === "N.C." && nn("C", null) === "C", "Nashville in A minor counts from its own tonic; no chord / no key → as written");
+  const sc = { timeSig: [4, 4], bars: [1, 2, 3, 4, 5].map((n) => ({ number: n, timeSig: [4, 4], section: n === 1 ? "Intro" : undefined, events: [{ symbol: n === 3 ? "G" : "C", beat: 0, durBeats: 2 }, { symbol: n === 3 ? "Am" : "C", beat: 2, durBeats: 2 }] })) };
+  const svg = eng.scoreToGridSVG(sc, { title: "Test & Co", subtitle: "key C", overrides: { "5.0": "F" } });
+  const d = new DOMParser().parseFromString(svg, "image/svg+xml");
+  const texts = Array.from(d.getElementsByTagName("text")).map((x) => x.textContent);
+  expect(d.getElementsByTagName("parsererror").length === 0 && texts.includes("Test & Co") && texts.includes("Intro") && texts.includes("Am") && texts.includes("F") && texts.filter((t) => t === "C").length === 4, "scoreToGridSVG: a well-formed SVG grid with the title, sections, every chord and the edits");
+  expect(/const copyImage = async/.test(uiSrc) && /ClipboardItem/.test(uiSrc) && /scoreToGridSVG\(/.test(uiSrc), "⧉ Image copies the chart as a PNG (clipboard, share or download)");
+  expect(/nashvilleFor\(cur, musicKey\)/.test(uiSrc) && /1·5·6m/.test(uiSrc), "the numerals toggle has a Nashville state");
+  expect(/const ovT = useMemo/.test(uiSrc) && /overrides: ovT/.test(uiSrc) && /transposeSymbol\(v, -semis, useSharp\)/.test(uiSrc), "chord edits transpose with the chart (stored untransposed)");
+}
+
 console.log(`\nworkbench: ${passes} passed, ${failures} failed`);
 if (failures) process.exit(1);
