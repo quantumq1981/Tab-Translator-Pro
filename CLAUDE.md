@@ -22,7 +22,7 @@ The family is **recognize → normalize → finish**:
 
 **Shared rails:**
 - **CSMPN** (Chord Sheet Maker Pro Notation) is the canonical interchange text; ChordPro / MusicXML / CSML ride alongside.
-- **Same-origin localStorage handoff** — forward `csm:handoff:v1` (→ Pro, `?import=handoff`) and reverse `ttp:decode:v1` (→ Tab Translator, `?import=decode`). Versioned; any same-origin sender interoperable. Canonical spec: `chord-sheet-maker/docs/HANDOFF-CONTRACT.md` (up to date as of 2026-10-26: `parts[]`, `Tempo Map:`, `csm:lyrics:v1`).
+- **Same-origin localStorage handoff** — forward `csm:handoff:v1` (→ Pro, `?import=handoff`) and reverse `ttp:decode:v1` (→ Tab Translator, `?import=decode`, optional `intent: "link"` = open the score ready to link a recording). Versioned; any same-origin sender interoperable. Canonical spec: `chord-sheet-maker/docs/HANDOFF-CONTRACT.md` (up to date as of 2026-10-26: `parts[]`, `Tempo Map:`, `csm:lyrics:v1`).
 - All three are **client-side, iOS-Safari-first, zero-server** static web apps on GitHub Pages.
 
 **This repo is the family's recognition front-end (the "recognize" stage).**
@@ -3419,6 +3419,47 @@ Tests: `tests/chord-reading.mjs` (in `npm test`). Benches: `rhythm-key.mjs`, `fu
 (the real app on a G-major full mix: banner, key re-decode 2 → 0 out-of-key chords, chart key picker → decode,
 ≥1 bar 49 → 30 chords, delete 8 → 7, merge 7 → 5, no overflow at 390 px). Device check remaining: the owner's
 own recording on the iPad.
+
+## Score ↔ recording link — notation and audio read together (2026-11-06)
+
+**The ask:** the notation paths (C–G) and the audio tools had no connection; a recording plus an accurate
+MusicXML / Guitar Pro file should give a better chart than either. Full write-up + every number:
+**`docs/SCORE-AUDIO-LINK.md`**. Engine block "SCORE ↔ RECORDING LINK" (pure, worker-safe); UI
+`ScoreLinkPanel` in the Audio panel. Guards: `tests/score-link.mjs` (in `npm test`). Benches:
+`bench/scorelink.mjs`, `bench/link-real.mjs`, `bench/link-e2e.mjs`.
+
+- **Link** (`linkScoreToAudio`): every part parsed once (`scoreLinkParts`: drum kits out — parsers now
+  flag them: GP7/8 `InstrumentSet` drumKit, GP6 `<Instrument ref="drmkt">`, GP3/4/5 track flag 0x01;
+  chordal parts weigh 1, single lines 0.35). **Beat-level semi-global DTW** (`linkBeatDTW`, one beat
+  per step — a frame-level DTW drifted to 160 bpm through the Jarreau outro; beat-level reads 78–81).
+  Candidate grids: tracker beats rescaled to the score quarter (×½ ⅔ 1 1.5 2, all phases) + a uniform
+  grid at the score's ♩; 3 best transpositions; **lowest total path cost wins** (not best similarity —
+  a tracker reading 130 for a 124 song matched better per step and drifted two bars). Then
+  `_linkRefine` (0.1 s frames, ±1 quarter band) and snap to a tracked beat within 120 ms.
+- **Chords** (`analyzeAudioWithScore`): v2 on the score's beats with `opts.scorePrior` →
+  `_scorePriorBonus`: the score's chroma per segment (`scoreLinkPriorGrid` — COMPING parts only, a
+  lead line's D over Cm7 read Ebmaj7; bass = lowest instrumental note; **let-ring carry** so an
+  arpeggio reads its chord) named by the **recognition oracle** (template cosine can't tell B♭m7 from
+  D♭6 — the oracle took the score's own reading from 85.6 → 92 % on the first bench), that state +
+  `scoreWeight`, others 70 % of their relative match. Disagreements → review list, score's chord first
+  (`fromScore`, "📄 score"). Without `scorePrior` the decoder is byte-identical (pinned tests unchanged).
+- **Chart** (`linkedChartScore`): the score's bars (`unrollRepeatOrder`: |: :| twice, 1st/2nd endings),
+  sections, `audioOffset`, tempo map = fewest bar-line changes within 100 ms, timeline.
+- **Weights** (`LINK_FOLLOW`, per device `ttp:linkFollow`): Recording 0.15 · **Balanced 0.3** · Score 1.
+  Held-out bench: audio alone 75.3 → exact score 83.0; 20 %-wrong score 80.1 (copied blindly 67.4);
+  40 %-wrong 78.7. Real record (Al Jarreau MP3 + GP7) vs its own score: audio alone 60 % root →
+  Balanced 92 % → Score 98 %; match 0.75 vs 0.58 wrong key; ♩≈79 vs 80.
+- **UI:** Audio panel 📎 Link a score (no `accept`) / "Use <open score>"; MusicXML/GP panel
+  **🎧 Link a recording →** (`scoreFile` + `linkAsk` lifted to the parent; `_linkAskSeen` because the
+  Audio panel remounts on every mode switch). `analyzeWithScoreOffThread` (worker, main-thread
+  fallback). Reverse handoff `ttp:decode:v1` gained optional **`intent: "link"`** (senders: Chord Sheet
+  Maker Pro import menu, chord-sheet-maker "Link a recording ↗"); contract in
+  `chord-sheet-maker/docs/HANDOFF-CONTRACT.md`.
+- **Also:** Harmony (all parts) now works for GP / GPX / Power Tab (`_harmonyOfParts`; the chip shows
+  for every multi-part format).
+- **Limits:** monotonic alignment (no D.S./extra-chorus jumps); a very wrong ♩ marking relies on the
+  tracker grids; bleed still costs ~5 points; beats×beats DTW capped at 6 M cells. Device check: the
+  real phone flow (decode + link of a 4-min song ≈ 2–3 s here).
 
 ## Path B (scans / photos) — OUT OF SCOPE
 

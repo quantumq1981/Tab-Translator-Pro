@@ -8,3 +8,6 @@ bench/*.png
 bench/*.pdf
 bench/*.ttp.zip
 .engine.chordreading.mjs
+bench/.cache-link/
+bench/_scratch/
+.engine.scorelink.mjs
