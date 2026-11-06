@@ -237,3 +237,18 @@ node bench/reading-e2e.mjs --deps <dir>                                 # the re
   the notated chords — what a player who knows the song would type in.
 - `reading-e2e.mjs` — weak-evidence banner, Song key (prefer / only key chords), the chart's key picker
   driving the decode, chord-change length, review-list delete and merge, no overflow at 390 px.
+
+## Score ↔ recording link (2026-11-06)
+
+Notation + audio read together — design and numbers in `docs/SCORE-AUDIO-LINK.md`.
+
+```sh
+node bench/scorelink.mjs --split dev|test [--weights 0.15,0.3,0.6] [--conds clean,noise,bleed]   # synthetic, tempo-warped, known truth
+node bench/link-real.mjs --score song.gp --audio song.mp3                                        # a real record vs its own score (ffmpeg decode)
+node bench/link-e2e.mjs --deps $D/out --score song.gp --audio song.mp3                           # the real app: Link a recording → linked chart → review → unlink, + intent "link"
+```
+
+`scorelink.mjs` renders each corpus comp part with a tempo warp the score doesn't know (±6 % sine,
+one bar 20 % slower), 60 s from the first chord (cached in `bench/.cache-link`), and links the
+unwarped score (±2 bars of slack): exact, 20 % / 40 % of bars wrong, a wrong file copied blindly,
+the score written 3 semitones up. `--engine <path>` benches a frozen copy of the engine.

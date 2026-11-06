@@ -259,6 +259,9 @@ import {
   voicingToSVGuitar,
   chordSubstitutions,
   HARMONY_PART,
+  analyzeAudioWithScore,
+  linkedChartScore,
+  SCORE_LINK,
   parseMidiFile,
   spellScoreForKey,
   keyNameForKey,
@@ -530,6 +533,28 @@ async function analyzeChordsOffThread(samples, sr, opts = {}) {
   try { return await _engineRPC("analyzeAudioChords", [samples, sr, opts]); }
   catch (_) { return analyzeAudioChords(samples, sr, opts); }
 }
+/* A recording read WITH its score (link + score-informed chords) off-thread, main-thread
+ * fallback. partScores are plain score objects (the parser's re-parse buffers stripped). */
+async function analyzeWithScoreOffThread(samples, sr, partScores, opts = {}) {
+  try { return await _engineRPC("analyzeAudioWithScore", [samples, sr, partScores, opts]); }
+  catch (_) { return analyzeAudioWithScore(samples, sr, partScores, opts); }
+}
+/* Every part of a score file, parsed once each — what a recording is linked against. MusicXML
+ * needs DOMParser (main thread); the engine's one parser handles every format. */
+async function scorePartsFromBytes(bytes, name, sharp) {
+  const first = await parseScoreOffThread(bytes, name, sharp);
+  const strip = (sc) => ({ source: sc.source, timeSig: sc.timeSig, tempo: sc.tempo, tuningMidi: sc.tuningMidi, bars: sc.bars });
+  const parts = first.parts && first.parts.length ? first.parts : [{ index: 0, name: name }];
+  const out = [];
+  for (const p of parts) {
+    let sc = first;
+    if (first.parts && first.parts.length > 1 && p.index !== first.partIndex) {
+      try { sc = await parseGuitarProOrXML(bytes, name, sharp, p.index); } catch (_) { continue; }
+    }
+    out.push({ score: strip(sc), name: p.name || "", drum: !!p.drum });
+  }
+  return { parts: out, tempo: first.tempo || null, title: name, bars: first.bars ? first.bars.length : 0 };
+}
 /* Anti-aliased (Kaiser-windowed sinc) resampling off-thread, main-thread fallback. The
  * decode used to box-average down to the analysis rate, which lets cymbal/hat energy
  * above the new Nyquist fold straight into the chroma band. */
@@ -607,6 +632,11 @@ export default function TabDecoderPro() {
   const [xmlScore, setXmlScore] = useState(null);
   const [xmlErr, setXmlErr] = useState("");
   const [xmlName, setXmlName] = useState("");
+  /* The score file open in the MusicXML / GP / Power Tab panel ({ name, bytes }), so the Audio panel
+   * can LINK a recording to it (📎 Link a score) — notation and audio read together. `linkAsk`
+   * counts taps on "🎧 Link a recording" there: it opens the Audio panel ready to link. */
+  const [scoreFile, setScoreFile] = useState(null);
+  const [linkAsk, setLinkAsk] = useState(0);
   const [xmlBusy, setXmlBusy] = useState(false); // parsing GP/MusicXML (may be off-thread)
   const [restored, setRestored] = useState(false); // showing a restored-from-cache session
   const fileRef = useRef(null);
@@ -688,7 +718,7 @@ export default function TabDecoderPro() {
       }
       const sc = await parseScoreOffThread(bytes, f.name, useSharp); // MusicXML / GP3-8 auto-detect (binary GP/PTB off-thread)
       if (!sc.bars.length) setXmlErr("No measures found. Is this a MusicXML score or a Guitar Pro file?");
-      setXmlScore(sc); setXmlName(f.name);
+      setXmlScore(sc); setXmlName(f.name); setScoreFile({ name: f.name, bytes });
       setRestored(false);
       saveSessionFile(bytes); // meta is written by the persist effect
       setPlaySet(null); rememberProject({ kind: "xml", filename: f.name, bytes, bars: sc.bars.length, bpm: sc.tempo, keyLabel: keyLabelOf(sc) });
@@ -724,7 +754,9 @@ export default function TabDecoderPro() {
       if (!env || env.v !== 1 || !env.b64) return;
       const bin = atob(env.b64), bytes = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      decodeRef.current = { bytes, filename: env.filename || "decoded tab" };
+      // intent "link" (optional, additive): the sender wants a RECORDING linked to this score —
+      // open the score, then the Audio panel with it attached (📎 Link a score)
+      decodeRef.current = { bytes, filename: env.filename || "decoded tab", intent: env.intent === "link" ? "link" : null };
       setDecodeReq((n) => n + 1);
     } catch (err) { console.warn("decode handoff skipped:", err); }
   }, []);
@@ -751,6 +783,8 @@ export default function TabDecoderPro() {
           const sc = await parseScoreOffThread(d.bytes, d.filename, useSharp);
           if (!sc.bars.length) setXmlErr("No measures found. Is this a MusicXML score or a Guitar Pro file?");
           setXmlScore(sc); setXmlName(d.filename);
+          setScoreFile({ name: d.filename, bytes: new Uint8Array(d.bytes.slice(0)) });
+          if (d.intent === "link" && sc.bars.length) { setLinkAsk((n) => n + 1); setMode("audio"); }
         } catch (err) { setXmlErr("Parse failed: " + (err && err.message ? err.message : String(err))); }
         finally { setXmlBusy(false); }
       }
@@ -1025,7 +1059,7 @@ export default function TabDecoderPro() {
             <button onClick={() => setPlaySet(null)} style={{ ...toggle(C), flex: "none", padding: "3px 10px" }}>✕</button>
           </div>
         )}
-        {mode === "library" ? <LibraryPanel C={C} onOpen={openProject} currentId={projectId} /> : mode === "tuner" ? <LiveTuner C={C} useSharp={useSharp} /> : mode === "live" ? <LiveChords C={C} useSharp={useSharp} /> : mode === "lyrics" ? <LyricsPanel C={C} /> : mode === "audio" ? <AudioImport C={C} useSharp={useSharp} incoming={audioIncoming} onLoaded={(f, bytes, dur) => { if (!audioIncoming || audioIncoming.name !== f.name) rememberProject({ kind: "audio", filename: f.name, bytes, duration: dur }); }} /> : (
+        {mode === "library" ? <LibraryPanel C={C} onOpen={openProject} currentId={projectId} /> : mode === "tuner" ? <LiveTuner C={C} useSharp={useSharp} /> : mode === "live" ? <LiveChords C={C} useSharp={useSharp} /> : mode === "lyrics" ? <LyricsPanel C={C} /> : mode === "audio" ? <AudioImport C={C} useSharp={useSharp} incoming={audioIncoming} scoreFile={scoreFile} linkAsk={linkAsk} onLoaded={(f, bytes, dur) => { if (!audioIncoming || audioIncoming.name !== f.name) rememberProject({ kind: "audio", filename: f.name, bytes, duration: dur }); }} /> : (
         <div className={"tdp-cols" + (mode === "manual" ? " manual" : "")} style={{ position: "relative" }}>
           <section className="panel-rise" style={{ animationDelay: ".05s", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
             {mode === "manual" ? (
@@ -1119,7 +1153,7 @@ export default function TabDecoderPro() {
                 {xmlScore && xmlScore.parts && xmlScore.parts.length > 1 && (
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginTop: 12 }}>
                     <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim }}>PART</span>
-                    {(xmlScore.source === "musicxml" || xmlScore.source === "midi") && (
+                    {(
                       <button onClick={() => selectPart(HARMONY_PART)} title={`read every pitched part together (voices and drums left out)${xmlScore.merged && xmlScore.mergedParts ? ": " + xmlScore.mergedParts.join(", ") : ""}`}
                         style={{ ...chip(C), padding: "3px 9px", borderColor: xmlScore.partIndex === HARMONY_PART ? C.amber : C.border, color: xmlScore.partIndex === HARMONY_PART ? C.amber : C.dim }}>Harmony (all pitched parts)</button>
                     )}
@@ -1127,6 +1161,14 @@ export default function TabDecoderPro() {
                       <button key={p.index} onClick={() => selectPart(p.index)} title={`chart the "${p.name}" part`}
                         style={{ ...chip(C), padding: "3px 9px", borderColor: xmlScore.partIndex === p.index ? C.amber : C.border, color: xmlScore.partIndex === p.index ? C.amber : C.dim }}>{p.name}</button>
                     ))}
+                  </div>
+                )}
+                {xmlScore && scoreFile && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginTop: 10, fontSize: 11, color: C.dim }}>
+                    <button onClick={() => { setLinkAsk((n) => n + 1); setMode("audio"); }}
+                      title="have a recording of this song? link it to this score: the chords are read from the recording WITH the score as evidence, the bars follow the recording's tempo, and every place they disagree is listed"
+                      style={{ ...chip(C), padding: "4px 12px", borderColor: C.cyan, color: C.cyan }}>🎧 Link a recording →</button>
+                    <span>score + audio: the recording's timing, the score's harmony, the differences listed</span>
                   </div>
                 )}
                 {texDoc && !xmlScore && (
@@ -4175,7 +4217,70 @@ function CheckByEar({ C, score, getBuffer, onStart }) {
  * HONEST: works on a CLEAN ISOLATED stem (one instrument) — a full mix won't
  * recognise reliably. Can't be headless-tested (decode + playback) — device only;
  * the analysis engine under it is unit-tested. */
-function AudioImport({ C, useSharp, incoming, onLoaded }) {
+/* How far a LINKED score steers the chords (scoreWeight, see engine SCORE_LINK / _scorePriorBonus).
+ * Measured on the corpus bench (tests/bench/scorelink.mjs, docs/SCORE-AUDIO-LINK.md): "balanced"
+ * is the default — near the score when the file is right, and it still beats copying the file when
+ * a fifth of its bars are wrong; "score" trusts the file (a transcription you know is accurate);
+ * "recording" lets the audio overrule more (a live version, a different arrangement). */
+const LINK_FOLLOW = {
+  recording: { label: "Recording", w: 0.15, tip: "the recording decides; the score only tips close calls — a live take, a different arrangement" },
+  balanced: { label: "Balanced", w: 0.3, tip: "the score's harmony unless the recording clearly plays something else (default)" },
+  score: { label: "Score", w: 1, tip: "trust the file — an accurate transcription; the recording supplies the timing" },
+};
+function useLinkFollow() { return _usePref("ttp:linkFollow", "balanced", (x) => !!LINK_FOLLOW[x]); }
+let _linkAskSeen = 0;   // "🎧 Link a recording" taps already acted on (the Audio panel remounts on every mode switch)
+
+/* 📎 LINK A SCORE — the bridge between the notation paths (MusicXML · Guitar Pro · Power Tab ·
+ * MIDI) and the audio tools. Pure presentational: the controller is AudioImport. */
+function ScoreLinkPanel({ C, file, res, busy, follow, onFollow, onPick, openName, onUseOpen, onUnlink, onForce, fmt, hasAudio }) {
+  const lk = res && res.link;
+  const bars = lk && lk.bars ? lk.bars.filter((b) => b.matched) : [];
+  const pct = (x) => `${Math.round(100 * (x || 0))}%`;
+  return (
+    <div style={{ marginBottom: 14, border: `1px solid ${file ? C.cyan : C.border}`, borderRadius: 10, padding: "10px 12px", background: C.raised, fontSize: 11, lineHeight: 1.6 }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+        <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim }}>SCORE</span>
+        {/* No `accept` filter — iOS greys out .gp/.gpx/.ptb (no UTI); the engine detects the format from the bytes. */}
+        <label style={{ ...chip(C), padding: "4px 12px", cursor: busy ? "default" : "pointer", borderColor: file ? C.border : C.cyan, color: file ? C.dim : C.cyan }}>
+          📎 {file ? "Link another score" : "Link a score"}
+          <input type="file" onChange={onPick} disabled={busy} style={{ display: "none" }} />
+        </label>
+        {openName && (!file || file.name !== openName) && (
+          <button onClick={onUseOpen} disabled={busy} title="link the score open in the MusicXML / Guitar Pro / Power Tab panel"
+            style={{ ...chip(C), padding: "4px 12px", borderColor: C.cyan, color: C.cyan }}>Use “{openName.length > 28 ? openName.slice(0, 26) + "…" : openName}”</button>
+        )}
+        {file && <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }} title="how far the score steers the chords">
+          <span style={{ color: C.dim }}>Chords follow:</span>
+          {Object.entries(LINK_FOLLOW).map(([k, v]) => (
+            <button key={k} onClick={() => onFollow(k)} disabled={busy} title={v.tip}
+              style={{ ...chip(C), padding: "3px 8px", borderColor: follow === k ? C.cyan : C.border, color: follow === k ? C.cyan : C.dim }}>{v.label}</button>
+          ))}
+        </span>}
+        {file && <button onClick={onUnlink} disabled={busy} style={{ ...chip(C), padding: "3px 8px", color: C.dim }}>✕ Unlink</button>}
+      </div>
+      {!file && <div style={{ color: C.dim, marginTop: 6 }}>Have a <b>MusicXML / Guitar Pro / Power Tab / MIDI</b> file of this song? Link it: the chords are read from the recording <b>with the score as evidence</b>, the bars become the score's bars on the recording's own tempo (rubato included), the score's sections come along, and every place the recording plays something else is listed for review.</div>}
+      {file && !lk && <div style={{ color: C.dim, marginTop: 6 }}>📄 <b style={{ color: C.text }}>{file.name}</b> · {file.parts.length} part{file.parts.length === 1 ? "" : "s"} · {file.bars} bars{file.tempo ? ` · ♩=${file.tempo}` : ""} — {hasAudio ? (busy ? "linking…" : "ready") : "upload the recording above to link it"}.</div>}
+      {lk && !lk.ok && <div style={{ color: C.amber, marginTop: 6 }}>⚠ Couldn't link {file ? file.name : "the score"}: {lk.reason}</div>}
+      {lk && lk.ok && res.failed && (
+        <div style={{ color: C.amber, marginTop: 6 }}>⚠ <b>Weak match</b> ({pct(lk.confidence)}{lk.runnerUp ? `; next best key ${pct(lk.runnerUp.confidence)}` : ""}) — is this the same song and arrangement? The chart below is the <b>recording alone</b>.
+          {" "}<button onClick={onForce} style={{ ...chip(C), padding: "1px 8px", borderColor: C.amber, color: C.amber }}>Link anyway</button></div>
+      )}
+      {lk && lk.ok && !res.failed && (
+        <div style={{ marginTop: 6, color: C.dim }}>
+          📄 <b style={{ color: C.text }}>{file && file.name}</b> linked — score bars {bars.length ? `${bars[0].index + 1}–${bars[bars.length - 1].index + 1}` : "–"} ↔ {fmt(lk.coverage.audioFrom)}–{fmt(lk.coverage.audioTo)} of the recording · ♩≈<b style={{ color: C.amber }}>{Math.round(lk.tempo)}</b>{lk.scoreTempo ? ` (score says ${lk.scoreTempo})` : ""}
+          {" · "}{lk.transpose ? <b style={{ color: C.amber }}>recording is {lk.transpose > 0 ? "+" : ""}{lk.transpose} semitone{Math.abs(lk.transpose) === 1 ? "" : "s"} from the score (capo / transposed file) — the chart is in the recording's key</b> : "same key"}
+          {" · "}match <b style={{ color: C.green }}>{pct(lk.confidence)}</b>{lk.runnerUp ? <span title="similarity at the best WRONG transposition — the gap is how sure the link is"> (next best key {pct(lk.runnerUp.confidence)})</span> : null}
+          {res.agreement != null && <>
+            <br />The recording agrees with the score <b style={{ color: C.green }}>{pct(res.agreement)}</b> of the time{res.disagreements ? <> — <b style={{ color: C.amber }}>{res.disagreements}</b> chord{res.disagreements === 1 ? "" : "s"} differ: they're in the review list with the score's chord one tap away.</> : "."}
+          </>}
+          <br /><span>Bars, tempo map and sections come from the score; <b>Tempo &amp; bars</b> applies to Voices (ML) / Guitar → Tab.</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -4213,6 +4318,12 @@ function AudioImport({ C, useSharp, incoming, onLoaded }) {
   const [changes, setChanges] = useChordChanges();
   const readRef = useRef({ songKey: "", keyUse, changes });
   readRef.current = { songKey, keyUse, changes };
+  // 📎 a linked score: { name, parts:[{score,name,drum}], tempo, bars } and the last link result
+  const [linkFile, setLinkFile] = useState(null);
+  const [linkRes, setLinkRes] = useState(null);        // { link, agreement, disagreements, failed? }
+  const [linkFollow, setLinkFollow] = useLinkFollow();
+  const linkRef = useRef({ file: null, follow: "balanced", force: false });
+  linkRef.current = { ...linkRef.current, file: linkFile, follow: linkFollow };
   // ⚡ Auto: uncertain chords take the decoder's best match with nothing left pending (per device)
   const [autoPick, setAutoPick] = useState(() => { try { return localStorage.getItem("ttp:autoPick") === "1"; } catch (_) { return false; } });
   const autoPickRef = useRef(autoPick);
@@ -4253,7 +4364,15 @@ function AudioImport({ C, useSharp, incoming, onLoaded }) {
           // hands back the DETECTED tempo — so the bpm control is filled in from the
           // audio instead of dialled in by hand. Measured against a time-aligned .gp4:
           // root accuracy 25.8% -> 38.7%, coverage 61% -> 100%.
-          const r = (await analyzeChordsOffThread(ds, sr, opts)) || {};
+          let r = null;
+          const lf = linkRef.current;
+          if (lf.file) {
+            // 📎 read WITH the linked score: the decode runs on the score's beats with its harmony as evidence
+            const lr = (await analyzeWithScoreOffThread(ds, sr, lf.file.parts, { ...opts, tempo: lf.file.tempo, scoreWeight: (LINK_FOLLOW[lf.follow] || LINK_FOLLOW.balanced).w, force: !!lf.force })) || {};
+            if (lr.events && lr.link && lr.link.ok) { r = lr; setLinkRes({ link: lr.link, agreement: lr.agreement, disagreements: lr.disagreements || 0 }); }
+            else setLinkRes({ link: lr.link || { ok: false, reason: "no result" }, failed: true });
+          } else setLinkRes(null);
+          if (!r) r = (await analyzeChordsOffThread(ds, sr, opts)) || {};
           setRaw(autoPickRef.current ? autoResolveChords(r.events || []) : (r.events || []));
           setTracked(r.beats && r.beats.length ? r.beats : null);
           setBeatInfo(r.bpm || r.tuning != null ? { bpm: r.bpm || 0, method: r.method, tuning: r.tuning, key: r.key, evidence: r.evidence, adapted: r.adapted } : null);
@@ -4266,7 +4385,7 @@ function AudioImport({ C, useSharp, incoming, onLoaded }) {
     }, 30);
   };
 
-  const resetFor = (label) => { setErr(""); setName(label); setSongKey(""); readRef.current = { ...readRef.current, songKey: "" }; setBusy(true); setRaw([]); setTracked(null); bg.reset(); setOverrides({}); setAb(null); setMlNotes(null); setGtrNotes(null); setVoiceIdx(0); setSections([]); ref.current.mlRaw = null; stopPlay(); };
+  const resetFor = (label) => { setErr(""); setName(label); setLinkRes(null); setSongKey(""); readRef.current = { ...readRef.current, songKey: "" }; setBusy(true); setRaw([]); setTracked(null); bg.reset(); setOverrides({}); setAb(null); setMlNotes(null); setGtrNotes(null); setVoiceIdx(0); setSections([]); ref.current.mlRaw = null; stopPlay(); };
   const onFile = async (e) => {
     const f = e.target.files && e.target.files[0]; if (!f) return;
     resetFor(f.name);
@@ -4317,6 +4436,26 @@ function AudioImport({ C, useSharp, incoming, onLoaded }) {
     } else s.cur = s.mono;
     run(s.cur, s.sr, k);
   };
+  /* 📎 Link / unlink a score. Choosing one before the recording is fine — the analysis picks it up. */
+  const relink = () => { const s = ref.current; setOverrides({}); if (s.cur && kind === "chords") run(s.cur, s.sr, kind); };
+  const linkBytes = async (fname, bytes) => {
+    setErr("");
+    try {
+      const parsed = await scorePartsFromBytes(bytes, fname, useSharp);
+      if (!parsed.parts.length) { setErr("That score has no parts with notes to link."); return; }
+      linkRef.current = { ...linkRef.current, file: { name: fname, ...parsed }, force: false };
+      setLinkFile({ name: fname, ...parsed }); setLinkRes(null);
+      relink();
+    } catch (e) { setErr("Couldn't read that score: " + (e && e.message ? e.message : "unknown")); }
+  };
+  const onLinkPick = async (e) => { const f = e.target.files && e.target.files[0]; if (!f) return; e.target.value = ""; await linkBytes(f.name, new Uint8Array(await f.arrayBuffer())); };
+  const useOpenScore = () => { if (scoreFile && scoreFile.bytes) linkBytes(scoreFile.name, scoreFile.bytes); };
+  const unlinkScore = () => { linkRef.current = { ...linkRef.current, file: null, force: false }; setLinkFile(null); setLinkRes(null); relink(); };
+  const forceLink = () => { linkRef.current = { ...linkRef.current, force: true }; relink(); };
+  const followRef = useRef(linkFollow);
+  useEffect(() => { if (followRef.current !== linkFollow) { followRef.current = linkFollow; if (linkFile) relink(); } }, [linkFollow]); // eslint-disable-line
+  // "🎧 Link a recording →" in the score panel: link the open score as soon as this panel opens
+  useEffect(() => { if (linkAsk && linkAsk !== _linkAskSeen && scoreFile) { _linkAskSeen = linkAsk; useOpenScore(); } }, [linkAsk]); // eslint-disable-line
   const switchKind = (k) => { setKind(k); setOverrides({}); const s = ref.current; if (s.cur) run(s.cur, s.sr, k); };
   // Review: batch-commit choices on the SOURCE events (pure engine commitChordChoices), so
   // the chart re-quantises and every export carries them. ⚡ Auto resolves every uncertain
@@ -4589,12 +4728,18 @@ function AudioImport({ C, useSharp, incoming, onLoaded }) {
   const SECTION_NAMES = ["Intro", "Verse", "Pre-Chorus", "Chorus", "Bridge", "Instrumental", "Solo", "Breakdown", "Outro"];
 
   // chords → a real score (re-quantised live as bpm / time-sig change); notes → a timeline
+  const linked = linkRes && linkRes.link && linkRes.link.ok && !linkRes.failed ? linkRes.link : null;
   const audioScore = useMemo(() => {
     if (!(kind === "chords" && raw.length)) return null;
+    if (linked) {
+      // 📎 linked: the SCORE's bars (sections, meter, repeats as played) on the recording's clock
+      const sc = linkedChartScore(linked, raw, { useSharp });
+      if (sc) return sections.length && !sc.bars.some((b) => b.section) ? applySectionsToScore(sc, sections, { beatsPerBar: sc.timeSig[0] }) : sc;
+    }
     // chord events sit on the decoder's (half-)beat grid → quantise to half beats on the timeline
     const sc = audioEventsToScore(raw, { timeline: tl, beatsPerBar: bpb, quantize: { step: 0.5 }, useSharp });
     return sections.length ? applySectionsToScore(sc, sections, { beatsPerBar: bpb }) : sc;
-  }, [kind, raw, bg.grid, useSharp, sections]);
+  }, [kind, raw, bg.grid, useSharp, sections, linked]);
   const noteEvents = kind === "notes" ? raw.map((e) => ({ label: e.note, midi: e.midi, startSec: e.startSec, durSec: e.durSec })) : [];
   const fmt = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
   const activeIdx = noteEvents.findIndex((e) => pos >= e.startSec && pos < e.startSec + e.durSec);
@@ -4636,6 +4781,12 @@ function AudioImport({ C, useSharp, incoming, onLoaded }) {
 
       {busy && <div style={{ fontSize: 13, color: C.amber, marginBottom: 12 }}>{gtrProg ? `⏳ Transcribing guitar… ${gtrProg.total ? `${gtrProg.done}/${gtrProg.total} × 10 s` : "loading the model"}` : "⏳ Analyzing… (FFT over the whole stem)"}</div>}
       {err && <div style={{ fontSize: 12, color: C.red, marginBottom: 12 }}>{err}</div>}
+
+      {/* 📎 SCORE LINK — notation + recording read together (the bridge to the MusicXML / GP / Power Tab paths) */}
+      {kind === "chords" && (
+        <ScoreLinkPanel C={C} file={linkFile} res={linkRes} busy={busy} follow={linkFollow} onFollow={setLinkFollow}
+          onPick={onLinkPick} openName={scoreFile ? scoreFile.name : ""} onUseOpen={useOpenScore} onUnlink={unlinkScore} onForce={forceLink} fmt={fmt} hasAudio={!!ref.current.cur} />
+      )}
 
       {/* A/B clarity readout: is center-extraction worth it on THIS file? */}
       {ab && ab !== "busy" && (() => {
@@ -4866,7 +5017,9 @@ function AudioImport({ C, useSharp, incoming, onLoaded }) {
             </div>
           )}
           <ChordReview events={raw} C={C} fmt={fmt} onSeek={(t) => play(t)} onCommit={commitChoices} auto={autoPick} onAuto={toggleAuto} onRemove={removeChords} onMergeShort={mergeShort} beatSec={60 / Math.max(30, bpm || 120)} />
-          <ChartPanel score={audioScore} vocabPicker={false} title={name || "Audio stem"} meta={`${audioScore.bars.length} bars · ♩=${bg.grid.follow ? "~" + Math.round(bpm) + " (follows the performance)" : +bpm.toFixed(1)} · from audio${songKey ? ` · read in ${songKey}` : ""}`} C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey="" onPick={() => {}}
+          <ChartPanel score={audioScore} vocabPicker={false} title={name || "Audio stem"} meta={linked
+              ? `${audioScore.bars.length} bars (the score's) · ♩≈${Math.round(linked.tempo)} (follows the recording) · from audio + ${linkFile ? linkFile.name : "score"}${songKey ? ` · read in ${songKey}` : ""}`
+              : `${audioScore.bars.length} bars · ♩=${bg.grid.follow ? "~" + Math.round(bpm) + " (follows the performance)" : +bpm.toFixed(1)} · from audio${songKey ? ` · read in ${songKey}` : ""}`} C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey="" onPick={() => {}}
             keyOverride={songKey} setKeyOverride={(k) => setSongKey(k || "")}
             getAudio={() => (ref.current.cur ? { samples: ref.current.cur, sr: ref.current.sr } : null)} getBuffer={() => ref.current.audioBuf || null} />
           <div style={{ fontSize: 11, color: C.dim, marginTop: 10, lineHeight: 1.6 }}>
@@ -5461,7 +5614,7 @@ function ChordReview({ events, C, fmt, onSeek, onCommit, auto, onAuto, onRemove,
               {cands.map((a) => (
                 <button key={a.symbol} onClick={() => pick(i, a.symbol)} title={a.symbol === e.symbol ? `keep ${a.symbol}` : `use ${a.symbol}`}
                   style={{ ...chip(C), padding: "2px 8px", fontFamily: "'Space Mono', monospace", fontWeight: a.symbol === cur ? 700 : 400, color: a.symbol === cur ? C.cyan : C.dim, borderColor: a.symbol === cur ? C.cyan : C.border }}>
-                  {a.symbol} <span style={{ fontWeight: 400, color: C.dim }}>{pct(a.prob)}</span>
+                  {a.symbol} <span style={{ fontWeight: 400, color: a.fromScore ? C.cyan : C.dim }}>{a.fromScore ? "📄 score" : pct(a.prob)}</span>
                 </button>
               ))}
               {onRemove && <button onClick={() => onRemove([i])} title="delete this chord — the chord before it rings on through its time" aria-label={`delete chord at ${fmt(e.startSec)}`}

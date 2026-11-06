@@ -1072,11 +1072,17 @@ function _gpifNoteTech(note) {
   return t;
 }
 function parseGPIF(xml, useSharp = true, partIndex = 0) {
+  if (partIndex === HARMONY_PART) return _harmonyOfParts((i) => parseGPIF(xml, useSharp, i), useSharp);
   const doc = new DOMParser().parseFromString(xml, "text/xml");
   if (_xEls(doc, "parsererror").length) throw new Error("Not valid gpif XML.");
   const tracks = _xEls(doc, "Track").filter((t) => t.getAttribute("id") != null);
   if (!tracks.length) throw new Error("No <Track> found — is this a GP7/8 .gp file?");
-  const parts = tracks.map((t, i) => ({ index: i, id: t.getAttribute("id"), name: (_xChildText(t, "Name") || `Track ${i + 1}`).trim() || `Track ${i + 1}` }));
+  // a drum kit: GP7/8 InstrumentSet Type "drumKit"; GP6 <Instrument ref="drmkt"> — its notes are drum keys, not pitches
+  const isKit = (t) => {
+    const is = _xFirst(t, "InstrumentSet"); if (is && /drum|percussion/i.test(_xChildText(is, "Type") || "")) return true;
+    const ins = _xFirst(t, "Instrument"); return !!ins && /^drm|drum|perc/i.test(ins.getAttribute("ref") || "");
+  };
+  const parts = tracks.map((t, i) => ({ index: i, id: t.getAttribute("id"), name: (_xChildText(t, "Name") || `Track ${i + 1}`).trim() || `Track ${i + 1}`, ...(isKit(t) ? { drum: true } : {}) }));
   const idx = Math.max(0, Math.min(tracks.length - 1, partIndex | 0));
 
   const barMap = _gpById(doc, "Bar"), voiceMap = _gpById(doc, "Voice"), beatMap = _gpById(doc, "Beat"), noteMap = _gpById(doc, "Note"), rhythmMap = _gpById(doc, "Rhythm");
@@ -1370,6 +1376,7 @@ function _gpAddTech(map, eng, noteTags, beatTags, bend, bends) {
   if (bend && bends) bends[eng] = bend;
 }
 function parseGP345(u8, useSharp = true, partIndex = 0) {
+  if (partIndex === HARMONY_PART) return _harmonyOfParts((i) => parseGP345(u8, useSharp, i), useSharp);
   const r = _gpReader(u8);
   const version = r.version();
   const v = /v5/.test(version) ? 5 : /v4/.test(version) ? 4 : /v3/.test(version) ? 3 : 0;
@@ -1404,7 +1411,7 @@ function parseGP345(u8, useSharp = true, partIndex = 0) {
   // --- tracks ---
   const tracks = [];
   for (let t = 0; t < trackCount; t++) {
-    r.u8();                                                          // flags
+    const tflags = r.u8();                                           // flags (0x01 = percussion track)
     const name = r.byteString(40);
     const stringCount = r.i32();
     const tuning = [];
@@ -1414,7 +1421,7 @@ function parseGP345(u8, useSharp = true, partIndex = 0) {
     r.i32();                                                         // fret count
     const capo = r.i32();                                            // capo fret (kept for the export header)
     r.skip(4);                                                       // colour
-    tracks.push({ name, stringCount, tuning, capo, measures: [] });
+    tracks.push({ name, stringCount, tuning, capo, measures: [], ...(tflags & 1 ? { drum: true } : {}) });
   }
   // --- measures (measure-major, then track) ---
   const state = tracks.map(() => ({ lastFret: {} }));
@@ -1441,7 +1448,7 @@ const _withTech = (e, tech, bends) => {
 function _gpBuildScore(tracks, tempo, version, useSharp, partIndex) {
   const idx = Math.max(0, Math.min(tracks.length - 1, partIndex | 0));
   const tr = tracks[idx];
-  const parts = tracks.map((t, i) => ({ index: i, id: String(i), name: (t.name || "").trim() || `Track ${i + 1}` }));
+  const parts = tracks.map((t, i) => ({ index: i, id: String(i), name: (t.name || "").trim() || `Track ${i + 1}`, ...(t.drum ? { drum: true } : {}) }));
   const bars = tr.measures.map((m, mi) => {
     const [bts, btype] = m.timeSig;
     const onsets = new Map();
@@ -1577,7 +1584,7 @@ function parseGP5(u8, version, useSharp = true, partIndex = 0) {
   const tracks = [];
   for (let t = 0; t < trackCount; t++) {
     if (t === 0 || !gt500) r.skip(1);
-    r.u8();                                                          // flags1
+    const tflags = r.u8();                                           // flags1 (0x01 = percussion track)
     const name = r.byteString(40);
     const stringCount = r.i32();
     const tuning = [];
@@ -1592,7 +1599,7 @@ function parseGP5(u8, version, useSharp = true, partIndex = 0) {
     r.skip(12);
     _gp5RSEInstrument(r, gt500);
     if (gt500) { for (let i = 0; i < 4; i++) r.i8(); r.intByteString(); r.intByteString(); } // track EQ-4 + RSE effect names
-    tracks.push({ name, stringCount, tuning, capo, measures: [] });
+    tracks.push({ name, stringCount, tuning, capo, measures: [], ...(tflags & 1 ? { drum: true } : {}) });
   }
   r.skip(gt500 ? 1 : 2);                                             // blank byte(s) after all tracks
   // --- measures (measure-major, then track; 2 voices each + line break) ---
@@ -1773,6 +1780,7 @@ function _ptbTimeSig(data) {
   return { beats: ((data >>> 27) & 0x1f) + 1, beatType: 1 << ((data >>> 24) & 0x7), show: !!(data & 0x100000) };
 }
 function parsePowerTab(u8, useSharp = true, partIndex = 0) {
+  if (partIndex === HARMONY_PART) return _harmonyOfParts((i) => parsePowerTab(u8, useSharp, i), useSharp);
   const r = _ptbReader(u8);
   const v = _ptbHeader(r);
   const guitarScore = _ptbScore(r, v);
@@ -1875,6 +1883,25 @@ function mergePartNotes(barsMeta, partNotes, useSharp = true, opts = {}) {
     return { ...ref, events };
   });
   return { bars, merged: true, mergedParts: opts.names || [], partIndex: HARMONY_PART };
+}
+/* HARMONY for the tab formats (Guitar Pro 3–8, GPX, Power Tab): every pitched track read together,
+ * like MusicXML/MIDI. Each track is parsed on its own (`parseAt(i)` — one parse per track, the same
+ * master bars) and its events become notes of their gap-to-next-onset length (a tab track has no
+ * separate written lengths). Drum kits (the parser's `drum` flag, an all-zero GP tuning) and voice /
+ * drum names are left out. The result keeps the first track's shape (tuning, tempo, bars' meter,
+ * sections, repeats) with merged events and `partIndex: HARMONY_PART`. */
+function _harmonyOfParts(parseAt, useSharp = true) {
+  const first = parseAt(0);
+  const parts = first.parts || [];
+  if (parts.length < 2) return first;
+  const scores = parts.map((p) => (p.index === 0 ? first : parseAt(p.index)));
+  const notesByPart = scores.map((sc, i) => (parts[i].drum || (sc.tuningMidi && isPercussionTuning(sc.tuningMidi)))
+    ? sc.bars.map(() => [])
+    : sc.bars.map((b) => (b.events || []).flatMap((e) => (e.midis || []).map((m) => ({ midi: m, q: e.qbeat != null ? e.qbeat : e.beat || 0, d: e.qdur != null ? e.qdur : e.durBeats || 1 })))));
+  const keep = harmonyPartIndices(parts, notesByPart);
+  const meta = first.bars.map((b) => ({ ...b, events: [] }));
+  const merged = mergePartNotes(meta, keep.map((i) => notesByPart[i]), useSharp, { names: keep.map((i) => parts[i].name) });
+  return { ...first, ...merged, parts };
 }
 /* Per-bar pitched notes of one MusicXML part, with their written lengths (same cursor /
  * <chord/> / <backup> / <forward> walk as parseMusicXML; grace notes, rests, slash noteheads and
@@ -6573,7 +6600,7 @@ function chordStatesV2(opts = {}) {
 /* Emission score per (beat, state). Cosine of the treble chroma to the template, plus
  * the bass register's vote for the state's bass note, minus a rarity prior (`rank`,
  * as in `recognise`) and an inversion prior; optional diatonic key bonus. */
-function _emitV2(seg, states, opts, keyFit, keyPen) {
+function _emitV2(seg, states, opts, keyFit, keyPen, prior) {
   const S = states.length, out = new Float64Array(S + 1);
   const c = seg.chroma, b = seg.bass;
   let cn = 0; for (let p = 0; p < 12; p++) cn += c[p] * c[p];
@@ -6600,10 +6627,65 @@ function _emitV2(seg, states, opts, keyFit, keyPen) {
     if (st.quality.intervals.length === 2) sc -= powPen;
     if (keyFit) sc += keyW * keyFit[s];
     if (keyPen) sc -= keyPen[s];
+    if (prior) sc += prior.bonus[s];
     out[s] = sc;
   }
   out[S] = opts.ncScore != null ? opts.ncScore : 0.55;
   return out;
+}
+
+/* A LINKED SCORE as evidence (see "SCORE ↔ RECORDING LINK"). `p` = { chroma[12], bass[12] }: what
+ * the notation has sounding over this segment, already moved into the recording's key. Each state
+ * earns `scoreWeight` × (its template's match to that chroma relative to the BEST state's)^4, so
+ * the chord the score spells gets the whole bonus and a near neighbour (Cm under a Cm7) a fraction
+ * of it; plus `scoreBassWeight` when the state's bass is the score's lowest note. Relative, not
+ * absolute, because a score's chroma carries melody and passing notes — no template matches it
+ * exactly, and the bonus must not depend on how busy the arrangement is. Returns { bonus, best }
+ * or null for a beat the score leaves silent (no notation evidence either way). */
+function _scorePriorBonus(p, states, opts) {
+  if (!p || !p.chroma) return null;
+  let cn = 0; for (let q = 0; q < 12; q++) cn += p.chroma[q] * p.chroma[q];
+  if (!(cn > 1e-12)) return null;
+  cn = Math.sqrt(cn);
+  const w = opts.scoreWeight != null ? opts.scoreWeight : SCORE_LINK.priorWeight;
+  const wb = opts.scoreBassWeight != null ? opts.scoreBassWeight : SCORE_LINK.priorBassWeight;
+  const S = states.length, sim = new Float64Array(S);
+  let mx = 0, best = 0;
+  for (let s = 0; s < S; s++) {
+    let d = 0; for (let q = 0; q < 12; q++) d += states[s].vec[q] * p.chroma[q];
+    sim[s] = d / cn;
+    if (sim[s] > mx) { mx = sim[s]; best = s; }
+  }
+  let bmax = 0, bpc = -1; if (p.bass) for (let q = 0; q < 12; q++) if (p.bass[q] > bmax) { bmax = p.bass[q]; bpc = q; }
+  // tie-break the template reading toward the state whose bass IS the score's lowest note
+  if (bpc >= 0) for (let s = 0; s < S; s++) if (sim[s] >= mx - 1e-9 && states[s].bassPc === bpc) { best = s; break; }
+  /* The score's chord NAMED THE WAY THE APP NAMES NOTATION — the recognition oracle (`recognise`,
+   * same vocabulary) on the score's pitch classes + bass. Template cosine alone cannot tell the
+   * enharmonic readings of one pitch set apart (B♭m7 = D♭6, Am7/C = C6); the oracle can, by the
+   * same rules every imported chart is named with. That state gets the whole bonus, every other
+   * state 70 % of its relative template match. Measured on the corpus bench (docs/SCORE-AUDIO-LINK.md). */
+  let oracle = -1;
+  const pcs = []; for (let q = 0; q < 12; q++) if (p.chroma[q] >= 0.2 * (function () { let m = 0; for (let k = 0; k < 12; k++) if (p.chroma[k] > m) m = p.chroma[k]; return m; })()) pcs.push(q);
+  if (bpc >= 0 && pcs.indexOf(bpc) < 0) { pcs.push(bpc); pcs.sort((a, b) => a - b); }
+  if (pcs.length >= 2) {
+    const r = recognise(pcs, makeMask(pcs), bpc >= 0 ? bpc : null, { vocabulary: opts.vocabulary, sixNine: opts.sixNine });
+    if (r && r.best && !r.single) {
+      const suf = r.best.writtenFrom != null ? r.best.writtenFrom : r.best.quality.suffix;
+      for (let s = 0; s < S; s++) {
+        const st = states[s];
+        if (st.root !== r.best.root || st.quality.suffix !== suf) continue;
+        if (oracle < 0 || (st.bassPc === bpc && states[oracle].bassPc !== bpc) || (states[oracle].bassPc !== bpc && st.bassPc === st.root)) oracle = s;
+      }
+    }
+  }
+  if (oracle >= 0) best = oracle;
+  const others = oracle >= 0 ? 0.7 : 1;
+  const bonus = new Float64Array(S);
+  for (let s = 0; s < S; s++) {
+    const r = mx > 0 ? sim[s] / mx : 0;
+    bonus[s] = (s === oracle ? w : others * w * r * r * r * r) + (bpc >= 0 && states[s].bassPc === bpc ? wb : 0);
+  }
+  return { bonus, best };
 }
 
 /* Forward–backward + Viterbi on the "stay, or jump anywhere" chord HMM. Emissions
@@ -6929,7 +7011,8 @@ function transcribeChordsV2(samples, sampleRate, opts = {}) {
   }
   // the user's key (opts.key, "G" / { tonic, mode }) — see keyLockPenalties
   const keyPen = opts.key && opts.keyLock !== "off" ? keyLockPenalties(states, opts.key, opts) : null;
-  const E = segs.map((s) => _emitV2(s, states, opts, keyFit, keyPen));
+  const priors = typeof opts.scorePrior === "function" ? segs.map((s) => _scorePriorBonus(opts.scorePrior(s.t0, s.t1), states, opts)) : null;
+  const E = segs.map((s, i) => _emitV2(s, states, opts, keyFit, keyPen, priors && priors[i]));
   const hm = hmmChordDecode(E, gated, opts);
   const post = hm.post;
   /* Minimum chord length in BEATS (opts.minChordBeats; 0/absent = as decoded, one grid unit).
@@ -6959,6 +7042,15 @@ function transcribeChordsV2(samples, sampleRate, opts = {}) {
   const ambThr = opts.ambiguityThreshold != null ? opts.ambiguityThreshold : 0.4;
   const out = events.map((e) => {
     const st = states[e.state];
+    /* With a linked score: what the notation spells over the event (the state its chroma votes
+     * for most, summed over the event's beats) and whether the recording agrees. */
+    let scoreSym;
+    if (priors) {
+      const votes = new Map();
+      for (const t of e.beats) if (priors[t]) votes.set(priors[t].best, (votes.get(priors[t].best) || 0) + 1);
+      let bk = -1, bv = 0; for (const [k, v] of votes) if (v > bv) { bv = v; bk = k; }
+      if (bk >= 0) { scoreSym = symOf(states[bk]); e.scoreMidis = midisOf(states[bk]); }
+    }
     // per-label posterior mass averaged over the event's beats
     const mass = new Map();
     let ent = 0;
@@ -6984,6 +7076,7 @@ function transcribeChordsV2(samples, sampleRate, opts = {}) {
       prob: +prob.toFixed(3),
       alternatives,
       ambiguous: prob < ambThr,
+      ...(priors ? { scoreSymbol: scoreSym || null, scoreMidis: e.scoreMidis || null, agree: scoreSym != null && _sameChordClass(scoreSym, label) } : {}),
     };
   });
   return { events: out, tuning: fr.tuning, beats: bt.beats || [], bpm: bt.bpm, segments: segs.length };
@@ -8618,6 +8711,536 @@ function alignPcmToScore(samples, sampleRate, score, opts = {}) {
     if (k !== last) { segments.push({ sec: +(f * hopSec).toFixed(3), key: k }); last = k; }
   }
   return { segments, confidence: +confidence.toFixed(3) };
+}
+
+/* ============================================================================
+ *  SCORE ↔ RECORDING LINK — notation and audio read together (2026-11-06)
+ *  ---------------------------------------------------------------------------
+ *  The notation paths (C/D/E/F/G: MusicXML · Guitar Pro · Power Tab · MIDI) know
+ *  WHAT is played — exact pitches, bars, meter, sections — but nothing about when a
+ *  real recording plays it. The audio paths know WHEN, and can only guess WHAT. A
+ *  recording plus an accurate score therefore answers both, and the chart built from
+ *  the pair is better than either alone:
+ *
+ *    1. linkScoreToAudio — find where every score beat falls in the recording:
+ *       beat-synchronous chroma (NNLS treble + bass, the v2 front-end) against the
+ *       score's sounding notes per quarter, aligned by a semi-global DTW whose unit
+ *       step is ONE BEAT (so the alignment cannot wander the way a frame-level DTW
+ *       does through a repetitive vamp — measured on Al Jarreau "We're in This Love
+ *       Together": frame-level bars read 73–160 bpm at the outro, beat-level 78–81).
+ *       All 12 transpositions are ranked first, so a recording in another key than the
+ *       file (a capo, a transposed transcription) still links, and says so.
+ *    2. The v2 chord HMM decodes the recording ON THE SCORE'S BEATS with the score's
+ *       chroma as a second evidence term (_scorePriorBonus). The audio still decides
+ *       where it clearly disagrees (a live substitution, a wrong bar in the file) —
+ *       every event carries `scoreSymbol` + `agree` so those spots are listed.
+ *    3. linkedChartScore — the result on the SCORE's bars (numbers, meter, sections,
+ *       repeats as performed), with the recording's tempo map and audioOffset, so
+ *       playback, Check by ear, practice loops and every exporter follow the record.
+ *  Pure + worker-safe. Measured in docs/SCORE-AUDIO-LINK.md.
+ * ==========================================================================*/
+const SCORE_LINK = {
+  skipAudio: 0.45,       // cost per recording beat left outside the score (intro, outro, fade)
+  skipScore: 0.5,        // cost per score beat the recording never plays (dearer: a score is meant to be played)
+  stepPenalty: 0.35,     // a beat the tracker missed or doubled (one beat ↔ two)
+  bassWeight: 0.5,       // the bass register's share of the alignment feature
+  gateDb: 40,            // recording beats this far under the loud passages carry no evidence
+  melodicWeight: 0.35,   // a single-line part (melody, solo, bass line) counts this much in the score's chroma
+  priorWeight: 0.3,      // score evidence in the chord HMM (≈ the spread between rival chords' audio scores)
+  priorBassWeight: 0.1,  // … and for the score's bass note
+  minConfidence: 0.55,   // mean beat similarity below this → the link is reported as weak
+  snapSec: 0.12,         // a linked quarter moves onto a tracked beat this close
+  refineBandQ: 1,        // the fine pass searches ±this many quarters around the beat-level path
+  refineStepPenalty: 0.15, // … each off-diagonal fine step costs this much more
+  carryRestQ: 2,         // a score rest longer than this (quarters) ends a carried chord
+  maxCells: 6e6,         // DTW size cap (beats × beats); longer pairs are refused rather than run out of memory
+};
+const _LINK_DRUM_NAME = /\b(drums?|drum\s*kit|percussion|perc|kit)\b/i;
+const _LINK_VOICE_NAME = /\b(voice|vocals?|vox|choir|singers?|soprano|alto|tenor|baritone)\b/i;
+
+/* Repeats as performed: |: … :| plays twice; a bar marked ending "1" only the first time
+ * through, "2" only the second. Returns bar indices in performance order (written order
+ * when the score has no repeats). Guarded: never more than 4× the written length. */
+function unrollRepeatOrder(bars) {
+  const order = [], n = (bars || []).length;
+  if (!n) return order;
+  let start = 0, i = 0, pass = 1, guard = 0;
+  while (i < n && guard++ < 4 * n + 8) {
+    const b = bars[i];
+    if (b.repeatStart && pass === 1) start = i;
+    const end = b.ending ? String(b.ending).split(/[,\s]+/).map(Number).filter((x) => x > 0) : null;
+    const played = !end || end.indexOf(pass) >= 0;      // a 1st-ending bar is skipped on the way back
+    if (played) order.push(i);
+    if (b.repeatEnd && played) {
+      if (pass === 1) { pass = 2; i = start; continue; }
+      pass = 1; start = i + 1;
+    } else if (pass === 2 && played && end && (i + 1 >= n || !bars[i + 1].ending)) { pass = 1; start = i + 1; }
+    i++;
+  }
+  return order;
+}
+
+/* A score's notes in QUARTERS from the start of the performance (repeats unrolled), plus
+ * its bars in that order. Events keep the gap to the part's next onset as their length
+ * (qdur) — right for comping, slightly short for a chord held under a moving line. */
+function scorePartNotes(score, opts = {}) {
+  const bars = (score && score.bars) || [];
+  const order = opts.unroll === false ? bars.map((_, i) => i) : unrollRepeatOrder(bars);
+  const notes = [], outBars = [];
+  let pos = 0;
+  order.forEach((bi, k) => {
+    const bar = bars[bi], [num, den] = bar.timeSig || score.timeSig || [4, 4], q = 4 / den;
+    for (const e of bar.events || []) {
+      const t = pos + (e.qbeat != null ? e.qbeat : e.beat || 0) * q, d = Math.max(0.05, (e.qdur != null ? e.qdur : e.durBeats || 1) * q);
+      for (const m of e.midis || []) notes.push({ midi: m, t, d });
+    }
+    outBars.push({ index: k, sourceBar: bar.number, q0: pos, q1: pos + num * q, timeSig: [num, den], section: bar.section || null });
+    pos += num * q;
+  });
+  return { notes, len: pos, bars: outBars };
+}
+
+/* The parts of a score that a recording can be matched against: drum kits out (flagged by the
+ * parser, a drum name, or an all-zero GP tuning); every other part weighted by how chordal it
+ * is — a comping part (≥ 1.8 notes per onset) counts 1, a single line `melodicWeight`. Voices
+ * stay in for the ALIGNMENT (the recording has the singer) but not for the chord prior.
+ * input: [{ score, name?, drum? }] (one parse per part — the same bar structure). */
+function scoreLinkParts(partScores, opts = {}) {
+  const out = [];
+  for (const ps of partScores || []) {
+    if (!ps || !ps.score || !ps.score.bars) continue;
+    const name = ps.name || "";
+    if (ps.drum || _LINK_DRUM_NAME.test(name) || (ps.score.tuningMidi && isPercussionTuning(ps.score.tuningMidi))) continue;
+    const pn = scorePartNotes(ps.score, opts);
+    if (!pn.notes.length) continue;
+    const onsets = new Set(pn.notes.map((n) => n.t.toFixed(4))).size;
+    const poly = pn.notes.length / Math.max(1, onsets);
+    out.push({ name, notes: pn.notes, len: pn.len, bars: pn.bars, poly, voice: _LINK_VOICE_NAME.test(name), weight: poly >= 1.8 ? 1 : (opts.melodicWeight != null ? opts.melodicWeight : SCORE_LINK.melodicWeight) });
+  }
+  return out;
+}
+
+/* Score → one column per `step` quarters: duration-weighted treble chroma and the lowest note
+ * that sounds for a real share of the step (the bass). `which(part)` picks the parts. */
+function scoreHarmonyGrid(parts, len, step = 1, which, whichBass) {
+  const G = Math.max(1, Math.ceil(len / step - 1e-9));
+  const cols = Array.from({ length: G }, () => ({ chroma: new Float64Array(12), bass: new Float64Array(12), low: 999 }));
+  for (const p of parts) {
+    const useC = !which || which(p), useB = whichBass ? whichBass(p) : useC;
+    if (!useC && !useB) continue;
+    for (const n of p.notes) {
+      const a = Math.max(0, Math.floor(n.t / step + 1e-6)), b = Math.min(G, Math.ceil((n.t + n.d) / step - 1e-6));
+      for (let g = a; g < b; g++) {
+        const ov = Math.min(n.t + n.d, (g + 1) * step) - Math.max(n.t, g * step);
+        if (ov <= 0) continue;
+        if (useC) cols[g].chroma[((n.midi % 12) + 12) % 12] += (ov / step) * p.weight;
+        if (useB && ov >= 0.2 * step && n.midi < cols[g].low) cols[g].low = n.midi;
+      }
+    }
+  }
+  for (const c of cols) if (c.low < 999) c.bass[c.low % 12] = 1;
+  return cols;
+}
+
+// [treble 12 | bass 12], each half max-normalised, the whole unit length (zero = no evidence)
+function _linkFeat(chroma, bass, bw, shift = 0) {
+  const v = new Float64Array(24);
+  let a = 0, b = 0; for (let p = 0; p < 12; p++) { if (chroma[p] > a) a = chroma[p]; if (bass[p] > b) b = bass[p]; }
+  for (let p = 0; p < 12; p++) { const r = (p + shift) % 12; v[r] = a ? chroma[p] / a : 0; v[12 + r] = b ? (bw * bass[p]) / b : 0; }
+  let n = 0; for (let q = 0; q < 24; q++) n += v[q] * v[q];
+  n = Math.sqrt(n); if (n) for (let q = 0; q < 24; q++) v[q] /= n;
+  return v;
+}
+function _linkSim(a, b) {
+  let d = 0, sa = 0, sb = 0; for (let q = 0; q < 24; q++) { d += a[q] * b[q]; sa += a[q] * a[q]; sb += b[q] * b[q]; }
+  return sa < 1e-12 || sb < 1e-12 ? null : d;          // both unit length
+}
+
+/* Semi-global DTW, one BEAT per step. A[i] recording beats, B[j] score beats (unit features;
+ * a zero vector = no evidence, cost 0.5). Steps: (1,1); (1,2) one recording beat over two
+ * score beats; (2,1) two recording beats over one — each of the latter costs `stepPenalty`
+ * more. Recording beats before/after the matched stretch cost `skipAudio` each, score beats
+ * the recording never reaches `skipScore` each. → { path:[[i,j]…], cost }. */
+function linkBeatDTW(A, B, opts = {}) {
+  const n = A.length, m = B.length;
+  const sa = opts.skipAudio != null ? opts.skipAudio : SCORE_LINK.skipAudio;
+  const ss = opts.skipScore != null ? opts.skipScore : SCORE_LINK.skipScore;
+  const pen = opts.stepPenalty != null ? opts.stepPenalty : SCORE_LINK.stepPenalty;
+  const W = m + 1;
+  const C = new Float32Array(n * m);
+  for (let i = 0; i < n; i++) for (let j = 0; j < m; j++) { const s = _linkSim(A[i], B[j]); C[i * m + j] = s == null ? 0.5 : 1 - s; }
+  const D = new Float64Array((n + 1) * W).fill(Infinity), P = new Uint8Array((n + 1) * W);
+  for (let i = 0; i <= n; i++) D[i * W] = i * sa;
+  for (let j = 0; j <= m; j++) D[j] = j * ss;
+  for (let i = 1; i <= n; i++) for (let j = 1; j <= m; j++) {
+    const c = C[(i - 1) * m + j - 1];
+    let best = D[(i - 1) * W + j - 1] + c, p = 1;
+    if (j >= 2) { const v = D[(i - 1) * W + j - 2] + c + C[(i - 1) * m + j - 2] + pen; if (v < best) { best = v; p = 2; } }
+    if (i >= 2) { const v = D[(i - 2) * W + j - 1] + c + C[(i - 2) * m + j - 1] + pen; if (v < best) { best = v; p = 3; } }
+    D[i * W + j] = best; P[i * W + j] = p;
+  }
+  let bi = n, bj = m, bc = Infinity;
+  for (let i = 0; i <= n; i++) { const v = D[i * W + m] + (n - i) * sa; if (v < bc) { bc = v; bi = i; bj = m; } }
+  for (let j = 0; j <= m; j++) { const v = D[n * W + j] + (m - j) * ss; if (v < bc) { bc = v; bi = n; bj = j; } }
+  const path = []; let i = bi, j = bj;
+  while (i > 0 && j > 0) {
+    const p = P[i * W + j];
+    if (p === 1) { path.push([i - 1, j - 1]); i--; j--; }
+    else if (p === 2) { path.push([i - 1, j - 1]); path.push([i - 1, j - 2]); i--; j -= 2; }
+    else { path.push([i - 1, j - 1]); path.push([i - 2, j - 1]); i -= 2; j--; }
+  }
+  path.reverse();
+  return { path, cost: bc };
+}
+
+/* Recording beats at the score's quarter: the tracker often reports double (or half, or
+ * dotted) time. `ratio` = recording beat rate / score quarter rate, snapped to 1/2, 2/3, 1,
+ * 3/2, 2 when within 15 % (else 1: the score's tempo marking may simply be wrong — the DTW
+ * absorbs a steady tempo difference on its own). Returns the candidate grids (one per phase
+ * for a coarser grid). Beat positions are interpolated, so any ratio works. */
+function _linkBeatGrids(beats, ratio) {
+  const snaps = [0.5, 2 / 3, 1, 1.5, 2];
+  let r = 1;
+  for (const c of snaps) if (Math.abs(Math.log(ratio / c)) < Math.log(1.15)) r = c;
+  if (r === 1) return [{ r, phase: 0, beats: beats.slice() }];
+  const at = (x) => { const i = Math.max(0, Math.min(beats.length - 2, Math.floor(x))); return beats[i] + (x - i) * (beats[i + 1] - beats[i]); };
+  const phases = r > 1 ? Array.from({ length: Math.round(r * 2) / 2 >= 1.5 ? Math.ceil(r) : 1 }, (_, k) => k) : [0];
+  return phases.map((ph) => { const g = []; for (let x = ph; x <= beats.length - 1 + 1e-9; x += r) g.push(at(x)); return { r, phase: ph, beats: g }; });
+}
+
+function _linkAudioSegs(frames, grid, gateDb, bw) {
+  const lv = frames.map((f) => f.level).sort((a, b) => a - b);
+  const ref = lv.length ? lv[Math.min(lv.length - 1, Math.floor(0.95 * lv.length))] : 0;
+  const segs = _segmentFrames(frames, grid);
+  return segs.map((s) => ({ t0: s.t0, t1: s.t1, chroma: s.chroma, bass: s.bass, quiet: s.level < ref - gateDb, v: s.level < ref - gateDb ? new Float64Array(24) : _linkFeat(s.chroma, s.bass, bw) }));
+}
+
+/* Link a score to a recording. partScores: [{ score, name?, drum? }] — every part of the file
+ * (the same bars). → {
+ *   ok, transpose (recording = score + n semitones), confidence (mean beat similarity on the
+ *   path), runnerUp (best wrong transposition's), qToSec(q) / secToQ(t) as arrays
+ *   `beatTimes` (recording second of every score quarter 0…len) for those, bars:[{ index,
+ *   sourceBar, sec, endSec, bpm, sim, matched }], coverage, tempo, timeSig, tuning }.
+ * opts: { tempo (the score's ♩), beats / bpm (a beat grid already tracked), _frames, transpose
+ * (force), maxTranspositions (3) }. */
+function linkScoreToAudio(samples, sampleRate, partScores, opts = {}) {
+  const parts = scoreLinkParts(partScores, opts);
+  if (!parts.length) return { ok: false, reason: "The score has no pitched notes to match against the recording." };
+  const len = Math.max(...parts.map((p) => p.len)), bars = parts.reduce((a, p) => (p.bars.length > a.length ? p.bars : a), []);
+  const fr = opts._frames || nnlsChromagram(samples, sampleRate, opts);
+  const frames = fr.frames || [];
+  if (!frames.length) return { ok: false, reason: "The recording is silent." };
+  const bt = opts.beats && opts.beats.length >= 4 ? { beats: opts.beats, bpm: opts.bpm || 0 } : detectBeats(samples, sampleRate, opts);
+  let beats = (bt.beats || []).slice();
+  if (beats.length < 4) {                                           // no pulse found: an even grid at the score's tempo
+    const spq = 60 / (opts.tempo > 0 ? opts.tempo : 100); beats = [];
+    for (let t = 0; t <= frames[frames.length - 1].t; t += spq) beats.push(t);
+  }
+  const bw = opts.bassWeight != null ? opts.bassWeight : SCORE_LINK.bassWeight;
+  const gateDb = opts.gateDb != null ? opts.gateDb : SCORE_LINK.gateDb;
+  // the score's beat rate vs the recording's: from the ♩ marking, else from the lengths
+  const abpm = 60 / ((beats[beats.length - 1] - beats[0]) / (beats.length - 1));
+  let sbpm = opts.tempo > 0 ? opts.tempo : 0;
+  if (!sbpm) sbpm = (len / Math.max(1, frames[frames.length - 1].t - frames[0].t)) * 60 || abpm;   // no ♩ marking: the lengths
+  const grids = _linkBeatGrids(beats, abpm / sbpm);
+  /* …and a plain grid at the score's own ♩ (when it has one). A tracker that reads the pulse a few
+   * percent off (130 against a real 124) drifts through every bar, and on a repetitive vamp the
+   * beat path then follows that wrong pace for bars on end — measured on the corpus bench: a
+   * two-bar drift in a minute. The candidate with the better match on the path wins; the fine
+   * pass fixes the phase either way. */
+  if (opts.tempo > 0 && opts.uniformGrid !== false) {
+    const spq = 60 / opts.tempo, end = frames[frames.length - 1].t + 0.05, g = [];
+    for (let t = Math.max(0, beats[0] - spq * Math.floor(beats[0] / spq)); t <= end; t += spq) g.push(t);
+    if (g.length >= 4) grids.push({ r: 1, phase: 0, uniform: true, beats: g });
+  }
+  const cols = scoreHarmonyGrid(parts, len, 1);
+  const m = cols.length;
+  // transpositions ranked by the whole-song pitch-class histogram, then aligned
+  const hs = new Float64Array(12);
+  for (const c of cols) { let mx = 0; for (let p = 0; p < 12; p++) if (c.chroma[p] > mx) mx = c.chroma[p]; if (mx) for (let p = 0; p < 12; p++) hs[p] += c.chroma[p] / mx; }
+  const trials = [];
+  for (const g of grids) {
+    const segs = _linkAudioSegs(frames, g.beats, gateDb, bw);
+    if (segs.length * m > (opts.maxCells || SCORE_LINK.maxCells)) return { ok: false, reason: "This recording and score are too long to link in one piece (more than " + Math.round(Math.sqrt(opts.maxCells || SCORE_LINK.maxCells)) + " beats each)." };
+    const ha = new Float64Array(12);
+    for (const s of segs) if (!s.quiet) { let mx = 0; for (let p = 0; p < 12; p++) if (s.chroma[p] > mx) mx = s.chroma[p]; if (mx) for (let p = 0; p < 12; p++) ha[p] += s.chroma[p] / mx; }
+    const rank = [];
+    for (let k = 0; k < 12; k++) { let d = 0, na = 0, nb = 0; for (let p = 0; p < 12; p++) { d += ha[(p + k) % 12] * hs[p]; na += ha[p] * ha[p]; nb += hs[p] * hs[p]; } rank.push({ k, c: d / (Math.sqrt(na * nb) || 1) }); }
+    rank.sort((a, b) => b.c - a.c);
+    const ks = opts.transpose != null ? [((opts.transpose % 12) + 12) % 12] : rank.slice(0, opts.maxTranspositions || 3).map((x) => x.k);
+    for (const k of ks) {
+      const B = cols.map((c) => _linkFeat(c.chroma, c.bass, bw, k));
+      const r = linkBeatDTW(segs.map((s) => s.v), B, opts);
+      let sim = 0, ns = 0;
+      for (const [i, j] of r.path) { const s = _linkSim(segs[i].v, B[j]); if (s != null) { sim += s; ns++; } }
+      trials.push({ k, grid: g, segs, path: r.path, cost: r.cost, sim: ns ? sim / ns : 0, n: ns });
+    }
+  }
+  /* The winner is the lowest TOTAL path cost (mismatch + skipped beats + off-diagonal steps), not
+   * the best mean similarity: a grid denser than the score's quarters (a tracker reading 130 for a
+   * 124 song) can match slightly better per step while needing a skip or a squeeze every few bars
+   * — exactly the drift to avoid. Same score, same audio length → the totals compare. */
+  trials.sort((a, b) => a.cost - b.cost);
+  const best = trials[0];
+  const runnerUp = trials.find((t) => t.k !== best.k);
+  // score quarter → recording second: the first recording beat each score beat is matched to;
+  // unmatched stretches interpolated, the ends extrapolated at the local tempo
+  const segs = best.segs, beatTimes = new Float64Array(m + 1).fill(NaN), simAt = new Float64Array(m).fill(NaN);
+  for (const [i, j] of best.path) {
+    if (isNaN(beatTimes[j])) beatTimes[j] = segs[i].t0;
+    const s = _linkSim(segs[i].v, _linkFeat(cols[j].chroma, cols[j].bass, bw, best.k)); if (s != null) simAt[j] = isNaN(simAt[j]) ? s : Math.max(simAt[j], s);
+  }
+  const lastJ = best.path.length ? best.path[best.path.length - 1][1] : -1;
+  if (lastJ >= 0 && lastJ + 1 <= m) { const i = best.path[best.path.length - 1][0]; beatTimes[lastJ + 1] = Math.max(beatTimes[lastJ + 1] || 0, segs[i].t1); }
+  const known = []; for (let j = 0; j <= m; j++) if (!isNaN(beatTimes[j])) known.push(j);
+  const matchedFrom = known.length ? known[0] : 0, matchedTo = known.length ? known[known.length - 1] : 0;
+  if (known.length < 2) return { ok: false, reason: "The recording and the score did not line up anywhere." };
+  for (let a = 0; a + 1 < known.length; a++) { const j0 = known[a], j1 = known[a + 1]; for (let j = j0 + 1; j < j1; j++) beatTimes[j] = beatTimes[j0] + ((beatTimes[j1] - beatTimes[j0]) * (j - j0)) / (j1 - j0); }
+  const spq0 = (beatTimes[known[Math.min(known.length - 1, 8)]] - beatTimes[known[0]]) / Math.max(1, known[Math.min(known.length - 1, 8)] - known[0]);
+  const kE = known.length - 1, spq1 = (beatTimes[known[kE]] - beatTimes[known[Math.max(0, kE - 8)]]) / Math.max(1, known[kE] - known[Math.max(0, kE - 8)]);
+  for (let j = known[0] - 1; j >= 0; j--) beatTimes[j] = beatTimes[j + 1] - spq0;
+  for (let j = known[kE] + 1; j <= m; j++) beatTimes[j] = beatTimes[j - 1] + spq1;
+  for (let j = 1; j <= m; j++) if (beatTimes[j] <= beatTimes[j - 1]) beatTimes[j] = beatTimes[j - 1] + 1e-3;   // strictly increasing
+  if (opts.refine !== false && matchedTo - matchedFrom >= 4) _linkRefine(frames, cols, beatTimes, matchedFrom, matchedTo, best.k, bw, gateDb, opts);
+  /* Precision: the fine pass works at the 0.1 s frame rate; the beat tracker's beats sit on real
+   * onsets. Where a tracked beat (any phase / subdivision) is within `snapSec` (or a fifth of a
+   * quarter) of a linked quarter, the quarter moves onto it. Where none is near (the tracker is
+   * off the pulse there) the linked time stands. */
+  if (opts.snap !== false && beats.length >= 4) {
+    const spqL = (beatTimes[matchedTo] - beatTimes[matchedFrom]) / Math.max(1, matchedTo - matchedFrom);
+    const lim = Math.min(opts.snapSec != null ? opts.snapSec : SCORE_LINK.snapSec, 0.2 * spqL);
+    let bi = 0;
+    for (let j = matchedFrom; j <= matchedTo; j++) {
+      const t = beatTimes[j];
+      while (bi + 1 < beats.length && beats[bi + 1] <= t) bi++;
+      let nb = beats[bi]; if (bi + 1 < beats.length && Math.abs(beats[bi + 1] - t) < Math.abs(nb - t)) nb = beats[bi + 1];
+      if (Math.abs(nb - t) <= lim && (j === matchedFrom || nb > beatTimes[j - 1] + 0.25 * spqL)) beatTimes[j] = nb;
+    }
+    for (let j = 1; j <= m; j++) if (beatTimes[j] <= beatTimes[j - 1]) beatTimes[j] = beatTimes[j - 1] + 1e-3;
+  }
+  const qToSec = (q) => { const i = Math.max(0, Math.min(m - 1, Math.floor(q))); return beatTimes[i] + (q - i) * (beatTimes[i + 1] - beatTimes[i]); };
+  const barsOut = bars.map((b) => {
+    const j0 = Math.round(b.q0), j1 = Math.min(m, Math.round(b.q1));
+    let ss = 0, ns = 0; for (let j = j0; j < j1; j++) if (!isNaN(simAt[j])) { ss += simAt[j]; ns++; }
+    const sec = qToSec(b.q0), endSec = qToSec(b.q1);
+    return { index: b.index, sourceBar: b.sourceBar, timeSig: b.timeSig, section: b.section, q0: b.q0, q1: b.q1, sec: +sec.toFixed(3), endSec: +endSec.toFixed(3), bpm: +((60 * (b.q1 - b.q0)) / Math.max(1e-3, endSec - sec)).toFixed(2), sim: ns ? +(ss / ns).toFixed(3) : null, matched: j1 > matchedFrom && j0 < matchedTo };
+  });
+  const matchedBpm = barsOut.filter((b) => b.matched).map((b) => b.bpm).sort((a, b) => a - b);
+  const conf = +best.sim.toFixed(3);
+  return {
+    ok: true, transpose: best.k > 6 ? best.k - 12 : best.k, confidence: conf, runnerUp: runnerUp ? { transpose: runnerUp.k > 6 ? runnerUp.k - 12 : runnerUp.k, confidence: +runnerUp.sim.toFixed(3) } : null,
+    weak: conf < (opts.minConfidence != null ? opts.minConfidence : SCORE_LINK.minConfidence),
+    beatTimes: Array.from(beatTimes, (x) => +x.toFixed(4)), len, bars: barsOut,
+    coverage: { scoreFromQ: matchedFrom, scoreToQ: matchedTo, scoreQ: m, audioFrom: +beatTimes[matchedFrom].toFixed(3), audioTo: +beatTimes[matchedTo].toFixed(3), audioLen: +(frames[frames.length - 1].t + 0.05).toFixed(3) },
+    tempo: matchedBpm.length ? matchedBpm[matchedBpm.length >> 1] : sbpm, scoreTempo: opts.tempo > 0 ? opts.tempo : null, beatRatio: best.grid.r,
+    tuning: fr.tuning != null ? +fr.tuning.toFixed(1) : 0,
+    parts: parts.map((p) => ({ name: p.name, weight: p.weight, voice: p.voice })),
+    trials: trials.map((t) => ({ transpose: t.k > 6 ? t.k - 12 : t.k, grid: t.grid.uniform ? "uniform" : `tracker×${+t.grid.r.toFixed(3)}${t.grid.phase ? "+" + t.grid.phase : ""}`, sim: +t.sim.toFixed(4), cost: +t.cost.toFixed(2) })),
+  };
+}
+
+/* FINE PASS. The beat-level path is only as good as the beat tracker's grid — off by half a beat
+ * when the tracker locks to the off-beats, smeared when it reads an odd ratio (a dotted pulse).
+ * So the alignment is re-run at the NNLS frame rate (0.1 s) against the score at the matching
+ * resolution, but only inside a band of ±`refineBandQ` quarters around the coarse path (cheap, and
+ * it cannot jump to another repetition of the same progression). Steps (1,1)/(1,2)/(2,1), each
+ * off-diagonal step `refineStepPenalty` dearer. The matched stretch's quarter times are then the
+ * mean recording time of each quarter's columns, smoothed over ±2 quarters (local linear fit) and
+ * kept strictly increasing. Mutates `beatTimes` in [from, to]. */
+function _linkRefine(frames, cols, beatTimes, from, to, k, bw, gateDb, opts = {}) {
+  const lv = frames.map((f) => f.level).sort((a, b) => a - b);
+  const ref = lv.length ? lv[Math.min(lv.length - 1, Math.floor(0.95 * lv.length))] : 0;
+  const hop = frames.length > 1 ? frames[1].t - frames[0].t : 0.1;
+  const spq = (beatTimes[to] - beatTimes[from]) / Math.max(1, to - from);
+  const sub = Math.max(1, Math.min(8, Math.round(spq / hop)));             // score columns per quarter ≈ frames per quarter
+  const band = (opts.refineBandQ != null ? opts.refineBandQ : SCORE_LINK.refineBandQ) * spq;
+  const pen = opts.refineStepPenalty != null ? opts.refineStepPenalty : SCORE_LINK.refineStepPenalty;
+  const A = frames.map((f) => (f.level < ref - gateDb ? null : _linkFeat(f.chroma, f.bass, bw)));
+  const B = [];
+  for (let j = from; j < to; j++) { const v = _linkFeat(cols[j].chroma, cols[j].bass, bw, k); for (let u = 0; u < sub; u++) B.push({ v, q: j + (u + 0.5) / sub }); }
+  const qT = (q) => { const i = Math.max(from, Math.min(to - 1, Math.floor(q))); return beatTimes[i] + (q - i) * (beatTimes[i + 1] - beatTimes[i]); };
+  const M = B.length, lo = new Int32Array(M), hi = new Int32Array(M);
+  for (let c = 0; c < M; c++) {
+    const t = qT(B[c].q);
+    lo[c] = Math.max(0, Math.floor((t - band - frames[0].t) / hop));
+    hi[c] = Math.min(frames.length - 1, Math.ceil((t + band - frames[0].t) / hop));
+    if (hi[c] < lo[c]) hi[c] = lo[c];
+  }
+  const cost = (i, c) => { const a = A[i]; if (!a) return 0.5; let d = 0; const b = B[c].v; for (let q = 0; q < 24; q++) d += a[q] * b[q]; return 1 - d; };
+  const D = new Array(M), P = new Array(M);
+  const get = (c, i) => (c < 0 || i < lo[c] || i > hi[c] ? Infinity : D[c][i - lo[c]]);
+  for (let c = 0; c < M; c++) {
+    const w = hi[c] - lo[c] + 1; D[c] = new Float64Array(w).fill(Infinity); P[c] = new Uint8Array(w);
+    for (let i = lo[c]; i <= hi[c]; i++) {
+      const cc = cost(i, c);
+      if (c === 0) { D[0][i - lo[0]] = cc; continue; }                 // open start inside the band
+      let best = get(c - 1, i - 1) + cc, p = 1;
+      const v2 = get(c - 2, i - 1) + cc + (c >= 1 ? cost(i, c - 1) : 0) + pen; if (v2 < best) { best = v2; p = 2; }
+      const v3 = get(c - 1, i - 2) + cc + cost(i - 1 >= 0 ? i - 1 : 0, c) + pen; if (v3 < best) { best = v3; p = 3; }
+      D[c][i - lo[c]] = best; P[c][i - lo[c]] = p;
+    }
+  }
+  let i = lo[M - 1], bc = Infinity;
+  for (let r = lo[M - 1]; r <= hi[M - 1]; r++) { const v = D[M - 1][r - lo[M - 1]]; if (v < bc) { bc = v; i = r; } }   // open end
+  if (!isFinite(bc)) return;
+  const colT = new Float64Array(M).fill(NaN);
+  let c = M - 1;
+  while (c >= 0 && i >= 0) {
+    colT[c] = isNaN(colT[c]) ? frames[i].t : Math.min(colT[c], frames[i].t);
+    if (c === 0) break;
+    const p = P[c][i - lo[c]];
+    if (p === 1) { c--; i--; } else if (p === 2) { colT[c - 1] = frames[i].t; c -= 2; i--; } else { colT[c] = frames[i - 1].t; c--; i -= 2; }
+  }
+  // quarter j's time = where its FIRST column was matched (the frame's centre, minus half a hop: its start)
+  const raw = [];
+  for (let j = from; j < to; j++) { const t = colT[(j - from) * sub]; raw.push(isNaN(t) ? beatTimes[j] : t - hop / 2 + (0.5 / sub) * spq * 0); }
+  raw.push(beatTimes[to] + (raw[raw.length - 1] - beatTimes[to - 1]));
+  // smooth: local linear fit over ±2 quarters
+  const sm = raw.map((_, a) => {
+    let n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
+    for (let d = -2; d <= 2; d++) { const b = a + d; if (b < 0 || b >= raw.length) continue; n++; sx += b; sy += raw[b]; sxx += b * b; sxy += b * raw[b]; }
+    const den = n * sxx - sx * sx; if (!den) return raw[a];
+    const sl = (n * sxy - sx * sy) / den; return (sy - sl * sx) / n + sl * a;
+  });
+  for (let a = 0; a < sm.length; a++) beatTimes[from + a] = sm[a];
+  for (let j = from + 1; j < beatTimes.length; j++) if (beatTimes[j] <= beatTimes[j - 1]) beatTimes[j] = beatTimes[j - 1] + 1e-3;
+}
+
+/* Recording second → score quarter on a link (inverse of beatTimes; linear outside). */
+function linkSecToQ(link, t) {
+  const bt = link.beatTimes, m = bt.length - 1;
+  if (t <= bt[0]) return (t - bt[0]) / Math.max(1e-3, bt[1] - bt[0]);
+  if (t >= bt[m]) return m + (t - bt[m]) / Math.max(1e-3, bt[m] - bt[m - 1]);
+  let lo = 0, hi = m; while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (bt[mid] <= t) lo = mid; else hi = mid; }
+  return lo + (t - bt[lo]) / Math.max(1e-6, bt[hi] - bt[lo]);
+}
+function linkQToSec(link, q) {
+  const bt = link.beatTimes, m = bt.length - 1;
+  const i = Math.max(0, Math.min(m - 1, Math.floor(q)));
+  return bt[i] + (q - i) * (bt[i + 1] - bt[i]);
+}
+
+/* Chords of a recording read WITH its score: link, then the v2 decoder on the score's beats
+ * (×2 subdivision) with the score's chroma (chordal parts; voices left out) as evidence.
+ * → { link, events (each + scoreSymbol, agree), bpm, beats, key, tuning, agreement } or
+ * { link } when the link failed / is weak and opts.force is not set. */
+function analyzeAudioWithScore(samples, sampleRate, partScores, opts = {}) {
+  const fr = opts._frames || nnlsChromagram(samples, sampleRate, opts);
+  const link = linkScoreToAudio(samples, sampleRate, partScores, { ...opts, _frames: fr });
+  if (!link.ok || (link.weak && !opts.force)) return { link };
+  const parts = scoreLinkParts(partScores, opts);
+  const step = 0.5, cols = scoreLinkPriorGrid(parts, link.len, step);
+  const k = ((link.transpose % 12) + 12) % 12;
+  const prior = (t0, t1) => {
+    const q0 = linkSecToQ(link, t0), q1 = linkSecToQ(link, t1);
+    if (q1 <= 0 || q0 >= link.len) return null;
+    const chroma = new Float64Array(12), bass = new Float64Array(12);
+    const a = Math.max(0, Math.floor(q0 / step)), b = Math.min(cols.length, Math.max(a + 1, Math.ceil(q1 / step)));
+    for (let g = a; g < b; g++) for (let p = 0; p < 12; p++) { chroma[(p + k) % 12] += cols[g].chroma[p]; bass[(p + k) % 12] += cols[g].bass[p]; }
+    return { chroma, bass };
+  };
+  // decode grid: the score's quarters inside the recording (plus the recording's own beats outside them)
+  const audioEnd = link.coverage.audioLen;
+  const grid = link.beatTimes.filter((t) => t >= 0 && t <= audioEnd);
+  const r = analyzeAudioChordsV2(samples, sampleRate, { ...opts, _frames: fr, beats: grid.length >= 3 ? grid : null, bpm: link.tempo, scorePrior: prior, adaptive: false });
+  /* Where the recording and the score disagree, the chord goes to the REVIEW list with the
+   * score's reading as the first alternative — one tap writes the score's chord, one tap keeps
+   * the recording's. Agreement is reported as a share of the score-covered time. */
+  const evs = (r.events || []).map((e) => {
+    if (!e.scoreSymbol || e.agree) return e;
+    const alts = (e.alternatives || []).filter((a) => a.symbol !== e.scoreSymbol);
+    const own = (e.alternatives || []).find((a) => a.symbol === e.scoreSymbol);
+    return { ...e, ambiguous: true, disagree: true, alternatives: [{ symbol: e.scoreSymbol, prob: own ? own.prob : 0, midis: e.scoreMidis || (own && own.midis) || [], fromScore: true }, ...alts].slice(0, 4) };
+  });
+  let tot = 0, agree = 0; for (const e of evs) if (e.scoreSymbol) { tot += e.durSec; if (e.agree) agree += e.durSec; }
+  return { ...r, events: evs, link, agreement: tot ? +(agree / tot).toFixed(3) : null, disagreements: evs.filter((e) => e.disagree).length };
+}
+
+/* The harmony a score spells, per `step` quarters, for the chord prior: the CHORDAL parts' notes
+ * (comping guitar, piano voicings — ≥ 1.8 notes per onset), the bass from the lowest note of any
+ * instrumental part. A melody or solo line over the chords would otherwise vote its passing
+ * notes into the chord (measured on the Jarreau file: a lead-guitar D over Cm7 read Ebmaj7). With
+ * no chordal part (a lead sheet's melody + bass), every instrumental part; voices only if nothing
+ * else has notes. */
+function scoreLinkPriorGrid(parts, len, step = 0.5) {
+  const inst = parts.filter((p) => !p.voice), pool = inst.length ? inst : parts;
+  const chordal = pool.filter((p) => p.poly >= 1.8);
+  const cset = new Set(chordal.length ? chordal : pool), bset = new Set(pool);
+  const cols = scoreHarmonyGrid(parts, len, step, (p) => cset.has(p), (p) => bset.has(p));
+  /* HARMONY CARRY ("let ring"): an arpeggio or a broken-chord figure sounds one or two notes at a
+   * time, but the chord it spells is in force until the next chord — the way a player reads
+   * comping, and the way the strings ring. A column with fewer than 3 real pitch classes reads the
+   * decaying sum of what sounded before it (×0.75 per half beat) under its own notes; a full chord
+   * (≥ 3) restarts the sum; a rest longer than `carryRestQ` quarters ends it (a stop is a rest). */
+  const restCols = Math.max(1, Math.round((SCORE_LINK.carryRestQ || 2) / step));
+  const decay = Math.pow(0.75, step / 0.5);
+  let acc = null, empty = 0;
+  for (const c of cols) {
+    let mx = 0; for (let p = 0; p < 12; p++) if (c.chroma[p] > mx) mx = c.chroma[p];
+    let k = 0; if (mx > 0) for (let p = 0; p < 12; p++) if (c.chroma[p] >= 0.2 * mx) k++;
+    if (!mx) { if (++empty >= restCols) acc = null; } else empty = 0;
+    const own = Float64Array.from(c.chroma, (v) => (mx ? v / mx : 0));
+    if (k >= 3 || !acc) { acc = mx ? own : acc; continue; }
+    for (let p = 0; p < 12; p++) { acc[p] = acc[p] * decay + own[p]; c.chroma[p] = acc[p]; }
+  }
+  return cols;
+}
+
+/* Root + quality equal (the bass may differ: C and C/E are the same chord class here). */
+function _sameChordClass(a, b) {
+  if (!a || !b) return false;
+  const strip = (s) => String(s).replace(/\/[A-G][#b]?$/, "");
+  const pa = _parseSym(strip(a)), pb = _parseSym(strip(b));
+  return pa.pc != null && pa.pc === pb.pc && strip(a).replace(/^[A-G][#b]?/, "") === strip(b).replace(/^[A-G][#b]?/, "");
+}
+
+/* Recording chord events on the SCORE's bars (performance order — repeats unrolled), with the
+ * recording's clock: per-bar tempo map, audioOffset (bar 1's second in the recording) and a
+ * timeline, so playback / Check by ear / practice follow the record and bar n is the score's
+ * bar n. Sections come from the score. Bars before the recording starts or after it ends stay
+ * empty. → the shared score shape, source "audio+score", each event + scoreSymbol / agree. */
+function linkedChartScore(link, events, opts = {}) {
+  const bars = link.bars || [];
+  if (!bars.length) return null;
+  const placed = (events || []).filter((e) => e.symbol).map((e) => ({ e, q0: linkSecToQ(link, e.startSec), q1: linkSecToQ(link, e.startSec + (e.durSec || 0)) }));
+  const outBars = bars.map((b, bi) => {
+    const [num, den] = b.timeSig, qPerBeat = 4 / den;
+    const evs = [];
+    for (const p of placed) {
+      if (p.q1 <= b.q0 + 1e-6 || p.q0 >= b.q1 - 1e-6) continue;
+      const qbeat = Math.max(0, (p.q0 - b.q0) / qPerBeat);
+      const ev = { symbol: p.e.symbol, midis: p.e.midis || [], qbeat: qbeat < 1e-6 ? 0 : qbeat };
+      if (p.q0 < b.q0 - 1e-6) ev.held = true;
+      if (p.e.ambiguous) ev.uncertain = true;
+      if (p.e.reviewed) ev.reviewed = true;
+      if (p.e.scoreSymbol !== undefined) { ev.scoreSymbol = p.e.scoreSymbol; ev.agree = !!p.e.agree; }
+      evs.push(ev);
+    }
+    evs.sort((a, c) => a.qbeat - c.qbeat);
+    const merged = [];
+    for (const ev of evs) { const last = merged[merged.length - 1]; if (last && last.symbol === ev.symbol) continue; merged.push(ev); }
+    merged.forEach((e) => { e.beat = Math.max(0, Math.min(num - 1, Math.round(e.qbeat))); });
+    for (let i = 1; i < merged.length; i++) if (merged[i].beat <= merged[i - 1].beat) merged[i].beat = Math.min(num - 1, merged[i - 1].beat + 1);
+    merged.forEach((e, i) => { e.durBeats = (i + 1 < merged.length ? merged[i + 1].beat : num) - e.beat; });
+    _fillTrueDur(merged, num);
+    return { number: bi + 1, sourceBar: b.sourceBar, timeSig: b.timeSig, ...(b.section ? { section: b.section } : {}), events: merged };
+  });
+  /* Tempo: the recording's clock as the FEWEST tempo changes (on bar lines) that keep every beat
+   * within `tempoTolerance` seconds (100 ms) of where the link put it — the engine's own tempo-map
+   * simplifier, as for audio charts. Per-bar jitter would otherwise write a change on every bar. */
+  const den0 = bars[0].timeSig[1], bpb0 = bars[0].timeSig[0];
+  const full = { times: link.beatTimes.slice(), positions: link.beatTimes.map((_, j) => (j * den0) / 4) };
+  const simp = timelineSimplified(full, opts.tempoTolerance != null ? opts.tempoTolerance : 0.1, bpb0);
+  const changes = timelineTempoChanges(simp).map((c) => ({ bar: Math.floor(c.beat / bpb0 + 1e-6) + 1, beat: 0, bpm: +((c.bpm * 4) / den0).toFixed(3) }));
+  const map = []; for (const c of changes) { if (map.length && map[map.length - 1].bar === c.bar) map[map.length - 1] = c; else map.push(c); }
+  const sorted = bars.map((b) => b.bpm).sort((a, b) => a - b), tempo = +sorted[sorted.length >> 1].toFixed(2);
+  const score = {
+    source: "audio+score", timeSig: bars[0].timeSig, tempo, bars: outBars,
+    timeline: simp,
+    audioOffset: bars[0].sec, tempoMap: map.length > 1 ? map : null,
+    link: { transpose: link.transpose, confidence: link.confidence },
+  };
+  return score;
 }
 
 
@@ -11134,6 +11757,8 @@ function scoreToGridSVG(score, opts = {}) {
 }
 
 export {
+  SCORE_LINK, unrollRepeatOrder, scorePartNotes, scoreLinkParts, scoreHarmonyGrid, linkBeatDTW, linkScoreToAudio, linkSecToQ, linkQToSec,
+  analyzeAudioWithScore, linkedChartScore, scoreLinkPriorGrid, _harmonyOfParts, _scorePriorBonus, _sameChordClass, _linkFeat, _linkBeatGrids,
   makeMask,
   popcount,
   rotateRight,
