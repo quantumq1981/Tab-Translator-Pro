@@ -261,6 +261,9 @@ import {
   HARMONY_PART,
   analyzeAudioWithScore,
   linkedChartScore,
+  scoreInformedTab,
+  scorePartRole,
+  compareStemsToScore,
   SCORE_LINK,
   parseMidiFile,
   spellScoreForKey,
@@ -4232,6 +4235,56 @@ let _linkAskSeen = 0;   // "🎧 Link a recording" taps already acted on (the Au
 
 /* 📎 LINK A SCORE — the bridge between the notation paths (MusicXML · Guitar Pro · Power Tab ·
  * MIDI) and the audio tools. Pure presentational: the controller is AudioImport. */
+/* 🎸 + 📎 Guitar → Tab read with the linked score: which part gives the strings, how far the tab
+ * follows the score (the same Recording / Balanced / Score as the chords), what agreed, and every
+ * place the playing and the file differ — tap a bar to hear it. Presentational; the engine is
+ * scoreInformedTab. */
+const _NOTE_NAMES = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"];
+function ScoreTabPanel({ C, r, parts, part, onPart, follow, onFollow, onSeek, fmt }) {
+  const s = r.stats, pct = (x) => `${Math.round(100 * (x || 0))}%`;
+  const byBar = useMemo(() => {
+    const m = new Map();
+    for (const d of r.differences) { if (d.bar == null) continue; const e = m.get(d.bar) || { bar: d.bar, sourceBar: d.sourceBar, t: d.startSec, missed: [], extra: [] }; (d.kind === "missed" ? e.missed : e.extra).push(d.midi); m.set(d.bar, e); }
+    return [...m.values()].sort((a, b) => a.bar - b.bar);
+  }, [r]);
+  const nm = (m) => _NOTE_NAMES[((m % 12) + 12) % 12] + (Math.floor(m / 12) - 1);
+  return (
+    <div style={{ fontSize: 11, color: C.dim, marginBottom: 8, lineHeight: 1.6, border: `1px solid ${C.cyan}`, borderRadius: 8, padding: "8px 10px" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+        <span style={{ fontSize: 10, letterSpacing: 2 }}>TAB FROM THE SCORE</span>
+        {parts.length > 1 && (
+          <select value={part} onChange={(e) => onPart(e.target.value)} title="which score part gives the tab its strings and frets"
+            style={{ ...chip(C), padding: "3px 9px", background: C.raised, color: C.cyan, borderColor: C.cyan, cursor: "pointer" }}>
+            <option value="auto">All guitar parts ({parts.length})</option>
+            {parts.map((p) => <option key={p.i} value={String(p.i)}>{p.name || `Part ${p.i + 1}`}</option>)}
+          </select>
+        )}
+        <span>Tab follows:</span>
+        {Object.entries(LINK_FOLLOW).map(([k, v]) => (
+          <button key={k} onClick={() => onFollow(k)} title={k === "recording" ? "only the notes heard; strings from the score where they agree" : k === "balanced" ? "the notes heard, plus score notes the model missed but faintly heard" : "the score's notes on the recording's timing (extra notes left out)"}
+            style={{ ...chip(C), padding: "2px 8px", borderColor: follow === k ? C.cyan : C.border, color: follow === k ? C.cyan : C.dim }}>{v.label}</button>
+        ))}
+      </div>
+      <div style={{ marginTop: 4 }}>
+        🎸 <b style={{ color: C.text }}>{r.partNames.join(" + ")}</b>: <b style={{ color: C.green }}>{s.matched}</b> of {s.scoreNotes} score notes heard{s.recovered ? <>, <b style={{ color: C.green }}>{s.recovered}</b> found again in the model's quieter onsets</> : null} ({pct(s.agreement)}) · strings and frets <b>from the score</b> for those · {s.extra} heard note{s.extra === 1 ? "" : "s"} not in the part {follow === "score" ? "left out" : "kept, fingered around them"} · {s.missed} score note{s.missed === 1 ? "" : "s"} not heard{follow === "score" ? " (written in from the score)" : ""}{r.capo ? ` · capo ${r.capo} (the recording is ${r.transpose} semitone${Math.abs(r.transpose) === 1 ? "" : "s"} up)` : r.transpose < 0 ? ` · tuned down ${-r.transpose}` : ""}.
+      </div>
+      {byBar.length > 0 && (
+        <div style={{ marginTop: 6 }}>
+          <div style={{ marginBottom: 3 }}>Where the playing and the file differ ({byBar.length} bar{byBar.length === 1 ? "" : "s"}) — tap to listen:</div>
+          <div className="tdp-scroll" style={{ display: "flex", flexWrap: "wrap", gap: 4, maxHeight: 110, overflow: "auto" }}>
+            {byBar.map((b) => (
+              <button key={b.bar} onClick={() => onSeek(b.t)} title={`${b.missed.length ? "not heard: " + b.missed.map(nm).join(" ") : ""}${b.missed.length && b.extra.length ? " · " : ""}${b.extra.length ? "heard, not in the part: " + b.extra.map(nm).join(" ") : ""}`}
+                style={{ ...chip(C), padding: "1px 7px", fontSize: 10, borderColor: C.amber, color: C.amber }}>
+                ▶ {b.bar}{b.sourceBar && b.sourceBar !== b.bar ? ` (${b.sourceBar})` : ""} · {fmt(b.t)}{b.missed.length ? ` −${b.missed.length}` : ""}{b.extra.length ? ` +${b.extra.length}` : ""}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ScoreLinkPanel({ C, file, res, busy, follow, onFollow, onPick, openName, onUseOpen, onUnlink, onForce, fmt, hasAudio }) {
   const lk = res && res.link;
   const bars = lk && lk.bars ? lk.bars.filter((b) => b.matched) : [];
@@ -4273,7 +4326,7 @@ function ScoreLinkPanel({ C, file, res, busy, follow, onFollow, onPick, openName
           {res.agreement != null && <>
             <br />The recording agrees with the score <b style={{ color: C.green }}>{pct(res.agreement)}</b> of the time{res.disagreements ? <> — <b style={{ color: C.amber }}>{res.disagreements}</b> chord{res.disagreements === 1 ? "" : "s"} differ: they're in the review list with the score's chord one tap away.</> : "."}
           </>}
-          <br /><span>Bars, tempo map and sections come from the score; <b>Tempo &amp; bars</b> applies to Voices (ML) / Guitar → Tab.</span>
+          <br /><span>Bars, tempo map and sections come from the score (Guitar → Tab too, with the score's strings); <b>Tempo &amp; bars</b> applies to Voices (ML).</span>
         </div>
       )}
     </div>
@@ -4292,6 +4345,8 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
   const [gtrProg, setGtrProg] = useState(null);
   const [gtrTuning, setGtrTuning] = useState("standard"); // the guitar's tuning for Guitar → Tab (GUITAR_TUNINGS id)
   const [gtrCapo, setGtrCapo] = useState(0);          // capo fret: frets are written relative to it (sounding = tuning + capo + fret)
+  const [gtrOnset, setGtrOnset] = useState(null);    // the guitar model's onset matrix — a linked score looks again in it for missed notes
+  const [gtrLinkPart, setGtrLinkPart] = useState("auto"); // which score part(s) give the tab its fingering: "auto" = every guitar part
   const [gtrOvr, setGtrOvr] = useState({});         // the tab's own chord edits (its "bar.beat" keys aren't the chord chart's)      // { done, total } windows while the guitar model runs
   const [voiceCount, setVoiceCount] = useState(3);   // SATB split target (1 = no split, 2 = duet, 3 = SAT, 4 = SATB)
   const [voiceIdx, setVoiceIdx] = useState(0);       // which voice slot is displayed (0 = highest / soprano)
@@ -4535,12 +4590,12 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
     const s = ref.current; if (!s.cur) { setErr("Upload audio first."); return; }
     const model = typeof window !== "undefined" ? window.TTP_GUITAR_MODEL : null;
     if (typeof model !== "function") { setErr("Guitar → Tab needs the guitar note model (guitar-model.js) — not loaded on this build."); return; }
-    setBusy(true); setErr(""); setGtrNotes(null); setGtrProg({ done: 0, total: 0 });
+    setBusy(true); setErr(""); setGtrNotes(null); setGtrOnset(null); setGtrProg({ done: 0, total: 0 });
     _releaseEngineWorker();
     try {
       const pcm = s.sr === 16000 ? s.cur : resampleTo(s.cur, s.sr, 16000);
-      const { notes } = await model(pcm, { onProgress: (done, total) => setGtrProg({ done, total }) });
-      setGtrNotes(notes || []); setGtrOvr({});
+      const { notes, onset } = await model(pcm, { keepOnset: true, onProgress: (done, total) => setGtrProg({ done, total }) });
+      setGtrNotes(notes || []); setGtrOnset(onset || null); setGtrOvr({});
       if (!notes || !notes.length) setErr("The guitar model found no notes in this audio.");
     } catch (e) { setErr("Guitar transcription failed: " + (e && e.message ? e.message : "unknown")); }
     setGtrProg(null); setBusy(false);
@@ -4573,7 +4628,30 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
   }, [gtrNotes]);
   const gtrSuggest = gtrDetect && gtrDetect.tuning;
   const [gtrUndo, setGtrUndo] = useState(null);                 // { tuning, capo } before an Apply
+  /* 📎 Guitar → Tab WITH the linked score (engine.scoreInformedTab): the score's strings and frets for
+   * every note the two agree on, missed score notes looked for again in the model's onsets, extra
+   * notes kept as heard (Recording / Balanced) or dropped (Score), on the SCORE's bars. GuitarSet:
+   * see docs/SCORE-AUDIO-LINK.md. */
+  const linkedNow = linkRes && linkRes.link && linkRes.link.ok && !linkRes.failed ? linkRes.link : null;
+  const gtrLinkParts = useMemo(() => {
+    const ps = linkFile && linkFile.parts ? linkFile.parts : [];
+    const gtr = ps.map((p, i) => ({ ...p, i })).filter((p) => scorePartRole(p) === "guitar" && scorePartRole(p) !== "drums");
+    return gtr;
+  }, [linkFile]);
+  const gtrLinked = useMemo(() => {
+    if (!linkedNow || !gtrLine || !gtrLine.length || !gtrLinkParts.length) return null;
+    const pick = gtrLinkPart === "auto" ? gtrLinkParts : gtrLinkParts.filter((p) => String(p.i) === gtrLinkPart);
+    if (!pick.length) return null;
+    try {
+      const lc = linkedChartScore(linkedNow, [], { useSharp });
+      const ts = (lc && lc.timeSig) || [4, 4];
+      const r = scoreInformedTab(gtrLine, linkedNow, pick, { follow: linkFollow, out: gtrOnset ? { onset: gtrOnset } : null, useSharp, timeline: lc && lc.timeline, beatsPerBar: ts[0], beatType: ts[1] });
+      if (r.score && lc) r.score = { ...r.score, bars: r.score.bars.map((b, i) => (lc.bars[i] && lc.bars[i].section ? { ...b, section: lc.bars[i].section } : b)) };
+      return { ...r, partNames: pick.map((p) => p.name || "Guitar") };
+    } catch (_) { return null; }
+  }, [linkedNow, gtrLine, gtrLinkParts, gtrLinkPart, linkFollow, gtrOnset, useSharp]);
   const gtrScore = useMemo(() => {
+    if (gtrLinked && gtrLinked.score) return gtrLinked.score;
     if (!gtrPoly) return null;
     // Finger on the chosen tuning (+ capo): on the GP corpus, fingering a non-standard part in its real
     // tuning puts 62.6 % of notes on the written string vs 43.8 % in standard (tests/bench/tuning.mjs).
@@ -4581,7 +4659,7 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
     const fingered = fingerScore(gtrPoly, { tuning: t.midi, capo: gtrCapo });
     const base = { ...fingered, tuningMidi: t.midi, tuning: t.name, soundingCapo: gtrCapo, capo: gtrCapo };
     return sections.length ? applySectionsToScore(base, sections, { beatsPerBar: bpb }) : base;
-  }, [gtrPoly, gtrTuning, gtrCapo, sections]);
+  }, [gtrPoly, gtrTuning, gtrCapo, sections, gtrLinked]);
   /* Voice split — SATB heuristic (engine.tsx splitVoices) runs on the RAW ML notes,
    * so switching the voice count or the displayed voice is cheap: no re-inference,
    * no re-download. voiceCount === 1 shows the full polyphonic score (no split).
@@ -4939,10 +5017,15 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
       {/* GUITAR → TAB: CRNN notes, fingered; AlphaTex export carries the strings */}
       {gtrScore && (
         <div style={{ marginBottom: 14 }}>
+          {gtrLinked ? (
+            <ScoreTabPanel C={C} r={gtrLinked} parts={gtrLinkParts} part={gtrLinkPart} onPart={setGtrLinkPart} follow={linkFollow} onFollow={setLinkFollow} onSeek={(t) => play(Math.max(0, t - 0.5))} fmt={fmt} useSharp={useSharp} />
+          ) : (
           <div style={{ fontSize: 11, color: C.dim, marginBottom: 6, lineHeight: 1.6 }}>
             🎸 <b style={{ color: C.text }}>{gtrNotes.length} notes</b> from the guitar model · strings <b>inferred</b> (fingerScore — playable, not necessarily the player's) · bars come from <b>Tempo &amp; bars</b> above · <b>AlphaTex (tab)</b> exports every note with its string.
+            {linkedNow && !gtrLinkParts.length && <> · the linked score has no guitar part to take strings from.</>}
           </div>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 6, fontSize: 11, color: C.dim }}>
+          )}
+          {!gtrLinked && <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 6, fontSize: 11, color: C.dim }}>
             <select value={gtrTuning} onChange={(e) => setGtrTuning(e.target.value)} title="the guitar's tuning — the tab is fingered and labelled on it"
               style={{ ...chip(C), padding: "3px 9px", borderColor: gtrTuning !== "standard" ? C.amber : C.border, color: gtrTuning !== "standard" ? C.amber : C.dim, background: C.raised, cursor: "pointer" }}>
               {GUITAR_TUNINGS.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
@@ -4952,15 +5035,15 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
             <span style={{ minWidth: 18, textAlign: "center", color: gtrCapo ? C.amber : C.dim }}>{gtrCapo || "—"}</span>
             <button onClick={() => setGtrCapo((c) => Math.min(12, c + 1))} disabled={gtrCapo >= 12} style={{ ...chip(C), padding: "2px 9px" }} aria-label="capo up">+</button>
             {gtrCapo > 0 && <span>frets relative to the capo</span>}
-          </div>
-          {gtrSuggest && gtrSuggest.id !== gtrTuning && (
+          </div>}
+          {!gtrLinked && gtrSuggest && gtrSuggest.id !== gtrTuning && (
             <div style={{ fontSize: 11, color: C.amber, border: `1px dashed ${C.amber}`, borderRadius: 6, padding: "5px 8px", marginBottom: 6, lineHeight: 1.5 }}>
               Detected: <b>{gtrSuggest.label}</b> ({Math.round((gtrSuggest.confidence || 0.6) * 100)}%) — {gtrSuggest.standard.unplayable} note{gtrSuggest.standard.unplayable === 1 ? "" : "s"} sit below standard tuning's low E.{" "}
               <button onClick={() => { setGtrUndo({ tuning: gtrTuning, capo: gtrCapo }); setGtrTuning(gtrSuggest.id); }} style={{ ...chip(C), padding: "2px 9px", borderColor: C.amber, color: C.amber }}>Apply</button>
               <span style={{ color: C.dim }}> (a full mix's bass can do this too — keep standard if the guitar is in standard)</span>
             </div>
           )}
-          {gtrDetect && gtrDetect.capo && gtrDetect.capo.capo !== gtrCapo && (
+          {!gtrLinked && gtrDetect && gtrDetect.capo && gtrDetect.capo.capo !== gtrCapo && (
             <div style={{ fontSize: 11, color: C.amber, border: `1px dashed ${C.amber}`, borderRadius: 6, padding: "5px 8px", marginBottom: 6, lineHeight: 1.5 }}>
               Sounds like <b>capo {gtrDetect.capo.capo}</b> ({Math.round(gtrDetect.capo.confidence * 100)}%) — {Math.round(gtrDetect.capo.openShare * 100)}% of the notes fall on its open strings (vs {Math.round(gtrDetect.capo.openShare0 * 100)}% without).{" "}
               <button onClick={() => { setGtrUndo({ tuning: gtrTuning, capo: gtrCapo }); setGtrCapo(gtrDetect.capo.capo); }} style={{ ...chip(C), padding: "2px 9px", borderColor: C.amber, color: C.amber }}>Apply</button>
@@ -4979,15 +5062,17 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
               : <span>no techniques heard</span>)}
           </div>
           <div style={{ marginBottom: 6 }}><CheckByEar C={C} score={gtrScore} getBuffer={() => ref.current.audioBuf} onStart={stopPlay} /></div>
-          <ChartPanel score={gtrScore} title={(name || "Guitar") + " · tab"}
-            meta={`${gtrScore.bars.length} bars · ${gtrNotes.length} notes · from the guitar ML model · ${guitarTuning(gtrTuning).name}${gtrCapo ? ` · capo ${gtrCapo}` : ""}`}
-            C={C} useSharp={useSharp} overrides={gtrOvr} setOverrides={setGtrOvr} selKey="" onPick={() => {}} autoSimplify={false} defaultView="tab"
+          <ChartPanel score={gtrScore} overrides={gtrOvr} setOverrides={setGtrOvr} autoSimplify={false} title={(name || "Guitar") + " · tab"}
+            meta={gtrLinked ? `${gtrScore.bars.length} bars (the score's) · ${gtrLinked.notes.length} notes · fingering from the score · ${gtrScore.tuning || "Standard"}${gtrLinked.capo ? ` · capo ${gtrLinked.capo}` : ""}`
+              : `${gtrScore.bars.length} bars · ${gtrNotes.length} notes · from the guitar ML model · ${guitarTuning(gtrTuning).name}${gtrCapo ? ` · capo ${gtrCapo}` : ""}`}
+            C={C} useSharp={useSharp} selKey="" onPick={() => {}} defaultView="tab"
             getAudio={() => (ref.current.mono ? { samples: ref.current.mono, sr: ref.current.sr } : null)} getBuffer={() => ref.current.audioBuf || null} />
         </div>
       )}
 
       {/* STEMS → split a full mix (or import stems) → a chart per instrument */}
-      <StemsPanel C={C} useSharp={useSharp} vocab={vocab} setVocab={setVocab} sixNine={sixNine} setSixNine={setSixNine} reading={chordReadingOpts(songKey, keyUse, changes)} getSource={() => ref.current.audioBuf || null} sourceName={name} fmt={fmt} loading={busy} />
+      <StemsPanel C={C} useSharp={useSharp} vocab={vocab} setVocab={setVocab} sixNine={sixNine} setSixNine={setSixNine} reading={chordReadingOpts(songKey, keyUse, changes)} getSource={() => ref.current.audioBuf || null} sourceName={name} fmt={fmt} loading={busy}
+        link={linked} linkParts={linkFile ? linkFile.parts : null} linkName={linkFile ? linkFile.name : ""} />
 
       {/* SONG STRUCTURE → detected + editable, applied to the chart below */}
       {!!raw.length && !!ref.current.cur && (
@@ -5162,7 +5247,28 @@ const STEM_STAGE_TEXT = {
   runtime: "starting the AI runtime (older devices: a minute or more)…",
   separating: "separating…",
 };
-function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, reading, getSource, sourceName, fmt, loading }) {
+/* 📎 Stems × score parts — one row per stem: its score part(s), how closely it follows them, and the
+ * bars that differ (the score's bar numbers). Presentational; the engine is compareStemsToScore. */
+const _STEM_KIND_HOW = { notes: "pitch line", chords: "harmony", drums: "kick · snare · cymbals" };
+function StemsVsScore({ C, rows, name }) {
+  const pct = (x) => `${Math.round(100 * (x || 0))}%`;
+  return (
+    <div style={{ fontSize: 11, color: C.dim, lineHeight: 1.6, border: `1px solid ${C.cyan}`, borderRadius: 8, padding: "8px 10px", marginBottom: 8 }}>
+      <div style={{ fontSize: 10, letterSpacing: 2, marginBottom: 4 }}>STEMS VS THE SCORE{name ? ` · ${name}` : ""}</div>
+      {rows.map((r) => (
+        <div key={r.role} style={{ marginBottom: 3 }}>
+          <b style={{ color: C.text }}>{STEM_ROLE_NAMES[r.role] || r.role}</b>
+          {r.parts.length ? <> ↔ {r.parts.join(" + ")}: <b style={{ color: r.agreement >= 0.75 ? C.green : r.agreement >= 0.5 ? C.amber : C.red }}>{r.agreement != null ? pct(r.agreement) : "—"}</b> ({_STEM_KIND_HOW[r.kind]}{r.from === "chords" ? ", from the stem's chord chart" : ""})
+            {r.differs.length ? <> · differs in bar{r.differs.length === 1 ? "" : "s"} <span style={{ color: C.amber }}>{r.differs.slice(0, 24).join(", ")}{r.differs.length > 24 ? " …" : ""}</span></> : <> · no bar stands out</>}
+            {r.kind === "drums" && <span> — a rough guide: the drum transcriber confuses kick and snare, listen before trusting a flag</span>}
+          </> : <> — {r.note}</>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, reading, getSource, sourceName, fmt, loading, link, linkParts, linkName }) {
   const [tracks, setTracks] = useState(null);           // { sampleRate, list:[{ role, name, L, R }] } at FULL rate
   const [busy, setBusy] = useState(""), [prog, setProg] = useState(null), [err, setErr] = useState("");
   const [res, setRes] = useState(null);                 // chartsFromStems result
@@ -5389,6 +5495,18 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, reading
   const toggleSet = (set, setter, role) => setter((x) => { const n = new Set(x); n.has(role) ? n.delete(role) : n.add(role); return n; });
 
   const chart = res && (res.charts.find((c) => c.role === tab) || res.charts[0]);
+  /* 📎 each stem against its score part(s) (engine.compareStemsToScore): the stems' chart times are
+   * from the split's start, the link's from the recording's — shifted by the section offset. */
+  const vsScore = useMemo(() => {
+    if (!res || !link || !linkParts || !linkParts.length) return null;
+    const off = (tracks && tracks.offsetSec) || 0;
+    const charts = res.charts.map((c) => ({ ...c,
+      ...(c.notes ? { notes: c.notes.map((n) => ({ ...n, startSec: n.startSec + off })) } : {}),
+      ...(c.hits ? { hits: c.hits.map((h) => ({ ...h, t: h.t + off })) } : {}),
+      ...(c.events ? { events: c.events.map((e) => ({ ...e, startSec: e.startSec + off })) } : {}) }));
+    try { return compareStemsToScore({ charts }, 16000, link, linkParts, {}); } catch (_) { return null; }
+  }, [res, link, linkParts, tracks]);
+  const partsFor = (role) => { const r = vsScore && vsScore.find((x) => x.role === role); return r && r.parts.length ? r.parts.join(" + ") : ""; };
   const chartScore = useMemo(() => {
     if (!chart) return null;
     if (chart.kind === "chords") return audioEventsToScore(chart.events, { timeline: bg.grid.timeline, beatsPerBar: bpb, quantize: { step: 0.5 }, useSharp });
@@ -5501,12 +5619,13 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, reading
         <>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginBottom: 8 }}>
             {res.charts.map((c) => (
-              <button key={c.role} onClick={() => setTab(c.role)} style={{ ...chip(C), padding: "4px 10px", borderColor: tab === c.role ? C.cyan : C.border, color: tab === c.role ? C.cyan : C.dim }}>{c.name}</button>
+              <button key={c.role} onClick={() => setTab(c.role)} title={partsFor(c.role) ? `score part: ${partsFor(c.role)}` : undefined} style={{ ...chip(C), padding: "4px 10px", borderColor: tab === c.role ? C.cyan : C.border, color: tab === c.role ? C.cyan : C.dim }}>{c.name}{partsFor(c.role) ? <span style={{ color: C.dim }}> · {partsFor(c.role).length > 22 ? partsFor(c.role).slice(0, 20) + "…" : partsFor(c.role)}</span> : null}</button>
             ))}
             {setVocab && <ChordVocabPicker C={C} value={vocab} onChange={setVocab} sixNine={sixNine} onSixNine={setSixNine} disabled={!!busy} />}
             <button onClick={saveAllParts} disabled={!!busy} title="every chart as files in one zip: MusicXML + MIDI + CSMPN per part, AlphaTex tab for guitar and bass, a full score and a multi-track MIDI" style={{ ...chip(C), padding: "4px 12px", color: C.green }}>⬇ All parts (zip)</button>
             <button onClick={sendPartsToPro} disabled={!!busy} title="open the band chart in Chord Sheet Maker Pro and file every instrument's chart in its song library" style={{ ...chip(C), padding: "4px 12px", color: C.cyan }}>→ Chord Sheet Maker Pro (all parts)</button>
           </div>
+          {vsScore && <StemsVsScore C={C} rows={vsScore} name={linkName} />}
           <TempoBarsPanel C={C} bg={bg} label="TEMPO & BARS · shared by every stem chart" canFindBars={!!tracks}
             onFindBars={() => { if (!tracks) return; bg.findBars(stemMono(tracks.list), tracks.sampleRate); }} />
           {!res.charts.length && <div style={{ fontSize: 11, color: C.dim }}>No instrument produced a chart.</div>}

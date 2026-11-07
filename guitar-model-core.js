@@ -84,7 +84,9 @@ export async function transcribeGuitarPcm(pcm16k, engine, opts = {}) {
   const bytes = await guitarModelBytes();
   const sess = await guitarSession(bytes);
   try {
-    const { notes } = await engine.transcribeGuitar(pcm16k, (seg) => sess.run(seg), { onProgress: opts.onProgress });
-    return { notes };
+    // opts.keepOnset: also the model's onset matrix ([frames × 88], 100 fps) — a linked score looks
+    // again in it for notes the thresholds dropped (engine.scoreInformedTab)
+    const r = await engine.transcribeGuitar(pcm16k, (seg) => sess.run(seg), { onProgress: opts.onProgress, keepOutputs: !!opts.keepOnset });
+    return opts.keepOnset && r.out ? { notes: r.notes, onset: r.out.onset } : { notes: r.notes };
   } finally { sess.release(); }
 }

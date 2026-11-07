@@ -32,11 +32,11 @@ async function transcribeGuitarAudio(pcm16k, opts = {}) {
       w.onmessage = (ev) => {
         const m = ev.data || {};
         if (m.type === "progress") { if (opts.onProgress) opts.onProgress(m.done, m.total); return; }
-        if (m.type === "result") resolve({ notes: m.notes });
+        if (m.type === "result") resolve(m.onset ? { notes: m.notes, onset: m.onset } : { notes: m.notes });
         else reject(new Error(m.message || "guitar transcription failed"));
       };
       w.onerror = (e) => reject(new Error((e && e.message) || "guitar worker crashed"));
-      w.postMessage({ id: 1, pcm, engineUrl }, [pcm.buffer]);
+      w.postMessage({ id: 1, pcm, engineUrl, keepOnset: !!opts.keepOnset }, [pcm.buffer]);
     });
   } catch (err) {
     if (/worker|module|import/i.test(String(err && err.message))) return onMainThread(Float32Array.from(pcm16k), engineUrl, opts);

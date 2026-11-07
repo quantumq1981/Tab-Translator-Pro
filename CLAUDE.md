@@ -3461,6 +3461,37 @@ MusicXML / Guitar Pro file should give a better chart than either. Full write-up
   tracker grids; bleed still costs ~5 points; beats×beats DTW capped at 6 M cells. Device check: the
   real phone flow (decode + link of a 4-min song ≈ 2–3 s here).
 
+### Score-informed tab + stems × score parts (2026-11-07, follow-ons 2 and 3)
+
+Full write-up + every number: `docs/SCORE-AUDIO-LINK.md` (last two sections). Guards: `tests/score-tab.mjs`
+(in `npm test`). Benches: `bench/scoretab.mjs` (GuitarSet), `bench/stemscore.mjs` (rendered stems, spoiled
+score bars), `bench/stemscore-real.mjs` + `bench/split-file.mjs` (a real record split by the app's own SCNet
+core in Node), `bench/scoretab-e2e.mjs` (real app). Activations: `scripts/guitarset_activations.py`.
+
+- **Guitar → Tab with a linked score** (`scoreInformedTab(notes, link, parts, { follow, out })`): score notes
+  placed by the link, then **re-aligned per note** (wide 0.3 s match → local median offset ±2 s); a heard
+  note with the same pitch within `tolSec` 0.2 s takes the score's **string + fret** (a pin); missed score
+  notes are looked for again in the guitar model's **onset matrix** at 0.05 (the model's own threshold is
+  0.3); extras kept (Recording/Balanced) or dropped (Score). Transposed link: up to +7 = capo, down to −3 =
+  tuned down. Pins ride `npin` per pitch through `polyNotesToScore` → `audioEventsToScore` → `fingerScore` →
+  `fingerSequence` (`_validPins` / `_pinnedShape`); **no pins = byte-identical fingering** (guarded).
+  The guitar worker returns the onset matrix on `keepOnset` (transferred, ~8 MB per 4 min).
+  **Held-out GuitarSet Tab F1, Balanced**: exact score 62.0 → **86.7** (solos 49.9 → 88.1); 10 % re-fingered
+  78.9; 10 % wrong notes 85.9; 30 % wrong 84.1 ("Score" drops to 69.6 there — Balanced stays the default).
+  The tab can only be as right as the file's fingering (no string evidence in audio).
+- **Stems × score parts** (`compareStemsToScore(charts, sr, link, parts, { audio })`, `scorePartRole`,
+  `matchStemsToParts`): bass/vocals = pitch-class timelines; guitar/keys/other = chroma vs the parts (from the
+  stem audio, or — in the app, where stems are handed to the worker — the stem's chord chart); drums = kick /
+  snare / cymbal F-measure (GP articulations > 90 mapped; kick↔snare confusion = half credit). A bar differs
+  below the kind's floor AND the stem's median − 0.15. Rendered stems, 20 % spoiled bars: bass flagged 100 %
+  (precision 90 %), guitar/keys 96.7 % (88 %; 93 % / 76 % from the chord chart), **drums ≈ 46 % / 46 % — a
+  rough guide, the UI says so**. Real Jarreau: guitar/keys 86 %, bass 72 %, drums 39 %.
+- **UI:** `ScoreTabPanel` (part picker, Tab follows, differences by bar → ▶ seek) replaces the tuning/capo
+  pickers when linked; `StemsVsScore` above the stem charts; stem tabs show the score part names.
+- **Do not re-derive:** the stems bench must pass `unroll: false` (renderer plays bars as written); a
+  `meta` prop that grows can break the smoke test's `score={gtrScore}…overrides={gtrOvr}` distance guard —
+  keep those props next to `score`.
+
 ## Path B (scans / photos) — OUT OF SCOPE
 
 Raster tab (a photo or scanned page) has no text layer and needs an OMR/Vision
@@ -3666,6 +3697,13 @@ accordingly.
   arrangement levels, full-kit drums + drum/piano MusicXML, project records / setlists / bundles,
   techniques + tuning/capo gates, Nashville + grid SVG, plus UI contract guards. Real-app checks:
   `tests/bench/*-e2e.mjs` (see "Workbench" above).
+- **Score-informed tab + stems × score parts** (`tests/score-tab.mjs`, in `npm test`): pins fix a note's
+  string/fret, a pin that doesn't sound its pitch is ignored, no pins = unchanged fingering; scoreTabNotes
+  (written strings, repeats unrolled); scoreInformedTab matched/extra/missed/recovered semantics per
+  follow mode, a steady 0.15 s offset absorbed, +2 semitones → capo 2 with the score's frets, pooled
+  parts; stem↔part roles and matching; compareStemsToScore flags a wrong bass bar and a wrong chord bar
+  (from the chord chart), passes a written drum groove, names each stem's part; UI/glue contracts
+  (keepOnset transferred, the panels shipped, section offset applied).
 - **Lyrics import (`parseLyrics`)**: `npm test` asserts the strict chord matcher accepts
   real chords and rejects note-letter lyric words (Add/Cab/Bad/Fed/Gem/Bee/Ace), the
   line-level `isChordLine` catches chord lines but spares lyric/blank lines, a full
