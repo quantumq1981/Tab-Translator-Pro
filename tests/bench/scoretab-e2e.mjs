@@ -25,9 +25,11 @@ await page.locator("label", { hasText: "Upload audio" }).locator('input[type="fi
 await page.getByText(/linked — score bars/).waitFor({ timeout: 300000 });
 ok("score linked to the clip", true);
 
+const SKIP_TAB = arg("skip-tab") === "1"; let body = "";
+if (!SKIP_TAB) {
 await page.getByRole("button", { name: "🎸 Guitar → Tab (ML)" }).click();
 await page.getByText("TAB FROM THE SCORE").waitFor({ timeout: 900000 });
-let body = await text();
+body = await text();
 const m = body.match(/: (\d+) of (\d+) score notes heard/);
 ok("TAB FROM THE SCORE: score notes heard reported", !!m && +m[2] > 0, m && m[0]);
 ok("the tab chart's fingering comes from the score", /fingering from the score/.test(body) && /bars \(the score's\)/.test(body));
@@ -46,11 +48,14 @@ await page.locator('button[title^="the score\'s notes on the recording"]').click
 await page.waitForTimeout(600);
 body = await text();
 ok("Tab follows: Score — extra notes left out, missed notes written in", /left out/.test(body) && /written in from the score/.test(body));
+}
 
 const wavs = fs.readdirSync(STEMS).filter((f) => /\.wav$/i.test(f)).map((f) => path.join(STEMS, f));
 await page.locator('input[type="file"][multiple]').setInputFiles(wavs);
-await page.getByText(/STEMS VS THE SCORE/).waitFor({ timeout: 600000 });
+await page.getByRole("button", { name: "♫ Chart these stems" }).click({ timeout: 120000 });
+const got = await page.getByText(/STEMS VS THE SCORE/).waitFor({ timeout: +arg("stems-timeout", 600000) }).then(() => true, () => false);
 body = await text();
+if (!got) { await page.screenshot({ path: path.join(OUT, "scoretab-e2e-stems-fail.png"), fullPage: true }); console.log("STEMS PANEL TEXT:\n" + ((body.match(/STEMS[\s\S]{0,1500}/) || [body.slice(-1500)])[0])); }
 const rows = (body.match(/STEMS VS THE SCORE[\s\S]*?(?=TEMPO & BARS)/) || [""])[0];
 console.log(rows.trim());
 ok("bass stem ↔ the score's bass part, with an agreement", /Bass ↔ Electric Bass[^\n]*\d+%/.test(rows));
