@@ -143,13 +143,60 @@ errors — 11/11.
 
 1. **Lyrics from a score with lyrics**: MusicXML lyrics are per NOTE, so a linked score gives
    syllable-level timing for free (WO-3 is line-level from audio alone).
-2. **Guitar → Tab with a linked score**: the score's strings/frets as the fingering where the CRNN
-   notes agree, the CRNN where they don't (a live variation) — and a note-level disagreement list.
-3. **Stems × score parts**: the bass stem against the score's bass part, the vocal stem against the
-   melody — per-instrument agreement, and the score's part names on the stem charts.
+2. ~~Guitar → Tab with a linked score~~ — **built 2026-11-07**, see below.
+3. ~~Stems × score parts~~ — **built 2026-11-07**, see below.
 4. **Play-along on the better aligner**: ChartPanel's 🎯 Auto-align (the older event-level DTW) can
    use `linkScoreToAudio` and get the fine pass + transposition search.
 5. **Personal calibration**: every linked pair is labelled training data for the audio decoder on the
    owner's own music (thresholds, template weights) — the honest route past the audio-only ceiling.
 6. **Family**: Chord Sheet Maker Pro playing the recording with the chart needs the audio to cross
    apps — too big for localStorage; the planned OPFS handoff (Wave 1 #4) is the carrier.
+
+---
+
+## Built 2026-11-07 — stems × score parts
+
+*Code: `engine.tsx` block "STEMS × SCORE PARTS" (`scorePartRole`, `matchStemsToParts`,
+`compareStemsToScore`), `TabDecoderPro.tsx` `StemsVsScore` in the stems panel. Bench:
+`tests/bench/stemscore.mjs` (rendered parts, known differences), `tests/bench/stemscore-real.mjs`
+(a real record split by the app's own separator — `tests/bench/split-file.mjs`). Guards: `tests/score-tab.mjs`.*
+
+A split recording and a linked score both say what each instrument does. Each stem is matched to its
+score part(s) — bass ↔ bass, drums ↔ drums, vocals ↔ voices, the separator's "other" stem ↔ every guitar
+and keys part (by the parser's drum flag, the part's name, then its tuning) — and compared bar by bar on
+the link's clock:
+
+| stem | compared as | agreement |
+|---|---|---|
+| bass, vocals | pitch-class timelines (50 ms) of the stem's notes vs the part's | time both sound the same pitch class ÷ time either sounds (octave-blind) |
+| guitar / keys / other | the stem's chroma vs the parts' duration-weighted chroma per bar (in the app: the stem's own chord chart, since the audio is handed to the worker while charting) | cosine |
+| drums | kick / snare / cymbal hits vs the part's General-MIDI notes (Guitar Pro's own articulations above 90 mapped too), ±60 ms after a local re-alignment | mean of the three drums' F-measures; a kick heard as a snare at the right time is half credit |
+
+A bar **differs** when it is below the floor for its kind (lines 0.5, harmony 0.7, drums 0.5) and
+clearly below the stem's own typical agreement (median − 0.15), so a leaky stem that reads lower
+everywhere doesn't flag every bar. The stem tabs carry the score part names.
+
+**Measured — rendered stems with known differences** (`stemscore.mjs`, 8 songs with comp + bass + drum
+parts; the score given to the comparator has 20 % of each part's bars wrong — bass +5 semitones, comp
++3, snares moved to kicks an eighth later — while the "recording" plays the original):
+
+| stem | agreement, correct bars | agreement, wrong bars | wrong bars flagged | precision | false flags |
+|---|---|---|---|---|---|
+| bass | 0.88 | 0.05 | **100 %** | 90 % | 3.5 % |
+| guitar/keys (stem audio) | 0.90 | 0.37 | **96.7 %** | 87.9 % | 3.4 % |
+| guitar/keys (stem chord chart — the app's path) | 0.88 | 0.34 | 93.3 % | 75.7 % | 7.6 % |
+| drums | 0.74 | 0.37 | 45.9 % | 45.9 % | 17.4 % |
+
+With every stem leaking the others at −12 dB: bass 100 % / 74 %, guitar/keys 96.7 % / 65.9 %, drums
+53.8 % / 51.2 % (recall / precision). **Drums are a rough guide only**: the drum transcriber alone
+scores 90–100 % on these parts, but it confuses kick and snare often enough that per-bar flags are about
+a coin toss — the UI says so ("listen before trusting a flag").
+
+**A real record** (Al Jarreau, the MP3 split by the app's own SCNet — full model, 3:46 in 180 s in Node
+— against the Guitar Pro file): bass stem ↔ "Electric Bass (finger)" **72 %**, 3 bars differ; guitar/keys
+stem ↔ both guitar parts **86 %**, 5 bars differ; drums ↔ "Drums" 39 %; vocals: no part in the file.
+There is no ground truth here — the numbers say how closely each player follows the transcription.
+
+Bench gotcha (recorded so nobody re-derives it): the bench's renderer plays bars **as written** while
+the link unrolls repeats; pass `unroll: false` to both (as `scorelink.mjs` does) or every song with
+`|: :|` reads as misaligned.

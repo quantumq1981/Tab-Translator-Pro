@@ -4045,6 +4045,42 @@ function fingerShapes(midis, tuning, opts = {}) {
     .slice(0, w.beam);
 }
 
+/* Pins: `{ midi → { string, fret } }` — a string/fret that is KNOWN for a pitch (a linked score's
+ * tab, a note the user fingered). A pin counts only when it sounds that pitch on this tuning and
+ * its string is free; the rest of the event is fingered around it. No pins → nothing changes. */
+function _validPins(pins, midis, tuning, maxFret = FINGER_DEFAULTS.maxFret) {
+  const out = {}, used = new Set();
+  let n = 0;
+  for (const m of [...new Set(midis)]) {
+    const p = pins[m];
+    if (!p || p.string == null || p.fret == null || used.has(p.string)) continue;
+    const open = tuning[p.string];
+    if (open == null || open + p.fret !== m || p.fret < 0 || p.fret > maxFret + 2) continue;
+    out[m] = { string: p.string, fret: p.fret }; used.add(p.string); n++;
+  }
+  return n ? out : null;
+}
+/* The one shape a pinned event can take: its pins, then each unpinned pitch on the free string
+ * whose fret sits closest to the pinned hand (open strings count as free). */
+function _pinnedShape(midis, pins, tuning, w) {
+  const notes = [], used = new Set();
+  for (const [m, p] of Object.entries(pins)) { notes.push({ string: p.string, fret: p.fret, midi: +m }); used.add(p.string); }
+  const fr = notes.map((x) => x.fret).filter((f) => f > 0);
+  const hand = fr.length ? fr.reduce((a, b) => a + b, 0) / fr.length : 0;
+  for (const m of [...new Set(midis)].filter((x) => !pins[x]).sort((a, b) => a - b)) {
+    const c = fingerCandidates(m, tuning, w.maxFret);
+    let best = -1, bd = Infinity;
+    for (let i = 0; i < c.length; i += 2) {
+      if (used.has(c[i])) continue;
+      const d = c[i + 1] === 0 ? 0.5 : Math.abs(c[i + 1] - hand);
+      if (d < bd) { bd = d; best = i; }
+    }
+    if (best >= 0) { notes.push({ string: c[best], fret: c[best + 1], midi: m }); used.add(c[best]); }
+  }
+  notes.sort((a, b) => a.midi - b.midi);
+  return { notes, cost: _fingerLocalCost(notes, w), pos: _fingerHandPos(notes), ext: _fingerExtent(notes), pinned: true };
+}
+
 /** Viterbi over a sequence of events `[{ midis, gap? }]` (gap = beats since the
  *  previous event ended). Returns one shape per event (`null` for an unplayable or
  *  empty event) plus the path cost. */
@@ -4053,6 +4089,8 @@ function fingerSequence(events, tuning = TUNINGS.Standard, opts = {}) {
   const memo = new Map();
   const sets = events.map((e) => {
     if (!e || !e.midis || !e.midis.length) return [];
+    const pins = e.pins ? _validPins(e.pins, e.midis, tuning, w.maxFret) : null;
+    if (pins) return [_pinnedShape(e.midis, pins, tuning, w)];
     const key = [...e.midis].sort((a, b) => a - b).join(",");
     if (!memo.has(key)) memo.set(key, fingerShapes(e.midis, tuning, w));
     return memo.get(key);
@@ -4125,7 +4163,7 @@ function fingerScore(score, opts = {}) {
   for (const { bi, e } of flat) {
     const bpb = ((score.bars[bi].timeSig || score.timeSig || [4, 4])[0]);
     const on = bi * bpb + (e.qbeat ?? e.beat ?? 0), dur = e.qdur ?? e.durBeats ?? 1;
-    seq.push({ midis: e.midis || [], gap: lastEnd == null ? 0 : Math.max(0, on - lastEnd) });
+    seq.push({ midis: e.midis || [], gap: lastEnd == null ? 0 : Math.max(0, on - lastEnd), ...(e.npin ? { pins: e.npin } : {}) });
     lastEnd = on + dur;
   }
   const { shapes } = fingerSequence(seq, tuning, opts);
@@ -8096,7 +8134,7 @@ function audioEventsToScore(events, opts = {}) {
   let placed = (events || []).filter((e) => e.symbol).map((e) => {
     const onsetBeat = tl ? timelineBeatsAt(tl, e.startSec) : e.startSec / secPerBeat;  // global beat position
     const endBeat = tl ? timelineBeatsAt(tl, e.startSec + (e.durSec || secPerBeat)) : onsetBeat + (e.durSec || secPerBeat) / secPerBeat;
-    return { symbol: e.symbol, midis: e.midis || [], onsetBeat: Math.max(0, onsetBeat), durBeat: Math.max(0.25, endBeat - onsetBeat), uncertain: !!e.ambiguous, reviewed: !!e.reviewed, ...(e.ntech ? { ntech: e.ntech } : {}) };
+    return { symbol: e.symbol, midis: e.midis || [], onsetBeat: Math.max(0, onsetBeat), durBeat: Math.max(0.25, endBeat - onsetBeat), uncertain: !!e.ambiguous, reviewed: !!e.reviewed, ...(e.ntech ? { ntech: e.ntech } : {}), ...(e.npin ? { npin: e.npin } : {}) };
   }).sort((a, b) => a.onsetBeat - b.onsetBeat);
   if (tl && opts.quantize && opts.quantize.step > 0) {
     placed = quantizeBeatNotes(placed.map((p) => ({ ...p, startBeat: p.onsetBeat, endBeat: p.onsetBeat + p.durBeat })), opts.quantize.step, opts.quantize.strength != null ? opts.quantize.strength : 1)
@@ -8112,7 +8150,7 @@ function audioEventsToScore(events, opts = {}) {
     const bar = Math.floor(p.onsetBeat / beatsPerBar + 1e-6);
     const inBar = p.onsetBeat - bar * beatsPerBar;
     if (!barsMap.has(bar)) barsMap.set(bar, []);
-    barsMap.get(bar).push({ symbol: p.symbol, midis: p.midis, qbeat: Math.max(0, Math.min(beatsPerBar - 1e-6, inBar)), uncertain: p.uncertain, reviewed: p.reviewed, ...(p.ntech ? { ntech: p.ntech } : {}) });
+    barsMap.get(bar).push({ symbol: p.symbol, midis: p.midis, qbeat: Math.max(0, Math.min(beatsPerBar - 1e-6, inBar)), uncertain: p.uncertain, reviewed: p.reviewed, ...(p.ntech ? { ntech: p.ntech } : {}), ...(p.npin ? { npin: p.npin } : {}) });
   }
   const lastBar = barsMap.size ? Math.max(...barsMap.keys()) : -1;
   // A bar with no ONSET is not "no chord" — the previous chord is often still sounding
@@ -8137,7 +8175,7 @@ function audioEventsToScore(events, opts = {}) {
     for (let i = 1; i < evs.length; i++) if (evs[i].beat <= evs[i - 1].beat) evs[i].beat = Math.min(beatsPerBar - 1, evs[i - 1].beat + 1);
     evs.forEach((e, i) => { e.durBeats = (i + 1 < evs.length ? evs[i + 1].beat : beatsPerBar) - e.beat; });
     _fillTrueDur(evs, beatsPerBar);
-    bars.push({ number: b + 1, timeSig: [beatsPerBar, beatType], events: evs.map((e) => ({ symbol: e.symbol, midis: e.midis, beat: e.beat, durBeats: e.durBeats, qbeat: e.qbeat, qdur: e.qdur, ...(e.held ? { held: true } : {}), ...(e.uncertain ? { uncertain: true } : {}), ...(e.reviewed ? { reviewed: true } : {}), ...(e.ntech && !e.held ? { ntech: e.ntech } : {}) })) });
+    bars.push({ number: b + 1, timeSig: [beatsPerBar, beatType], events: evs.map((e) => ({ symbol: e.symbol, midis: e.midis, beat: e.beat, durBeats: e.durBeats, qbeat: e.qbeat, qdur: e.qdur, ...(e.held ? { held: true } : {}), ...(e.uncertain ? { uncertain: true } : {}), ...(e.reviewed ? { reviewed: true } : {}), ...(e.ntech && !e.held ? { ntech: e.ntech } : {}), ...(e.npin && !e.held ? { npin: e.npin } : {}) })) });
   }
   const score = { source: "audio", timeSig: [beatsPerBar, beatType], tempo: bpm, bars };
   if (tl) {
@@ -8208,8 +8246,9 @@ function polyNotesToScore(notes, opts = {}) {
     if (!c) { c = { startSec: n.startSec, midis: [], durSec: 0 }; cols.push(c); }
     c.midis.push(n.midi); c.durSec = Math.max(c.durSec, n.durSec);
     if (n.tech && n.tech.length) { c.ntech = c.ntech || {}; c.ntech[n.midi] = { tech: n.tech.slice(), ...(n.bend ? { bend: n.bend } : {}) }; }
+    if (n.string != null && n.fret != null) { c.npin = c.npin || {}; c.npin[n.midi] = { string: n.string, fret: n.fret }; }
   }
-  const events = cols.map((c) => ({ symbol: symbolForMidis(c.midis, useSharp), midis: c.midis.slice().sort((a, b) => a - b), startSec: c.startSec, durSec: c.durSec, ...(c.ntech ? { ntech: c.ntech } : {}) }));
+  const events = cols.map((c) => ({ symbol: symbolForMidis(c.midis, useSharp), midis: c.midis.slice().sort((a, b) => a - b), startSec: c.startSec, durSec: c.durSec, ...(c.ntech ? { ntech: c.ntech } : {}), ...(c.npin ? { npin: c.npin } : {}) }));
   const score = audioEventsToScore(events, opts);
   score.source = "ml";                                          // tag the provenance
   return score;
@@ -8353,7 +8392,9 @@ async function transcribeGuitar(pcm, model, opts = {}) {
   for (const k of Object.keys(per)) out[k] = crnnDeframe(per[k], fpsSeg, CRNN.classes, frames);
   const notes = crnnNotesFromOutputs(out, opts);
   const score = notes.length ? fingerScore(polyNotesToScore(notes, opts), { tuning: opts.tuning }) : null;
-  return { notes, score };
+  // opts.keepOutputs: the raw matrices too — a linked score looks again in them for notes the
+  // thresholds dropped (scoreInformedTab's recovery)
+  return opts.keepOutputs ? { notes, score, out } : { notes, score };
 }
 
 /* ---- SATB-style voice separation --------------------------------------------
@@ -9241,6 +9282,391 @@ function linkedChartScore(link, events, opts = {}) {
     link: { transpose: link.transpose, confidence: link.confidence },
   };
   return score;
+}
+
+/* ============================================================================
+ * SCORE-INFORMED TAB — Guitar → Tab with a linked score (2026-11-07)
+ * ----------------------------------------------------------------------------
+ * The guitar CRNN hears WHICH notes sound and WHEN, but not on which string; a Guitar Pro tab
+ * says which string, but not what this player did on this night. Linked (linkScoreToAudio), the
+ * two meet note by note:
+ *   • a heard note that the score also has (same pitch, onset within `tolSec` of where the link
+ *     puts the score's note) takes the SCORE's string and fret — "matched";
+ *   • a score note the model missed is looked for again in the model's own onset activations at a
+ *     much lower threshold, where the score says it should be — "recovered" (Balanced/Score);
+ *   • a heard note the score doesn't have stays, fingered around its neighbours — "extra" (a live
+ *     variation; dropped when following the Score);
+ *   • a score note with no evidence at all is a "missed" difference (included as the score's note
+ *     when following the Score).
+ * A transposed link (the record a step up, a capo, a half-step-down tuning) keeps the shapes: up
+ * to `maxCapo` semitones up is a capo, up to `maxDown` down is the whole guitar tuned down.
+ * Every note's string/fret rides as a pin (`npin`) into the fingering, so the chart, AlphaTex,
+ * CSMPN {tab} and the Notes editor all carry the score's fingering. Pure; measured in
+ * tests/bench/scoretab.mjs (GuitarSet, real recorded guitar with every string annotated). */
+const SCORE_TAB = { tolSec: 0.08, wideSec: 0.3, localSec: 2, recoverOnset: 0.08, recoverWinSec: 0.06, chordTol: 0.035, octaveFix: false, maxCapo: 7, maxDown: 3 };
+const SCORE_TAB_FOLLOW = {
+  recording: { recover: false, keepExtra: true, includeMissed: false },
+  balanced: { recover: true, keepExtra: true, includeMissed: false },
+  score: { recover: true, keepExtra: false, includeMissed: true },
+};
+
+/* A part's open strings, engine order (0 = lowest), from what the parser read. */
+function _scoreTabTuning(score) {
+  const t = score && (score.tuningMidi || TUNINGS[score.tuning]);
+  return Array.isArray(t) && t.some((m) => m != null) ? t.slice(0, 6) : TUNINGS.Standard.slice();
+}
+
+/** A tab part's notes in QUARTERS from the start of the performance (repeats unrolled exactly as
+ *  scorePartNotes / the link), each with the string and fret the file writes:
+ *  → { notes: [{ midi, t, d, string, fret, bar, sourceBar }], len, bars, tuning }. A note whose
+ *  event has no fret for its pitch keeps string/fret null (fingered later). */
+function scoreTabNotes(score, opts = {}) {
+  const bars = (score && score.bars) || [], tuning = _scoreTabTuning(score);
+  const order = opts.unroll === false ? bars.map((_, i) => i) : unrollRepeatOrder(bars);
+  const notes = [], outBars = [];
+  let pos = 0;
+  order.forEach((bi, k) => {
+    const bar = bars[bi], [num, den] = bar.timeSig || score.timeSig || [4, 4], q = 4 / den;
+    for (const e of bar.events || []) {
+      const t = pos + (e.qbeat != null ? e.qbeat : e.beat || 0) * q, d = Math.max(0.05, (e.qdur != null ? e.qdur : e.durBeats || 1) * q);
+      const byMidi = {};
+      for (const [s, f] of Object.entries(e.frets || {})) { const open = tuning[+s]; if (open != null && f != null && f >= 0) byMidi[open + f] = byMidi[open + f] || { string: +s, fret: f }; }
+      for (const m of e.midis || []) { const p = byMidi[m]; notes.push({ midi: m, t, d, string: p ? p.string : null, fret: p ? p.fret : null, bar: k + 1, sourceBar: bar.number }); }
+    }
+    outBars.push({ index: k, sourceBar: bar.number, q0: pos, q1: pos + num * q, timeSig: [num, den], section: bar.section || null });
+    pos += num * q;
+  });
+  return { notes, len: pos, bars: outBars, tuning };
+}
+
+/* The highest onset activation for one pitch inside [t0, t1] seconds → { v, t } (CRNN layout:
+ * [frames × 88] at 100 fps from MIDI 21). */
+function _crnnPeak(out, midi, t0, t1) {
+  const k = midi - CRNN.minMidi;
+  if (!out || !out.onset || k < 0 || k >= CRNN.classes) return { v: 0, t: t0 };
+  const frames = Math.floor(out.onset.length / CRNN.classes);
+  let a = Math.max(0, Math.floor(t0 * CRNN.fps)), b = Math.min(frames - 1, Math.ceil(t1 * CRNN.fps)), v = 0, at = a;
+  for (let i = a; i <= b; i++) { const x = out.onset[i * CRNN.classes + k]; if (x > v) { v = x; at = i; } }
+  return { v, t: at / CRNN.fps };
+}
+
+/** Heard guitar notes + a linked score part → a tab with the score's fingering where the two agree.
+ *  notes: the CRNN's [{ midi, startSec, durSec }] (recording seconds); link: linkScoreToAudio's
+ *  result; part: { score } of the guitar part (or the score itself); opts:
+ *    follow    "recording" | "balanced" (default) | "score" (SCORE_TAB_FOLLOW)
+ *    out       the CRNN's raw { onset, … } matrices (transcribeGuitar → .out) for recovery
+ *    tuning/capo  override the detected guitar setup; params: override SCORE_TAB
+ *    bpm/beatsPerBar/beatType/timeline/useSharp → polyNotesToScore
+ *  → { notes: [{ midi, startSec, durSec, string, fret, status, bar }], score (fingered, on
+ *    `timeline` when given), differences: [{ kind:"missed"|"extra", midi, startSec, bar, sourceBar }],
+ *    stats: { scoreNotes, heard, matched, recovered, extra, missed, agreement }, tuning, capo, transpose } */
+function scoreInformedTab(notes, link, part, opts = {}) {
+  const follow = SCORE_TAB_FOLLOW[opts.follow] ? opts.follow : "balanced";
+  const F = { ...SCORE_TAB, ...SCORE_TAB_FOLLOW[follow], ...(opts.params || {}) };
+  /* part may be several parts (the separator's "other" stem holds every guitar): their notes are
+   * pooled, each keeping its own strings; the first part's tuning is the guitar's */
+  const plist = (Array.isArray(part) ? part : [part]).filter(Boolean).map((p) => (p.score ? p.score : p));
+  const pscore = plist[0];
+  let sn = scoreTabNotes(pscore, opts);
+  for (const ps of plist.slice(1)) { const o = scoreTabNotes(ps, opts); const same = o.tuning.every((m, i) => m === sn.tuning[i]); sn.notes.push(...o.notes.map((n) => (same ? n : { ...n, string: null, fret: null }))); }
+  const k = (link && link.transpose) || 0;
+  // recording = score + k semitones: a capo (up) or the whole guitar tuned down keeps the shapes
+  let tuning = opts.tuning ? opts.tuning.slice() : sn.tuning.slice(), capo = opts.capo != null ? opts.capo : 0, pinOK = true;
+  if (!opts.tuning && opts.capo == null) {
+    if (k > 0 && k <= F.maxCapo) capo = k;
+    else if (k < 0 && -k <= F.maxDown) tuning = tuning.map((m) => (m == null ? null : m + k));
+    else if (k !== 0) pinOK = false;
+  }
+  const play = capoTuning(tuning, capo);
+  const tol = F.tolSec, cov = (link && link.coverage) || { audioFrom: -Infinity, audioTo: Infinity };
+  const barAt = (q) => { const b = sn.bars.find((x) => q >= x.q0 - 1e-6 && q < x.q1 - 1e-6) || null; return b ? { bar: b.index + 1, sourceBar: b.sourceBar } : { bar: null, sourceBar: null }; };
+  const S = sn.notes.map((n) => {
+    const sec = linkQToSec(link, n.t), end = linkQToSec(link, n.t + n.d), rec = n.midi + k;
+    const fret = pinOK && n.string != null && play[n.string] != null ? rec - play[n.string] : null;
+    return { ...n, sec, end, rec, pin: fret != null && fret >= 0 && fret <= 24 ? { string: n.string, fret } : null, used: false };
+  }).filter((n) => n.sec >= cov.audioFrom - tol && n.sec <= cov.audioTo + tol).sort((a, b) => a.sec - b.sec);
+  const A = (notes || []).map((n, i) => ({ midi: n.midi, startSec: n.startSec, durSec: n.durSec != null ? n.durSec : Math.max(0.05, (n.endSec || n.startSec) - n.startSec), i, ...(n.tech ? { tech: n.tech } : {}), ...(n.bend ? { bend: n.bend } : {}) }));
+  // one-to-one, closest onset first, exact pitch
+  const lowerS = (t) => { let lo = 0, hi = S.length; while (lo < hi) { const m = (lo + hi) >> 1; if (S[m].sec < t) lo = m + 1; else hi = m; } return lo; };
+  const matchAll = (w, octave) => {
+    const pairs = [];
+    A.forEach((a, ai) => {
+      for (let j = lowerS(a.startSec - w - 1); j < S.length && S[j].sec <= a.startSec + w + 1; j++) {
+        const s = S[j], d = Math.abs(s.sec - a.startSec);
+        if (d > w) continue;
+        if (s.rec === a.midi) pairs.push([d, ai, j, 0]);
+        else if (octave && Math.abs(s.rec - a.midi) === 12) pairs.push([d + w, ai, j, 1]);
+      }
+    });
+    pairs.sort((x, y) => x[0] - y[0]);
+    const aOf = new Array(A.length).fill(-1), sOf = new Array(S.length).fill(-1);
+    for (const [, ai, j, oct] of pairs) { if (aOf[ai] >= 0 || sOf[j] >= 0) continue; aOf[ai] = j; sOf[j] = ai; S[j].octave = !!oct; }
+    return aOf;
+  };
+  /* Note-level re-alignment: the beat-level link can sit ~0.1 s off a note (swing, a push, a
+   * fermata). Match first inside a WIDE window, take the local median offset of those pairs
+   * (±localSec around each score note) and move the score's notes by it; then match tightly. */
+  if (A.length && S.length && F.wideSec > tol) {
+    const first = matchAll(F.wideSec, false), offs = [];
+    first.forEach((j, ai) => { if (j >= 0) offs.push([S[j].sec, A[ai].startSec - S[j].sec]); });
+    offs.sort((a, b) => a[0] - b[0]);
+    if (offs.length >= 3) {
+      let lo = 0, hi = 0;
+      for (const s of S) {
+        while (lo < offs.length && offs[lo][0] < s.sec - F.localSec) lo++;
+        while (hi < offs.length && offs[hi][0] <= s.sec + F.localSec) hi++;
+        const win = offs.slice(lo, hi).map((x) => x[1]).sort((a, b) => a - b);
+        const d = win.length >= 3 ? win[win.length >> 1] : 0;
+        s.sec += d; s.end += d;
+      }
+      S.sort((a, b) => a.sec - b.sec);
+    }
+  }
+  const aOf = matchAll(tol, F.octaveFix);
+  aOf.forEach((j) => { if (j >= 0) S[j].used = true; });
+  const outN = [];
+  A.forEach((a, ai) => {
+    const j = aOf[ai];
+    if (j >= 0) { const s = S[j]; outN.push({ ...a, midi: s.rec, status: "matched", pin: s.pin, q: s.t, ...barAt(s.t) }); return; }
+    if (!F.keepExtra) return;
+    const q = linkSecToQ(link, a.startSec);
+    outN.push({ ...a, status: "extra", pin: null, q, ...barAt(q) });
+  });
+  let recovered = 0;
+  const missed = [];
+  for (const s of S) {
+    if (s.used) continue;
+    let pk = null;
+    if (F.recover && opts.out) { const p = _crnnPeak(opts.out, s.rec, s.sec - F.recoverWinSec, s.sec + F.recoverWinSec); if (p.v >= F.recoverOnset) pk = p; }
+    const durSec = Math.max(0.05, s.end - s.sec);
+    if (pk) { recovered++; outN.push({ midi: s.rec, startSec: pk.t, durSec, status: "recovered", pin: s.pin, q: s.t, bar: s.bar, sourceBar: s.sourceBar }); continue; }
+    missed.push(s);
+    if (F.includeMissed) outN.push({ midi: s.rec, startSec: s.sec, durSec, status: "score", pin: s.pin, q: s.t, bar: s.bar, sourceBar: s.sourceBar });
+  }
+  outN.sort((a, b) => a.startSec - b.startSec || a.midi - b.midi);
+  // fingering: chords of notes within chordTol; pinned notes are fixed, the rest fingered around them
+  const groups = [];
+  for (const n of outN) {
+    const g = groups[groups.length - 1];
+    if (g && n.startSec - g.t <= F.chordTol && g.notes.length < play.length && !g.notes.some((x) => x.midi === n.midi)) g.notes.push(n);
+    else groups.push({ t: n.startSec, notes: [n] });
+  }
+  const spb = 60 / ((link && link.tempo) || opts.bpm || 120);
+  let lastEnd = null;
+  const seq = groups.map((g) => {
+    const pins = {}; let np = 0;
+    for (const n of g.notes) if (n.pin) { pins[n.midi] = n.pin; np++; }
+    const end = Math.max(...g.notes.map((n) => n.startSec + n.durSec));
+    const ev = { midis: g.notes.map((n) => n.midi), gap: lastEnd == null ? 0 : Math.max(0, (g.t - lastEnd) / spb), ...(np ? { pins } : {}) };
+    lastEnd = end;
+    return ev;
+  });
+  const { shapes } = fingerSequence(seq, play, opts.fingering || {});
+  groups.forEach((g, i) => {
+    const sh = shapes[i] || [];
+    for (const n of g.notes) { const x = sh.find((y) => y.midi === n.midi); n.string = x ? x.string : null; n.fret = x ? x.fret : null; }
+  });
+  const final = outN.map(({ pin, q, i, ...n }) => n);
+  const score = final.length ? fingerScore(polyNotesToScore(final, opts), { tuning, capo }) : null;
+  if (score) {
+    score.tuningMidi = tuning.slice(); score.soundingCapo = capo; score.capo = capo;
+    const named = GUITAR_TUNINGS.find((g) => g.midi.every((m, s) => m === tuning[s]));
+    score.tuning = named ? named.name : (pscore.tuning || "Standard");
+    score.source = "ml+score";
+  }
+  const differences = [
+    ...missed.map((s) => ({ kind: "missed", midi: s.rec, startSec: +s.sec.toFixed(3), bar: s.bar, sourceBar: s.sourceBar })),
+    ...final.filter((n) => n.status === "extra").map((n) => ({ kind: "extra", midi: n.midi, startSec: n.startSec, bar: n.bar, sourceBar: n.sourceBar })),
+  ].sort((a, b) => a.startSec - b.startSec);
+  const matched = final.filter((n) => n.status === "matched").length, extra = A.length - matched;
+  return {
+    notes: final, score, differences, tuning, capo, transpose: k, follow,
+    stats: { scoreNotes: S.length, heard: A.length, matched, recovered, extra, missed: missed.length, agreement: S.length ? +((matched + recovered) / S.length).toFixed(3) : null },
+  };
+}
+
+/* ============================================================================
+ * STEMS × SCORE PARTS (2026-11-07)
+ * ----------------------------------------------------------------------------
+ * A split recording (SCNet, or Moises/Demucs stems the user imports) and a linked score both say
+ * what each INSTRUMENT does. Put side by side, bar by bar on the link's clock, they answer "does
+ * the bass player play the written line?", "where does the guitar leave the chart?", "is the
+ * drummer on the written groove?" — and they put the score's part names on the stem charts.
+ *   bass / vocals (single lines): pitch-class timelines (`stepSec` samples) of the stem's detected
+ *     notes vs the part's notes — agreement = time both sound the same pitch class ÷ time either
+ *     sounds (octave-blind, so a YIN octave slip doesn't count against the player);
+ *   guitar / keys / other (chords): the stem's chroma vs the parts' duration-weighted chroma per
+ *     bar (cosine);
+ *   drums: kick / snare / cymbal hits vs the part's General-MIDI notes, ±`drumTolSec` (F-measure).
+ * A bar DIFFERS when it is below the absolute floor for its kind AND clearly below this stem's own
+ * typical agreement (median − `margin`) — a leaky stem reads lower everywhere and must not flag
+ * every bar. Pure; measured in tests/bench/stemscore.mjs (rendered parts, known differences). */
+const STEM_COMPARE = { stepSec: 0.05, drumTolSec: 0.06, drumWideSec: 0.15, localSec: 2, flag: { notes: 0.5, chords: 0.7, drums: 0.5 }, margin: 0.15, minActiveSec: 0.4 };
+const _PART_BASS_NAME = /\bbass(?!\s*drum)\b|\bbajo\b|\bcontrabass\b/i;
+const _PART_GUITAR_NAME = /\b(guitars?|gtr|gt\.?|nylon|steel|strat|tele|les\s*paul|acoustic|electric|distortion|overdrive|clean)\b/i;
+const _PART_KEYS_NAME = /\b(piano|keys?|keyboards?|organ|rhodes|wurli\w*|synth\w*|clav\w*|epiano|e\.\s*piano|harpsichord|pad)\b/i;
+
+/** A score part's instrument role: drums · bass · vocals · guitar · piano · other — by the
+ *  parser's drum flag, the part's name, then its tuning (lowest open string ≤ F#1 = bass). */
+function scorePartRole(part) {
+  const name = (part && part.name) || "", sc = part && part.score;
+  if (part && part.drum) return "drums";
+  if (sc && sc.tuningMidi && isPercussionTuning(sc.tuningMidi)) return "drums";
+  if (_LINK_DRUM_NAME.test(name) && !_PART_BASS_NAME.test(name)) return "drums";
+  if (_PART_BASS_NAME.test(name)) return "bass";
+  if (_LINK_VOICE_NAME.test(name)) return "vocals";
+  if (_PART_KEYS_NAME.test(name)) return "piano";
+  if (_PART_GUITAR_NAME.test(name)) return "guitar";
+  const t = sc && sc.tuningMidi ? sc.tuningMidi.filter((m) => m != null) : [];
+  if (t.length && Math.min(...t) <= 30) return "bass";
+  if (t.length) return "guitar";
+  return "other";
+}
+
+/** Which score parts each stem is compared with: bass ↔ bass parts, drums ↔ drum parts, vocals ↔
+ *  voice parts, guitar ↔ guitar parts, piano ↔ keys parts, and "other" (the separator's guitar +
+ *  keys stem) ↔ every pitched part no guitar/piano stem claimed. → { role: [part index] }. */
+function matchStemsToParts(stemRoles, partScores) {
+  const roles = (partScores || []).map((p) => scorePartRole(p));
+  const has = new Set(stemRoles || []), out = {};
+  for (const r of stemRoles || []) {
+    let idx = [];
+    if (r === "bass" || r === "drums" || r === "vocals") idx = roles.map((x, i) => (x === r ? i : -1)).filter((i) => i >= 0);
+    else if (r === "guitar" || r === "piano") idx = roles.map((x, i) => (x === r ? i : -1)).filter((i) => i >= 0);
+    else if (r === "other") idx = roles.map((x, i) => ((x === "other" || (x === "guitar" && !has.has("guitar")) || (x === "piano" && !has.has("piano"))) ? i : -1)).filter((i) => i >= 0);
+    out[r] = idx;
+  }
+  return out;
+}
+
+/* General MIDI drum notes → the three drums the transcriber hears; Guitar Pro 6–8 add its own
+ * articulations above 90 (91 rim shot, 92 half-open hat, 93–98 ride edge/choke, chokes, splash). */
+const _GM_DRUM_CLASS = (n) => (n === 35 || n === 36 ? "kick" : (n >= 37 && n <= 40) || n === 91 ? "snare" : [42, 44, 46, 49, 51, 52, 53, 55, 57, 59, 92, 93, 94, 95, 96, 97, 98].includes(n) ? "hat" : null);
+
+/* Notes of the matched parts in RECORDING seconds (link + transposition), performance order. */
+function _partNotesSec(link, partScores, idx, opts) {
+  const k = link.transpose || 0, out = [];
+  for (const i of idx) {
+    const pn = scorePartNotes(partScores[i].score, opts);
+    for (const n of pn.notes) {
+      const sec = linkQToSec(link, n.t), end = linkQToSec(link, n.t + n.d);
+      out.push({ midi: n.midi, raw: n.midi, sec, end: Math.max(sec + 0.03, end), q: n.t, part: i, k });
+    }
+  }
+  return out.sort((a, b) => a.sec - b.sec);
+}
+
+/** Each stem against its score part(s), bar by bar.
+ *  stems: the charts of chartsFromStems (`{ charts }`) for bass/vocal notes and drum hits, plus the
+ *  harmonic stem audio for chroma: opts.audio = { role: Float32Array } at `sampleRate` (16 kHz);
+ *  link: linkScoreToAudio's result; partScores: [{ score, name, drum? }] (one parse per part).
+ *  → [{ role, kind, parts: [names], agreement (0..1 | null), bars: [{ bar, sourceBar, agreement,
+ *     scoreSec, heardSec }], differs: [bar numbers], note? }] */
+function compareStemsToScore(stems, sampleRate, link, partScores, opts = {}) {
+  const F = { ...STEM_COMPARE, ...(opts.params || {}), flag: { ...STEM_COMPARE.flag, ...((opts.params && opts.params.flag) || {}) } };
+  const charts = (stems && stems.charts) || [], audio = opts.audio || {};
+  const roles = [...new Set([...charts.filter((c) => c.role !== "band").map((c) => c.role), ...Object.keys(audio)])];
+  const map = matchStemsToParts(roles, partScores);
+  const bars = (link.bars || []).filter((b) => b.matched !== false);
+  const k = link.transpose || 0, names = (idx) => idx.map((i) => partScores[i].name || `Part ${i + 1}`);
+  const summarize = (role, kind, idx, per) => {
+    const valid = per.filter((b) => b.agreement != null);
+    let num = 0, den = 0; for (const b of valid) { num += b.agreement * b.w; den += b.w; }
+    const med = valid.length ? valid.map((b) => b.agreement).sort((a, b) => a - b)[valid.length >> 1] : null;
+    const floor = F.flag[kind];
+    const differs = valid.filter((b) => b.agreement < floor && b.agreement < med - F.margin).map((b) => b.bar);
+    return { role, kind, parts: names(idx), agreement: den ? +(num / den).toFixed(3) : null, median: med != null ? +med.toFixed(3) : null,
+      bars: per.map(({ w, ...b }) => ({ ...b, agreement: b.agreement != null ? +b.agreement.toFixed(3) : null })), differs };
+  };
+  const out = [];
+  for (const role of roles) {
+    const idx = map[role] || [];
+    const chart = charts.find((c) => c.role === role);
+    const kind = role === "drums" ? "drums" : role === "bass" || role === "vocals" ? "notes" : "chords";
+    if (!idx.length) { out.push({ role, kind, parts: [], agreement: null, bars: [], differs: [], note: "no matching part in the score" }); continue; }
+    if (kind === "notes") {
+      if (!chart || !chart.notes) continue;
+      const sn = _partNotesSec(link, partScores, idx, opts);
+      const heard = chart.notes.map((n) => ({ pc: (((n.midi % 12) + 12) % 12), s: n.startSec, e: n.startSec + n.durSec })).sort((a, b) => a.s - b.s);
+      const per = bars.map((b) => {
+        let both = 0, union = 0, sAct = 0, hAct = 0;
+        for (let t = b.sec + F.stepSec / 2; t < b.endSec; t += F.stepSec) {
+          const exp = new Set(); for (const n of sn) { if (n.sec > t) break; if (n.end > t) exp.add((((n.midi + k) % 12) + 12) % 12); }
+          let h = -1; for (const n of heard) { if (n.s > t) break; if (n.e > t) h = n.pc; }
+          if (exp.size) sAct++; if (h >= 0) hAct++;
+          if (exp.size || h >= 0) union++;
+          if (h >= 0 && exp.has(h)) both++;
+        }
+        const active = union * F.stepSec >= F.minActiveSec;
+        return { bar: b.index + 1, sourceBar: b.sourceBar, agreement: active ? both / union : null, scoreSec: +(sAct * F.stepSec).toFixed(2), heardSec: +(hAct * F.stepSec).toFixed(2), w: union };
+      });
+      out.push(summarize(role, kind, idx, per));
+    } else if (kind === "drums") {
+      if (!chart || !chart.hits) continue;
+      const exp = [];
+      for (const i of idx) {
+        const pn = scorePartNotes(partScores[i].score, opts);
+        const seen = new Set();                 // a hat + a ride struck together is ONE cymbal hit to the ear
+        for (const n of pn.notes) { const c = _GM_DRUM_CLASS(n.midi), key = c + "@" + n.t.toFixed(3); if (c && !seen.has(key)) { seen.add(key); exp.push({ t: linkQToSec(link, n.t), c }); } }
+      }
+      const hits = chart.hits.map((h) => ({ t: h.t, c: h.type === "openHat" || h.type === "crash" || h.type === "ride" ? "hat" : h.type })).sort((a, b) => a.t - b.t);
+      /* the beat-level link can sit 0.1 s off a hit; drums need ±60 ms. Move the written hits by the
+       * local median offset to the nearest same-drum hit (±wide, over ±localSec), as the tab does */
+      exp.sort((a, b) => a.t - b.t);
+      const offs = [];
+      for (const e of exp) { let bd = Infinity, d0 = 0; for (const h of hits) { if (h.t < e.t - F.drumWideSec) continue; if (h.t > e.t + F.drumWideSec) break; const d = h.t - e.t; if (h.c === e.c && Math.abs(d) < bd) { bd = Math.abs(d); d0 = d; } } if (bd <= F.drumWideSec) offs.push([e.t, d0]); }
+      if (offs.length >= 4) for (const e of exp) { const w = offs.filter((o) => Math.abs(o[0] - e.t) <= F.localSec).map((o) => o[1]).sort((a, b) => a - b); if (w.length >= 3) e.t += w[w.length >> 1]; }
+      const per = bars.map((b) => {
+        const E1 = exp.filter((x) => x.t >= b.sec && x.t < b.endSec), H = hits.filter((x) => x.t >= b.sec - F.drumTolSec && x.t < b.endSec - F.drumTolSec);
+        // per drum (kick · snare · cymbals), then their mean: eight hi-hats must not outvote a moved snare
+        const used = new Set(), tp = { kick: 0, snare: 0, hat: 0 }, ne = { kick: 0, snare: 0, hat: 0 }, nh = { kick: 0, snare: 0, hat: 0 };
+        for (const h of H) nh[h.c] = (nh[h.c] || 0) + 1;
+        const open = [];
+        for (const e of E1) { ne[e.c]++; let bi = -1, bd = Infinity; H.forEach((h, j) => { const d = Math.abs(h.t - e.t); if (!used.has(j) && h.c === e.c && d <= F.drumTolSec && d < bd) { bd = d; bi = j; } }); if (bi >= 0) { used.add(bi); tp[e.c]++; } else open.push(e); }
+        // a kick heard as a snare (or the reverse) at the right moment: the transcriber's commonest
+        // confusion, half credit to both drums — a MOVED hit still counts against the bar
+        for (const e of open) { if (e.c === "hat") continue; const j = H.findIndex((h, jj) => !used.has(jj) && h.c !== "hat" && h.c !== e.c && Math.abs(h.t - e.t) <= F.drumTolSec); if (j >= 0) { used.add(j); tp[e.c] += 0.5; tp[H[j].c] += 0.5; } }
+        let fs = 0, nc = 0; for (const c of ["kick", "snare", "hat"]) { const n = ne[c] + (nh[c] || 0); if (!n) continue; fs += (2 * tp[c]) / n; nc++; }
+        const n = E1.length + H.length;
+        return { bar: b.index + 1, sourceBar: b.sourceBar, agreement: n >= 2 && nc ? fs / nc : null, scoreSec: E1.length, heardSec: H.length, w: n, ...(opts.debug ? { _exp: E1.map((x) => x.c[0] + x.t.toFixed(2)), _hits: H.map((x) => x.c[0] + x.t.toFixed(2)) } : {}) };
+      });
+      out.push(summarize(role, kind, idx, per));
+    } else {
+      const pcm = audio[role];
+      const sn = _partNotesSec(link, partScores, idx, opts);
+      /* No stem audio (the app hands each stem to the worker while charting): the stem's own chord
+       * chart stands in — each chord's voiced pitches, duration-weighted, as the stem's chroma. */
+      if (!pcm) {
+        const cc = chart && chart.events ? chart : charts.find((c) => c.role === "band");
+        if (!cc || !cc.events) continue;
+        const evs = cc.events.filter((e) => e.midis && e.midis.length);
+        const per = bars.map((b) => {
+          const a = new Float64Array(12), s = new Float64Array(12); let wa = 0, sw = 0;
+          for (const e of evs) { const ov = Math.min(e.startSec + e.durSec, b.endSec) - Math.max(e.startSec, b.sec); if (ov <= 0) continue; for (const m of new Set(e.midis.map((x) => ((x % 12) + 12) % 12))) a[m] += ov; wa += ov; }
+          for (const n of sn) { const ov = Math.min(n.end, b.endSec) - Math.max(n.sec, b.sec); if (ov <= 0) continue; s[(((n.midi + k) % 12) + 12) % 12] += ov; sw += ov; }
+          if (!wa && !sw) return { bar: b.index + 1, sourceBar: b.sourceBar, agreement: null, scoreSec: 0, heardSec: 0, w: 0 };
+          let dot = 0, na = 0, ns = 0; for (let p = 0; p < 12; p++) { dot += a[p] * s[p]; na += a[p] * a[p]; ns += s[p] * s[p]; }
+          return { bar: b.index + 1, sourceBar: b.sourceBar, agreement: na && ns ? dot / Math.sqrt(na * ns) : 0, scoreSec: +sw.toFixed(2), heardSec: +wa.toFixed(2), w: Math.max(1, b.endSec - b.sec) };
+        });
+        out.push({ ...summarize(role, kind, idx, per), from: "chords" });
+        continue;
+      }
+      const fr = opts.frames && opts.frames[role] ? opts.frames[role] : nnlsChromagram(pcm, sampleRate, opts);
+      const lv = fr.frames.map((f) => f.level).sort((a, b) => a - b), ref = lv.length ? lv[Math.floor(0.95 * (lv.length - 1))] : 0;
+      const per = bars.map((b) => {
+        const a = new Float64Array(12), s = new Float64Array(12); let fa = 0;
+        for (const f of fr.frames) { if (f.t < b.sec || f.t >= b.endSec) continue; if (f.level < ref - SCORE_LINK.gateDb) continue; fa++; for (let p = 0; p < 12; p++) a[p] += f.chroma[p]; }
+        let sw = 0;
+        for (const n of sn) { const ov = Math.min(n.end, b.endSec) - Math.max(n.sec, b.sec); if (ov <= 0) continue; s[(((n.midi + k) % 12) + 12) % 12] += ov; sw += ov; }
+        if (!fa && !sw) return { bar: b.index + 1, sourceBar: b.sourceBar, agreement: null, scoreSec: 0, heardSec: 0, w: 0 };
+        let dot = 0, na = 0, ns = 0; for (let p = 0; p < 12; p++) { dot += a[p] * s[p]; na += a[p] * a[p]; ns += s[p] * s[p]; }
+        const cos = na && ns ? dot / Math.sqrt(na * ns) : 0;
+        return { bar: b.index + 1, sourceBar: b.sourceBar, agreement: cos, scoreSec: +sw.toFixed(2), heardSec: +(fa * 0.1).toFixed(2), w: Math.max(1, b.endSec - b.sec) };
+      });
+      out.push(summarize(role, kind, idx, per));
+    }
+  }
+  return out;
 }
 
 
@@ -11758,7 +12184,7 @@ function scoreToGridSVG(score, opts = {}) {
 
 export {
   SCORE_LINK, unrollRepeatOrder, scorePartNotes, scoreLinkParts, scoreHarmonyGrid, linkBeatDTW, linkScoreToAudio, linkSecToQ, linkQToSec,
-  analyzeAudioWithScore, linkedChartScore, scoreLinkPriorGrid, _harmonyOfParts, _scorePriorBonus, _sameChordClass, _linkFeat, _linkBeatGrids,
+  analyzeAudioWithScore, linkedChartScore, SCORE_TAB, SCORE_TAB_FOLLOW, scoreTabNotes, scoreInformedTab, _crnnPeak, _scoreTabTuning, _validPins, _pinnedShape, STEM_COMPARE, scorePartRole, matchStemsToParts, compareStemsToScore, _partNotesSec, _GM_DRUM_CLASS, scoreLinkPriorGrid, _harmonyOfParts, _scorePriorBonus, _sameChordClass, _linkFeat, _linkBeatGrids,
   makeMask,
   popcount,
   rotateRight,
