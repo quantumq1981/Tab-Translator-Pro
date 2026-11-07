@@ -141,8 +141,8 @@ errors — 11/11.
 
 ## Follow-ons (not built — in order of value)
 
-1. **Lyrics from a score with lyrics**: MusicXML lyrics are per NOTE, so a linked score gives
-   syllable-level timing for free (WO-3 is line-level from audio alone).
+1. ~~Lyrics from a score with lyrics~~ — **built 2026-11-07 for Guitar Pro 4/5 files**, see the last
+   section. Still open: MusicXML `<lyric>` (per note — no assignment needed) and GP6/7/8 gpif lyrics.
 2. ~~Guitar → Tab with a linked score~~ — **built 2026-11-07**, see below.
 3. ~~Stems × score parts~~ — **built 2026-11-07**, see below.
 4. **Play-along on the better aligner**: ChartPanel's 🎯 Auto-align (the older event-level DTW) can
@@ -262,3 +262,103 @@ holds keys, so the model hears 1,847 notes against the jazz-guitar part's 484; B
 recovers 43 (53 %) — the tab of a full-band stem is the honest hard case; "Score" gives the file's tab on
 the record's timing. In the real app on a 40 s clip: 48 of 197 score notes heard, differences in 19 bars,
 the AlphaTex export parses with every note on its string (14 bars, 240 notes).
+
+---
+
+## Built 2026-11-07 — syllable-timed lyrics from a score that has lyrics
+
+*Code: `engine.tsx` block "LYRICS FROM A SCORE" (`_lyricChunks`, `assignLyricText`, `_gpLyrics`,
+`scoreLyricSyllables`, `lyricMapFromSyllables`, `linkedLyricMap`, `lyricMapToText`, `scoreQToSec`), the GP4/5
+header-lyrics capture in `parseGP345`/`parseGP5`, word timing in `_placeChords` + `lyricsToLRC({words})`.
+UI: `LyricsSheetView` "📄 Lyrics from the score", "⬇ LRC (word-timed)", the karaoke highlight; the vocal
+stem from the stems panel refines the timing. Guards: `tests/score-lyrics.mjs`. Bench: `tests/bench/lyricsync.mjs`.*
+
+**Why it works.** A Guitar Pro 4/5 file stores up to five lyric lines in its header, each with a start bar,
+and names the track they belong to. Guitar Pro's own rule puts one syllable on each voice-1 note of that
+track in written order, skipping rests and tied notes: `de-sert` is two syllables, `_` holds a note
+(melisma), a lone `-` holds a note and joins the word, `+` joins two words on one note, `[..]` is a
+comment. Verified on the repo's files: Heart-Shaped Box has 365 notes and 365 chunks. Once each syllable has
+a score position, the link already gives seconds for every score quarter, so each syllable gets a time.
+
+**Whole-word files.** Some files store the words without hyphens (Power of Love: 268 words, 329 untied
+notes), so the text doesn't map note-for-note. `assignLyricText` detects this (fewer than 0.9 chunks per
+note and no syllable marks) and runs a monotonic syllable → note DP instead:
+- words are split into syllables (`_hyphenate`);
+- each syllable takes 1–4 notes (a melisma costs 0.35 per extra note);
+- an unsung note costs 0.6, a dropped syllable 2;
+- a break in the singing (a gap ≥ 0.75 quarter) costs 1.5 inside a word, 0.25 between words, and −0.3 at a
+  line end;
+- a line end without a break costs 0.6 for the file's own line breaks, 0.15 at punctuation;
+- a pacing term (0.01 · distance from the even spread) keeps melismas from piling up at the end.
+
+**Performance order.** Repeats are unrolled (`unrollRepeatOrder`), and each pass through a repeated bar
+takes the next lyric line written for it, so verse 2 lands on the second pass. An opened score without a
+recording plays in written order (`unroll: false`).
+
+**Refinement from the vocal line.** When sung notes are available (the stems panel's vocal chart, else
+Voices (ML)), each syllable moves to the nearest sung onset of the same pitch class within 0.4 s, after a
+local median offset (±3 s window); then it snaps to an onset within 0.2 s. With no sung note nearby, the
+score time stays.
+
+### Measured
+
+**Reading whole-word text** (`--assign-eval`: the GP files with syllabified lyrics re-read from their
+words alone, compared with Guitar Pro's own assignment; words matched by LCS). Syllables within a beat of
+the truth:
+
+| | Hotel California | Heart-Shaped Box | Schism | all |
+|---|---|---|---|---|
+| breaks at rests | 95.4 % | 94.4 % | 49.5 % | **85.2 %** (median 0.25 beat) |
+| no break information | | | | 69.8 % |
+
+Schism's vocal line is through-composed with long rests inside phrases, which the break model reads as
+line ends.
+
+**Synthetic, known truth** (`--synthetic`: whole songs rendered with a tempo warp, the vocal line sung by
+a synth, link + lyric map; 1,381 syllables over 4 songs). Error of each syllable's time:
+
+| | median | ≤ 50 ms | ≤ 100 ms | ≤ 200 ms |
+|---|---|---|---|---|
+| link only | 55 ms | 25.4 % | 63.4 % | 83.1 % |
+| + vocal refinement | **14 ms** | 75.2 % | 81.4 % | 90.4 % |
+
+Per song (link only → refined median): Hotel California 96 → 25 ms, Power of Love 53 → 13, Heart-Shaped
+Box 55 → 10, Schism 53 → 14.
+
+**Real records** (owner's MP3s, separated by the app's own SCNet core in Node; no syllable-level truth
+exists, so the read is the distance from each syllable to the nearest sung onset of the same pitch class
+in the separated vocal, with a +0.5 s shifted control):
+
+| | link | lyrics | link only | refined | control +0.5 s |
+|---|---|---|---|---|---|
+| Eagles, *Hotel California* (391 s, GP5) | 0.797 (next key 0.533), ♩≈73.6, 120/121 bars | direct, 438 syllables, 39 lines | median 100 ms · 38.8 % ≤ 100 ms | median 0 ms · 53.7 % ≤ 100 ms (252 moved) | 250 ms · 18.0 % |
+| Huey Lewis, *The Power of Love* (235 s, GP4) | 0.719 (next key 0.579), ♩≈118.8, 115/115 bars | phrases, 307 syllables, 49 lines | median 170 ms · 20.8 % ≤ 100 ms | median 0 ms · 45.3 % ≤ 100 ms (160 moved) | 275 ms |
+
+Roughly half the syllables don't find a same-pitch-class onset nearby. Some are notes the vocal model
+missed. Others are backing vocals in the stem, ad-libs, or a melody sung differently from the file. Those
+syllables keep the link's time.
+
+**The real app** (`bench/scorelyrics-e2e.mjs`, headless Chromium at 390 px): open Hotel California's GP5 → Lyrics
+→ "📄 Lyrics from the score" fills the sheet and offers the word-timed LRC; link the MP3 → the audio chart's
+sheet reads "39 lines · 438 syllables timed from the score"; no overflow, no console errors. This run caught a
+real bug: the linked score's parts were stripped of their lyrics before reaching the Audio panel.
+
+### Limits
+
+- **Guitar Pro 4/5 header lyrics only.** MusicXML `<lyric>` and GP6/7/8 gpif lyrics are not read yet.
+- **The text must match the singing**: a file whose lyric line skips a verse, or whose vocal track was
+  written for a different arrangement, places syllables on the wrong notes. Edit the text in the sheet.
+- **Whole-word files are a best fit** (85 % within a beat when the rests mark the phrases, 70 % when they
+  don't).
+- Refinement trusts the vocal stem: backing vocals with the same pitch class can pull a syllable.
+- **The text shows as the file writes it.** Many GP authors space a word's syllables instead of
+  hyphenating (Hotel California: `de sert high way`), so the sheet reads that way; the timing is per
+  syllable either way. Edit the text to rejoin words.
+
+```
+node bench/lyricsync.mjs --assign-eval [--breaks file|rest]
+node bench/lyricsync.mjs --synthetic [--sec 0]
+node bench/lyricsync.mjs --score <gp4/5> --audio <mp3> [--stems <split dir>]
+node bench/scorelyrics-e2e.mjs --deps <dir> --score <gp4/5> [--audio <mp3>]   # the real app
+```
+
