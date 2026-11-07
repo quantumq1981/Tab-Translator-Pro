@@ -200,3 +200,65 @@ There is no ground truth here — the numbers say how closely each player follow
 Bench gotcha (recorded so nobody re-derives it): the bench's renderer plays bars **as written** while
 the link unrolls repeats; pass `unroll: false` to both (as `scorelink.mjs` does) or every song with
 `|: :|` reads as misaligned.
+
+---
+
+## Built 2026-11-07 — Guitar → Tab with a linked score
+
+*Code: `engine.tsx` block "SCORE-INFORMED TAB" (`scoreTabNotes`, `scoreInformedTab`, pins through
+`fingerSequence` / `polyNotesToScore` / `fingerScore`), `TabDecoderPro.tsx` `ScoreTabPanel`; the guitar
+worker can hand back its onset matrix (`keepOnset`). Bench: `tests/bench/scoretab.mjs` on GuitarSet
+(activations from `scripts/guitarset_activations.py`, the shipped int8 model). Real app:
+`tests/bench/scoretab-e2e.mjs`. Guards: `tests/score-tab.mjs`.*
+
+The guitar model hears which notes sound and when, but not on which string; a Guitar Pro tab says which
+string, not what this player did. Linked, they meet note by note:
+
+1. score notes are placed on the recording by the link, then **re-aligned locally** (match inside a wide
+   0.3 s window, move each score note by the median offset of the pairs within ±2 s — the beat-level link
+   can sit ~0.1 s off a note: swing, a push);
+2. a heard note with the same pitch within `tolSec` (0.2 s) of a score note takes the score's **string
+   and fret** — matched;
+3. a score note the model missed is looked for again in the model's **onset activations** around where
+   the score says it is, at a much lower threshold (0.05 vs the model's 0.3) — recovered;
+4. heard notes the score lacks stay (a live variation), fingered around their pinned neighbours; score
+   notes with no evidence are listed as differences.
+
+Following (the same control as the chords): **Recording** = only the heard notes, strings from the score
+where they agree · **Balanced** (default) = + recovered score notes · **Score** = the score's notes on the
+recording's timing, extra notes left out. A transposed link keeps the shapes: up to 7 semitones up is a
+capo, up to 3 down is the guitar tuned down. Several guitar parts can be pooled (the separator's "other"
+stem holds every guitar). The tab sits on the score's bars with its sections.
+
+**Measured on GuitarSet** (every 3rd track: 60 dev = players 0–2, used for the two tuned values; 60
+test = players 3–5, reported). Each track's "score" is written from its own annotation the way a
+transcriber would — notes on a 16th grid at the file's tempo, strings as played — then spoiled the ways a
+real tab differs from a performance. Tab F1 = onset ±50 ms + pitch + string (the bench/guitarset.mjs
+metric). **Held-out test split:**
+
+| score given | shipped Guitar → Tab | Recording | **Balanced** | Score |
+|---|---|---|---|---|
+| exact transcription | 62.0 | 85.8 | **86.7** | 88.7 |
+| 10 % of notes written on another string | 62.0 | 78.0 | **78.9** | 80.1 |
+| 10 % wrong notes (dropped / a step off / extra) | 62.0 | 85.0 | **85.9** | 82.0 |
+| both | 62.0 | 77.5 | **78.2** | 75.1 |
+| 30 % wrong notes | 62.0 | 83.6 | **84.1** | 69.6 |
+
+Solos gain most (exact score: 49.9 → 88.1 Balanced; comping 67.0 → 86.1). Note F1 (string ignored) also
+rises a little with Balanced (86.5 → 87.6) — the recovered notes. Re-fingered notes can't be recovered
+from audio (no string evidence), so a 10 % re-fingered score caps the tab ~8 points lower: the tab is only
+as right as the file's fingering. "Score" wins with an exact file and loses with a wrong one; Balanced is
+within 2 points of the best everywhere, so it stays the default.
+
+Dev sweep (exact score, Recording / Balanced / Score): tolerance 0.08 s 79.9 / 78.8 / 79.8 → 0.12 s
+80.6 / 81.3 / 81.3 → 0.15 s 80.8 / 81.6 / 83.6 → **0.2 s + recovery 0.05: 81.0 / 82.1 / 85.1**. A wider
+window helps because a real performance deviates from the written grid (swing, rubato) and the pitch must
+still match. Octave correction of the model's notes: +0.1 (not shipped). Local window 1 s vs 2 s: ±0.1.
+The note-level re-alignment, measured on the first 27–29 dev tracks before tuning: median per-track
+link error 106 → 56 ms, Balanced tab 78.0 → 80.2.
+
+**A real record** (Jarreau, the guitar model on the separator's "other" stem, full song): the stem also
+holds keys, so the model hears 1,847 notes against the jazz-guitar part's 484; Balanced matches 211 and
+recovers 43 (53 %) — the tab of a full-band stem is the honest hard case; "Score" gives the file's tab on
+the record's timing. In the real app on a 40 s clip: 48 of 197 score notes heard, differences in 19 bars,
+the AlphaTex export parses with every note on its string (14 bars, 240 notes).

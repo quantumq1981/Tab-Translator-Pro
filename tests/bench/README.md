@@ -252,3 +252,22 @@ node bench/link-e2e.mjs --deps $D/out --score song.gp --audio song.mp3          
 one bar 20 % slower), 60 s from the first chord (cached in `bench/.cache-link`), and links the
 unwarped score (±2 bars of slack): exact, 20 % / 40 % of bars wrong, a wrong file copied blindly,
 the score written 3 semitones up. `--engine <path>` benches a frozen copy of the engine.
+
+## Score-informed tab + stems × score parts (2026-11-07)
+
+```
+# GuitarSet activations once (shipped int8 guitar model, float16 per track; --every 3 = the 120 benched tracks)
+python -I scripts/guitarset_activations.py models/guitar-crnn/guitar-gaps.w8.onnx <gs_ex> <acts> --every 3
+node bench/scoretab.mjs --gs <gs_ex> --acts <acts> --every 3 --split dev|test [--flip 0.1] [--wrong 0.1] [--params '{"tolSec":0.2}']
+node bench/stemscore.mjs [--wrong 0.2] [--leak 0.25]            # rendered comp/bass/drum stems, spoiled score bars; FROM_CHORDS=1 = the app's chord-chart path
+node bench/split-file.mjs --audio <mix> --model <scnet.int8.onnx> --ort <dir with onnxruntime-node> --out <dir>   # the app's separator core in Node
+node bench/stemscore-real.mjs --score <gp> --audio <mix> --stems <split dir> [--guitar-model … --ort …]
+node bench/scoretab-e2e.mjs --deps <dir> --score <gp> --audio <clip> --stems <dir of stem wavs> [--skip-tab 1]
+```
+
+`scoretab.mjs` writes each GuitarSet track's "score" from its own annotation (16th grid at the file's
+tempo, strings as played), optionally spoils it (`--flip`: notes on another string; `--wrong`: dropped /
+a step off / extra), links it to the recording and scores the shipped Guitar → Tab against
+scoreInformedTab (Recording / Balanced / Score) with the guitarset.mjs Tab F1. `stemscore.mjs` renders
+the comp, bass and every drum part of 8 songs as stems and spoils 20 % of each part's bars in the score;
+a good comparator flags exactly those bars. Results: docs/SCORE-AUDIO-LINK.md.
