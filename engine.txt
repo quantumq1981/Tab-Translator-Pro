@@ -9303,7 +9303,7 @@ function linkedChartScore(link, events, opts = {}) {
  * Every note's string/fret rides as a pin (`npin`) into the fingering, so the chart, AlphaTex,
  * CSMPN {tab} and the Notes editor all carry the score's fingering. Pure; measured in
  * tests/bench/scoretab.mjs (GuitarSet, real recorded guitar with every string annotated). */
-const SCORE_TAB = { tolSec: 0.08, wideSec: 0.3, localSec: 2, recoverOnset: 0.08, recoverWinSec: 0.06, chordTol: 0.035, octaveFix: false, maxCapo: 7, maxDown: 3 };
+const SCORE_TAB = { tolSec: 0.2, wideSec: 0.3, localSec: 2, recoverOnset: 0.05, recoverWinSec: 0.06, chordTol: 0.035, octaveFix: false, maxCapo: 7, maxDown: 3 };
 const SCORE_TAB_FOLLOW = {
   recording: { recover: false, keepExtra: true, includeMissed: false },
   balanced: { recover: true, keepExtra: true, includeMissed: false },
