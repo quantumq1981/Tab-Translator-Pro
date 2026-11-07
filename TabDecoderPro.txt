@@ -264,6 +264,11 @@ import {
   scoreInformedTab,
   scorePartRole,
   compareStemsToScore,
+  scoreLyricSyllables,
+  lyricMapFromSyllables,
+  scoreQToSec,
+  linkedLyricMap,
+  lyricMapToText,
   SCORE_LINK,
   parseMidiFile,
   spellScoreForKey,
@@ -546,7 +551,7 @@ async function analyzeWithScoreOffThread(samples, sr, partScores, opts = {}) {
  * needs DOMParser (main thread); the engine's one parser handles every format. */
 async function scorePartsFromBytes(bytes, name, sharp) {
   const first = await parseScoreOffThread(bytes, name, sharp);
-  const strip = (sc) => ({ source: sc.source, timeSig: sc.timeSig, tempo: sc.tempo, tuningMidi: sc.tuningMidi, bars: sc.bars });
+  const strip = (sc) => ({ source: sc.source, timeSig: sc.timeSig, tempo: sc.tempo, tuningMidi: sc.tuningMidi, bars: sc.bars, ...(sc.lyrics ? { lyrics: sc.lyrics } : {}) }); // lyrics: for 📄 Lyrics from the score
   const parts = first.parts && first.parts.length ? first.parts : [{ index: 0, name: name }];
   const out = [];
   for (const p of parts) {
@@ -635,6 +640,11 @@ export default function TabDecoderPro() {
   const [xmlScore, setXmlScore] = useState(null);
   const [xmlErr, setXmlErr] = useState("");
   const [xmlName, setXmlName] = useState("");
+  // 📄 a score's own lyrics (a Guitar Pro lyric line), every syllable on the score's clock (written order)
+  const xmlLyrics = useMemo(() => {
+    if (!xmlScore || !xmlScore.lyrics) return null;
+    try { const map = lyricMapFromSyllables(scoreLyricSyllables(xmlScore, { unroll: false }), scoreQToSec(xmlScore)); return map.lines.length ? { map, label: "Lyrics from the score", tip: `the lyrics written in "${xmlScore.lyrics.trackName}", every syllable at the score's tempo`, linked: false } : null; } catch (_) { return null; }
+  }, [xmlScore]);
   /* The score file open in the MusicXML / GP / Power Tab panel ({ name, bytes }), so the Audio panel
    * can LINK a recording to it (📎 Link a score) — notation and audio read together. `linkAsk`
    * counts taps on "🎧 Link a recording" there: it opens the Audio panel ready to link. */
@@ -1181,7 +1191,7 @@ export default function TabDecoderPro() {
                   </div>
                 )}
                 {xmlScore && (
-                  <ChartPanel score={xmlScore} title={xmlName}
+                  <ChartPanel score={xmlScore} title={xmlName} lyricMap={xmlLyrics}
                     meta={`${xmlScore.bars.length} bars · ${xmlScore.tuning} tuning · ${xmlScore.timeSig.join("/")}`}
                     C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey={selKey} onPick={pickChord}
                     keyOverride={keyOverride} setKeyOverride={setKeyOverride}
@@ -1270,7 +1280,7 @@ export default function TabDecoderPro() {
  * the same shape, so the renderer, editor and exporters are identical. Edits are
  * lifted to the parent as an `overrides` map ("<bar>.<beat>" -> symbol) so they
  * survive view/transpose changes and feed straight into export. */
-function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setOverrides, selKey, onPick, keyOverride, setKeyOverride, autoSimplify = true, defaultView = "chart", vocabPicker = true, scoreEdit: scoreEditProp, setScoreEdit: setScoreEditProp, getAudio, getBuffer, semisReq }) {
+function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setOverrides, selKey, onPick, keyOverride, setKeyOverride, autoSimplify = true, defaultView = "chart", vocabPicker = true, lyricMap, scoreEdit: scoreEditProp, setScoreEdit: setScoreEditProp, getAudio, getBuffer, semisReq }) {
   /* WO-1: note-level corrections. The edit is an op list replayed over the parsed score
    * (applyScoreEdits); controlled when the parent persists it (session meta), local otherwise.
    * Everything downstream — simplify, arrange, transpose, respell, every view and export — reads
@@ -1694,7 +1704,7 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
 
       {printing && <PrintSheet score={tscore} title={title} keyLabel={key ? kName(key) : ""} bpm={bpm} view={view === "edit" ? "chart" : view} overrides={ovT} musicKey={key} semis={semis} levelLabel={lvl ? `${level} level` : ""} capo={lvl ? lvl.capo : 0} lib={printLib} dict={printDict} />}
       {view === "lyrics"
-        ? <LyricsSheetView C={C} score={tscore} title={title} overrides={ovT} playKey={playKey} getAudio={getAudio} getBuffer={getBuffer} bpm={bpm} exportKey={key} keySpelled={keySpelled} />
+        ? <LyricsSheetView C={C} score={tscore} title={title} overrides={ovT} playKey={playKey} getAudio={getAudio} getBuffer={getBuffer} bpm={bpm} exportKey={key} keySpelled={keySpelled} scoreLyrics={lyricMap} />
         : view === "edit"
         ? <NoteEditorView score={score} edit={scoreEdit} setEdit={setScoreEdit} C={C} useSharp={useSharp} playKey={playKey} getAudio={getAudio} bpm={bpm} semis={semis} />
         : view === "tab"
@@ -1954,7 +1964,7 @@ function _saveText(name, text, mime) {
     a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 2000);
   } catch (_) {}
 }
-function LyricsSheetView({ C, score, title, overrides, playKey, getAudio, getBuffer, bpm, exportKey, keySpelled }) {
+function LyricsSheetView({ C, score, title, overrides, playKey, getAudio, getBuffer, bpm, exportKey, keySpelled, scoreLyrics }) {
   const [text, setText] = useState(() => _lsGet(_lyrKey(title, "lyrics")) || "");
   const [map, setMap] = useState(() => { try { const m = JSON.parse(_lsGet(_lyrKey(title, "lyricmap")) || "null"); return m && Array.isArray(m.lines) ? m : null; } catch (_) { return null; } });
   const [editing, setEditing] = useState(() => !_lsGet(_lyrKey(title, "lyrics")));
@@ -1993,6 +2003,9 @@ function LyricsSheetView({ C, score, title, overrides, playKey, getAudio, getBuf
       player.current.raf = requestAnimationFrame(tick);
     } catch (_) { stopPlay(); }
   };
+  /* 📄 lyrics that came WITH the score (a Guitar Pro file's lyric line): every syllable timed — on the
+   * recording's clock when a score is linked, else on the score's own. Fills the text box too. */
+  const useScoreLyrics = () => { if (!scoreLyrics || !scoreLyrics.map) return; setText(lyricMapToText(scoreLyrics.map)); setMap(scoreLyrics.map); setEditing(false); setSel(-1); setErr(""); };
   const align = async () => {
     if (!parsed) return;
     setBusy(true); setErr("");
@@ -2014,7 +2027,7 @@ function LyricsSheetView({ C, score, title, overrides, playKey, getAudio, getBuf
     try {
       const body = []; parsed.sections.forEach((sec, si) => { if (sec.label) body.push(sec.label.toUpperCase()); sec.blocks.forEach((blk, bi) => { if (bi > 0) body.push(""); blk.forEach((l) => body.push(l)); }); if (si < parsed.sections.length - 1) body.push(""); });
       const env = { v: 1, source: "tab-translator-pro", createdAt: new Date().toISOString(), title: parsed.title || base, artist: parsed.subtitle || "", lyrics: body.join("\n"),
-        timing: { v: 1, lines: map.lines.map((l) => ({ text: l.text, section: l.section, startSec: l.startSec, endSec: l.endSec })) } };
+        timing: { v: 1, lines: map.lines.map((l) => ({ text: l.text, section: l.section, startSec: l.startSec, endSec: l.endSec, ...(l.words ? { words: l.words.map((w) => ({ text: w.text, col: w.col, startSec: w.startSec })) } : {}) })) } };
       localStorage.setItem("csm:lyrics:v1", JSON.stringify(env)); setSent(true);
       window.location.assign(`${window.location.origin}/chord-sheet-maker-pro/?import=lyrics`);
     } catch (e) { setSent(false); setErr("Couldn't hand the lyrics to Chord Sheet Maker Pro."); }
@@ -2029,8 +2042,11 @@ function LyricsSheetView({ C, score, title, overrides, playKey, getAudio, getBuf
         <button onClick={() => fileRef.current && fileRef.current.click()} style={ch(false)}>⬆ Load lyrics</button>
         <input ref={fileRef} type="file" onChange={onFile} style={{ display: "none" }} />
         {last && !text && <button onClick={() => setText(last)} style={ch(false)} title="the sheet you last imported in the Lyrics tab">use Lyrics tab sheet</button>}
-        <button onClick={align} disabled={!parsed || busy} style={{ ...ch(!!map, C.cyan), opacity: parsed ? 1 : 0.4 }}>{busy ? "aligning…" : `🎯 Auto-align${audio ? " to the vocal" : " to the bars"}`}</button>
-        {map && <span>{map.lines.length} lines · {map.source === "vocal" ? "from the recording" : "spread over the bars"} · {Math.round(map.confidence * 100)}% sure</span>}
+        {scoreLyrics && scoreLyrics.map && scoreLyrics.map.lines.length > 0 && (
+          <button onClick={useScoreLyrics} style={ch(map && map.source === "score", C.green)} title={scoreLyrics.tip || "the lyrics written in the score file, every syllable timed"}>📄 {scoreLyrics.label || "Lyrics from the score"}</button>
+        )}
+        <button onClick={align} disabled={!parsed || busy} style={{ ...ch(!!map && map.source !== "score", C.cyan), opacity: parsed ? 1 : 0.4 }}>{busy ? "aligning…" : `🎯 Auto-align${audio ? " to the vocal" : " to the bars"}`}</button>
+        {map && <span>{map.lines.length} lines · {map.source === "score" ? `${map.syllableCount || ""} syllables timed from the score${map.refined ? ` · ${map.refined} on sung onsets` : ""}` : map.source === "vocal" ? "from the recording" : "spread over the bars"}{map.source === "score" ? "" : ` · ${Math.round(map.confidence * 100)}% sure`}</span>}
         {stale && <span style={{ color: C.amber }}>· the text changed — align again</span>}
       </div>
       {editing && (
@@ -2048,6 +2064,7 @@ function LyricsSheetView({ C, score, title, overrides, playKey, getAudio, getBuf
           {pos != null && <button onClick={stopPlay} style={ch(true, C.green)}>■ Stop</button>}
           <span style={{ marginLeft: "auto", display: "inline-flex", flexWrap: "wrap", gap: 4 }}>
             <button onClick={() => _saveText(`${base}.lrc`, lyricsToLRC(map, { title: parsed && parsed.title || title, artist: parsed && parsed.subtitle }))} style={ch(false)}>⬇ LRC</button>
+            {map.lines.some((l) => l.words) && <button onClick={() => _saveText(`${base}.word.lrc`, lyricsToLRC(map, { title: parsed && parsed.title || title, artist: parsed && parsed.subtitle, words: true }))} style={ch(false)} title="enhanced LRC: a time stamp before every syllable (karaoke players)">⬇ LRC (word-timed)</button>}
             <button onClick={() => _saveText(`${base}.chordpro`, scoreToChordProWithLyrics(score, map, opts))} style={ch(false)}>⬇ ChordPro + lyrics</button>
             <button onClick={() => _saveText(`${base}.txt`, scoreToLyricsSheet(score, map, opts))} style={ch(false)}>⬇ Sheet .txt</button>
             <button onClick={() => { try { navigator.clipboard.writeText(scoreToLyricsSheet(score, map, opts)); } catch (_) {} }} style={ch(false)}>⧉ Copy sheet</button>
@@ -2069,14 +2086,19 @@ function LyricsSheetView({ C, score, title, overrides, playKey, getAudio, getBuf
               <div key={i} ref={on ? curRef : null} onClick={() => setSel(r.index)} title={`${l.startSec.toFixed(2)} s${l.startBar ? ` · bar ${l.startBar} beat ${l.startBeat}` : ""} · ${Math.round(l.confidence * 100)}% sure`}
                 style={{ cursor: "pointer", borderLeft: `3px solid ${on ? C.green : picked ? C.amber : "transparent"}`, background: on ? "rgba(152,195,121,0.10)" : picked ? "rgba(255,107,53,0.08)" : "transparent", padding: "1px 0 1px 6px", borderRadius: 3, overflowX: "auto" }}>
                 {r.chordLine && <div style={{ ...mono, color: C.chord, fontWeight: 700 }}>{r.chordLine}</div>}
-                <div style={{ ...mono, color: on ? C.text : C.text, opacity: l.confidence < 0.4 && !l.manual ? 0.75 : 1 }}>{r.text}{l.confidence < 0.4 && !l.manual ? <span style={{ color: C.dim }}>  ≈</span> : null}</div>
+                {on && l.words && playT != null && r.text === l.text ? (() => {
+                  // the syllable being sung, lit (syllable-timed lines only, while playing)
+                  let k = -1; l.words.forEach((w, wi) => { if (w.startSec <= playT + 0.05) k = wi; });
+                  const a = k >= 0 ? l.words[k].col : 0, b = k >= 0 ? (k + 1 < l.words.length ? l.words[k + 1].col : l.text.length) : 0;
+                  return <div style={{ ...mono, color: C.text }}>{l.text.slice(0, a)}<span style={{ color: C.green, textDecoration: "underline" }}>{l.text.slice(a, b)}</span>{l.text.slice(b)}</div>;
+                })() : <div style={{ ...mono, color: on ? C.text : C.text, opacity: l.confidence < 0.4 && !l.manual ? 0.75 : 1 }}>{r.text}{l.confidence < 0.4 && !l.manual ? <span style={{ color: C.dim }}>  ≈</span> : null}</div>}
               </div>
             );
           })}
         </div>
       )}
       <div style={{ fontSize: 10, color: C.dim, marginTop: 6, lineHeight: 1.5 }}>
-        Line-level timing (words aren't timed individually). With a recording, lines snap to where singing starts; best on an isolated vocal stem (Audio mode → 🎤 Isolate vocals, or a split vocals stem). Lines marked ≈ are guesses — tap one and nudge it a beat.
+        {map && map.source === "score" ? <>Every syllable is timed from the score's lyrics{scoreLyrics && scoreLyrics.linked ? " on the recording's clock (the link)" : " at the score's tempo"}; the chords sit over the syllable sung at each change. </> : null}Auto-align is line-level (words aren't timed individually). With a recording, lines snap to where singing starts; best on an isolated vocal stem (Audio mode → 🎤 Isolate vocals, or a split vocals stem). Lines marked ≈ are guesses — tap one and nudge it a beat.
       </div>
     </div>
   );
@@ -4345,6 +4367,7 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
   const [gtrProg, setGtrProg] = useState(null);
   const [gtrTuning, setGtrTuning] = useState("standard"); // the guitar's tuning for Guitar → Tab (GUITAR_TUNINGS id)
   const [gtrCapo, setGtrCapo] = useState(0);          // capo fret: frets are written relative to it (sounding = tuning + capo + fret)
+  const [stemVocals, setStemVocals] = useState(null);  // the stems panel's vocal line (recording seconds) — refines linked lyrics
   const [gtrOnset, setGtrOnset] = useState(null);    // the guitar model's onset matrix — a linked score looks again in it for missed notes
   const [gtrLinkPart, setGtrLinkPart] = useState("auto"); // which score part(s) give the tab its fingering: "auto" = every guitar part
   const [gtrOvr, setGtrOvr] = useState({});         // the tab's own chord edits (its "bar.beat" keys aren't the chord chart's)      // { done, total } windows while the guitar model runs
@@ -4807,6 +4830,16 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
 
   // chords → a real score (re-quantised live as bpm / time-sig change); notes → a timeline
   const linked = linkRes && linkRes.link && linkRes.link.ok && !linkRes.failed ? linkRes.link : null;
+  /* 📄 the linked score's lyrics on the recording's clock (engine.linkedLyricMap): every syllable timed by the
+   * link; a vocal line — the split vocal stem's notes, else Voices (ML) — moves each to its sung onset. */
+  const linkLyrics = useMemo(() => {
+    if (!linked || !linkFile || !linkFile.parts || !linkFile.parts.some((p) => p.score && p.score.lyrics)) return null;
+    try {
+      const vocalNotes = stemVocals && stemVocals.length ? stemVocals : mlNotes && mlNotes.length ? mlNotes : null;
+      const map = linkedLyricMap(linked, linkFile.parts, vocalNotes ? { vocalNotes } : {});
+      return map && map.lines.length ? { map, label: "Lyrics from the score", linked: true, tip: `the lyrics written in "${map.track}", every syllable on the recording's clock${vocalNotes ? " and moved to the sung onsets" : ""}` } : null;
+    } catch (_) { return null; }
+  }, [linked, linkFile, stemVocals, mlNotes]);
   const audioScore = useMemo(() => {
     if (!(kind === "chords" && raw.length)) return null;
     if (linked) {
@@ -5072,7 +5105,7 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
 
       {/* STEMS → split a full mix (or import stems) → a chart per instrument */}
       <StemsPanel C={C} useSharp={useSharp} vocab={vocab} setVocab={setVocab} sixNine={sixNine} setSixNine={setSixNine} reading={chordReadingOpts(songKey, keyUse, changes)} getSource={() => ref.current.audioBuf || null} sourceName={name} fmt={fmt} loading={busy}
-        link={linked} linkParts={linkFile ? linkFile.parts : null} linkName={linkFile ? linkFile.name : ""} />
+        link={linked} linkParts={linkFile ? linkFile.parts : null} linkName={linkFile ? linkFile.name : ""} onVocals={setStemVocals} />
 
       {/* SONG STRUCTURE → detected + editable, applied to the chart below */}
       {!!raw.length && !!ref.current.cur && (
@@ -5102,7 +5135,7 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
             </div>
           )}
           <ChordReview events={raw} C={C} fmt={fmt} onSeek={(t) => play(t)} onCommit={commitChoices} auto={autoPick} onAuto={toggleAuto} onRemove={removeChords} onMergeShort={mergeShort} beatSec={60 / Math.max(30, bpm || 120)} />
-          <ChartPanel score={audioScore} vocabPicker={false} title={name || "Audio stem"} meta={linked
+          <ChartPanel score={audioScore} vocabPicker={false} lyricMap={linkLyrics} title={name || "Audio stem"} meta={linked
               ? `${audioScore.bars.length} bars (the score's) · ♩≈${Math.round(linked.tempo)} (follows the recording) · from audio + ${linkFile ? linkFile.name : "score"}${songKey ? ` · read in ${songKey}` : ""}`
               : `${audioScore.bars.length} bars · ♩=${bg.grid.follow ? "~" + Math.round(bpm) + " (follows the performance)" : +bpm.toFixed(1)} · from audio${songKey ? ` · read in ${songKey}` : ""}`} C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey="" onPick={() => {}}
             keyOverride={songKey} setKeyOverride={(k) => setSongKey(k || "")}
@@ -5268,7 +5301,7 @@ function StemsVsScore({ C, rows, name }) {
   );
 }
 
-function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, reading, getSource, sourceName, fmt, loading, link, linkParts, linkName }) {
+function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, reading, getSource, sourceName, fmt, loading, link, linkParts, linkName, onVocals }) {
   const [tracks, setTracks] = useState(null);           // { sampleRate, list:[{ role, name, L, R }] } at FULL rate
   const [busy, setBusy] = useState(""), [prog, setProg] = useState(null), [err, setErr] = useState("");
   const [res, setRes] = useState(null);                 // chartsFromStems result
@@ -5506,6 +5539,13 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, reading
       ...(c.events ? { events: c.events.map((e) => ({ ...e, startSec: e.startSec + off })) } : {}) }));
     try { return compareStemsToScore({ charts }, 16000, link, linkParts, {}); } catch (_) { return null; }
   }, [res, link, linkParts, tracks]);
+  // the vocal stem's notes, on the recording's clock, to the parent (they refine a linked score's lyrics)
+  useEffect(() => {
+    if (!onVocals) return;
+    const v = res && res.charts.find((c) => c.role === "vocals");
+    const off = (tracks && tracks.offsetSec) || 0;
+    onVocals(v && v.notes && v.notes.length ? v.notes.map((n) => ({ midi: n.midi, startSec: n.startSec + off, durSec: n.durSec })) : null);
+  }, [res, tracks]); // eslint-disable-line
   const partsFor = (role) => { const r = vsScore && vsScore.find((x) => x.role === role); return r && r.parts.length ? r.parts.join(" + ") : ""; };
   const chartScore = useMemo(() => {
     if (!chart) return null;

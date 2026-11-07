@@ -3492,6 +3492,40 @@ core in Node), `bench/scoretab-e2e.mjs` (real app). Activations: `scripts/guitar
   `meta` prop that grows can break the smoke test's `score={gtrScore}…overrides={gtrOvr}` distance guard —
   keep those props next to `score`.
 
+### Syllable-timed lyrics from a score that has lyrics (2026-11-07, follow-on 1)
+
+Full write-up + every number: `docs/SCORE-AUDIO-LINK.md` (last section). Engine block "LYRICS FROM A SCORE"
+(pure). Guards: `tests/score-lyrics.mjs` (in `npm test`). Bench: `bench/lyricsync.mjs`.
+
+- **Capture:** GP4/5 header lyrics (trackChoice + 5 × (start bar, text)) are now KEPT by `parseGP345` /
+  `parseGP5` (they were read and dropped). trackChoice is 1-based; 0 → a voice-named track. Note readers
+  flag ties (`tie`), beat readers `tied` when every note is tied. `_gpBuildScore(…, lyr)` → `score.lyrics =
+  { track, trackName, mode, syllables, beats }` on EVERY part's score; files without lyrics gain no field.
+- **Guitar Pro's rule** (verified, Heart-Shaped Box 365 notes = 365 chunks): one syllable per voice-1 note,
+  rests and all-tied beats skipped; `x-y` two syllables, `_` holds a note, a lone `-` holds a note AND joins
+  the word, `+` joins words, `[..]` comment, newline = line, blank = stanza (`_lyricChunks`).
+- **Whole-word files** (Power of Love: 268 words, 329 notes) → `assignLyricText` "phrases" mode: a
+  monotonic syllable→note DP (1–4 notes per syllable, unsung notes, dropped syllables, rest breaks rewarded
+  at line ends, a pacing term). 85 % within a beat when rests mark phrases, 70 % when they don't.
+- **Timing:** `scoreLyricSyllables` (repeats unrolled; each pass of a repeated bar takes the next verse) →
+  `lyricMapFromSyllables(syls, toSec, { vocalNotes })` → the WO-3 lyric map + per-line `words` [{text, col,
+  startSec, endSec}]. `linkedLyricMap(link, parts)` uses the link's clock; `scoreQToSec` a score alone.
+  Refinement: each syllable moves to the nearest same-pitch-class sung onset (0.4 s, after a ±3 s local
+  median offset; snap 0.2 s). Vocal notes = the stems panel's vocal chart (`onVocals`), else Voices (ML).
+- **Exports:** `_placeChords` puts a chord over the syllable sung at the change; `lyricsToLRC(map,
+  {words:true})` = enhanced LRC; the `csm:lyrics:v1` timing lines gain optional `words`.
+- **UI:** `LyricsSheetView` "📄 Lyrics from the score" (linked audio charts: `linkLyrics`; opened GP files:
+  `xmlLyrics`), "⬇ LRC (word-timed)", the sung syllable underlined during playback.
+- **Measured:** synthetic whole songs (1,381 syllables) median 55 ms link-only → **14 ms** refined (≤ 100 ms
+  63 → 81 %). Real records vs their separated vocals (distance to a same-pitch-class sung onset; +0.5 s
+  control 250–275 ms): Hotel California 100 → 0 ms median, Power of Love 170 → 0 ms; about half the syllables
+  find no sung onset nearby and keep the link's time.
+- **Fixed on the way:** the tied-note pass could SHRINK a syllable a `_` melisma had extended (now `max`).
+  And `scorePartsFromBytes` stripped `lyrics` from the linked score's parts (caught by `bench/scorelyrics-e2e.mjs`);
+  it keeps them now (guarded). The sheet shows the file's text as written ("de sert high way" is the file's own spacing).
+- **Limits:** GP4/5 header lyrics only (MusicXML `<lyric>` and gpif lyrics not read yet); the text must match
+  the performance; backing vocals in the stem can pull a syllable.
+
 ## Path B (scans / photos) — OUT OF SCOPE
 
 Raster tab (a photo or scanned page) has no text layer and needs an OMR/Vision
@@ -3704,6 +3738,12 @@ accordingly.
   parts; stem↔part roles and matching; compareStemsToScore flags a wrong bass bar and a wrong chord bar
   (from the chord chart), passes a written drum groove, names each stem's part; UI/glue contracts
   (keepOnset transferred, the panels shipped, section offset applied).
+- **Score lyrics** (`tests/score-lyrics.mjs`, in `npm test`): `_lyricChunks` rules (hyphens, `_`, lone `-`
+  joins, `+`, comments, lines/stanzas), direct assignment (ties skipped and extending, melisma), phrases mode
+  (each line on its sung phrase), Hotel California 438 syllables on "Vocals (Henley)" on every part, Power of
+  Love in phrases mode, Schism "fall away", no `lyrics` field on lyric-less files, repeats → verse 2,
+  map lines/columns/times, refinement (and its pitch-class gate), linked times from beat times, text
+  round-trip, chord over the syllable, word-timed LRC, UI wiring.
 - **Lyrics import (`parseLyrics`)**: `npm test` asserts the strict chord matcher accepts
   real chords and rejects note-letter lyric words (Add/Cab/Bad/Fed/Gem/Bee/Ace), the
   line-level `isChordLine` catches chord lines but spares lyric/blank lines, a full

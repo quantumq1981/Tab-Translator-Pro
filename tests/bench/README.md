@@ -263,6 +263,8 @@ node bench/stemscore.mjs [--wrong 0.2] [--leak 0.25]            # rendered comp/
 node bench/split-file.mjs --audio <mix> --model <scnet.int8.onnx> --ort <dir with onnxruntime-node> --out <dir>   # the app's separator core in Node
 node bench/stemscore-real.mjs --score <gp> --audio <mix> --stems <split dir> [--guitar-model … --ort …]
 node bench/scoretab-e2e.mjs --deps <dir> --score <gp> --audio <clip> --stems <dir of stem wavs> [--skip-tab 1]
+node bench/lyricsync.mjs --assign-eval | --synthetic | --score <gp4/5> --audio <mp3> [--stems <split dir>]   # syllable-timed lyrics from a score (docs/SCORE-AUDIO-LINK.md)
+node bench/scorelyrics-e2e.mjs --deps <dir> --score <gp4/5> [--audio <mp3>]   # lyrics from the score in the real app (score alone, then linked)
 ```
 
 `scoretab.mjs` writes each GuitarSet track's "score" from its own annotation (16th grid at the file's
