@@ -3557,6 +3557,12 @@ Full write-up: `docs/SCORE-AUDIO-LINK.md` (last section). Same `score.lyrics` sh
   (`bench/scorelyrics-e2e.mjs --expect`): Black Cow + Bach chorale bwv104.6 (all 7 lines, chords over syllables).
 - **Do not re-derive:** a dispatched GP7 file's text does NOT reproduce its placed syllables (author edits); read the
   beats. Don't break MusicXML lines at every comma when fermatas exist (chorale lines are fermata phrases).
+- **Bach chorales as permanent fixtures (2026-11-08):** `tests/fixtures/bach-chorales/` = the 338 music21 chorales
+  that have lyrics (test-only, NOTICE.md; `tests/` is never deployed) + `truth.json` (music21's reading).
+  `tests/bach-lyrics.mjs` (in `npm test`): 18,018 syllables, position / text / word joins **100 %**, 0 invented,
+  ~21 ms/file. It caught a sung-order bug: bwv328 (a Te Deum: extra verses only in a few repeated sections) was
+  sung 3× through. `lyricPassOrder` now adds a pass only when **most** lyric bars still hold an unsung verse
+  (a strophic hymn); guarded, mutation-tested.
 
 ## Path B (scans / photos) — OUT OF SCOPE
 
@@ -3779,6 +3785,9 @@ accordingly.
   elision, tie hold, end-line, fermata lines, `4`/`4a` bars, over-full bar, lyrics from another part, no field
   without lyrics), GP7 placed syllables (Black Cow), gpif text-only reading + grace skip, GP6, the sung order
   (strophic hymn, chorale repeat, chords on the pass order, verse lines, stanzas). Mutation-tested.
+- **Bach chorale lyrics** (`tests/bach-lyrics.mjs`, in `npm test`): 338 chorales vs music21 — every syllable's bar,
+  position, verse, text and word join (100 %), the lyric part, no invented syllables, every written syllable sung once
+  when a repeat carries verse 2 (165 files), and bwv328 not repeated whole.
 - **Lyrics import (`parseLyrics`)**: `npm test` asserts the strict chord matcher accepts
   real chords and rejects note-letter lyric words (Add/Cab/Bad/Fed/Gem/Bee/Ace), the
   line-level `isChordLine` catches chord lines but spares lyric/blank lines, a full

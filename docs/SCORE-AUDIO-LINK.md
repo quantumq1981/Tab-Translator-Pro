@@ -396,7 +396,7 @@ and line breaks come from the track text, matched in order. A file with text onl
 skipping grace notes (Guitar Pro puts no syllable on them from the text).
 
 **Sung order.** `lyricPassOrder(score)` unrolls the repeats (verse 2 on the second pass, as before) and,
-while some bar still holds a verse no pass reached, sings the whole song again with the next verse. That is
+while most lyric bars still hold a verse no pass reached, sings the whole song again with the next verse. That is
 a hymn with several verses under one line of music. A change of verse starts a line (`verseStart`); a
 further time through starts a stanza. An opened score's lyric sheet now reads in this order too (it read
 written order, so a repeated section showed only verse 1), and its map carries `passOrder`, so
@@ -415,6 +415,13 @@ files (408 Bach chorales plus folk songs, madrigals, trecento pieces), 193 with 
 syllables. Same bar, position and verse: **99.94 %**; same text **99.86 %** (most differences are a leading
 space music21 keeps, and Corelli figured bass written as lyrics); word joins **99.82 %**; 31 ms per file.
 The 20 syllables not found are all in seven trecento editions.
+
+**Bach chorales in `npm test`** (`tests/bach-lyrics.mjs`, fixtures `tests/fixtures/bach-chorales/`, test-only):
+the 338 chorales with lyrics, 18,018 syllables, compared with music21 on every run. Position, text and word
+joins are **100 %**, with no invented syllables. In the 165 chorales whose repeat carries verse 2 (and whose
+verses all get a pass), every written syllable is sung exactly once. This run found a sung-order bug: bwv328 (a Te
+Deum whose extra verses sit only in a few repeated sections) was sung through three times. The rule now
+adds a further pass only when most lyric bars still hold an unsung verse, which is what a strophic hymn looks like.
 
 **Guitar Pro 7** (Black Cow): 266 placed syllables read exactly, first "In" at bar 8 beat 4, lines from the
 Singers text ("In the cor ner / Of my eye / I saw you in Ru dy's"). Reading the same text with no placed
