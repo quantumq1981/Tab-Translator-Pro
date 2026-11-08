@@ -141,8 +141,8 @@ errors — 11/11.
 
 ## Follow-ons (not built — in order of value)
 
-1. ~~Lyrics from a score with lyrics~~ — **built 2026-11-07 for Guitar Pro 4/5 files**, see the last
-   section. Still open: MusicXML `<lyric>` (per note — no assignment needed) and GP6/7/8 gpif lyrics.
+1. ~~Lyrics from a score with lyrics~~ — **built 2026-11-07 (Guitar Pro 4/5) and 2026-11-08 (MusicXML,
+   Guitar Pro 6/7/8)**, see the last two sections. Still open: MIDI lyric meta events.
 2. ~~Guitar → Tab with a linked score~~ — **built 2026-11-07**, see below.
 3. ~~Stems × score parts~~ — **built 2026-11-07**, see below.
 4. **Play-along on the better aligner**: ChartPanel's 🎯 Auto-align (the older event-level DTW) can
@@ -345,7 +345,7 @@ real bug: the linked score's parts were stripped of their lyrics before reaching
 
 ### Limits
 
-- **Guitar Pro 4/5 header lyrics only.** MusicXML `<lyric>` and GP6/7/8 gpif lyrics are not read yet.
+- ~~Guitar Pro 4/5 header lyrics only~~ — MusicXML and Guitar Pro 6/7/8 are read since 2026-11-08 (next section).
 - **The text must match the singing**: a file whose lyric line skips a verse, or whose vocal track was
   written for a different arrangement, places syllables on the wrong notes. Edit the text in the sheet.
 - **Whole-word files are a best fit** (85 % within a beat when the rests mark the phrases, 70 % when they
@@ -360,5 +360,89 @@ node bench/lyricsync.mjs --assign-eval [--breaks file|rest]
 node bench/lyricsync.mjs --synthetic [--sec 0]
 node bench/lyricsync.mjs --score <gp4/5> --audio <mp3> [--stems <split dir>]
 node bench/scorelyrics-e2e.mjs --deps <dir> --score <gp4/5> [--audio <mp3>]   # the real app
+```
+
+---
+
+## Built 2026-11-08 — lyrics from MusicXML and Guitar Pro 6/7/8
+
+*Code: `engine.tsx` block "LYRICS FROM A SCORE" — `_musicXmlLyrics` (called by `parseMusicXML`),
+`_gpifLyrics` + `_beatLyricSyllables` (called by `parseGPIF`, so `.gp` GP7/8 and `.gpx` GP6 alike),
+`_assignLyricLines` / `_extendOverTies` (shared with the GP4/5 reader, behaviour unchanged),
+`lyricPassOrder` / `scoreInPassOrder` (the sung order). Guards: `tests/score-lyrics.mjs`. Benches:
+`bench/lyricsxml.mjs` (MusicXML vs music21), `bench/scorelyrics-e2e.mjs --expect …` (real app).*
+
+All three formats produce the same `score.lyrics` (`{ track, trackName, mode, syllables, beats }`; each
+syllable `{ text, bar, bi, q, qa, end, midi, wordEnd, lineStart, stanza, verse }`), on every part's score,
+so linking, refinement, the lyric sheet, the LRC exports and the Perform handoff need nothing new. Files
+without lyrics gain no field (every pinned output unchanged).
+
+**MusicXML** writes each syllable under its note, so nothing has to be assigned:
+- each `<lyric number>` (or `name`) is a verse, ranked by its number;
+- `<syllabic>` begin/middle mark a syllable inside a word; `<elision/>` joins two syllables on one note;
+- `<extend/>` and tied notes hold the syllable on;
+- `<end-line/>` / `<end-paragraph/>` break lines and stanzas. A file without them breaks lines at
+  fermatas (a hymn's phrase ends), else after a word ending in `, . ; : ! ?`;
+- the lyric part is the chosen part if it has lyrics, else the first part that does, read in its voice
+  with the most lyrics (a piano part opened on its own still gets the voice's words).
+
+**Guitar Pro 6/7/8 (gpif).** Each track may carry `<Lyrics>`: up to five `<Line>`s of `<Text>` + `<Offset>`,
+the same lines GP4/5 keep in the header. **`Offset` is the 0-based bar** (Black Cow: Offset 7 → bar 8; bars
+7 or 9 reproduce only about 50 of 266 syllables). A "dispatched" file also has each syllable written
+under its note (`<Beat><Lyrics><Line>`, one per lyric line). Those placed syllables are what Guitar Pro shows,
+so they win, wherever they are: in the Black Cow file the text sits on the "Singers" track and the placed
+syllables on the "Saxophone Alto" track (the lead line). The placed beats give the positions; word joins
+and line breaks come from the track text, matched in order. A file with text only is read like GP4/5,
+skipping grace notes (Guitar Pro puts no syllable on them from the text).
+
+**Sung order.** `lyricPassOrder(score)` unrolls the repeats (verse 2 on the second pass, as before) and,
+while some bar still holds a verse no pass reached, sings the whole song again with the next verse. That is
+a hymn with several verses under one line of music. A change of verse starts a line (`verseStart`); a
+further time through starts a stanza. An opened score's lyric sheet now reads in this order too (it read
+written order, so a repeated section showed only verse 1), and its map carries `passOrder`, so
+`lyricSheetRows` / `scoreToChordProWithLyrics` time the chords on the same order (`scoreInPassOrder`; bar
+numbers kept, so chord edits still apply). The five GP4/5/7 lyric files are unchanged by it.
+
+**Fixed on the way:** the lyric sheet timed its chords at `score.tempo`, which is null for a MusicXML file
+without a tempo marking, so such a sheet showed no chords at all; it now uses 100, the same as the lyrics'
+`scoreQToSec`. And MusicXML bars numbered `4` and `4a` both read as bar 4, so syllables are now kept per
+bar INDEX (`bi`), not per number.
+
+### Measured
+
+**MusicXML vs music21** (`bench/lyricsxml.mjs`): every file with `<lyric>` in the music21 corpus — 448
+files (408 Bach chorales plus folk songs, madrigals, trecento pieces), 193 with several verses, 31,749
+syllables. Same bar, position and verse: **99.94 %**; same text **99.86 %** (most differences are a leading
+space music21 keeps, and Corelli figured bass written as lyrics); word joins **99.82 %**; 31 ms per file.
+The 20 syllables not found are all in seven trecento editions.
+
+**Guitar Pro 7** (Black Cow): 266 placed syllables read exactly, first "In" at bar 8 beat 4, lines from the
+Singers text ("In the cor ner / Of my eye / I saw you in Ru dy's"). Reading the same text with no placed
+syllables onto the Sax track: all 266 syllables placed, 256 on a note Guitar Pro also uses, but only 48 on
+the same note. The author cleared 16 syllables off single notes after Guitar Pro placed them (nothing in
+the file marks those notes), and every one shifts the rest. Text-only files are read by the GP4/5 rule
+(438/438 on Hotel California); placed syllables are exact.
+
+**Guitar Pro 6:** no `.gpx` in the repo carries lyrics (the four with voice tracks have empty `<Lyrics>`),
+so the guard writes text into The Weight's Alto Voice track and checks the reading (first syllable on its
+first note in bar 5, `in-to` two syllables of one word, the newline a new line). The `.gpx` container is the
+same XML, read by the same function.
+
+**Real app** (`bench/scorelyrics-e2e.mjs`, 390 px): Black Cow `.gp` → "In the cor ner"; Bach chorale
+`bwv104.6.mxl` → all seven lines including the repeated verse ("darum, dass nun und nimmermehr"), chords
+over the syllables; no console errors, no overflow.
+
+### Limits
+
+- A GP6/7/8 file with text only can't know about syllables an author cleared off single notes after
+  dispatching (it reads every note, as Guitar Pro would before the edit).
+- MusicXML lyrics on an unpitched part carry no pitch, so the vocal-stem refinement leaves them alone.
+- A linked recording that sings more verses than the score's single pass covers: the link is one pass
+  through the score, so the extra verses fall outside the recording's span.
+
+```
+python -I scripts/m21_lyrics_dump.py <music21/corpus> <truth.json>   # music21's per-note lyrics (dev-only)
+node bench/lyricsxml.mjs --corpus <music21/corpus> --truth <truth.json> [--show N]
+node bench/scorelyrics-e2e.mjs --deps <dir> --score <.gp/.gpx/.musicxml/.mxl> --expect "<a lyric line>"
 ```
 

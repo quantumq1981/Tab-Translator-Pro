@@ -264,7 +264,8 @@ node bench/split-file.mjs --audio <mix> --model <scnet.int8.onnx> --ort <dir wit
 node bench/stemscore-real.mjs --score <gp> --audio <mix> --stems <split dir> [--guitar-model … --ort …]
 node bench/scoretab-e2e.mjs --deps <dir> --score <gp> --audio <clip> --stems <dir of stem wavs> [--skip-tab 1]
 node bench/lyricsync.mjs --assign-eval | --synthetic | --score <gp4/5> --audio <mp3> [--stems <split dir>]   # syllable-timed lyrics from a score (docs/SCORE-AUDIO-LINK.md)
-node bench/scorelyrics-e2e.mjs --deps <dir> --score <gp4/5> [--audio <mp3>]   # lyrics from the score in the real app (score alone, then linked)
+node bench/scorelyrics-e2e.mjs --deps <dir> --score <.gp/.gpx/.gp5/.musicxml/.mxl> [--expect <lyric line regex>] [--audio <mp3>]   # lyrics from the score in the real app (score alone, then linked)
+node bench/lyricsxml.mjs --corpus <music21/corpus> --truth <truth.json> [--show N]   # MusicXML lyrics vs music21 (448 files)
 ```
 
 `scoretab.mjs` writes each GuitarSet track's "score" from its own annotation (16th grid at the file's

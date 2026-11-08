@@ -3523,8 +3523,40 @@ Full write-up + every number: `docs/SCORE-AUDIO-LINK.md` (last section). Engine 
 - **Fixed on the way:** the tied-note pass could SHRINK a syllable a `_` melisma had extended (now `max`).
   And `scorePartsFromBytes` stripped `lyrics` from the linked score's parts (caught by `bench/scorelyrics-e2e.mjs`);
   it keeps them now (guarded). The sheet shows the file's text as written ("de sert high way" is the file's own spacing).
-- **Limits:** GP4/5 header lyrics only (MusicXML `<lyric>` and gpif lyrics not read yet); the text must match
-  the performance; backing vocals in the stem can pull a syllable.
+- **Limits:** the text must match the performance; backing vocals in the stem can pull a syllable. (MusicXML and
+  GP6/7/8 lyrics: next section.)
+
+### Lyrics from MusicXML and Guitar Pro 6/7/8 + the sung order (2026-11-08)
+
+Full write-up: `docs/SCORE-AUDIO-LINK.md` (last section). Same `score.lyrics` shape as GP4/5 (syllables gain
+`bi` = bar INDEX), on every part's score; files without lyrics gain no field (pinned outputs unchanged).
+
+- **MusicXML** (`_musicXmlLyrics`, from `parseMusicXML`): `<lyric>` is per note, nothing to assign. `number`/`name`
+  = verse (ranked by number); `syllabic` begin/middle = inside a word; `elision` joins; `extend` + ties hold the
+  syllable; `end-line`/`end-paragraph` break lines/stanzas, else fermatas (≥ 2 on lyric notes), else trailing
+  `, . ; : ! ?`. Lyric part = the chosen part if it has lyrics, else the first that does, in its voice with the most
+  lyrics. Bars by INDEX: `4` and `4a` both parse to bar 4. An over-full bar advances by its content, not its meter.
+- **GP6/7/8 gpif** (`_gpifLyrics`, from `parseGPIF`, so `.gp` and `.gpx`): track `<Lyrics><Line><Text>+<Offset>`
+  (**Offset = 0-based bar**, verified on Black Cow) and, when dispatched, syllables under notes
+  (`<Beat><Lyrics><Line>`). **Placed syllables win, from any track** (Black Cow: text on "Singers", placed syllables
+  on "Saxophone Alto"); word joins + line breaks from the track text matched in order (`_beatLyricSyllables`).
+  Text only → the GP4/5 reader (`_assignLyricLines`), skipping grace notes; a grace note can still carry a placed
+  syllable (2 in Black Cow).
+- **Sung order** (`lyricPassOrder`): repeats unrolled, then the whole song again while a bar still has an unsung verse
+  (strophic hymns, all verses under one line). `verseStart` (a verse change) always breaks the line; a further time
+  through is a stanza. The opened-score sheet now uses it (it was written order → a repeated section showed verse 1
+  only); its map carries `passOrder` and `lyricSheetRows` / `scoreToChordProWithLyrics` time chords on
+  `scoreInPassOrder` (numbers kept → chord edits apply). No change on the five GP lyric files.
+- **Fixed:** `_lyricChords` timed chords at `score.tempo` → null on a MusicXML file without a tempo → the sheet showed
+  NO chords; now `|| 100`, matching `scoreQToSec`.
+- **Measured:** MusicXML vs music21 on its whole corpus (`bench/lyricsxml.mjs`, truth from
+  `scripts/m21_lyrics_dump.py`): 448 files, 31,749 syllables — position 99.94 %, text 99.86 %, word joins 99.82 %
+  (misses: 7 trecento editions). Black Cow placed syllables exact (266, "In" at bar 8 beat 4); its text read without
+  them hits the same note only 48/266 — the author cleared 16 syllables off single notes after dispatching. No
+  repo `.gpx` has lyrics: the GP6 guard writes text into The Weight's Alto Voice track. Real app
+  (`bench/scorelyrics-e2e.mjs --expect`): Black Cow + Bach chorale bwv104.6 (all 7 lines, chords over syllables).
+- **Do not re-derive:** a dispatched GP7 file's text does NOT reproduce its placed syllables (author edits); read the
+  beats. Don't break MusicXML lines at every comma when fermatas exist (chorale lines are fermata phrases).
 
 ## Path B (scans / photos) — OUT OF SCOPE
 
@@ -3743,7 +3775,10 @@ accordingly.
   (each line on its sung phrase), Hotel California 438 syllables on "Vocals (Henley)" on every part, Power of
   Love in phrases mode, Schism "fall away", no `lyrics` field on lyric-less files, repeats → verse 2,
   map lines/columns/times, refinement (and its pitch-class gate), linked times from beat times, text
-  round-trip, chord over the syllable, word-timed LRC, UI wiring.
+  round-trip, chord over the syllable, word-timed LRC, UI wiring. Since 2026-11-08 also MusicXML (verses, syllabic,
+  elision, tie hold, end-line, fermata lines, `4`/`4a` bars, over-full bar, lyrics from another part, no field
+  without lyrics), GP7 placed syllables (Black Cow), gpif text-only reading + grace skip, GP6, the sung order
+  (strophic hymn, chorale repeat, chords on the pass order, verse lines, stanzas). Mutation-tested.
 - **Lyrics import (`parseLyrics`)**: `npm test` asserts the strict chord matcher accepts
   real chords and rejects note-letter lyric words (Add/Cab/Bad/Fed/Gem/Bee/Ace), the
   line-level `isChordLine` catches chord lines but spares lyric/blank lines, a full
