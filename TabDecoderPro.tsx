@@ -269,6 +269,7 @@ import {
   scoreQToSec,
   linkedLyricMap,
   lyricMapToText,
+  lyricPassOrder,
   SCORE_LINK,
   parseMidiFile,
   spellScoreForKey,
@@ -640,10 +641,15 @@ export default function TabDecoderPro() {
   const [xmlScore, setXmlScore] = useState(null);
   const [xmlErr, setXmlErr] = useState("");
   const [xmlName, setXmlName] = useState("");
-  // 📄 a score's own lyrics (a Guitar Pro lyric line), every syllable on the score's clock (written order)
+  // 📄 a score's own lyrics (Guitar Pro 3–8 / .gpx / MusicXML), every syllable on the score's clock in SUNG order:
+  // repeats unrolled (verse 2 on the second pass), further verses sung again; the sheet's chords follow the same order
   const xmlLyrics = useMemo(() => {
     if (!xmlScore || !xmlScore.lyrics) return null;
-    try { const map = lyricMapFromSyllables(scoreLyricSyllables(xmlScore, { unroll: false }), scoreQToSec(xmlScore)); return map.lines.length ? { map, label: "Lyrics from the score", tip: `the lyrics written in "${xmlScore.lyrics.trackName}", every syllable at the score's tempo`, linked: false } : null; } catch (_) { return null; }
+    try {
+      const order = lyricPassOrder(xmlScore), same = order.length === xmlScore.bars.length && order.every((v, i) => v === i);
+      const map = { ...lyricMapFromSyllables(scoreLyricSyllables(xmlScore), scoreQToSec(xmlScore)), ...(same ? {} : { passOrder: order }) };
+      return map.lines.length ? { map, label: "Lyrics from the score", tip: `the lyrics written in "${xmlScore.lyrics.trackName}", every syllable at the score's tempo${same ? "" : ", in the order they are sung (repeats and verses)"}`, linked: false } : null;
+    } catch (_) { return null; }
   }, [xmlScore]);
   /* The score file open in the MusicXML / GP / Power Tab panel ({ name, bytes }), so the Audio panel
    * can LINK a recording to it (📎 Link a score) — notation and audio read together. `linkAsk`
@@ -2003,7 +2009,7 @@ function LyricsSheetView({ C, score, title, overrides, playKey, getAudio, getBuf
       player.current.raf = requestAnimationFrame(tick);
     } catch (_) { stopPlay(); }
   };
-  /* 📄 lyrics that came WITH the score (a Guitar Pro file's lyric line): every syllable timed — on the
+  /* 📄 lyrics that came WITH the score (Guitar Pro 3–8 / .gpx / MusicXML): every syllable timed — on the
    * recording's clock when a score is linked, else on the score's own. Fills the text box too. */
   const useScoreLyrics = () => { if (!scoreLyrics || !scoreLyrics.map) return; setText(lyricMapToText(scoreLyrics.map)); setMap(scoreLyrics.map); setEditing(false); setSel(-1); setErr(""); };
   const align = async () => {

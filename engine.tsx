@@ -993,7 +993,8 @@ function parseMusicXML(xml, useSharp = true, partIndex = 0) {
   const sound = _xEls(doc, "sound").find((s) => s.getAttribute("tempo"));
   if (sound) { const v = parseFloat(sound.getAttribute("tempo")); if (!isNaN(v)) tempo = v; }
   if (tempo == null) { const pm = _xFirst(doc, "per-minute"); if (pm) { const v = parseFloat(_xText(pm)); if (!isNaN(v)) tempo = v; } }
-  return { source: "musicxml", timeSig: bars.length ? bars[0].timeSig : [beats, beatType], tuning: _tuningName(tuning), tuningMidi: _tuningByKey((put) => (tuning || []).forEach((m, i) => put(i, m))), tempo, bars, parts, partIndex: idx };
+  const lyrics = _musicXmlLyrics(doc, partEls, idx, parts);
+  return { source: "musicxml", timeSig: bars.length ? bars[0].timeSig : [beats, beatType], tuning: _tuningName(tuning), tuningMidi: _tuningByKey((put) => (tuning || []).forEach((m, i) => put(i, m))), tempo, bars, parts, partIndex: idx, ...(lyrics ? { lyrics } : {}) };
 }
 
 /* ===========================================================================
@@ -1154,7 +1155,8 @@ function parseGPIF(xml, useSharp = true, partIndex = 0) {
   let tempo = null;
   const tAuto = _xEls(doc, "Automation").find((a) => _xChildText(a, "Type") === "Tempo");
   if (tAuto) { const v = parseFloat((_xChildText(tAuto, "Value") || "").split(/\s+/)[0]); if (!isNaN(v)) tempo = v; }
-  return { source: "gp", timeSig: bars.length ? bars[0].timeSig : lastSig, tuning: _tuningName(tuning), tuningMidi: _tuningByKey((put) => (tuningAll || TUNINGS.Standard).forEach((m, i) => put(i, m))), tempo, bars, parts, partIndex: idx };
+  const lyrics = _gpifLyrics(doc, tracks, { barMap, voiceMap, beatMap, noteMap, rhythmMap }, idx);
+  return { source: "gp", timeSig: bars.length ? bars[0].timeSig : lastSig, tuning: _tuningName(tuning), tuningMidi: _tuningByKey((put) => (tuningAll || TUNINGS.Standard).forEach((m, i) => put(i, m))), tempo, bars, parts, partIndex: idx, ...(lyrics ? { lyrics } : {}) };
 }
 
 /* Inflate a `.gp` (GP7/8) ZIP and return its Content/score.gpif XML text.
@@ -9748,7 +9750,7 @@ function assignLyricText(beats, text, opts = {}) {
       if (k >= notes.length) break;
       const b = notes[k++];
       if (c.melisma) { if (prev) prev.end = b.qa + b.d; continue; }
-      prev = { text: c.text, bar: b.bar, q: b.q, qa: b.qa, end: b.qa + b.d, midi: b.midi, wordEnd: c.wordEnd, lineStart: c.lineStart, stanza: c.stanza };
+      prev = { text: c.text, bar: b.bar, ...(b.bi != null ? { bi: b.bi } : {}), q: b.q, qa: b.qa, end: b.qa + b.d, midi: b.midi, wordEnd: c.wordEnd, lineStart: c.lineStart, stanza: c.stanza };
       syl.push(prev);
     }
   } else {
@@ -9798,14 +9800,32 @@ function assignLyricText(beats, text, opts = {}) {
       if (h === 9) { pending += S[i].text + (S[i].wordEnd ? " " : ""); continue; }
       const first = N[j - h], last = N[j - 1];
       const sy = S[i];
-      syl.push({ text: (pending + sy.text).replace(/\s+$/, ""), bar: first.bar, q: first.q, qa: first.qa, end: last.qa + last.d, midi: first.midi, wordEnd: sy.wordEnd, lineStart: sy.lineStart || (hasLines ? false : false), stanza: sy.stanza });
+      syl.push({ text: (pending + sy.text).replace(/\s+$/, ""), bar: first.bar, ...(first.bi != null ? { bi: first.bi } : {}), q: first.q, qa: first.qa, end: last.qa + last.d, midi: first.midi, wordEnd: sy.wordEnd, lineStart: sy.lineStart || (hasLines ? false : false), stanza: sy.stanza });
       pending = "";
     }
     if (pending && syl.length) syl[syl.length - 1].text += " " + pending.trim();
   }
-  // tied continuation notes extend the syllable before them
-  if (syl.length) { let si = 0; for (const b of beats) { if (!b.tied) continue; while (si + 1 < syl.length && syl[si + 1].qa <= b.qa) si++; if (syl[si].qa <= b.qa && b.qa - syl[si].end < 0.01) syl[si].end = Math.max(syl[si].end, b.qa + b.d); } }
+  _extendOverTies(syl, beats);
   return { mode, syllables: syl };
+}
+
+/* Tied continuation notes extend the syllable sung before them. */
+function _extendOverTies(syl, beats) {
+  if (!syl.length) return;
+  let si = 0;
+  for (const b of beats) { if (!b.tied) continue; while (si + 1 < syl.length && syl[si + 1].qa <= b.qa) si++; if (syl[si].qa <= b.qa && b.qa - syl[si].end < 0.01) syl[si].end = Math.max(syl[si].end, b.qa + b.d); }
+}
+
+/* Lyric lines ({ start bar (1-based), text }) onto a lyric track's beats: line k is verse k. */
+function _assignLyricLines(beats, lines) {
+  const syllables = []; let mode = null;
+  (lines || []).forEach((ln, verse) => {
+    if (!ln.text || !ln.text.trim()) return;
+    const r = assignLyricText(beats.filter((b) => b.bar >= Math.max(1, ln.start || 1)), ln.text);
+    if (!mode) mode = r.mode;
+    for (const s of r.syllables) syllables.push({ ...s, verse });
+  });
+  return { mode, syllables };
 }
 
 /* GP3/4/5: the lyric track's voice-1 note beats in written order → assignLyricText per lyric line. */
@@ -9817,16 +9837,167 @@ function _gpLyrics(tracks, lyr) {
   const tr = tracks[ti], barQ = []; let acc = 0;
   tr.measures.forEach((m) => { barQ.push(acc); const [n, d] = m.timeSig; acc += (n * 4) / d; });
   const beats = [];
-  tr.measures.forEach((m, mi) => { let c = 0; for (const b of (m.voices && m.voices[0]) || []) { if (b.midis.length) beats.push({ bar: mi + 1, q: c, qa: barQ[mi] + c, d: b.durQuarters, midi: Math.max(...b.midis), tied: !!b.tied }); c += b.durQuarters; } });
-  const syllables = []; let mode = null;
-  lyr.lines.forEach((ln, verse) => {
-    if (!ln.text || !ln.text.trim()) return;
-    const r = assignLyricText(beats.filter((b) => b.bar >= Math.max(1, ln.start || 1)), ln.text);
-    if (!mode) mode = r.mode;
-    for (const s of r.syllables) syllables.push({ ...s, verse });
-  });
+  tr.measures.forEach((m, mi) => { let c = 0; for (const b of (m.voices && m.voices[0]) || []) { if (b.midis.length) beats.push({ bar: mi + 1, bi: mi, q: c, qa: barQ[mi] + c, d: b.durQuarters, midi: Math.max(...b.midis), tied: !!b.tied }); c += b.durQuarters; } });
+  const { mode, syllables } = _assignLyricLines(beats, lyr.lines);
   // beats: the lyric track's notes (written order) — what the syllables sit on, for re-reading the text
   return syllables.length ? { track: ti, trackName: (tr.name || "").trim() || `Track ${ti + 1}`, mode, syllables, beats } : null;
+}
+
+/* GP6/7/8 (gpif — the .gpx container holds the same XML). Each track may carry <Lyrics> with up to five
+ * <Line>s of <Text> + <Offset> (the 0-based bar it starts on), the same lines GP4/5 keep in the header.
+ * When the file is "dispatched" Guitar Pro has also written each syllable under its note
+ * (<Beat><Lyrics><Line>), one <Line> per lyric line — what Guitar Pro shows, so it wins: the beats give
+ * the positions, the track text gives word joins and line breaks. A file with text only is read like
+ * GP4/5 (assignLyricText). The lyric track is the chosen part if it carries lyrics, else the first that does. */
+function _gpifTrackTuning(track) {
+  const tunProp = _gpProp(track, "Tuning") || (_xFirst(track, "Staff") && _gpProp(_xFirst(track, "Staff"), "Tuning"));
+  if (!tunProp) return null;
+  const pit = _gpIds(_xChildText(tunProp, "Pitches")).map(Number);
+  return pit.length && pit.every((v) => !isNaN(v)) ? pit : null;
+}
+function _gpifLyrics(doc, tracks, maps, idx) {
+  const own = (el, tag) => Array.from(el.childNodes || []).find((n) => n.nodeType === 1 && n.nodeName === tag) || null;
+  const trackLines = (t) => { const L = own(t, "Lyrics"); return L ? _xEls(L, "Line").map((ln) => { const te = _xFirst(ln, "Text"); return { start: (parseInt(_xChildText(ln, "Offset") || "0", 10) || 0) + 1, text: te ? String(te.textContent || "") : "" }; }) : []; };
+  const beatLyr = (b) => { const L = _xFirst(b, "Lyrics"); return L ? _xEls(L, "Line").map((ln) => String(ln.textContent || "")) : null; };
+  const anyBeatLyr = _xEls(doc, "Beat").some((b) => { const l = beatLyr(b); return !!l && l.some((x) => x.trim()); });
+  const mbs = _xEls(doc, "MasterBar"), barQ = []; { let acc = 0, sig = [4, 4]; mbs.forEach((mb) => { const tt = _xChildText(mb, "Time"); if (tt && /^\d+\/\d+$/.test(tt)) sig = tt.split("/").map(Number); barQ.push(acc); acc += (sig[0] * 4) / sig[1]; }); }
+  const beatsOf = (ti) => {
+    const tun = _gpifTrackTuning(tracks[ti]) || TUNINGS.Standard, out = [];
+    mbs.forEach((mb, mi) => {
+      const bar = maps.barMap.get(_gpIds(_xChildText(mb, "Bars"))[ti]); if (!bar) return;
+      const vId = _gpIds(_xChildText(bar, "Voices")).find((v) => v !== "-1"), voice = vId != null && maps.voiceMap.get(vId); if (!voice) return;
+      let c = 0;
+      for (const beatId of _gpIds(_xChildText(voice, "Beats"))) {
+        const beat = maps.beatMap.get(beatId); if (!beat) continue;
+        const rRef = _xFirst(beat, "Rhythm"), q = _gpRhythmQuarters(rRef && maps.rhythmMap.get(rRef.getAttribute("ref")));
+        const grace = !!_xFirst(beat, "GraceNotes");                                      // no syllable from the text on a grace note
+        const midis = []; let tied = 0;
+        for (const nId of _gpIds(_xText(_xFirst(beat, "Notes")))) {
+          const note = maps.noteMap.get(nId); if (!note) continue;
+          let m = _gpNoteMidi(note);
+          if (m == null) { const sEl = _gpProp(note, "String"), fEl = _gpProp(note, "Fret"); if (sEl && fEl) { const st = parseInt(_xChildText(sEl, "String"), 10), f = parseInt(_xChildText(fEl, "Fret"), 10); if (!isNaN(st) && !isNaN(f) && st >= 0 && st < tun.length) m = tun[st] + f; } }
+          if (m == null) continue;
+          midis.push(m); const tie = _xFirst(note, "Tie"); if (tie && tie.getAttribute("destination") === "true") tied++;
+        }
+        const lyr = beatLyr(beat);
+        if (midis.length) out.push({ bar: mi + 1, bi: mi, q: c, qa: barQ[mi] + c, d: q, midi: Math.max(...midis), tied: tied === midis.length, ...(grace ? { grace: true } : {}), ...(lyr && lyr.some((x) => x.trim()) ? { lyr } : {}) });
+        c += q;
+      }
+    });
+    return out;
+  };
+  const order = [idx, ...tracks.map((_, i) => i).filter((i) => i !== idx)];
+  const linesOf = order.map((ti) => [ti, trackLines(tracks[ti])]).filter(([, ls]) => ls.some((l) => l.text.trim()));
+  const pack = (ti, beats, res) => res.syllables.length ? { track: ti, trackName: (_xChildText(tracks[ti], "Name") || "").trim() || `Track ${ti + 1}`, mode: res.mode, syllables: res.syllables, beats: beats.map(({ lyr, ...b }) => b) } : null;
+  // 1. syllables Guitar Pro placed under notes win, wherever they are (the text may sit on another track:
+  //    in the Black Cow file it is on "Singers", the placed syllables on the lead line's track)
+  if (anyBeatLyr) for (const ti of order) {
+    const beats = beatsOf(ti); if (!beats.some((b) => b.lyr)) continue;
+    const ownText = linesOf.find(([t]) => t === ti), text = ownText || linesOf[0];
+    const r = pack(ti, beats, _beatLyricSyllables(beats, text ? text[1] : []));
+    if (r) return r;
+  }
+  // 2. text only: read it onto its own track's notes, like GP4/5
+  for (const [ti, lines] of linesOf) { const beats = beatsOf(ti).filter((b) => !b.grace), r = pack(ti, beats, _assignLyricLines(beats, lines)); if (r) return r; }
+  return null;
+}
+/* Syllables already placed under their notes (gpif beat lyrics): line k = verse k. Word joins and line
+ * breaks come from the track text of the same line, matched in order (a syllable the text lacks keeps
+ * its defaults). "_" / a lone "-" on a beat holds the previous syllable over it. */
+function _beatLyricSyllables(beats, lines) {
+  const nV = Math.max(0, ...beats.filter((b) => b.lyr).map((b) => b.lyr.length));
+  const norm = (x) => String(x).toLowerCase().replace(/[^\p{L}\p{N}']/gu, "");
+  const syllables = [];
+  for (let v = 0; v < nV; v++) {
+    const syl = []; let prev = null;
+    for (const b of beats) {
+      const t = (b.lyr && b.lyr[v] != null ? b.lyr[v] : "").trim();
+      if (!t) continue;
+      if (/^[_-]+$/.test(t)) { if (prev) { prev.end = Math.max(prev.end, b.qa + b.d); if (t[0] === "-") prev.wordEnd = false; } continue; }
+      prev = { text: t.replace(/\+/g, " ").replace(/-+$/, ""), bar: b.bar, bi: b.bi, q: b.q, qa: b.qa, end: b.qa + b.d, midi: b.midi, wordEnd: !/-$/.test(t), lineStart: false, stanza: false, verse: v };
+      syl.push(prev);
+    }
+    const chunks = _lyricChunks((lines[v] && lines[v].text) || "").filter((c) => !c.melisma);
+    let j = 0;
+    for (const s of syl) for (let k = j; k < Math.min(chunks.length, j + 6); k++) if (norm(chunks[k].text) === norm(s.text)) { s.wordEnd = s.wordEnd && chunks[k].wordEnd; s.lineStart = !!chunks[k].lineStart; s.stanza = !!chunks[k].stanza; j = k + 1; break; }
+    _extendOverTies(syl, beats);
+    syllables.push(...syl);
+  }
+  return { mode: "beats", syllables };
+}
+
+/* MusicXML: <lyric> is written under each note, so nothing needs assigning. Each lyric number (or name)
+ * is a verse; <syllabic> begin/middle mark a syllable inside a word; <extend/> and tied notes hold the
+ * syllable on; <elision/> joins two syllables on one note; <end-line/> / <end-paragraph/> (MusicXML 3)
+ * break lines and stanzas — a file without them breaks lines at fermatas (a hymn's phrase ends), else
+ * after a word ending in , . ; : ! ?. The
+ * lyric part is the chosen part if it has lyrics, else the first part that does, read in its voice with
+ * the most lyrics. Times are quarters (q in the bar, qa from the start), like the Guitar Pro lyrics. */
+function _musicXmlLyrics(doc, partEls, idx, parts) {
+  const kids = (el, tag) => Array.from(el.childNodes || []).filter((n) => n.nodeType === 1 && n.nodeName === tag);
+  const hasLyr = (p) => _xEls(p, "lyric").some((l) => _xEls(l, "text").some((t) => _xText(t)));
+  const pi = [idx, ...partEls.map((_, i) => i).filter((i) => i !== idx)].find((i) => partEls[i] && hasLyr(partEls[i]));
+  if (pi == null) return null;
+  const part = partEls[pi];
+  const vc = new Map();
+  for (const l of _xEls(part, "lyric")) if (_xEls(l, "text").some((t) => _xText(t))) { const v = _xChildText(l.parentNode, "voice") || "1"; vc.set(v, (vc.get(v) || 0) + 1); }
+  const voice = [...vc.entries()].sort((a, b) => b[1] - a[1])[0][0];
+  const keys = [], keyOf = (l) => { const k = l.getAttribute("number") || l.getAttribute("name") || "1"; if (!keys.includes(k)) keys.push(k); return k; };
+  const raw = [], plain = [];
+  let divisions = 1, beats = 4, beatType = 4, acc = 0;
+  _xEls(part, "measure").forEach((measure, mi) => {
+    const number = parseInt(measure.getAttribute("number") || String(mi + 1), 10);
+    let cursor = 0, lastOnset = 0, longest = 0;
+    for (let node = measure.firstChild; node; node = node.nextSibling) {
+      if (node.nodeType !== 1) continue;
+      const tag = node.nodeName;
+      longest = Math.max(longest, cursor);
+      if (tag === "attributes") {
+        const d = _xChildText(node, "divisions"); if (d) divisions = parseInt(d, 10) || divisions;
+        const t = _xFirst(node, "time"); if (t) { const b = _xChildText(t, "beats"), bt = _xChildText(t, "beat-type"); if (b) beats = parseInt(b, 10) || beats; if (bt) beatType = parseInt(bt, 10) || beatType; }
+      } else if (tag === "note") {
+        if (_xFirst(node, "grace")) continue;
+        const dur = parseInt(_xChildText(node, "duration") || "0", 10) || 0, isChord = !!_xFirst(node, "chord");
+        const onset = isChord ? lastOnset : cursor;
+        if (!isChord) { lastOnset = cursor; cursor += dur; }
+        if (_xFirst(node, "rest") || (_xChildText(node, "voice") || "1") !== voice) continue;
+        const q = onset / divisions, d = dur / divisions, qa = acc + q;
+        const pe = _xFirst(node, "pitch"), midi = pe ? _pitchToMidi(pe) : null;
+        const tieStop = kids(node, "tie").some((t) => t.getAttribute("type") === "stop") || _xEls(node, "tied").some((t) => t.getAttribute("type") === "stop");
+        const ls = kids(node, "lyric");
+        if (!ls.length) { if (!isChord) plain.push({ qa, end: qa + d, tieStop, key: null }); continue; }
+        for (const l of ls) {
+          const key = keyOf(l), texts = _xEls(l, "text").map(_xText).filter(Boolean), extend = !!_xFirst(l, "extend");
+          if (!texts.length) { plain.push({ qa, end: qa + d, tieStop: tieStop || extend, key }); continue; }
+          const sy = _xEls(l, "syllabic").map(_xText), last = sy[sy.length - 1] || "single";
+          raw.push({ key, text: texts.join(" "), wordEnd: last === "single" || last === "end", extend, endLine: !!_xFirst(l, "end-line"), endPara: !!_xFirst(l, "end-paragraph"), fermata: !!_xFirst(node, "fermata"), bar: number, bi: mi, q, qa, end: qa + d, midi });
+        }
+      } else if (tag === "backup") cursor -= parseInt(_xChildText(node, "duration") || "0", 10) || 0;
+      else if (tag === "forward") cursor += parseInt(_xChildText(node, "duration") || "0", 10) || 0;
+    }
+    acc += Math.max((beats * 4) / beatType, Math.max(longest, cursor) / divisions);       // an over-full bar must not overlap the next
+  });
+  if (!raw.length) return null;
+  const num = (k) => { const m = String(k).match(/\d+/); return m ? parseInt(m[0], 10) : Infinity; };
+  const ranked = [...keys].sort((a, b) => num(a) - num(b) || keys.indexOf(a) - keys.indexOf(b));
+  const marked = raw.some((r) => r.endLine || r.endPara), fermatas = !marked && raw.filter((r) => r.fermata).length >= 2;
+  plain.sort((a, b) => a.qa - b.qa);
+  const syllables = [];
+  ranked.forEach((key, verse) => {
+    const seen = new Set(), syl = [];
+    for (const r of raw) { const at = r.bi + "|" + r.qa; if (r.key !== key || seen.has(at)) continue; seen.add(at); syl.push(r); }
+    let brk = false, para = false;
+    syl.forEach((r, i) => {
+      const next = syl[i + 1], s = { text: r.text, bar: r.bar, bi: r.bi, q: r.q, qa: r.qa, end: r.end, midi: r.midi, wordEnd: r.wordEnd, lineStart: brk, stanza: para, verse };
+      // hold the syllable over the lyric-less notes that continue it (tie, <extend/>)
+      for (const p of plain) { if (p.qa < s.end - 1e-6) continue; if (p.qa > s.end + 1e-6 || (next && p.qa >= next.qa - 1e-6)) break; if (p.tieStop || r.extend || p.key === key) s.end = p.end; else break; }
+      syllables.push(s);
+      brk = marked ? (r.endLine || r.endPara) : fermatas ? r.fermata : (r.wordEnd && /[,.;:!?]["'’”)]*$/.test(r.text));
+      para = marked && r.endPara;
+    });
+  });
+  if (!syllables.length) return null;
+  return { track: pi, trackName: (parts[pi] && parts[pi].name) || `Part ${pi + 1}`, mode: "notes", syllables, beats: [] };
 }
 
 /** A score's lyric syllables in PERFORMANCE order (repeats unrolled as the link does, or written order
@@ -9836,20 +10007,49 @@ function _gpLyrics(tracks, lyr) {
 function scoreLyricSyllables(score, opts = {}) {
   const L = score && score.lyrics;
   if (!L || !L.syllables || !L.syllables.length) return [];
-  const bars = score.bars || [], order = opts.unroll === false ? bars.map((_, i) => i) : unrollRepeatOrder(bars);
-  const byBar = new Map(); for (const s of L.syllables) { if (!byBar.has(s.bar)) byBar.set(s.bar, []); byBar.get(s.bar).push(s); }
+  const bars = score.bars || [], order = opts.unroll === false ? bars.map((_, i) => i) : opts.strophic === false ? unrollRepeatOrder(bars) : lyricPassOrder(score);
+  const baseLen = opts.unroll === false ? bars.length : unrollRepeatOrder(bars).length;   // a further time through the song starts every baseLen bars
+  // by bar INDEX (bi): MusicXML bar numbers repeat ("4", "4a" both read 4); older syllables fall back to the number
+  const numIdx = new Map(); bars.forEach((b, i) => { if (!numIdx.has(b.number)) numIdx.set(b.number, i); });
+  const byBar = new Map(); for (const s of L.syllables) { const k = s.bi != null ? s.bi : numIdx.get(s.bar); if (k == null) continue; if (!byBar.has(k)) byBar.set(k, []); byBar.get(k).push(s); }
   const barStartQ = new Map(); { let acc = 0; bars.forEach((b) => { barStartQ.set(b.number, acc); const [n, d] = b.timeSig || score.timeSig || [4, 4]; acc += (n * 4) / d; }); }
   const pass = new Map(), out = []; let pos = 0;
   order.forEach((bi, k) => {
     const bar = bars[bi], [n, d] = bar.timeSig || score.timeSig || [4, 4], len = (n * 4) / d;
     const p = pass.get(bar.number) || 0; pass.set(bar.number, p + 1);
-    const here = byBar.get(bar.number) || [];
+    const here = byBar.get(bi) || [];
     const verses = [...new Set(here.map((s) => s.verse))].sort((a, b) => a - b);
     const v = verses.length ? verses[Math.min(p, verses.length - 1)] : null;
-    for (const s of here) if (s.verse === v) out.push({ text: s.text, t: pos + s.q, d: Math.max(0.05, s.end - s.qa), midi: s.midi, wordEnd: s.wordEnd !== false, lineStart: !!s.lineStart, stanza: !!s.stanza, bar: k + 1, sourceBar: bar.number, section: bar.section || null });
+    for (const s of here) if (s.verse === v) out.push({ text: s.text, t: pos + s.q, d: Math.max(0.05, s.end - s.qa), midi: s.midi, wordEnd: s.wordEnd !== false, lineStart: !!s.lineStart, stanza: !!s.stanza || (k > 0 && k % baseLen === 0 && s === here.find((x) => x.verse === v)), verse: s.verse, bar: k + 1, sourceBar: bar.number, section: bar.section || null });
     pos += len;
   });
-  return out.sort((a, b) => a.t - b.t);
+  out.sort((a, b) => a.t - b.t);
+  // a change of verse (the repeat sung with verse 2, back to verse 1 after it, a further time through) starts a line
+  for (let i = 1; i < out.length; i++) if (out[i].verse !== out[i - 1].verse) out[i].verseStart = true;
+  return out;
+}
+
+/** The order a score's bars are SUNG in: repeats unrolled (as the link does); then, while some bar still
+ *  holds a verse no pass has reached (a hymn with several verses under one line of music, or more verses
+ *  than repeats), the whole song again for the next verse. → bar indices. Max 8 passes. */
+function lyricPassOrder(score) {
+  const bars = (score && score.bars) || [], base = unrollRepeatOrder(bars), L = score && score.lyrics;
+  if (!L || !L.syllables || !L.syllables.length) return base;
+  const numIdx = new Map(); bars.forEach((b, i) => { if (!numIdx.has(b.number)) numIdx.set(b.number, i); });
+  const verses = new Map(); for (const s of L.syllables) { const k = s.bi != null ? s.bi : numIdx.get(s.bar); if (k == null) continue; if (!verses.has(k)) verses.set(k, new Set()); verses.get(k).add(s.verse); }
+  const order = base.slice(), played = new Map(); for (const i of base) played.set(i, (played.get(i) || 0) + 1);
+  for (let pass = 1; pass < 8; pass++) {
+    if (![...verses.entries()].some(([k, v]) => v.size > (played.get(k) || 0))) break;
+    for (const i of base) { order.push(i); played.set(i, (played.get(i) || 0) + 1); }
+  }
+  return order;
+}
+/** A score's bars in a given order (lyricPassOrder) — bar numbers kept, so chord edits ("bar.beat") still
+ *  apply; repeat signs cleared, the order already plays them. For a lyric sheet whose chords must follow
+ *  the sung order. */
+function scoreInPassOrder(score, order) {
+  if (!score || !order || (order.length === score.bars.length && order.every((v, i) => v === i))) return score;
+  return { ...score, bars: order.map((i) => ({ ...score.bars[i], repeatStart: false, repeatEnd: false, ending: null })), tempoMap: null, timeline: null };
 }
 
 /** Syllables + a clock → the WO-3 LyricMap, with per-syllable timing:
@@ -9867,9 +10067,10 @@ function lyricMapFromSyllables(syls, toSec, opts = {}) {
   const vn = (opts.vocalNotes || []).filter((n) => n && n.midi != null).map((n) => ({ pc: ((n.midi % 12) + 12) % 12, t: n.startSec })).sort((a, b) => a.t - b.t);
   if (vn.length) {
     const near = (t, pc, w) => { let best = null, bd = w; for (const n of vn) { if (n.t < t - w) continue; if (n.t > t + w) break; const d = Math.abs(n.t - t); if (n.pc === pc && d < bd) { bd = d; best = n; } } return best; };
-    const offs = []; for (const s of timed) { const n = near(s.startSec, ((s.midi % 12) + 12) % 12, 0.4); if (n) offs.push([s.startSec, n.t - s.startSec]); }
+    const pcOf = (m) => (m == null || isNaN(m) ? -1 : ((m % 12) + 12) % 12);
+    const offs = []; for (const s of timed) { const n = near(s.startSec, pcOf(s.midi), 0.4); if (n) offs.push([s.startSec, n.t - s.startSec]); }
     if (offs.length >= 4) for (const s of timed) { const w = offs.filter((o) => Math.abs(o[0] - s.startSec) <= 3).map((o) => o[1]).sort((a, b) => a - b); if (w.length >= 3) { const dlt = w[w.length >> 1]; s.startSec += dlt; s.endSec += dlt; } }
-    for (const s of timed) { const n = near(s.startSec, ((s.midi % 12) + 12) % 12, P.refineSec); if (n) { s.endSec += n.t - s.startSec; s.startSec = n.t; s.refined = true; refined++; } }
+    for (const s of timed) { const n = near(s.startSec, pcOf(s.midi), P.refineSec); if (n) { s.endSec += n.t - s.startSec; s.startSec = n.t; s.refined = true; refined++; } }
     for (let i = 1; i < timed.length; i++) if (timed[i].startSec <= timed[i - 1].startSec) timed[i].startSec = timed[i - 1].startSec + 0.02;
   }
   // lines: the file's line breaks, else a sentence end / a long rest / maxLineSec
@@ -9877,7 +10078,7 @@ function lyricMapFromSyllables(syls, toSec, opts = {}) {
   const hasBreaks = timed.some((s, i) => i > 0 && s.lineStart);
   timed.forEach((s, i) => {
     const prev = timed[i - 1];
-    const brk = !cur || (hasBreaks ? s.lineStart : (/[,.;:!?]$/.test(prev.text) && s.startSec - prev.endSec > 0.3) || s.startSec - prev.endSec > 1.2) || s.startSec - cur.startSec > (opts.maxLineSec || 9) && prev.wordEnd;
+    const brk = !cur || s.verseStart || s.stanza || (hasBreaks ? s.lineStart : (/[,.;:!?]$/.test(prev.text) && s.startSec - prev.endSec > 0.3) || s.startSec - prev.endSec > 1.2) || s.startSec - cur.startSec > (opts.maxLineSec || 9) && prev.wordEnd;
     if (s.section) section = s.section;
     if (brk) { cur = { parts: [], section, stanza: !!s.stanza || (lines.length > 0 && prev && s.startSec - prev.endSec > 3), startSec: s.startSec }; lines.push(cur); }
     cur.parts.push(s);
@@ -11447,7 +11648,7 @@ function lyricsToLRC(map, opts = {}) {
 }
 /* chords of the score on the line's clock: [{ t, symbol }] with consecutive repeats collapsed */
 function _lyricChords(score, opts) {
-  const ov = opts.overrides || {}, evs = scoreRecordingTimes(score, opts.bpm || score.tempo), out = [];
+  const ov = opts.overrides || {}, evs = scoreRecordingTimes(score, opts.bpm || score.tempo || 100), out = [];   // 100 = scoreQToSec's default, so chords and syllables share a clock
   for (const e of evs) {
     const bar = score.bars.find((b) => b.number === e.bar), ev = bar && bar.events.find((x) => `${bar.number}.${x.beat}` === e.key);
     let sym = ov[e.key] != null ? ov[e.key] : ev ? ev.symbol : "";
@@ -11484,8 +11685,11 @@ function _placeChords(line, chords, nextStart, restate, gapSec = 3) {
 }
 /** The chords-over-lyrics sheet as ROWS (what the UI renders line by line):
  *  [{ type:"title"|"section"|"chords"|"line"|"blank", text, chordLine?, index? }]. */
+/* A score lyric map read in sung order (map.passOrder: repeats unrolled, extra verses sung again) times
+ * its chords on the same order, so a chord sits over the syllable sung with it. */
+const _sheetScore = (score, map) => (map && Array.isArray(map.passOrder) && score && score.bars && map.passOrder.every((i) => i >= 0 && i < score.bars.length) ? scoreInPassOrder(score, map.passOrder) : score);
 function lyricSheetRows(score, map, opts = {}) {
-  const chords = _lyricChords(score, opts), R = [], lines = (map && map.lines) || [];
+  const chords = _lyricChords(_sheetScore(score, map), opts), R = [], lines = (map && map.lines) || [];
   const title = opts.title || (map && map.title), artist = opts.artist || (map && map.artist);
   if (title) R.push({ type: "title", text: title }); if (artist) R.push({ type: "title", text: artist }); if (title || artist) R.push({ type: "blank" });
   const intro = lines.length ? chords.filter((c) => c.t < lines[0].startSec - 0.12) : chords;
@@ -11519,7 +11723,7 @@ function scoreToLyricsSheet(score, map, opts = {}) {
 }
 /** ChordPro with inline [chords] in the lyric lines (round-trips through parseLyrics). */
 function scoreToChordProWithLyrics(score, map, opts = {}) {
-  const chords = _lyricChords(score, opts), L = [], lines = (map && map.lines) || [];
+  const chords = _lyricChords(_sheetScore(score, map), opts), L = [], lines = (map && map.lines) || [];
   const title = opts.title || (map && map.title), artist = opts.artist || (map && map.artist);
   if (title) L.push(`{title: ${title}}`); if (artist) L.push(`{artist: ${artist}}`);
   const kn = _exportKeyName(opts); if (kn) L.push(`{key: ${kn}}`);
@@ -12445,7 +12649,7 @@ function scoreToGridSVG(score, opts = {}) {
 
 export {
   SCORE_LINK, unrollRepeatOrder, scorePartNotes, scoreLinkParts, scoreHarmonyGrid, linkBeatDTW, linkScoreToAudio, linkSecToQ, linkQToSec,
-  analyzeAudioWithScore, linkedChartScore, SCORE_TAB, SCORE_TAB_FOLLOW, scoreTabNotes, scoreInformedTab, _crnnPeak, _scoreTabTuning, _validPins, _pinnedShape, STEM_COMPARE, scorePartRole, matchStemsToParts, compareStemsToScore, _partNotesSec, _GM_DRUM_CLASS, LYRIC_ASSIGN, _lyricChunks, _hyphenate, assignLyricText, _gpLyrics, scoreLyricSyllables, lyricMapFromSyllables, scoreQToSec, linkedLyricMap, lyricMapToText, scoreLinkPriorGrid, _harmonyOfParts, _scorePriorBonus, _sameChordClass, _linkFeat, _linkBeatGrids,
+  analyzeAudioWithScore, linkedChartScore, SCORE_TAB, SCORE_TAB_FOLLOW, scoreTabNotes, scoreInformedTab, _crnnPeak, _scoreTabTuning, _validPins, _pinnedShape, STEM_COMPARE, scorePartRole, matchStemsToParts, compareStemsToScore, _partNotesSec, _GM_DRUM_CLASS, LYRIC_ASSIGN, _lyricChunks, _hyphenate, assignLyricText, _gpLyrics, _extendOverTies, _assignLyricLines, _gpifTrackTuning, _gpifLyrics, _beatLyricSyllables, _musicXmlLyrics, lyricPassOrder, scoreInPassOrder, _sheetScore, scoreLyricSyllables, lyricMapFromSyllables, scoreQToSec, linkedLyricMap, lyricMapToText, scoreLinkPriorGrid, _harmonyOfParts, _scorePriorBonus, _sameChordClass, _linkFeat, _linkBeatGrids,
   makeMask,
   popcount,
   rotateRight,
