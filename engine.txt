@@ -10029,9 +10029,9 @@ function scoreLyricSyllables(score, opts = {}) {
   return out;
 }
 
-/** The order a score's bars are SUNG in: repeats unrolled (as the link does); then, while some bar still
- *  holds a verse no pass has reached (a hymn with several verses under one line of music, or more verses
- *  than repeats), the whole song again for the next verse. → bar indices. Max 8 passes. */
+/** The order a score's bars are SUNG in: repeats unrolled (as the link does); then, while MOST lyric bars
+ *  still hold a verse no pass has reached (a hymn with several verses under one line of music), the whole
+ *  song again for the next verse. → bar indices. Max 8 passes. */
 function lyricPassOrder(score) {
   const bars = (score && score.bars) || [], base = unrollRepeatOrder(bars), L = score && score.lyrics;
   if (!L || !L.syllables || !L.syllables.length) return base;
@@ -10039,7 +10039,10 @@ function lyricPassOrder(score) {
   const verses = new Map(); for (const s of L.syllables) { const k = s.bi != null ? s.bi : numIdx.get(s.bar); if (k == null) continue; if (!verses.has(k)) verses.set(k, new Set()); verses.get(k).add(s.verse); }
   const order = base.slice(), played = new Map(); for (const i of base) played.set(i, (played.get(i) || 0) + 1);
   for (let pass = 1; pass < 8; pass++) {
-    if (![...verses.entries()].some(([k, v]) => v.size > (played.get(k) || 0))) break;
+    // a strophic song: MOST lyric bars still hold an unsung verse. A few local sections with extra verses
+    // (a Te Deum's alternating lines, bwv328) say nothing about singing the whole piece again.
+    const waiting = [...verses.entries()].filter(([k, v]) => v.size > (played.get(k) || 0)).length;
+    if (!waiting || waiting < 0.5 * verses.size) break;
     for (const i of base) { order.push(i); played.set(i, (played.get(i) || 0) + 1); }
   }
   return order;
