@@ -3639,6 +3639,10 @@ found (it lived only in the stems panel). Write-up: `docs/DRUM-TRANSCRIPTION.md`
   **always at 16 kHz**, resampled internally; at 22.05/24 kHz without it the same takes read 0.05–0.1
   lower). Measured: 36/42 E-GMD takes ≥ 0.6; real vocal stems ≤ 0.52, rendered guitar/piano ≤ 0.50.
 - Tempo & bars' bar-line time printed `-1:-0.01` for a bar line before 0:00; now `−0:00.01`.
+- **Hits go on the TIMELINE, not one fixed ♩** (`DrumChartView`: `beat = timelineBeatsAt(timeline, t)`; `drumPattern` /
+  `drumHitsToMidi` honour `h.beat`). The owner's live drum take (no click, ~126 BPM drifting) slid the backbeat a 16th
+  every couple of bars on a fixed ♩; on the timeline the snares sit on 2 / 4 for all 178 bars. Guarded with an
+  accelerating 110 → 130 BPM take. Applies to the stems panel's drum chart too.
 
 ## Path B (scans / photos) — OUT OF SCOPE
 

@@ -160,6 +160,28 @@ section("drumLikeness — how drum-like a recording is (suggests 🥁 Drums)");
   expect(eng.drumLikeness(new Float32Array(100), sr).percussive === 0 && eng.drumLikeness(null, sr).frames === 0, "too short / no audio → 0, no throw");
 }
 
+section("a live take's drifting tempo — the drum grid and MIDI follow the beat grid");
+{
+  // 64 bars that speed up from 110 to 130 bpm, backbeat on 2 and 4 (like a band without a click)
+  const beats = []; let t = 0.5;
+  for (let i = 0; i < 64 * 4; i++) { beats.push(+t.toFixed(4)); t += 60 / (110 + (20 * i) / (64 * 4)); }
+  const hits = [];
+  beats.forEach((b, i) => { hits.push({ t: b, type: i % 2 ? "snare" : "kick" }); });
+  const tl = eng.audioBeatTimeline(beats, {}, { beatsPerBar: 4, firstSound: beats[0] });
+  const placed = hits.map((h) => ({ ...h, beat: eng.timelineBeatsAt(tl.timeline, h.t) }));
+  const onBackbeat = (g) => g.bars.filter((b) => b.snare.includes("x")).every((b) => b.snare === "....x.......x...");
+  const g = eng.drumPattern(placed, { bpm: tl.bpm, beatsPerBar: 4 });
+  expect(g.bars.length >= 64 && g.bars.filter((b) => b.snare.includes("x")).length === 64 && onBackbeat(g), `on the timeline every bar's snare is on beats 2 and 4 (64 bars with snares, of ${g.bars.length})`);
+  const fixed = eng.drumPattern(hits.map((h) => ({ ...h, t: h.t - beats[0] })), { bpm: tl.bpm, beatsPerBar: 4 });
+  expect(!onBackbeat(fixed), "(one fixed ♩ from bar 1 drifts off the backbeat — what the grid did before)");
+  const ticks = (bytes, note) => { const o = []; let tick = 0, i = 22; const vlq = () => { let v = 0, c; do { c = bytes[i++]; v = (v << 7) | (c & 0x7f); } while (c & 0x80); return v; };
+    while (i < bytes.length) { tick += vlq(); const st = bytes[i]; if (st === 0xff) { i += 2; const len = vlq(); i += len; continue; } if (st === 0x99 && bytes[i + 1] === note) o.push(tick); i += 3; } return o; };
+  const sn = ticks(eng.drumHitsToMidi(placed, { bpm: tl.bpm }), 38);
+  expect(sn.length === 128 && sn.every((k) => Math.abs((k / 480) % 2 - 1) < 0.06), "drumHitsToMidi puts every snare on beat 2 / 4 (within the timeline's smoothing) when hits carry their beat");
+  const ui = read("TabDecoderPro.tsx");
+  expect(/beat: timelineBeatsAt\(timeline, h\.t\)/.test(ui) && /drumPattern\(placed,/.test(ui) && /drumKitToMidi\(placed,/.test(ui), "the drum chart places hits on the timeline before the grid, the MIDI and the notation");
+}
+
 section("Audio panel — 🥁 Drums reads a drum recording without the chord decoder");
 {
   const ui = read("TabDecoderPro.tsx");

@@ -7336,7 +7336,9 @@ function drumPattern(hits, opts = {}) {
   };
   const bars = new Map(), extra = new Set();
   for (const h of hits || []) {
-    const slot = slotOf(h.t);
+    // a hit already placed on the beat grid (h.beat, from a tempo-following timeline) keeps it: a
+    // live take drifts, and one fixed ♩ from bar 1 slides the bars off the music within a minute
+    const slot = h.beat != null ? Math.round(h.beat * sub) : slotOf(h.t);
     if (slot < 0) continue;
     const bar = Math.floor(slot / (bpb * sub)), pos = slot - bar * bpb * sub;
     if (!bars.has(bar)) bars.set(bar, { kick: new Array(bpb * sub).fill("."), snare: new Array(bpb * sub).fill("."), hat: new Array(bpb * sub).fill(".") });
@@ -7363,7 +7365,7 @@ function drumHitsToMidi(hits, opts = {}) {
   const note = { kick: 36, snare: 38, hat: 42, openHat: 46, pedalHat: 44, crash: 49, ride: 51, tomHigh: 50, tomMid: 47, tomLow: 43 };
   const evs = [{ tick: 0, o: 0, b: [0xff, 0x51, 0x03, (uspq >> 16) & 255, (uspq >> 8) & 255, uspq & 255] }];
   for (const h of hits || []) {
-    const tick = Math.max(0, Math.round((h.t * bpm / 60) * PPQ)), n = note[h.type];
+    const tick = Math.max(0, Math.round((h.beat != null ? h.beat : h.t * bpm / 60) * PPQ)), n = note[h.type];
     if (n == null) continue;
     evs.push({ tick, o: 2, b: [0x99, n, h.velocity != null ? Math.max(1, Math.min(127, Math.round(h.velocity))) : 100] }, { tick: tick + 60, o: 1, b: [0x89, n, 0] });
   }

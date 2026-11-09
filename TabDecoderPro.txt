@@ -5796,10 +5796,11 @@ function _downloadBytes(bytes, filename, mime) {
   } catch (_) { /* nothing to save to */ }
 }
 function DrumChartView({ C, hits, model, timeline, bpm, bpb, base, fullKit, note, children }) {
-  const off = timelineSecondsAt(timeline, 0);
-  const shifted = useMemo(() => (hits || []).map((h) => ({ ...h, t: h.t - off })).filter((h) => h.t > -0.05), [hits, off]);
-  const groove = useMemo(() => drumPattern(shifted, { bpm, beatsPerBar: bpb }), [shifted, bpm, bpb]);
-  const beatHits = () => (hits || []).map((h) => ({ type: h.type, beat: timelineBeatsAt(timeline, h.t) }));
+  /* every hit placed on the recording's beat grid (the timeline follows a live take's tempo), from bar 1:
+   * the grid, the MIDI, the notation and the tab all read these beats (a fixed ♩ drifted off the music) */
+  const placed = useMemo(() => (hits || []).map((h) => ({ ...h, beat: timelineBeatsAt(timeline, h.t) })).filter((h) => isFinite(h.beat) && h.beat > -0.1), [hits, timeline]);
+  const groove = useMemo(() => drumPattern(placed, { bpm, beatsPerBar: bpb }), [placed, bpm, bpb]);
+  const beatHits = () => placed.map((h) => ({ type: h.type, beat: h.beat }));
   if (!hits || !hits.length) return <div style={{ fontSize: 11, color: C.dim }}>No drum hits found in this recording.{note ? " " + note : ""}</div>;
   return (
     <div>
@@ -5814,7 +5815,7 @@ function DrumChartView({ C, hits, model, timeline, bpm, bpb, base, fullKit, note
         ))}
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
-        <button onClick={() => _downloadBytes(fullKit || model ? drumKitToMidi(shifted, { bpm }) : drumHitsToMidi(shifted, { bpm }), `${base}-drums.mid`, "audio/midi")} style={{ ...chip(C), padding: "4px 12px" }}>⬇ Drums MIDI</button>
+        <button onClick={() => _downloadBytes(fullKit || model ? drumKitToMidi(placed, { bpm }) : drumHitsToMidi(placed, { bpm }), `${base}-drums.mid`, "audio/midi")} style={{ ...chip(C), padding: "4px 12px" }}>⬇ Drums MIDI</button>
         <button onClick={() => _downloadBytes(new TextEncoder().encode(drumHitsToMusicXML(beatHits(), { beatsPerBar: bpb, tempo: bpm, title: `${base} — drums` })), `${base}-drums.musicxml`, "application/vnd.recordare.musicxml+xml")}
           title="a percussion staff: hands stems-up, feet stems-down, GM drum sounds — opens in MuseScore / Sibelius / Dorico" style={{ ...chip(C), padding: "4px 12px" }}>⬇ Drum notation (MusicXML)</button>
         <button onClick={() => _downloadBytes(new TextEncoder().encode(drumHitsToAsciiTab(beatHits(), { beatsPerBar: bpb, title: `${base} — drums` })), `${base}-drums.txt`, "text/plain")}

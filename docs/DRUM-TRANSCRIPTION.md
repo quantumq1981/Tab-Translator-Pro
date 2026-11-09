@@ -362,3 +362,27 @@ headless Chromium (WAV, and MP3 with an iPhone user agent):
 4. No console errors.
 
 The stems panel's own check (`drum-model-e2e.mjs`) still passes on the shared component.
+
+### 9.1 A live take's drifting tempo (the owner's file, 2026-11-09)
+
+The owner's own drum-only MP3 ("My Old School", 5:47, a 1970s band with no click) read
+**96 % percussive**, and the drum model found 1,544 hits in ~20 s (kick 518 · snare 635 · hat 379 ·
+toms 9 · ride 3).
+
+**The grid was wrong**, and not because of the beat tracking. The tracker read ~126 BPM, drifting, and
+the timeline followed it with 41 tempo changes. On that timeline the strong snares sit exactly on beats 2
+and 4 (slot histogram peaks 138 / 138).
+
+The groove grid and the drum MIDI ignored the timeline: they laid every hit on ONE ♩ (125.7) from bar 1,
+so the backbeat slid a sixteenth every couple of bars (snare slots 5 → 6 → 7) and the grid was unreadable
+within a minute. The notation and tab downloads already used the timeline.
+
+**Fix:** `DrumChartView` places every hit on the timeline (`beat = timelineBeatsAt(timeline, t)`) before
+the grid, the MIDI, the notation and the tab. `drumPattern` and `drumHitsToMidi` honour `h.beat`
+(`drumKitToMidi` already did); absent → unchanged. On the owner's file the grid now holds snare on 2 / 4
+and kick on 1 / "& of 3" through all 178 bars. Guard: a synthetic 64-bar take accelerating
+110 → 130 BPM keeps every snare on 2 / 4, and the old fixed-♩ grid fails it. The real app with the
+owner's MP3 (`drum-audio-e2e.mjs`, iPhone UA) passes all 9 checks: suggestion, 1,545 hits, MIDI with
+93 distinct velocities, no errors.
+
+This affected the stems panel's drum chart too (same component, same fix).
