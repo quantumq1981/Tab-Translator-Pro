@@ -274,3 +274,21 @@ a step off / extra), links it to the recording and scores the shipped Guitar →
 scoreInformedTab (Recording / Balanced / Score) with the guitarset.mjs Tab F1. `stemscore.mjs` renders
 the comp, bass and every drum part of 8 songs as stems and spoils 20 % of each part's bars in the score;
 a good comparator flags exactly those bars. Results: docs/SCORE-AUDIO-LINK.md.
+
+## Drum transcription on real drums (WPO-ADT-001)
+
+`adt.mjs` scores drum transcription against **E-GMD** (CC BY 4.0: a human drummer on a Roland
+TD-17, rendered through 43 kits, MIDI with velocities). Build the 42-track subset once
+(`python3 -I scripts/egmd_subset.py <dir>`, ~100 MB, read out of the 96 GB archive with HTTP
+range requests), then:
+
+```sh
+node bench/adt.mjs --data <dir> --split test --variant adt     # transcribeDrumEvents (the §4 interface)
+node bench/adt.mjs --data <dir> --split test --variant base    # transcribeDrums, 3-class NMF
+node bench/adt.mjs --data <dir> --split test --variant full    # + the WO-5 full-kit classifier
+node bench/adt.mjs --data <dir> --variant file --est oaf.json  # an external system (scripts/oaf_drums_baseline.py)
+python3 ../scripts/adt_mireval_check.py est.json               # (after --dump est.json) harness == mir_eval
+```
+
+Metrics, the class map and the baseline table: `docs/DRUM-TRANSCRIPTION.md`. Tune on `dev`; run
+`test` once.

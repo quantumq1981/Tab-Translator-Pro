@@ -7283,6 +7283,10 @@ function transcribeDrums(samples, sampleRate, opts = {}) {
   }
   // onsets: peaks of each component's RISE (rectified first difference of its activation)
   const rel = opts.drumThreshold != null ? opts.drumThreshold : 0.4;
+  /* opts.softFloor (WPO-ADT-001, ghost notes): also keep rises between softFloor and `rel` of the
+   * local loudest, flagged soft:true — the ghost-note candidates the default path drops. Absent =
+   * the validated output, unchanged. opts.softTypes limits it to those pieces (e.g. ["snare"]). */
+  const soft = opts.softFloor > 0 && opts.softFloor < rel ? opts.softFloor : 0, gate = soft ? Math.min(0.1, soft) : 0.1;
   const gap = Math.round(0.06 / (hop / sampleRate)), Wn = Math.round(1.5 / (hop / sampleRate));
   const hits = [], peak = {};
   types.forEach((type, c) => {
@@ -7293,11 +7297,13 @@ function transcribeDrums(samples, sampleRate, opts = {}) {
     peak[type] = gmax;
     let last = -1e9;
     for (let t = 1; t + 1 < T; t++) {
-      if (!(d[t] > d[t - 1] && d[t] >= d[t + 1]) || d[t] < 0.1 * gmax) continue;
+      if (!(d[t] > d[t - 1] && d[t] >= d[t + 1]) || d[t] < gate * gmax) continue;
       let lmax = 0; for (let j = Math.max(0, t - Wn); j < Math.min(T, t + Wn + 1); j++) if (d[j] > lmax) lmax = d[j];
-      if (d[t] < rel * lmax) continue;
-      if (t - last < gap) { if (hits.length && hits[hits.length - 1].type === type && d[t] > hits[hits.length - 1].strength) { hits[hits.length - 1] = { t: +times[t].toFixed(3), type, strength: d[t] }; last = t; } continue; }
-      last = t; hits.push({ t: +times[t].toFixed(3), type, strength: d[t] });
+      const isSoft = d[t] < rel * lmax;
+      if (isSoft && !(soft && d[t] >= soft * lmax && (!opts.softTypes || opts.softTypes.includes(type)))) continue;
+      const mk = () => (soft ? { t: +times[t].toFixed(3), type, strength: d[t], local: d[t] / lmax, ...(isSoft ? { soft: true } : {}) } : { t: +times[t].toFixed(3), type, strength: d[t] });
+      if (t - last < gap) { if (hits.length && hits[hits.length - 1].type === type && d[t] > hits[hits.length - 1].strength) { hits[hits.length - 1] = mk(); last = t; } continue; }
+      last = t; hits.push(mk());
     }
   });
   /* A kick's beater click is broadband and a snare's body reaches low, so at a COINCIDENT
@@ -7308,7 +7314,11 @@ function transcribeDrums(samples, sampleRate, opts = {}) {
   const norm = (h) => h.strength / (peak[h.type] || 1);
   const shadowed = (h) => (h.type === "kick" || h.type === "snare") && norm(h) < 0.8 &&
     hits.some((o) => o !== h && (o.type === "kick" || o.type === "snare") && o.type !== h.type && Math.abs(o.t - h.t) < 0.03 && norm(o) > norm(h));
-  const kept = hits.filter((h) => !shadowed(h)).sort((a, b) => a.t - b.t);
+  /* a SOFT hit (softFloor) on the same instant as a full-strength hit of another piece is that
+   * piece's leakage into this component (a hat's sizzle lends the snare a faint rise on every
+   * off-beat), not a ghost note — unless opts.softKeepCoincident */
+  const leak = (h) => h.soft && !opts.softKeepCoincident && hits.some((o) => o !== h && !o.soft && o.type !== h.type && Math.abs(o.t - h.t) < 0.03);
+  const kept = hits.filter((h) => !shadowed(h) && !leak(h)).sort((a, b) => a.t - b.t);
   // opts.kit "full" (WO-5): name every onset from the signal around it — toms, open hat, crash, ride
   return opts.kit === "full" ? _classifyFullKit(samples, sampleRate, kept) : kept;
 }
@@ -7365,6 +7375,104 @@ function drumHitsToMidi(hits, opts = {}) {
   for (const e of evs) { body.push(...vlq(e.tick - t), ...e.b); t = e.tick; }
   const u32 = (v) => [(v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255];
   return Uint8Array.from([0x4d, 0x54, 0x68, 0x64, 0, 0, 0, 6, 0, 0, 0, 1, (PPQ >> 8) & 255, PPQ & 255, 0x4d, 0x54, 0x72, 0x6b, ...u32(body.length), ...body]);
+}
+
+/* ============================================================================
+ *  DRUM EVENTS — the WPO-ADT-001 §4 interface (Phase 0 contract)
+ *  ---------------------------------------------------------------------------
+ *  One call from a drum stem (or a drum-heavy mix) to symbolic drum events the score
+ *  renderer can draw without further inference:
+ *    { t_raw, t_quantized, bar, beat, slot, drum_class, velocity, confidence, is_ghost,
+ *      grid_confidence, piece }
+ *  drum_class ∈ DRUM_CLASSES (kick | snare | hihat | tom | cymbal | crash | ride); `piece` keeps
+ *  the detector's finer name (openHat, tomLow, …) for notation / GM MIDI.
+ *  The detector is a SEAM: opts.hits (precomputed [{ t, type, strength }]) replaces the
+ *  built-in NMF, so a learned model (Phase 1) only has to emit hits. Pure + worker-safe.
+ *  Measured on real drums (E-GMD) by tests/bench/adt.mjs — see docs/DRUM-TRANSCRIPTION.md.
+ * ------------------------------------------------------------------------- */
+const DRUM_CLASSES = ["kick", "snare", "hihat", "tom", "cymbal", "crash", "ride"];
+const DRUM_PIECE_CLASS = { kick: "kick", snare: "snare", hat: "hihat", openHat: "hihat", pedalHat: "hihat", tomHigh: "tom", tomMid: "tom", tomLow: "tom", crash: "crash", ride: "ride", cymbal: "cymbal", hihat: "hihat", tom: "tom" };
+/* Staff position + notehead for every class (renderer contract, §4 "renderable without
+ * inference"): line = diatonic step from the bottom staff line (0 = E4 line on a 5-line
+ * percussion staff, 4 = the middle line), GM note for playback. */
+const DRUM_NOTATION = {
+  kick:   { line: -1, head: "normal", stem: "down", gm: 36 },
+  snare:  { line: 5,  head: "normal", stem: "up",   gm: 38 },
+  hihat:  { line: 9,  head: "x",      stem: "up",   gm: 42 },
+  tom:    { line: 6,  head: "normal", stem: "up",   gm: 47 },
+  cymbal: { line: 10, head: "x",      stem: "up",   gm: 52 },
+  crash:  { line: 10, head: "x",      stem: "up",   gm: 49 },
+  ride:   { line: 8,  head: "x",      stem: "up",   gm: 51 },
+};
+
+/* strength (activation rise) → MIDI velocity. Loudness is logarithmic, and the NMF works on
+ * SQUARE-ROOT magnitudes, so the rise ∝ √amplitude: 40·log10 of the rise relative to the piece's
+ * loud hits (95th percentile) is the level in dB, spread over `dynDb` of range. */
+function _drumVelocities(hits, dynDb) {
+  const p95 = {};
+  for (const ty of new Set(hits.map((h) => h.type))) {
+    const v = hits.filter((h) => h.type === ty && h.strength > 0).map((h) => h.strength).sort((a, b) => a - b);
+    p95[ty] = v.length ? v[Math.min(v.length - 1, Math.floor(0.95 * v.length))] : 1;
+  }
+  return hits.map((h) => {
+    if (!(h.strength > 0)) return 64;                                          // rescued hats carry no rise
+    const db = 40 * Math.log10(h.strength / (p95[h.type] || h.strength));
+    return Math.max(1, Math.min(127, Math.round(112 + (112 / dynDb) * db)));
+  });
+}
+
+function transcribeDrumEvents(samples, sampleRate, opts = {}) {
+  const sub = opts.subdivisions || 4, dyn = opts.dynamicRangeDb || 36;
+  const hits = (opts.hits || transcribeDrums(samples, sampleRate, { ...opts, softFloor: opts.softFloor != null ? opts.softFloor : 0.15, softTypes: opts.softTypes || ["snare"] }))
+    .filter((h) => DRUM_PIECE_CLASS[h.type]).slice().sort((a, b) => a.t - b.t);
+  const vel = _drumVelocities(hits, dyn);
+  // confidence: how far the rise clears the detector's local threshold (soft hits start low)
+  const conf = hits.map((h) => (h.local != null ? Math.max(0, Math.min(1, (h.local - 0.1) / 0.7)) : h.strength > 0 ? 0.8 : 0.5));
+  /* ghost notes (§3.4): a snare at or under `ghostRatio` of the LOCAL accent level — the median
+   * velocity of the snares within ±2 s that are not themselves soft */
+  const ghostRatio = opts.ghostRatio || 0.6;
+  const isGhost = hits.map((h, i) => {
+    if (DRUM_PIECE_CLASS[h.type] !== "snare") return false;
+    const loc = hits.map((o, j) => [o, j]).filter(([o, j]) => DRUM_PIECE_CLASS[o.type] === "snare" && !o.soft && Math.abs(o.t - h.t) <= 2).map(([, j]) => vel[j]).sort((a, b) => a - b);
+    const acc = loc.length ? loc[loc.length >> 1] : 100;
+    return vel[i] <= ghostRatio * acc;
+  });
+  // the beat grid: the caller's (another stem of the song) or tracked on this audio
+  const tracked = opts.beats && opts.beats.length >= 3 ? { beats: opts.beats, bpm: opts.bpm || 0 } : (samples && samples.length ? detectBeats(samples, sampleRate, opts) : { beats: [], bpm: 0 });
+  const g = opts.timeline ? { timeline: opts.timeline, beatsPerBar: opts.beatsPerBar || 4, bpm: tracked.bpm }
+    : audioBeatTimeline(tracked.beats, opts.timing || {}, { beatsPerBar: opts.beatsPerBar || 4, downbeats: opts.downbeats, firstSound: hits.length ? hits[0].t : 0 });
+  const bpb = (g && g.beatsPerBar) || opts.beatsPerBar || 4, slotsPerBar = bpb * sub;
+  let events = hits.map((h, i) => {
+    let bar = 1, beat = 1, slot = 0, tq = h.t, gc = 0;
+    if (g && g.timeline) {
+      const pos = timelineBeatsAt(g.timeline, h.t), q = Math.round(pos * sub), dev = pos * sub - q;
+      const b0 = Math.floor(q / slotsPerBar);
+      bar = b0 + 1; slot = q - b0 * slotsPerBar; beat = 1 + slot / sub;
+      tq = timelineSecondsAt(g.timeline, q / sub);
+      gc = Math.max(0, 1 - 2 * Math.abs(dev));                                 // 1 = on the slot, 0 = half a slot off
+    }
+    const cls = DRUM_PIECE_CLASS[h.type];
+    return { t_raw: +h.t.toFixed(4), t_quantized: +tq.toFixed(4), bar, beat: +beat.toFixed(4), slot, drum_class: cls, velocity: vel[i],
+      confidence: +conf[i].toFixed(3), is_ghost: isGhost[i], grid_confidence: +gc.toFixed(3), piece: h.type };
+  }).filter((e) => e.bar >= 1);
+  // the grid's own fit: share of onsets within a quarter slot of a slot line (a swung or drifting
+  // take scores low, and every event's grid_confidence is scaled by it)
+  const fit = events.length ? events.filter((e) => e.grid_confidence >= 0.5).length / events.length : 0;
+  for (const e of events) e.grid_confidence = +(e.grid_confidence * fit).toFixed(3);
+  /* §3.1 failure mode: a stretch > minLowSec (2 s) where every onset is below lowConfidence is
+   * flagged low_onset_confidence and its events suppressed (not drawn as spurious hits) */
+  const lowThr = opts.lowConfidence != null ? opts.lowConfidence : 0.25, minLow = opts.minLowSec || 2;
+  const flags = [];
+  for (let i = 0; i < events.length;) {
+    if (events[i].confidence >= lowThr) { i++; continue; }
+    let j = i; while (j + 1 < events.length && events[j + 1].confidence < lowThr) j++;
+    // the stretch is measured over the weak onsets themselves (a silence is not low confidence)
+    const t0 = events[i].t_raw, t1 = events[j].t_raw;
+    if (t1 - t0 >= minLow) flags.push({ start: +(t0 - 0.001).toFixed(3), end: +(t1 + 0.001).toFixed(3), flag: "low_onset_confidence", suppressed: j - i + 1 });
+    i = j + 1;
+  }
+  if (flags.length && opts.suppressLow !== false) events = events.filter((e) => !flags.some((f) => e.confidence < lowThr && e.t_raw >= f.start && e.t_raw <= f.end));
+  return { events, flags, beats: tracked.beats || [], bpm: g ? g.bpm : tracked.bpm, beatsPerBar: bpb, subdivisions: sub, slotsPerBar, gridFit: +fit.toFixed(3), timeline: g ? g.timeline : null, method: opts.hits ? "external" : "nmf" };
 }
 
 /* Time left on a long job from its progress, for a countdown that stays honest between
@@ -13104,4 +13212,5 @@ export {
   detectTuningAndCapo,
   nashvilleFor,
   scoreToGridSVG,
+  transcribeDrumEvents, DRUM_CLASSES, DRUM_PIECE_CLASS, DRUM_NOTATION,
 };

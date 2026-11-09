@@ -3564,6 +3564,40 @@ Full write-up: `docs/SCORE-AUDIO-LINK.md` (last section). Same `score.lyrics` sh
   sung 3× through. `lyricPassOrder` now adds a pass only when **most** lyric bars still hold an unsung verse
   (a strophic hymn); guarded, mutation-tested.
 
+## Drum transcription — WPO-ADT-001 Phase 0 (2026-11-09)
+
+The work order (`DRUM_TRANSCRIPTION_INTEGRATION.md`, an uploaded spec) gates model work on a frozen
+interface + an evaluation harness. Both are built; full write-up + numbers: **`docs/DRUM-TRANSCRIPTION.md`**.
+Guards: `tests/drum-events.mjs` (in `npm test`). Bench: `tests/bench/adt.mjs` + `adt-metrics.mjs`.
+
+- **Real drums at last: E-GMD** (CC BY 4.0, TD-17 performances rendered through 43 kits, MIDI with
+  velocities). `scripts/egmd_subset.py` reads 42 tracks out of the 96 GB zip with HTTP range requests
+  (dev = E-GMD validation, 12 tracks; test = E-GMD test, 30; one kit per performance; `--seed 7` is
+  reproducible). MDB Drums / ENST / IDMT / **ADTOF are non-commercial** → not used (ADTOF baseline =
+  owner decision, doc §5). The harness equals `mir_eval` (`scripts/adt_mireval_check.py`, max Δ 0).
+- **Measured, do not re-derive (E-GMD test, 5-class, ±50 ms; class F / kick / snare / hihat / tom / cymbal):**
+  NMF default 66.2 / 82.1 / 66.7 / 68.6 / 0 / 0 · **WO-5 full kit 56.2, snare 35.7, toms 9.7, cymbals 9.4
+  — its synthetic ≥ 0.88 did NOT transfer; keep it off** · `transcribeDrumEvents` 68.3, snare 74.9 ·
+  Magenta Onsets & Frames drums (E-GMD checkpoint, `scripts/oaf_drums_baseline.py`) 76.3 / 78.2 / 78.4 /
+  77.6 / 94.3 / 54.3, velocity MAE 8.3. Pure DSP is at its ceiling (no toms/cymbals, velocity MAE 19,
+  ghost flag precision 13 %); the §5 targets need a learned model, and some (kick/snare ≥ 85, ghost ≥ 65,
+  simultaneous ≥ 70) are missed even by the SOTA-class baseline.
+- **`transcribeDrumEvents(samples, sr, opts)`** (pure) → the §4 event schema (`t_raw, t_quantized, bar,
+  beat, slot, drum_class, velocity, confidence, is_ghost, grid_confidence` + `piece`), `flags`
+  (`low_onset_confidence` over ≥ 2 s of weak onsets, suppressed unless `suppressLow:false`), the grid.
+  `DRUM_CLASSES` (kick | snare | hihat | tom | cymbal | crash | ride), `DRUM_NOTATION` (staff line,
+  notehead, GM per class). Grid = `opts.beats`/`opts.timeline` or `detectBeats` → `audioBeatTimeline`.
+  **`opts.hits` is the model seam** (Phase 1 only emits hits). Velocity = 40·log10 of the NMF rise
+  (it works on √magnitudes) vs the piece's p95.
+- **`transcribeDrums` gained opt-in `softFloor` / `softTypes`** (ghost candidates between softFloor and
+  0.4 of the local peak, flagged `soft`; a soft hit coinciding with a full-strength hit of another piece
+  is leakage and dropped). **Without softFloor the output is byte-identical** (tested) — stems charts,
+  drum exporters and the workbench suite are untouched. The interface uses 0.15, snare only (applied to
+  every piece it cost the kick 10 points on dev).
+- **Not built (Phase 1+, owner sign-off first):** a learned detector (port O&F to ONNX, or train a small
+  CRNN on E-GMD), UI wiring of the new events, the symbolic sidecar (belongs in `linkScoreToAudio`).
+  Deployment = on-device offline WASM; separate-and-detect is already the pipeline (SCNet drums stem).
+
 ## Path B (scans / photos) — OUT OF SCOPE
 
 Raster tab (a photo or scanned page) has no text layer and needs an OMR/Vision
@@ -3788,6 +3822,13 @@ accordingly.
 - **Bach chorale lyrics** (`tests/bach-lyrics.mjs`, in `npm test`): 338 chorales vs music21 — every syllable's bar,
   position, verse, text and word join (100 %), the lyric part, no invented syllables, every written syllable sung once
   when a repeat carries verse 2 (165 files), and bwv328 not repeated whole.
+- **Drum events** (`tests/drum-events.mjs`, in `npm test`): `transcribeDrums` unchanged without
+  softFloor; soft hits a flagged superset, softTypes; the §4 schema (exact fields, enum, notation for
+  every class, velocity 1–127, slot/beat/bar consistency, t_quantized within half a slot); backbeat on
+  slots 4/12, kicks on 0/8; softer snare → lower velocity; ghost taps kept + flagged, accents not; the
+  low_onset_confidence flag (≥ 2 s, suppression, suppressLow:false, a silence not flagged); the hits seam;
+  matchEvents = maximum matching (brute force); scoreTrack counts (merge, simultaneous, ghost). Real-drum
+  accuracy: `bench/adt.mjs` on E-GMD.
 - **Lyrics import (`parseLyrics`)**: `npm test` asserts the strict chord matcher accepts
   real chords and rejects note-letter lyric words (Add/Cab/Bad/Fed/Gem/Bee/Ace), the
   line-level `isChordLine` catches chord lines but spares lyric/blank lines, a full
