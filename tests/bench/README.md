@@ -292,3 +292,11 @@ python3 ../scripts/adt_mireval_check.py est.json               # (after --dump e
 
 Metrics, the class map and the baseline table: `docs/DRUM-TRANSCRIPTION.md`. Tune on `dev`; run
 `test` once.
+
+The drum model (Magenta O&F drums, `models/oaf-drums/`) in Node on onnxruntime-web 1.23.2 — set up
+`npm i onnxruntime-web@1.23.2` in a scratch dir — and in the real app:
+
+```sh
+node bench/adt.mjs --data <dir> --split test --variant onnx --ort <dir with onnxruntime-web@1.23.2> [--model m.onnx] [--opts '{"chunk":600}']
+node bench/drum-model-e2e.mjs --deps $D/out --wav <dir>/drummer7/session2/112_jazz-fusion_96_beat_4-4_28.wav [--ua "<iPad UA>"]
+```

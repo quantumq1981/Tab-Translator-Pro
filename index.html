@@ -45,6 +45,13 @@
   -->
   <script type="module" src="./guitar-model.js"></script>
   <!--
+    Optional drum transcription model (stems panel → drums chart): Magenta Onsets & Frames drums
+    (Apache-2.0, trained on E-GMD) as a 4.9 MB same-origin ONNX model on the same pinned runtime, in
+    a module Worker that imports this page's engine. Nothing is fetched until a drums stem is
+    charted with the drum model on. See drum-model.js.
+  -->
+  <script type="module" src="./drum-model.js"></script>
+  <!--
     Optional learned beat + downbeat tracker ("Tempo & bars" → 🥁 Find bar 1 (ML)): beat_this
     (CPJKU, MIT) as a 22.5 MB same-origin ONNX model on the same pinned runtime, in a module Worker
     that imports this page's engine. Nothing is fetched until the button is pressed. See beat-model.js.

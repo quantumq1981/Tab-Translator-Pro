@@ -5348,6 +5348,11 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, reading
   const [ovr, setOvr] = useState({});                    // role → chord overrides
   // WO-5: name toms / open hat / crash / ride on the drum stem (the 3-piece kick·snare·hat reading otherwise)
   const [fullKit, setFullKit] = useState(() => { try { return localStorage.getItem("ttp:fullKit") === "1"; } catch (_) { return false; } });
+  /* WPO-ADT-001: the drum model (Magenta Onsets & Frames drums, E-GMD-trained — drum-model.js) re-reads the
+   * drums stem after charting: kick · snare · toms · hi-hat · ride · crash with velocities. On by default;
+   * the NMF reading above stays if the model can't run. Measured on real drums: class F 66 → 76. */
+  const [drumML, setDrumML] = useState(() => { try { return localStorage.getItem("ttp:drumModel") !== "0"; } catch (_) { return true; } });
+  const [drumNote, setDrumNote] = useState("");
   // ONE beat grid for every stem chart (chartsFromStems tracks it on the drum stem) — the same
   // Tempo & bars corrections as the single-file panel, and bar 1 where the band first plays.
   const stemFirst = useMemo(() => { const band = res && res.charts.find((c) => c.kind === "chords" && c.events && c.events.length); return band ? band.events[0].startSec : 0; }, [res]);
@@ -5392,6 +5397,18 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, reading
       // vocabulary change) keeps the user's Tempo & bars corrections
       if (gridFor.current !== t) { gridFor.current = t; bg.reset(); }
       setTab((cur) => (r.charts.some((c) => c.role === cur) ? cur : r.charts.length ? r.charts[0].role : "band"));
+      setDrumNote("");
+      const model = typeof window !== "undefined" ? window.TTP_DRUM_MODEL : null;
+      if (drumML && typeof model === "function" && r.charts.some((c) => c.kind === "drums") && t.list.some((x) => x.role === "drums")) {
+        setBusy("🥁 Reading the drums with the drum model…");
+        try {
+          const pcm = stemMono(t.list.filter((x) => x.role === "drums"));
+          const d = await model(pcm, sr, { transfer: true, beats: r.beats, bpm: r.bpm, onProgress: (done, total) => setBusy(`🥁 Reading the drums with the drum model… ${Math.round((100 * done) / total)}%`) });
+          const hits = d.events.map((e) => ({ t: e.t_raw, type: e.piece, velocity: e.velocity, ghost: e.is_ghost, prob: e.confidence }));
+          setRes((cur) => (cur === r ? { ...r, charts: r.charts.map((c) => (c.kind === "drums" ? { ...c, hits, model: d.method } : c)) } : cur));
+          setDrumNote(`Drum model: ${hits.length} hits${d.flags && d.flags.length ? ` · ${d.flags.length} low-confidence stretch${d.flags.length > 1 ? "es" : ""} left out` : ""}.`);
+        } catch (e) { setDrumNote("The drum model couldn't run here (" + ((e && e.message) || e) + ") — showing the built-in reading."); }
+      }
     } catch (e) { setErr("Charting the stems failed: " + ((e && e.message) || e)); }
     setBusy(""); setProg(null);
   };
@@ -5400,8 +5417,8 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, reading
   const readRefS = useRef(reading);
   readRefS.current = reading;
   const readKey = JSON.stringify(reading || {});
-  const vocabSeen = useRef(vocab + "|" + sixNine + "|" + fullKit + "|" + readKey);
-  useEffect(() => { const k = vocab + "|" + sixNine + "|" + fullKit + "|" + readKey; if (vocabSeen.current !== k) { vocabSeen.current = k; if (tracks && res && !busy) analyse(tracks); } }, [vocab, sixNine, fullKit, readKey]);
+  const vocabSeen = useRef(vocab + "|" + sixNine + "|" + fullKit + "|" + drumML + "|" + readKey);
+  useEffect(() => { const k = vocab + "|" + sixNine + "|" + fullKit + "|" + drumML + "|" + readKey; if (vocabSeen.current !== k) { vocabSeen.current = k; if (tracks && res && !busy) analyse(tracks); } }, [vocab, sixNine, fullKit, drumML, readKey]);
 
   /* Keep the screen on for the length of a split. iOS suspends a Safari tab when the screen auto-locks (or Safari
    * goes to the background) — on a slow device a split outlasts the auto-lock, stalls, and is eventually killed.
@@ -5696,15 +5713,19 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, reading
                 ))}
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
-                <button onClick={() => saveBytes(fullKit ? drumKitToMidi(drumHits || chart.hits, { bpm }) : drumHitsToMidi(drumHits || chart.hits, { bpm }), `${base}-drums.mid`, "audio/midi")} style={{ ...chip(C), padding: "4px 12px" }}>⬇ Drums MIDI</button>
+                <button onClick={() => saveBytes(fullKit || chart.model ? drumKitToMidi(drumHits || chart.hits, { bpm }) : drumHitsToMidi(drumHits || chart.hits, { bpm }), `${base}-drums.mid`, "audio/midi")} style={{ ...chip(C), padding: "4px 12px" }}>⬇ Drums MIDI</button>
                 <button onClick={() => { const hb = chart.hits.map((h) => ({ type: h.type, beat: timelineBeatsAt(bg.grid.timeline, h.t) })); saveBytes(new TextEncoder().encode(drumHitsToMusicXML(hb, { beatsPerBar: bpb, tempo: bpm, title: `${base} — drums` })), `${base}-drums.musicxml`, "application/vnd.recordare.musicxml+xml"); }}
                   title="a percussion staff: hands stems-up, feet stems-down, GM drum sounds — opens in MuseScore / Sibelius / Dorico" style={{ ...chip(C), padding: "4px 12px" }}>⬇ Drum notation (MusicXML)</button>
                 <button onClick={() => { const hb = chart.hits.map((h) => ({ type: h.type, beat: timelineBeatsAt(bg.grid.timeline, h.t) })); saveBytes(new TextEncoder().encode(drumHitsToAsciiTab(hb, { beatsPerBar: bpb, title: `${base} — drums` })), `${base}-drums.txt`, "text/plain"); }}
                   style={{ ...chip(C), padding: "4px 12px" }}>⬇ Drum tab (.txt)</button>
-                <button onClick={() => { const v = !fullKit; setFullKit(v); try { localStorage.setItem("ttp:fullKit", v ? "1" : "0"); } catch (_) {} }} title="re-chart the stems to name toms, open hi-hat, crash and ride (else kick · snare · hi-hat)"
-                  style={{ ...chip(C), padding: "4px 12px", borderColor: fullKit ? C.green : C.border, color: fullKit ? C.green : C.dim }}>{fullKit ? "full kit ✓" : "full kit"}</button>
+                <button onClick={() => { const v = !drumML; setDrumML(v); try { localStorage.setItem("ttp:drumModel", v ? "1" : "0"); } catch (_) {} }} title="read the drums with the drum model (Magenta Onsets & Frames drums, trained on real kits): kick · snare · toms · hi-hat · ride · crash with velocities — a 4.9 MB download the first time"
+                  style={{ ...chip(C), padding: "4px 12px", borderColor: drumML ? C.green : C.border, color: drumML ? C.green : C.dim }}>{drumML ? "🥁 drum model ✓" : "🥁 drum model"}</button>
+                {!drumML && <button onClick={() => { const v = !fullKit; setFullKit(v); try { localStorage.setItem("ttp:fullKit", v ? "1" : "0"); } catch (_) {} }} title="re-chart the stems to name toms, open hi-hat, crash and ride (else kick · snare · hi-hat)"
+                  style={{ ...chip(C), padding: "4px 12px", borderColor: fullKit ? C.green : C.border, color: fullKit ? C.green : C.dim }}>{fullKit ? "full kit ✓" : "full kit"}</button>}
               </div>
-              <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>C crash · R ride · O open hi-hat · H hi-hat · S snare · T1/T2/FT toms · K kick, sixteenths per beat. Soft ghost notes are left out. Full kit names toms / open hat / crash / ride (measured on a rendered kit; a real kit can still be misread — check by ear).</div>
+              <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>{chart.model
+                ? <>C crash · R ride · H hi-hat (open or closed) · S snare · T2 toms (one class) · K kick, sixteenths per beat. Read by the drum model (Magenta Onsets &amp; Frames drums, trained on real kits); the MIDI keeps each hit's velocity. Measured on held-out E-GMD drums: kick, snare, hi-hat ≈ 78 % F1, toms 94 %, cymbals 54 % — soft ghost notes are still often missed.{drumNote ? " " + drumNote : ""}</>
+                : <>C crash · R ride · O open hi-hat · H hi-hat · S snare · T1/T2/FT toms · K kick, sixteenths per beat. Soft ghost notes are left out. Full kit names toms / open hat / crash / ride (measured on a rendered kit; on real drums it misreads many snares — the drum model is better).{drumNote ? " " + drumNote : ""}</>}</div>
             </div>
           )}
         </>
