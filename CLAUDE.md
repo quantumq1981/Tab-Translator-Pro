@@ -3644,12 +3644,43 @@ found (it lived only in the stems panel). Write-up: `docs/DRUM-TRANSCRIPTION.md`
   every couple of bars on a fixed ♩; on the timeline the snares sit on 2 / 4 for all 178 bars. Guarded with an
   accelerating 110 → 130 BPM take. Applies to the stems panel's drum chart too.
 
-## Path B (scans / photos) — OUT OF SCOPE
+## Lead sheet — any score → one melody + chords (2026-11-09)
 
-Raster tab (a photo or scanned page) has no text layer and needs an OMR/Vision
-pipeline (the hybrid Python + Vision approach explored earlier). It is **not**
-implemented here and should not be bolted onto the Path A parser. Keep them
-separate if Path B is ever built.
+`leadSheetFromMusicXML(xml, opts)` (engine block "LEAD SHEET", pure) reduces a full score to the
+"lite stage sheet": ONE monophonic melody + chord symbols. Built from the owner's OMR proposal
+(`docs/OMR-PLAN.md`) — OMR will emit MusicXML and this is what a fake book wants from it — but
+it pays off today for MusicXML / Muscriptor imports. UI wiring is not done yet.
+- **Melody part:** a part named like a voice / lead / melody wins, else the pitched non-drum
+  part with the most single-note onsets in the highest register (`pickMelodyPart`);
+  `opts.melodyPart` overrides. Only staff 1 is read (a piano's right hand), all its voices.
+- **Melody line (`_leadSkyline`):** the highest note starting at each onset, unless a higher
+  melody note is still held (a held melody over a moving inner voice — the proposal's
+  per-measure voice pick broke this and jumped voices at bar lines). Ties joined across bar
+  lines, grace notes / rests / slash heads ignored, onsets from the real `<backup>`/`<forward>`
+  walk. Split at bar lines into tied pieces.
+- **Chords:** written `<harmony>` from ANY part, keeping the file's own spelling (G#, not the
+  family Ab) and `<kind text>` (6/9, 7sus4 …); else from the notes — instruments over voices
+  (Harmony rule), but a **choir** (a part named soprano/alto/tenor/baritone/choir) reads every
+  voice incl. "Bass" and the melody. Names in a vocabulary (default **Pro**), spelled for the
+  key (`spellKey`). Rate `chordsPerBar` "auto": one chord per bar when it fits (Jaccard ≥ 0.75),
+  else halves, else beats — and a big chord that only fits by absorbing a change (Gm9 = Gm then
+  Bb) loses to two simpler halves. 1 / 2 / 4 fix the rate.
+- **Exports:** `leadSheetToMusicXML` (one part; 16th grid via `_voiceNotationMeasures` per bar,
+  so meter changes work; harmony at its beat with `<offset>`, `<degree>` for 7sus4 / 6/9 / add9 /
+  7♭9 / 7♯9; key signature, rehearsal marks, repeats, endings) and `leadSheetToChordScore`
+  (→ CSMPN / CSML / handoff). HONEST LIMIT: 32nds / tuplets are rounded to 16ths; `lead.offGrid`
+  counts them. `_parseSym` only knows the family table — key-spelled names (G#, D#) must be
+  parsed with `_PC_ANY` (`_leadHarmonyXML` does).
+
+## Path B (scans / photos) — not built; plan in `docs/OMR-PLAN.md`
+
+Raster input (a photo or scanned page) needs an OMR model, kept SEPARATE from the Path A parser.
+Decisions (2026-11-09): OpenCV.js not adopted (another ~9 MB WASM on phones; plain JS is
+enough); homr + Audiveris rejected (AGPL); LEGATO rejected for the client (frozen Llama 3.2 11B
+Vision encoder); **SMT** (MIT, 21.4 M params, `**kern` per grand-staff system) is the candidate,
+gated on the Phase 0 measurement in the plan. Exporting it needs the owner's OK to run the SMT
+repo's Python (the session's safety classifier blocked it). Cheaper routes to measure alongside:
+tab photos (digit recognition + Path A geometry) and chord-symbol OCR for lead sheets.
 
 -----
 
@@ -3883,6 +3914,13 @@ accordingly.
   Since 2026-11-09 also `drumLikeness` (drum loop vs chords, rate-independent, empty input) and the Audio
   panel's 🥁 Drums contracts (no chord decode, full-rate reader, filename auto-pick, the 0.6 suggestion,
   isolation off, one shared `DrumChartView`, the `−0:00.01` bar-line time).
+- **Lead sheet** (`tests/lead-sheet.mjs`, in `npm test`): the skyline keeps a held melody over an
+  inner voice, chord groups → top note, LH ignored; part choice (single-note high line, a
+  voice-named part, override); written harmony from another part at its beat; "written" with no
+  symbols → no chords; ties across a bar line, grace notes, meter change; choir rule; auto
+  chord rate; key spelling; harmony export (degrees, slash, offset) and round trip; the 338 Bach
+  chorales (soprano every time, exact round trip on the 336 on a 16th grid, the 2 with 32nds
+  flagged `offGrid`). Mutation-tested (held-note rule, choir rule).
 - **Lyrics import (`parseLyrics`)**: `npm test` asserts the strict chord matcher accepts
   real chords and rejects note-letter lyric words (Add/Cab/Bad/Fed/Gem/Bee/Ace), the
   line-level `isChordLine` catches chord lines but spares lyric/blank lines, a full
