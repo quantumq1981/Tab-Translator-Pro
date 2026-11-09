@@ -5,6 +5,8 @@
  *   node bench/adt.mjs --data <dir> [--split dev|test|all] [--variant base|full|adt]
  *                      [--opts '{"…":…}'] [--dump <est.json>] [--classes 5|7] [--limit n]
  *   node bench/adt.mjs --data <dir> --variant file --est <notes.json>   (score another system's output)
+ *   node bench/adt.mjs --data <dir> --variant onnx --ort <dir with onnxruntime-web@1.23.2> [--model m.onnx]
+ *        (the shipped drum model: engine.transcribeDrumsWithModel on ORT-web's plain WASM, one thread)
  *
  * <dir> holds truth.json + the WAVs, made by scripts/egmd_subset.py (dev = E-GMD
  * "validation", test = "test"; one kit per performance so no take is scored twice).
@@ -18,6 +20,18 @@ const DATA = arg("data"), SPLIT = arg("split", "all"), VARIANT = arg("variant", 
 const OPTS = JSON.parse(arg("opts", "{}")), LIMIT = +arg("limit", "0") || Infinity, DUMP = arg("dump");
 if (!DATA) { console.error("--data <dir> required"); process.exit(2); }
 const eng = await loadEngine();
+let ORT = null, SESS = null;
+if (VARIANT === "onnx") {
+  const { pathToFileURL } = await import("node:url");
+  const mod = await import(pathToFileURL(path.join(arg("ort"), "node_modules/onnxruntime-web/dist/ort.wasm.min.mjs")).href);
+  ORT = mod.default || mod; ORT.env.wasm.numThreads = 1;
+  const modelPath = arg("model", path.join(path.dirname(new URL(import.meta.url).pathname), "../../models/oaf-drums/oaf-drums.onnx"));
+  SESS = await ORT.InferenceSession.create(fs.readFileSync(modelPath), { executionProviders: ["wasm"], enableCpuMemArena: false, enableMemPattern: false });
+}
+const ortRun = async (spec, frames) => {
+  const r = await SESS.run({ [SESS.inputNames[0]]: new ORT.Tensor("float32", spec, [1, frames, 250, 1]) });
+  return { onset: r[SESS.outputNames[0]].data, velocity: r[SESS.outputNames[1]].data };
+};
 const truth = JSON.parse(fs.readFileSync(path.join(DATA, "truth.json"), "utf8")).filter((o) => SPLIT === "all" || o.split === SPLIT).slice(0, LIMIT);
 
 const ENG_CLASS = { kick: "kick", snare: "snare", hat: "hihat", openHat: "hihat", pedalHat: "hihat", tomHigh: "tom", tomMid: "tom", tomLow: "tom", crash: "crash", ride: "ride", hihat: "hihat", tom: "tom", cymbal: "cymbal" };
@@ -30,8 +44,8 @@ for (const o of truth) {
   const ref = o.notes.map(([t, n, v]) => ({ t, cls: gmToClass(n), vel: v })).filter((h) => h.cls);
   const t0 = performance.now();
   let est;
-  if (VARIANT === "adt") {
-    const r = eng.transcribeDrumEvents(x, sr, OPTS);
+  if (VARIANT === "adt" || VARIANT === "onnx") {
+    const r = VARIANT === "onnx" ? await eng.transcribeDrumsWithModel(x, sr, ortRun, OPTS) : eng.transcribeDrumEvents(x, sr, OPTS);
     est = r.events.map((e) => ({ t: e.t_raw, cls: e.drum_class, vel: e.velocity, is_ghost: e.is_ghost, slotAbs: e.bar * r.slotsPerBar + e.slot }));
     if (r.beats && r.beats.length) { beatSum += beatF(o.beats, r.beats); beatN++; if (Math.abs(r.bpm - o.bpm) / o.bpm <= 0.04) tempoOK++; }
     o._grid = r;
@@ -52,7 +66,7 @@ for (const o of truth) {
   };
   // the estimate's slots are counted from ITS bar 1; align by the offset between the two grids
   let slotFn = null;
-  if (VARIANT === "adt" && o._grid && o._grid.events.length) {
+  if ((VARIANT === "adt" || VARIANT === "onnx") && o._grid && o._grid.events.length) {
     const off = []; for (const e of est.slice(0, 40)) { const rs = refSlot(e.t); if (rs != null) off.push(rs - e.slotAbs); }
     off.sort((a, b) => a - b); const shift = off.length ? off[off.length >> 1] : 0;
     for (const e of est) e.slotAbs += shift;

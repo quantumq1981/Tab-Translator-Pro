@@ -77,6 +77,11 @@ jobs:
           cp guitar-model.js guitar-model-core.js guitar-worker.js _site/
           mkdir -p _site/models/guitar-crnn
           cp models/guitar-crnn/guitar-gaps.w8.onnx models/guitar-crnn/NOTICE _site/models/guitar-crnn/
+          # Drum transcription (stems → drums chart): glue + Magenta Onsets & Frames drums (Apache-2.0,
+          # E-GMD-trained), fp32 ONNX, SHA-256 pinned in drum-model-core.js; scripts/oaf_drums_export.py rebuilds it.
+          cp drum-model.js drum-model-core.js drum-worker.js _site/
+          mkdir -p _site/models/oaf-drums
+          cp models/oaf-drums/oaf-drums.onnx models/oaf-drums/NOTICE _site/models/oaf-drums/
           # Learned beat + downbeat tracker (Tempo & bars): glue + the weight-only int8 beat_this final0
           # (MIT, SHA-256 pinned in beat-model-core.js; scripts/beatthis_export.py rebuilds it).
           cp beat-model.js beat-model-core.js beat-worker.js _site/
@@ -97,6 +102,8 @@ jobs:
           grep -q "src=\"./stem-model.js?v=${BUILD}\"" _site/index.html
           sed -i "s#src=\"./guitar-model.js\"#src=\"./guitar-model.js?v=${BUILD}\"#" _site/index.html
           grep -q "src=\"./guitar-model.js?v=${BUILD}\"" _site/index.html
+          sed -i "s#src=\"./drum-model.js\"#src=\"./drum-model.js?v=${BUILD}\"#" _site/index.html
+          grep -q "src=\"./drum-model.js?v=${BUILD}\"" _site/index.html
           sed -i "s#src=\"./beat-model.js\"#src=\"./beat-model.js?v=${BUILD}\"#" _site/index.html
           grep -q "src=\"./beat-model.js?v=${BUILD}\"" _site/index.html
           sed -i "s#src=\"./tab-view.js\"#src=\"./tab-view.js?v=${BUILD}\"#" _site/index.html

@@ -228,3 +228,87 @@ drummer review.
 drum claim needs the E-GMD numbers next to it. (2) E-GMD is one e-kit's sensor data rendered
 through samples: no room, no bleed, no mic cross-talk. A real acoustic recording through SCNet
 will score lower; only the in-house set can measure that.
+
+---
+
+## 8. Phase 1, option 1 — Magenta O&F drums in the app (2026-11-09, built)
+
+The owner chose option 1 ("convert the Magenta model for the time being"). It ships as the drum
+reader of the stems panel.
+
+**Licence.** The E-GMD checkpoint is published in the README of `magenta/magenta`, which is
+Apache-2.0, and carries no separate terms. Its training data, E-GMD, is CC BY 4.0. Attribution and
+the Apache text: `models/oaf-drums/NOTICE`.
+
+**Conversion** (`scripts/oaf_drums_export.py`):
+1. Build the inference graph from Magenta's own code (`model_tpu.build_model`).
+2. Freeze it with only the **onset and velocity heads**. The frame and offset networks, and the unused
+   `length` input, fall away.
+3. Convert with tf2onnx (opset 17). This needed TF1 control flow (`disable_control_flow_v2`): TF 2.21's
+   TensorList while-loops don't load in ONNX Runtime, while the TF1 loops become ONNX `Scan` ops.
+4. **fp32 ONNX matches TensorFlow to 5e-6** (onset probability) and 2e-6 (velocity). The file is 4.9 MB.
+
+A weight-only int8 copy (1.8 MB) was measured and **not shipped**: test class F 75.9 vs 76.2, and
+cymbals 51.8 vs 53.8. Saving 3 MB is not worth that.
+
+**Engine (pure, `engine.tsx`):**
+- `oafDrumLogMel` / `oafDrumInput`: the model's input, **equal to librosa to 5e-4 dB** (fixture
+  `tests/fixtures/oaf-drums-logmel.json`).
+- `oafDrumWindows`: 14 s cores with 2 s of context per side.
+- `oafDrumHits`: rising edges of the onset probability > 0.5, the run's peak as confidence, the
+  model's velocity × 127.
+- `transcribeDrumsWithModel(samples, sr, run, opts)`: the whole path, ending in the Phase 0
+  interface (`opts.hits`). `method: "oaf-drums"`.
+- The model's 8-hit map has **one tom class and one hi-hat class**. They are written as the mid tom
+  and the closed hat, rows every drum exporter already draws.
+- The drum MIDI writers now carry a hit's measured `velocity` (absent → the old fixed velocity,
+  so existing exports are unchanged).
+
+**Glue** (`drum-model.js` → `drum-worker.js` → `drum-model-core.js`): the guitar CRNN's rails.
+- Pinned ONNX Runtime Web 1.23.2 plain WASM, one thread, `capWasmMemory`.
+- Cache API + SHA-256 check, a bad cached copy evicted.
+- A module worker, ended after each job. The main thread is used only when no Worker can be built;
+  a failed worker run is not retried there.
+- Lazy: nothing downloads until a drums stem is charted. `pages.yml` ships the files and stamps
+  `drum-model.js?v=`.
+
+**UI.** The stems panel charts the stems as before, then re-reads the drums stem with the model
+(**🥁 drum model**, on by default, remembered per device as `ttp:drumModel`). If the model can't
+run, the built-in reading stays and a note says why. With the model on, the full-kit toggle is
+hidden (it measured worse on real drums). The legend states the measured accuracy.
+
+### Measured
+
+E-GMD **test** split, 30 held-out tracks, 5 classes, ±50 ms. Same harness as §4.
+
+| | class F | kick | snare | hihat | tom | cymbal | simult. R | vel MAE | ghost R |
+|---|---|---|---|---|---|---|---|---|---|
+| built-in (`transcribeDrumEvents`, NMF) | 68.3 | 82.0 | 74.9 | 68.6 | 0 | 0 | 65.3 | 19.1 | 15.3 |
+| **drum model in the app (fp32 ONNX, JS features, 14 s windows)** | **76.2** | 78.3 | 78.3 | 77.7 | **94.3** | **53.8** | 61.0 | **8.2** | 26.3 |
+| TensorFlow original (§4) | 76.3 | 78.2 | 78.4 | 77.6 | 94.3 | 54.3 | 61.1 | 8.3 | 26.3 |
+
+- **Same model, same numbers.** The app's path reproduces the TensorFlow model on the dev split
+  exactly (class F 82.8 vs 82.8).
+- **Windowing is free.** Dev class F: whole file 82.8 · 2400 frames 82.8 · 1200 82.8 · 600 82.6.
+- **Ghost flag.** Its accent reference is the median of nearby snares; the upper quartile flagged 3×
+  more accents on dev. Flag recall / precision on test: 19 / 31 %.
+- **Kick is the one class the model reads worse than the built-in detector** (78.3 vs 82.0).
+  Both trail the §5 kick target.
+
+**Speed and memory (Node, onnxruntime-web 1.23.2 WASM, one thread, 4-core container).**
+- 0.052× real time end to end: about 12 s for a 4-minute song.
+- One 18 s window takes 0.64 s. The process grows by ~330 MB, and the window length barely
+  changes that (9 s window: 307 MB). It is mostly the WASM runtime.
+- Real app (headless Chromium, `tests/bench/drum-model-e2e.mjs`): a 40 s held-out take was charted
+  and read in ~5 s.
+  - Only the three ORT 1.23.2 files and the same-origin glue + model load.
+  - The grid shows K · S · H · T2 · C, and the MIDI download carries 63 distinct velocities.
+  - Toggling the model off brings back the built-in reading.
+  - No console errors, also with an iPad Safari 16 user agent.
+
+**Device check remaining:** a real iPhone / iPad (JavaScriptCore runs the WASM, the bench ran V8).
+
+**Still open from the work order:** kick/snare ≥ 85, cymbals ≥ 60, simultaneous ≥ 70 and ghost ≥ 65
+are missed by this model too (§7). Closing them is option 2: a model of our own, trained on E-GMD
+with SCNet-separated mixes as augmentation. The in-house stems set (§8.2) is still what will tell
+how all of this does on a real acoustic recording through SCNet.

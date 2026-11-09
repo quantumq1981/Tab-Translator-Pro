@@ -3594,9 +3594,34 @@ Guards: `tests/drum-events.mjs` (in `npm test`). Bench: `tests/bench/adt.mjs` + 
   is leakage and dropped). **Without softFloor the output is byte-identical** (tested) — stems charts,
   drum exporters and the workbench suite are untouched. The interface uses 0.15, snare only (applied to
   every piece it cost the kick 10 points on dev).
-- **Not built (Phase 1+, owner sign-off first):** a learned detector (port O&F to ONNX, or train a small
-  CRNN on E-GMD), UI wiring of the new events, the symbolic sidecar (belongs in `linkScoreToAudio`).
-  Deployment = on-device offline WASM; separate-and-detect is already the pipeline (SCNet drums stem).
+- Deployment = on-device offline WASM; separate-and-detect is already the pipeline (SCNet drums stem).
+  Not built: the symbolic sidecar (belongs in `linkScoreToAudio`), a model of our own (option 2).
+
+### Drum model — Magenta O&F drums in the app (2026-11-09, Phase 1 option 1, owner's choice)
+
+Write-up: `docs/DRUM-TRANSCRIPTION.md` §8. Guards: `tests/drum-model.mjs` (in `npm test`). Benches:
+`bench/adt.mjs --variant onnx`, `bench/drum-model-e2e.mjs`.
+
+- **Model:** E-GMD checkpoint of Magenta Onsets & Frames drums (magenta/magenta, **Apache-2.0**; E-GMD CC BY
+  4.0), `models/oaf-drums/oaf-drums.onnx` (4.9 MB, fp32, SHA-256 `fe61d7a9…3b6c`, NOTICE). Exported by
+  `scripts/oaf_drums_export.py`: onset + velocity heads only, **= TensorFlow to 5e-6**. **Needs
+  `disable_control_flow_v2()`**: TF 2.21's TensorList loops don't load in ORT; TF1 loops become `Scan`.
+  int8 (1.8 MB) measured and not shipped: −0.3 class F, −2 cymbals.
+- **Engine (pure):** `oafDrumLogMel`/`oafDrumInput` (= librosa to 5e-4 dB, fixture `oaf-drums-logmel.json`),
+  `oafDrumWindows` (14 s cores, 2 s context: accuracy-neutral), `oafDrumHits` (rising edge > 0.5, peak
+  prob, velocity × 127; one tom class → `tomMid`, one hat class → `hat`), `transcribeDrumsWithModel(…, run)`
+  → `transcribeDrumEvents({hits})`. Drum MIDI writers carry `h.velocity` (absent = unchanged bytes).
+  Ghost accent reference = median of nearby snares (`ghostQuantile` 0.5; the upper quartile flagged 3× more
+  accents on E-GMD dev).
+- **Glue:** `drum-model.js` → `drum-worker.js` → `drum-model-core.js` — the guitar rails (ORT 1.23.2 plain
+  WASM, one thread, capWasmMemory, Cache + SHA-256, worker ended per job). The main thread is used only when
+  no Worker can be built (no retry after a failed worker run). Lazy. `pages.yml` ships + stamps it.
+- **UI:** the stems panel re-reads the drums stem with the model after charting (**🥁 drum model**, default on,
+  `ttp:drumModel`). If the model fails, the built-in reading stays. The full-kit toggle is hidden while the model is on.
+- **Measured (E-GMD test):** class F 68.3 → **76.2** (TF 76.3), toms 0 → 94.3, cymbals 0 → 53.8, velocity MAE
+  19.1 → 8.2; kick 82.0 → 78.3 (the one regression). 0.052× real time in Node; ~330 MB process growth per
+  run, mostly the runtime. Real app: 40 s take in ~5 s, only ORT 1.23.2 + same-origin files, no errors.
+  **Device check remaining** (JavaScriptCore).
 
 ## Path B (scans / photos) — OUT OF SCOPE
 
@@ -3829,6 +3854,11 @@ accordingly.
   low_onset_confidence flag (≥ 2 s, suppression, suppressLow:false, a silence not flagged); the hits seam;
   matchEvents = maximum matching (brute force); scoreTrack counts (merge, simultaneous, ghost). Real-drum
   accuracy: `bench/adt.mjs` on E-GMD.
+- **Drum model** (`tests/drum-model.mjs`, in `npm test`): log-mel = librosa fixture (0.01 dB), top_db floor,
+  48 kHz resampled; windows tile [0, T) with ≤ 172 frames of context; hit decoding (rising frame, ×127, peak
+  prob, ride + bell merged, non-drum column ignored, threshold); a fake session through the whole pipeline
+  (no hits lost at seams, the caller's grid, model velocities, ghosts, confidence, throwing callback); drum
+  MIDI velocities (and unchanged without); SHA pin = committed file, NOTICE, glue / loader / pages / UI contracts.
 - **Lyrics import (`parseLyrics`)**: `npm test` asserts the strict chord matcher accepts
   real chords and rejects note-letter lyric words (Add/Cab/Bad/Fed/Gem/Bee/Ace), the
   line-level `isChordLine` catches chord lines but spares lyric/blank lines, a full

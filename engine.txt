@@ -7365,7 +7365,7 @@ function drumHitsToMidi(hits, opts = {}) {
   for (const h of hits || []) {
     const tick = Math.max(0, Math.round((h.t * bpm / 60) * PPQ)), n = note[h.type];
     if (n == null) continue;
-    evs.push({ tick, o: 2, b: [0x99, n, 100] }, { tick: tick + 60, o: 1, b: [0x89, n, 0] });
+    evs.push({ tick, o: 2, b: [0x99, n, h.velocity != null ? Math.max(1, Math.min(127, Math.round(h.velocity))) : 100] }, { tick: tick + 60, o: 1, b: [0x89, n, 0] });
   }
   evs.sort((a, b) => a.tick - b.tick || a.o - b.o);
   const end = (evs.length ? evs[evs.length - 1].tick : 0) + PPQ;
@@ -7415,6 +7415,7 @@ function _drumVelocities(hits, dynDb) {
     p95[ty] = v.length ? v[Math.min(v.length - 1, Math.floor(0.95 * v.length))] : 1;
   }
   return hits.map((h) => {
+    if (h.vel != null) return Math.max(1, Math.min(127, Math.round(h.vel)));  // a model's own velocity
     if (!(h.strength > 0)) return 64;                                          // rescued hats carry no rise
     const db = 40 * Math.log10(h.strength / (p95[h.type] || h.strength));
     return Math.max(1, Math.min(127, Math.round(112 + (112 / dynDb) * db)));
@@ -7427,14 +7428,16 @@ function transcribeDrumEvents(samples, sampleRate, opts = {}) {
     .filter((h) => DRUM_PIECE_CLASS[h.type]).slice().sort((a, b) => a.t - b.t);
   const vel = _drumVelocities(hits, dyn);
   // confidence: how far the rise clears the detector's local threshold (soft hits start low)
-  const conf = hits.map((h) => (h.local != null ? Math.max(0, Math.min(1, (h.local - 0.1) / 0.7)) : h.strength > 0 ? 0.8 : 0.5));
+  const conf = hits.map((h) => (h.prob != null ? Math.max(0, Math.min(1, h.prob)) : h.local != null ? Math.max(0, Math.min(1, (h.local - 0.1) / 0.7)) : h.strength > 0 ? 0.8 : 0.5));
   /* ghost notes (§3.4): a snare at or under `ghostRatio` of the LOCAL accent level — the median
    * velocity of the snares within ±2 s that are not themselves soft */
   const ghostRatio = opts.ghostRatio || 0.6;
   const isGhost = hits.map((h, i) => {
     if (DRUM_PIECE_CLASS[h.type] !== "snare") return false;
     const loc = hits.map((o, j) => [o, j]).filter(([o, j]) => DRUM_PIECE_CLASS[o.type] === "snare" && !o.soft && Math.abs(o.t - h.t) <= 2).map(([, j]) => vel[j]).sort((a, b) => a - b);
-    const acc = loc.length ? loc[loc.length >> 1] : 100;
+    // the accent level: the median by default (`ghostQuantile` 0.5 — measured best on E-GMD dev; the upper
+    // quartile flagged 3× more accents as ghosts there)
+    const acc = loc.length ? loc[Math.floor((opts.ghostQuantile != null ? opts.ghostQuantile : 0.5) * (loc.length - 1))] : 100;
     return vel[i] <= ghostRatio * acc;
   });
   // the beat grid: the caller's (another stem of the song) or tracked on this audio
@@ -7473,6 +7476,142 @@ function transcribeDrumEvents(samples, sampleRate, opts = {}) {
   }
   if (flags.length && opts.suppressLow !== false) events = events.filter((e) => !flags.some((f) => e.confidence < lowThr && e.t_raw >= f.start && e.t_raw <= f.end));
   return { events, flags, beats: tracked.beats || [], bpm: g ? g.bpm : tracked.bpm, beatsPerBar: bpb, subdivisions: sub, slotsPerBar, gridFit: +fit.toFixed(3), timeline: g ? g.timeline : null, method: opts.hits ? "external" : "nmf" };
+}
+
+/* ============================================================================
+ *  DRUM MODEL — Magenta Onsets & Frames DRUMS (E-GMD), the learned detector
+ *  ---------------------------------------------------------------------------
+ *  WPO-ADT-001 Phase 1, option 1. Apache-2.0 (magenta/magenta), trained on E-GMD (CC BY 4.0);
+ *  converted by scripts/oaf_drums_export.py (fp32 ONNX = TensorFlow to 5e-6 → weight-only int8,
+ *  1.8 MB, models/oaf-drums/). This block is the PURE half: the model's input features, the
+ *  windowing, and the decoding into the `opts.hits` seam of transcribeDrumEvents. The ONNX session
+ *  is browser glue (drum-model-core.js) — any `run(spec, frames) → { onset, velocity }` works.
+ * ------------------------------------------------------------------------- */
+const OAF_DRUMS = { sampleRate: 44100, nFft: 2048, hop: 512, nMels: 250, fmin: 30, topDb: 80, minPitch: 21, pitches: 88 };
+OAF_DRUMS.fps = OAF_DRUMS.sampleRate / OAF_DRUMS.hop;
+/* Output columns the E-GMD model uses (its "8-hit" training map collapses every kit piece onto
+ * the first note of its group) → the engine's piece names. */
+// one tom class and one hi-hat class (open + closed) is all it was trained to tell apart: they are
+// written as the mid tom and the closed hat, the rows the drum exporters already draw
+const OAF_DRUM_PIECES = { 36: "kick", 38: "snare", 48: "tomMid", 46: "hat", 51: "ride", 53: "ride", 49: "crash" };
+
+let _oafBank = null;
+/* librosa.filters.mel(sr, n_fft, n_mels, fmin, htk=True, norm="slaney"), sparse: [{ lo, w }] */
+function _oafMelBank() {
+  if (_oafBank) return _oafBank;
+  const { sampleRate: sr, nFft, nMels, fmin } = OAF_DRUMS, nb = nFft / 2 + 1;
+  const hz2mel = (f) => 2595 * Math.log10(1 + f / 700), mel2hz = (m) => 700 * (Math.pow(10, m / 2595) - 1);
+  const m0 = hz2mel(fmin), m1 = hz2mel(sr / 2), mf = [];
+  for (let i = 0; i < nMels + 2; i++) mf.push(mel2hz(m0 + ((m1 - m0) * i) / (nMels + 1)));
+  const bank = [];
+  for (let i = 0; i < nMels; i++) {
+    const enorm = 2 / (mf[i + 2] - mf[i]), w = [];
+    let lo = -1;
+    for (let k = 0; k < nb; k++) {
+      const f = (k * sr) / nFft;
+      const v = Math.max(0, Math.min((f - mf[i]) / (mf[i + 1] - mf[i]), (mf[i + 2] - f) / (mf[i + 2] - mf[i + 1])));
+      if (v > 0) { if (lo < 0) lo = k; w[k - lo] = v * enorm; } else if (lo >= 0) break;
+    }
+    bank.push({ lo: Math.max(0, lo), w: Float64Array.from(w.map((x) => x || 0)) });
+  }
+  return (_oafBank = bank);
+}
+
+/* The model's input: librosa.power_to_db(melspectrogram(y, 44100, hop 512, fmin 30, 250 HTK
+ * bands)) — centred frames (zero-padded n_fft/2 each side), periodic Hann, |X|², 10·log10, floor
+ * at the file's max − 80 dB. `samples` must be at 44.1 kHz (oafDrumInput resamples).
+ * Returns { spec: Float32Array T × 250 (time-major), frames: T }. */
+function oafDrumLogMel(samples) {
+  const { nFft: N, hop, nMels, topDb } = OAF_DRUMS, half = N >> 1;
+  const T = 1 + Math.floor(samples.length / hop), bank = _oafMelBank();
+  const win = new Float64Array(N); for (let i = 0; i < N; i++) win[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / N);
+  const re = new Float64Array(N), im = new Float64Array(N), pw = new Float64Array(half + 1);
+  const spec = new Float32Array(T * nMels);
+  let mx = -Infinity;
+  for (let t = 0; t < T; t++) {
+    const s0 = t * hop - half;
+    for (let i = 0; i < N; i++) { const j = s0 + i; re[i] = (j >= 0 && j < samples.length ? samples[j] : 0) * win[i]; im[i] = 0; }
+    _fft(re, im);
+    for (let k = 0; k <= half; k++) pw[k] = re[k] * re[k] + im[k] * im[k];
+    for (let m = 0; m < nMels; m++) {
+      const { lo, w } = bank[m]; let acc = 0;
+      for (let k = 0; k < w.length; k++) acc += w[k] * pw[lo + k];
+      const db = 10 * Math.log10(Math.max(1e-10, acc));
+      spec[t * nMels + m] = db; if (db > mx) mx = db;
+    }
+  }
+  const floor = mx - topDb;
+  for (let i = 0; i < spec.length; i++) if (spec[i] < floor) spec[i] = floor;
+  return { spec, frames: T };
+}
+
+/* Any rate → 44.1 kHz mono log-mel (the anti-aliased resampler the chord path uses). */
+function oafDrumInput(samples, sampleRate) {
+  const x = sampleRate === OAF_DRUMS.sampleRate ? samples : resampleTo(samples, sampleRate, OAF_DRUMS.sampleRate);
+  return oafDrumLogMel(x);
+}
+
+/* Windows over the spectrogram for a bounded-memory run: `chunk` frames of context-free core,
+ * `pad` frames of context each side (the model is bidirectional; the core keeps the frames that
+ * saw both). → [{ start, end, keepFrom, keepTo }] in frames; cores tile [0, T) exactly. */
+function oafDrumWindows(T, chunk = 1200, pad = 172) {
+  const out = [];
+  for (let c = 0; c < T; c += chunk) {
+    const keepTo = Math.min(T, c + chunk), start = Math.max(0, c - pad), end = Math.min(T, keepTo + pad);
+    out.push({ start, end, keepFrom: c, keepTo });
+  }
+  return out;
+}
+
+/* onset probabilities + velocities ([T × 88] each, time-major) → engine hits:
+ * a hit at every frame where a used column's probability rises through `threshold` (0.5, the
+ * model's own predict_onset_threshold). Velocity = the model's value × 127 at that frame. */
+function oafDrumHits(onset, velocity, T, opts = {}) {
+  const P = OAF_DRUMS.pitches, thr = opts.threshold != null ? opts.threshold : 0.5, hits = [];
+  for (const [pitch, type] of Object.entries(OAF_DRUM_PIECES)) {
+    const k = Number(pitch) - OAF_DRUMS.minPitch;
+    for (let t = 0; t < T; t++) {
+      const p = onset[t * P + k];
+      if (!(p > thr) || (t > 0 && onset[(t - 1) * P + k] > thr)) continue;
+      // the peak of this above-threshold run is its confidence
+      let pk = p, u = t; while (u + 1 < T && onset[(u + 1) * P + k] > thr) { u++; if (onset[u * P + k] > pk) pk = onset[u * P + k]; }
+      const v = velocity ? velocity[t * P + k] * 127 : null;
+      hits.push({ t: +(t / OAF_DRUMS.fps).toFixed(4), type, strength: pk, prob: +pk.toFixed(3), ...(v != null ? { vel: Math.max(1, Math.min(127, Math.round(v))) } : {}), pitch: Number(pitch) });
+    }
+  }
+  // two columns that map to one piece (ride + ride bell) at one instant are one hit
+  hits.sort((a, b) => a.t - b.t);
+  const out = [], last = {};
+  for (const h of hits) {
+    const o = last[h.type];
+    if (o && h.t - o.t < 0.03) { if (h.prob > o.prob) { Object.assign(o, h, { t: o.t }); } continue; }
+    const c = { ...h }; out.push(c); last[h.type] = c;
+  }
+  return out;
+}
+
+/* The whole learned path: audio → model (via `run`) → hits → the §4 events.
+ * run(specWindow Float32Array [frames × 250], frames) → Promise<{ onset, velocity }> ([frames × 88]).
+ * opts: everything transcribeDrumEvents takes (beats, timeline, timing, …) + chunk / pad / threshold
+ * / onProgress(done, total). Returns transcribeDrumEvents' result with method "oaf-drums". */
+async function transcribeDrumsWithModel(samples, sampleRate, run, opts = {}) {
+  const { spec, frames: T } = opts._input || oafDrumInput(samples, sampleRate);
+  const M = OAF_DRUMS.nMels, P = OAF_DRUMS.pitches;
+  const onset = new Float32Array(T * P), vel = new Float32Array(T * P);
+  const wins = oafDrumWindows(T, opts.chunk || 1200, opts.pad != null ? opts.pad : 172);
+  for (let i = 0; i < wins.length; i++) {
+    const w = wins[i], n = w.end - w.start;
+    const r = await run(spec.subarray(w.start * M, w.end * M), n);
+    const off = w.keepFrom - w.start, len = w.keepTo - w.keepFrom;
+    onset.set(r.onset.subarray(off * P, (off + len) * P), w.keepFrom * P);
+    if (r.velocity) vel.set(r.velocity.subarray(off * P, (off + len) * P), w.keepFrom * P);
+    if (opts.onProgress) { try { opts.onProgress(i + 1, wins.length); } catch (_) { /* a UI callback can't break the run */ } }
+  }
+  const hits = oafDrumHits(onset, vel, T, opts);
+  const res = transcribeDrumEvents(samples, sampleRate, { ...opts, hits });
+  res.method = "oaf-drums";
+  if (opts.keepActivations) res.activations = { onset, velocity: vel, frames: T, fps: OAF_DRUMS.fps };
+  return res;
 }
 
 /* Time left on a long job from its progress, for a countdown that stays honest between
@@ -12273,7 +12412,7 @@ function _highBandOnsets(x, sr, opts = {}) {
 /* hits ({ type, t } seconds or { type, beat } quarter beats) → quarter beats from bar 1 */
 function _drumBeats(hits, opts = {}) {
   const bpm = opts.bpm || 120, tl = opts.timeline && opts.timeline.times && opts.timeline.times.length >= 2 ? opts.timeline : null;
-  return (hits || []).filter((h) => h && DRUM_KIT[h.type]).map((h) => ({ type: h.type, beat: h.beat != null ? h.beat : tl ? timelineBeatsAt(tl, h.t) : (h.t * bpm) / 60, accent: !!h.accent }))
+  return (hits || []).filter((h) => h && DRUM_KIT[h.type]).map((h) => ({ type: h.type, beat: h.beat != null ? h.beat : tl ? timelineBeatsAt(tl, h.t) : (h.t * bpm) / 60, accent: !!h.accent, ...(h.velocity != null ? { velocity: h.velocity } : {}) }))
     .filter((h) => isFinite(h.beat) && h.beat > -0.1).sort((a, b) => a.beat - b.beat);
 }
 /** Drum hits → classic ASCII drum tab: one row per drum (CR RD HH SD T1 T2 FT BD), `sub` slots per
@@ -12361,7 +12500,9 @@ function drumKitToMidi(hits, opts = {}) {
   const evs = [{ tick: 0, o: 0, b: [0xff, 0x51, 0x03, (uspq >> 16) & 255, (uspq >> 8) & 255, uspq & 255] }];
   for (const h of _drumBeats(hits, opts)) {
     const tick = Math.max(0, Math.round(h.beat * PPQ)), n = DRUM_KIT[h.type].gm;
-    evs.push({ tick, o: 2, b: [0x99, n, h.accent ? 120 : 100] }, { tick: tick + 60, o: 1, b: [0x89, n, 0] });
+    // a measured velocity (the drum model's) when the hit has one, else the accent default
+    const v = h.velocity != null ? Math.max(1, Math.min(127, Math.round(h.velocity))) : h.accent ? 120 : 100;
+    evs.push({ tick, o: 2, b: [0x99, n, v] }, { tick: tick + 60, o: 1, b: [0x89, n, 0] });
   }
   evs.sort((a, b) => a.tick - b.tick || a.o - b.o);
   evs.push({ tick: (evs.length ? evs[evs.length - 1].tick : 0) + PPQ, o: 3, b: [0xff, 0x2f, 0x00] });
@@ -13213,4 +13354,5 @@ export {
   nashvilleFor,
   scoreToGridSVG,
   transcribeDrumEvents, DRUM_CLASSES, DRUM_PIECE_CLASS, DRUM_NOTATION,
+  OAF_DRUMS, OAF_DRUM_PIECES, oafDrumLogMel, oafDrumInput, oafDrumWindows, oafDrumHits, transcribeDrumsWithModel,
 };
