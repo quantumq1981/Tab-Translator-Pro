@@ -141,9 +141,38 @@ section("the shipped model + glue contracts");
   expect(/cp drum-model\.js drum-model-core\.js drum-worker\.js _site\//.test(pages) && /models\/oaf-drums\/oaf-drums\.onnx models\/oaf-drums\/NOTICE/.test(pages) && /drum-model\.js\?v=\$\{BUILD\}/.test(pages), "pages.yml ships the glue, model + NOTICE, and stamps drum-model.js");
   const ui = read("TabDecoderPro.tsx");
   expect(/window\.TTP_DRUM_MODEL/.test(ui) && /ttp:drumModel/.test(ui) && /stemMono\(t\.list\.filter\(\(x\) => x\.role === "drums"\)\)/.test(ui), "the stems panel re-reads the drums stem with the model (per-device toggle)");
-  expect(/fullKit \|\| chart\.model \? drumKitToMidi/.test(ui), "a model-read drum chart exports through the full-kit MIDI writer (velocities kept)");
+  expect(/fullKit \|\| model \? drumKitToMidi/.test(ui) && /model=\{chart\.model\}/.test(ui), "a model-read drum chart exports through the full-kit MIDI writer (velocities kept)");
   expect(/showing the built-in reading/.test(ui), "a model failure keeps the built-in reading");
   expect(read("engine.txt") === read("engine.tsx") && read("TabDecoderPro.txt") === read("TabDecoderPro.tsx"), ".txt mirrors are current");
+}
+
+section("drumLikeness — how drum-like a recording is (suggests 🥁 Drums)");
+{
+  const sr = 16000, R = (() => { let s = 7; return () => ((s = (s * 1103515245 + 12345) % 2147483648) / 2147483648) * 2 - 1; })();
+  const drums = new Float32Array(10 * sr), chords = new Float32Array(10 * sr);
+  for (let k = 0; k < 40; k++) { const i0 = Math.round(k * 0.25 * sr); for (let i = 0; i < 0.12 * sr && i0 + i < drums.length; i++) { const u = i / sr; drums[i0 + i] += (k % 2 ? 0.5 * R() : 0.9 * Math.sin(2 * Math.PI * (55 + 60 * Math.exp(-u * 30)) * u)) * Math.exp(-u * 25); } }
+  for (let i = 0; i < chords.length; i++) { const t = i / sr, f = [[261.6, 329.6, 392], [220, 261.6, 329.6]][Math.floor(t / 2) % 2]; chords[i] = 0.2 * f.reduce((a, x) => a + Math.sin(2 * Math.PI * x * t) + 0.3 * Math.sin(4 * Math.PI * x * t), 0); }
+  const d = eng.drumLikeness(drums, sr).percussive, c = eng.drumLikeness(chords, sr).percussive;
+  expect(d >= 0.6, `a drum loop reads drum-like (${d})`);
+  expect(c < 0.3, `sustained chords don't (${c})`);
+  const d22 = eng.drumLikeness(eng.resampleTo(drums, sr, 22050), 22050).percussive;
+  expect(Math.abs(d22 - d) < 0.05, `the reading doesn't depend on the file's rate (16 kHz ${d} · 22.05 kHz ${d22})`);
+  expect(eng.drumLikeness(new Float32Array(100), sr).percussive === 0 && eng.drumLikeness(null, sr).frames === 0, "too short / no audio → 0, no throw");
+}
+
+section("Audio panel — 🥁 Drums reads a drum recording without the chord decoder");
+{
+  const ui = read("TabDecoderPro.tsx");
+  const ai = ui.slice(ui.indexOf("function AudioImport("), ui.indexOf("function StemsPanel("));
+  expect(/\["drums", "🥁 Drums"\]/.test(ai), "a 🥁 Drums choice sits next to Chords and Notes");
+  expect(/if \(k === "drums"\) \{ runDrums\(\); return; \}/.test(ai), "Drums mode never runs the chord decoder");
+  expect(/readDrumAudio\(monoOf\(b\), b\.sampleRate/.test(ai), "the drum reader gets the full-rate recording (not the 16 kHz analysis copy)");
+  expect(/useModel && typeof model === "function"/.test(ui) && /drumEventsOffThread\(pcm, sr/.test(ui), "readDrumAudio: the drum model when on, else the built-in reader");
+  expect(/stemRoleFromName\(f\.name\) === "drums"/.test(ai) && /loadBuffer\(audioBuf, asDrums \? "drums" : null\)/.test(ai), "a file named like a drum stem opens in Drums mode");
+  expect(/drumLike >= 0\.6/.test(ai) && /drumLikenessOffThread\(mono, sr\)/.test(ai) && /Read it as drums/.test(ai), "a drum-like file opened as chords gets the 🥁 Read it as drums suggestion (threshold 0.6)");
+  expect(/kind !== "drums" && <button onClick=\{toggleIsolate\}/.test(ai) && /iso && s\.stereo && k !== "drums"/.test(ai), "vocal isolation is hidden and skipped in Drums mode");
+  expect(/const sec2 = \(t\) => \{ const a = Math\.abs\(t\)/.test(ui), "Tempo & bars shows a bar line before 0:00 as −0:00.01 (it read -1:-0.01)");
+  expect((ui.match(/<DrumChartView /g) || []).length === 2, "one drum chart component serves the Audio panel and the stems panel");
 }
 
 try { fs.unlinkSync(enginePath); } catch {}

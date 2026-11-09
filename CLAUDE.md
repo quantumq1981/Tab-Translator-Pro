@@ -3623,6 +3623,23 @@ Write-up: `docs/DRUM-TRANSCRIPTION.md` §8. Guards: `tests/drum-model.mjs` (in `
   run, mostly the runtime. Real app: 40 s take in ~5 s, only ORT 1.23.2 + same-origin files, no errors.
   **Device check remaining** (JavaScriptCore).
 
+### 🥁 Drums in the Audio panel (2026-11-09) — a drum file is never read as chords
+
+Report: an isolated drum MP3 uploaded in Audio mode came back as CHORDS, and the drum reader couldn't be
+found (it lived only in the stems panel). Write-up: `docs/DRUM-TRANSCRIPTION.md` §9. Guards:
+`tests/drum-model.mjs`. e2e: `bench/drum-audio-e2e.mjs` (WAV or MP3).
+- **🥁 Drums** next to Chords / Notes (`AudioImport` `kind: "drums"`): `run()` → `runDrums()` →
+  `readDrumAudio(monoOf(audioBuf), fullRate, { useModel })` = the drum model, else `transcribeDrumEvents`
+  off-thread. **The chord decoder never runs in this mode.** Chord controls, isolate, guitar tab and A/B are hidden.
+- **`DrumChartView`** = the one drum chart (groove grid, ⬇ MIDI / MusicXML / tab, toggles as children),
+  used by the Audio panel AND the stems panel (keep it between `StemsPanel` and `ChordReview`: a smoke test
+  slices that range).
+- A file named like a drum stem (`stemRoleFromName`) opens in Drums; any other file gets a "🥁 Read it as
+  drums" suggestion when **`drumLikeness` ≥ 0.6** (engine, pure: the percussive share of HPSS energy,
+  **always at 16 kHz**, resampled internally; at 22.05/24 kHz without it the same takes read 0.05–0.1
+  lower). Measured: 36/42 E-GMD takes ≥ 0.6; real vocal stems ≤ 0.52, rendered guitar/piano ≤ 0.50.
+- Tempo & bars' bar-line time printed `-1:-0.01` for a bar line before 0:00; now `−0:00.01`.
+
 ## Path B (scans / photos) — OUT OF SCOPE
 
 Raster tab (a photo or scanned page) has no text layer and needs an OMR/Vision
@@ -3859,6 +3876,9 @@ accordingly.
   prob, ride + bell merged, non-drum column ignored, threshold); a fake session through the whole pipeline
   (no hits lost at seams, the caller's grid, model velocities, ghosts, confidence, throwing callback); drum
   MIDI velocities (and unchanged without); SHA pin = committed file, NOTICE, glue / loader / pages / UI contracts.
+  Since 2026-11-09 also `drumLikeness` (drum loop vs chords, rate-independent, empty input) and the Audio
+  panel's 🥁 Drums contracts (no chord decode, full-rate reader, filename auto-pick, the 0.6 suggestion,
+  isolation off, one shared `DrumChartView`, the `−0:00.01` bar-line time).
 - **Lyrics import (`parseLyrics`)**: `npm test` asserts the strict chord matcher accepts
   real chords and rejects note-letter lyric words (Add/Cab/Bad/Fed/Gem/Bee/Ace), the
   line-level `isChordLine` catches chord lines but spares lyric/blank lines, a full

@@ -312,3 +312,53 @@ E-GMD **test** split, 30 held-out tracks, 5 classes, ±50 ms. Same harness as §
 are missed by this model too (§7). Closing them is option 2: a model of our own, trained on E-GMD
 with SCNet-separated mixes as augmentation. The in-house stems set (§8.2) is still what will tell
 how all of this does on a real acoustic recording through SCNet.
+
+---
+
+## 9. 🥁 Drums in the Audio panel (2026-11-09)
+
+**The report:** "I put an isolated drum MP3 through the audio panel and it gives me chords. There
+should be a completely different part of the algorithm for drums. I can't find it anywhere." Both
+true. The drum reader only ran inside the stems panel (after ✂ Split or 📂 Import stems), and a
+drum file uploaded on its own went through the chord decoder, which named the drums' pitch as
+chords.
+
+**What changed:**
+- **🥁 Drums** sits next to Chords and Notes in the Audio panel. In that mode the chord decoder
+  **never runs**. `readDrumAudio` uses the drum model (§8) on the **full-rate** recording, else the
+  built-in reader (`transcribeDrumEvents`, off-thread). The chord controls (chord names, song key,
+  🎤 Isolate vocals, 🎸 Guitar → Tab, ⚖ A/B, 📎 score link) are hidden. Tempo & bars works on the
+  drum reading's beat grid.
+- **The drum chart is one component** (`DrumChartView`) shared with the stems panel: the groove
+  grid plus ⬇ Drums MIDI (with the model's velocities), ⬇ Drum notation (MusicXML), ⬇ Drum tab and the
+  🥁 drum model toggle.
+- **A file named like a drum stem** ("Song - Drums.mp3", Demucs' `drums.wav`; `stemRoleFromName`)
+  opens straight in Drums.
+- **Any other file that sounds like drums** gets a suggestion after the chord pass: "🥁 This sounds
+  like a drum recording … Read it as drums". `drumLikeness` (engine, pure) = the share of spectral
+  energy that harmonic–percussive separation files as percussive, always measured at 16 kHz.
+  Measured at the app's analysis rate (22.05 kHz, resampled internally):
+
+  | material | drumLikeness |
+  |---|---|
+  | 42 E-GMD drum takes | median 0.77, **36/42 ≥ 0.6**; lowest 0.24–0.6 (layered / roomy kits) |
+  | the repo's 4 real vocal stems | 0.25 · 0.25 · 0.38 · **0.52** (Peg) |
+  | 28 rendered guitar / piano / organ stems | ≤ **0.50** |
+
+  The threshold is **0.6**: nothing non-drum in this set reaches it (margin 0.08). It only shows a
+  suggestion; the Drums choice is always there for the takes it misses.
+  - Measured at 22.05 / 24 kHz without the internal resample, the same takes read 0.05–0.1 lower
+    (28 and 23 of 42 ≥ 0.6). That is why the measure resamples first.
+- **Fixed on the way:** Tempo & bars printed a bar line just before 0:00 as `-1:-0.01`. It now
+  reads `−0:00.01`.
+
+**Checked:** `tests/drum-model.mjs` (60 checks: `drumLikeness` on a synthetic drum loop vs chords,
+rate independence, the Audio-panel contracts) and `tests/bench/drum-audio-e2e.mjs`, the real app in
+headless Chromium (WAV, and MP3 with an iPhone user agent):
+1. A drum take uploaded as `track.mp3` gets the suggestion (71 % percussive).
+2. "Read it as drums" gives 194 hits read by the model, no chord controls, the K / S / H / T2 / C grid,
+   Tempo & bars, and `track-drums.mid` with 59 distinct velocities.
+3. `Song - Drums.mp3` opens straight in Drums.
+4. No console errors.
+
+The stems panel's own check (`drum-model-e2e.mjs`) still passes on the shared component.
