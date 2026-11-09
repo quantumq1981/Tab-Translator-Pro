@@ -7614,6 +7614,44 @@ async function transcribeDrumsWithModel(samples, sampleRate, run, opts = {}) {
   return res;
 }
 
+/* How drum-like a recording is: the share of its spectral energy that harmonic–percussive
+ * separation (median filters along time vs frequency, Fitzgerald 2010) files as PERCUSSIVE.
+ * Sustained pitched sound forms horizontal ridges, hits vertical ones. Mono at any rate; reads
+ * at most `maxSec` (60 s) from `startSec`. → { percussive: 0..1, frames }. The Audio panel uses
+ * it to suggest the drum reader for an uploaded drum part (threshold measured in
+ * docs/DRUM-TRANSCRIPTION.md §9). Pure. */
+function drumLikeness(samples, sampleRate, opts = {}) {
+  // measured at 16 kHz (the threshold's scale): any other rate is resampled first, so the reading
+  // doesn't depend on the file's rate (at 22.05 / 24 kHz the same takes read 0.05–0.1 lower)
+  if (samples && samples.length && sampleRate !== 16000) {
+    const a = Math.max(0, Math.floor((opts.startSec || 0) * sampleRate)), b = Math.min(samples.length, a + Math.floor((opts.maxSec || 60) * sampleRate));
+    return drumLikeness(resampleTo(samples.subarray(a, b), sampleRate, 16000), 16000, { ...opts, startSec: 0 });
+  }
+  sampleRate = 16000;
+  const N = 1024, hop = 512, half = N / 2, kt = opts.timeKernel || 17, kf = opts.freqKernel || 17;
+  const start = Math.max(0, Math.floor((opts.startSec || 0) * sampleRate));
+  const end = Math.min(samples ? samples.length : 0, start + Math.floor((opts.maxSec || 60) * sampleRate));
+  if (!(end - start > N)) return { percussive: 0, frames: 0 };
+  const win = _hann(N), re = new Float64Array(N), im = new Float64Array(N), S = [];
+  const kmax = Math.min(half, Math.floor((8000 / sampleRate) * N));      // up to 8 kHz (the analysis rate's band)
+  for (let s0 = start; s0 + N <= end; s0 += hop) {
+    for (let i = 0; i < N; i++) { re[i] = samples[s0 + i] * win[i]; im[i] = 0; }
+    _fft(re, im);
+    const col = new Float32Array(kmax);
+    for (let k = 1; k < kmax; k++) col[k] = Math.hypot(re[k], im[k]);
+    S.push(col);
+  }
+  const T = S.length, buf = new Float64Array(Math.max(kt, kf));
+  const med = (get, n, c, K) => { let m = 0; const h = K >> 1; for (let j = c - h; j <= c + h; j++) { const v = j >= 0 && j < n ? get(j) : 0; let p = m++; while (p > 0 && buf[p - 1] > v) { buf[p] = buf[p - 1]; p--; } buf[p] = v; } return buf[m >> 1]; };
+  let eh = 0, ep = 0;
+  for (let t = 0; t < T; t++) for (let k = 1; k < kmax; k++) {
+    const h = med((j) => S[j][k], T, t, kt), p = med((j) => S[t][j], kmax, k, kf);
+    const x = S[t][k] * S[t][k], h2 = h * h, p2 = p * p, d = h2 + p2;
+    if (d > 0) { eh += x * h2 / d; ep += x * p2 / d; }
+  }
+  return { percussive: eh + ep > 0 ? +(ep / (eh + ep)).toFixed(3) : 0, frames: T };
+}
+
 /* Time left on a long job from its progress, for a countdown that stays honest between
  * progress events. prog = { done, total, t0, tAt }: `done` of `total` units COMPLETED as of
  * `tAt` (ms, same clock as `now`), work started at `t0`. The rate is measured up to the last
@@ -13354,5 +13392,5 @@ export {
   nashvilleFor,
   scoreToGridSVG,
   transcribeDrumEvents, DRUM_CLASSES, DRUM_PIECE_CLASS, DRUM_NOTATION,
-  OAF_DRUMS, OAF_DRUM_PIECES, oafDrumLogMel, oafDrumInput, oafDrumWindows, oafDrumHits, transcribeDrumsWithModel,
+  drumLikeness, OAF_DRUMS, OAF_DRUM_PIECES, oafDrumLogMel, oafDrumInput, oafDrumWindows, oafDrumHits, transcribeDrumsWithModel,
 };

@@ -320,6 +320,8 @@ import {
   arrangementLevels,
   drumHitsToMusicXML,
   drumHitsToAsciiTab,
+  transcribeDrumEvents,
+  drumLikeness,
   drumKitToMidi,
   pianoScoreFromNotes,
   scoreToPianoMusicXML,
@@ -527,6 +529,30 @@ async function parseScoreOffThread(bytes, filename, sharp) {
 async function detectSectionsOffThread(samples, sr, opts = {}) {
   try { return await _engineRPC("detectSections", [samples, sr, opts]); }
   catch (_) { return detectSections(samples, sr, opts); }
+}
+/* A drum recording → the §4 drum events (built-in NMF reader), and how drum-like a recording is —
+ * off-thread when possible, main-thread fallback as always. */
+async function drumEventsOffThread(samples, sr, opts = {}) {
+  try { return await _engineRPC("transcribeDrumEvents", [samples, sr, opts]); }
+  catch (_) { return transcribeDrumEvents(samples, sr, opts); }
+}
+async function drumLikenessOffThread(samples, sr) {
+  try { return await _engineRPC("drumLikeness", [samples, sr]); }
+  catch (_) { return drumLikeness(samples, sr); }
+}
+/* Read a drum recording: the drum model (drum-model.js) when it is on and loads, else the built-in
+ * reader. `pcm` is mono at its own rate (full rate: hi-hats live above 8 kHz). → { hits, method, flags,
+ * beats, bpm, note }, hits = [{ t, type, velocity, ghost, prob }] on the recording's clock. */
+async function readDrumAudio(pcm, sr, { useModel = true, beats, bpm, onProgress } = {}) {
+  const model = typeof window !== "undefined" ? window.TTP_DRUM_MODEL : null;
+  let d = null, note = "";
+  if (useModel && typeof model === "function") {
+    try { d = await model(Float32Array.from(pcm), sr, { transfer: true, beats, bpm, onProgress }); }
+    catch (e) { note = "The drum model couldn't run here (" + ((e && e.message) || e) + ") — showing the built-in reading."; }
+  }
+  if (!d) d = await drumEventsOffThread(pcm, sr, beats && beats.length ? { beats, bpm } : {});
+  const hits = (d.events || []).map((e) => ({ t: e.t_raw, type: e.piece, velocity: e.velocity, ghost: e.is_ghost, prob: e.confidence }));
+  return { hits, method: d.method, flags: d.flags || [], beats: d.beats || [], bpm: d.bpm || 0, note };
 }
 /* PCM → chord/note events, off-thread when possible (the analysis is a heavy pure-JS
  * FFT/YIN loop that would jank the main thread on a long stem); ALWAYS falls back to
@@ -4122,7 +4148,8 @@ function TempoBarsPanel({ C, bg, pos, onFindBars, canFindBars, label = "TEMPO & 
   const scale = (f) => (timing.bpm != null ? set({ bpm: Math.max(20, Math.min(400, timing.bpm * f)) }) : set({ beatScale: Math.max(0.25, Math.min(4, (timing.beatScale || 1) * f)) }));
   const canFollow = !!(grid.detected && grid.detected.beats && grid.detected.beats.length >= 2);
   const fd = grid.firstDownbeat || 0;
-  const sec2 = (t) => `${Math.floor(t / 60)}:${(t % 60).toFixed(2).padStart(5, "0")}`;
+  // m:ss.cc; a bar line just before the recording starts reads −0:00.01, not -1:-0.01
+  const sec2 = (t) => { const a = Math.abs(t); return `${t < 0 ? "−" : ""}${Math.floor(a / 60)}:${(a % 60).toFixed(2).padStart(5, "0")}`; };
   const changed = JSON.stringify(timing) !== JSON.stringify(NO_TIMING);
   const nMap = grid.tempoMap ? grid.tempoMap.length : 0;
   const seg = (on) => ({ ...chip(C), padding: "3px 9px", borderColor: on ? C.cyan : C.border, color: on ? C.cyan : C.dim });
@@ -4365,7 +4392,14 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  const [kind, setKind] = useState("chords");        // chords | notes
+  const [kind, setKind] = useState("chords");        // chords | notes | drums
+  /* 🥁 Drums: a drum recording is read by the drum reader (the drum model, else the built-in NMF) —
+   * never by the chord decoder. drumLike = the share of percussive energy (engine.drumLikeness): ≥ 0.6
+   * suggests the drum reader for a file opened as chords. */
+  const [drumRes, setDrumRes] = useState(null);       // { hits, method, flags, beats, bpm, note }
+  const [drumProg, setDrumProg] = useState(null);
+  const [drumLike, setDrumLike] = useState(null);
+  const [drumML, setDrumML] = useState(() => { try { return localStorage.getItem("ttp:drumModel") !== "0"; } catch (_) { return true; } });
   const [isolate, setIsolate] = useState(false);     // center-channel (vocal) isolation before analysis
   const [ab, setAb] = useState(null);                // { mix, iso } harmonic-clarity A/B, or "busy"
   const [mlNotes, setMlNotes] = useState(null);      // raw ML notes, kept so voice-count/voice-index can re-derive without re-inference
@@ -4419,7 +4453,7 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
   const TARGET = 16000;
   /* ONE beat grid for every chart from this recording (see useBeatGrid): bar 1 is the bar the first
    * chord/note sounds in, so the chord chart, Voices (ML) and Guitar → Tab share bar numbers. */
-  const firstSound = useMemo(() => { const t = (raw || []).map((e) => e.startSec).filter((x) => isFinite(x)); return t.length ? Math.min(...t) : 0; }, [raw]);
+  const firstSound = useMemo(() => { const t = (kind === "drums" && drumRes ? drumRes.hits.map((h) => h.t) : (raw || []).map((e) => e.startSec)).filter((x) => isFinite(x)); return t.length ? Math.min(...t) : 0; }, [raw, kind, drumRes]);
   const bg = useBeatGrid(tracked, firstSound);
   const bpm = bg.bpm, bpb = bg.meter, tl = bg.grid.timeline;
 
@@ -4432,7 +4466,20 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
   };
   useEffect(() => () => stopPlay(), []);
 
+  /* 🥁 the drum reader on the FULL-rate recording (hi-hats live above the 16 kHz analysis band) */
+  const runDrums = async (useModel = drumML) => {
+    const b = ref.current.audioBuf; if (!b) return;
+    setBusy(true); setErr(""); setDrumRes(null); setRaw([]); setDrumProg(null);
+    try {
+      const r = await readDrumAudio(monoOf(b), b.sampleRate, { useModel, onProgress: (done, total) => setDrumProg({ done, total }) });
+      setDrumRes(r);
+      setTracked(r.beats && r.beats.length ? r.beats : null);
+      ref.current.beats = r.beats && r.beats.length ? r.beats : null; ref.current.beatBpm = r.bpm || 0;
+    } catch (e) { setErr("Reading the drums failed: " + ((e && e.message) || e)); }
+    setDrumProg(null); setBusy(false);
+  };
   const run = (ds, sr, k) => {
+    if (k === "drums") { runDrums(); return; }
     setBusy(true); setErr("");
     // recoverGaps: re-read the spans the main pass left unlabelled at a lower threshold
     // (guarded by confidence + gap length) so a chart isn't littered with false N.C. bars.
@@ -4458,6 +4505,9 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
           } else setLinkRes(null);
           if (!r) r = (await analyzeChordsOffThread(ds, sr, opts)) || {};
           setRaw(autoPickRef.current ? autoResolveChords(r.events || []) : (r.events || []));
+          // does this sound like a drum recording? (suggests 🥁 Drums — the chord decoder names drums' pitch as chords)
+          const mono = ref.current.mono;
+          if (mono) drumLikenessOffThread(mono, sr).then((d) => setDrumLike(d ? d.percussive : null)).catch(() => {});
           setTracked(r.beats && r.beats.length ? r.beats : null);
           setBeatInfo(r.bpm || r.tuning != null ? { bpm: r.bpm || 0, method: r.method, tuning: r.tuning, key: r.key, evidence: r.evidence, adapted: r.adapted } : null);
           // cache the beat grid: the structure pass reuses it instead of tracking twice
@@ -4469,7 +4519,7 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
     }, 30);
   };
 
-  const resetFor = (label) => { setErr(""); setName(label); setLinkRes(null); setSongKey(""); readRef.current = { ...readRef.current, songKey: "" }; setBusy(true); setRaw([]); setTracked(null); bg.reset(); setOverrides({}); setAb(null); setMlNotes(null); setGtrNotes(null); setVoiceIdx(0); setSections([]); ref.current.mlRaw = null; stopPlay(); };
+  const resetFor = (label) => { setErr(""); setName(label); setLinkRes(null); setSongKey(""); readRef.current = { ...readRef.current, songKey: "" }; setBusy(true); setRaw([]); setTracked(null); bg.reset(); setOverrides({}); setAb(null); setMlNotes(null); setGtrNotes(null); setDrumRes(null); setDrumLike(null); setVoiceIdx(0); setSections([]); ref.current.mlRaw = null; stopPlay(); };
   const onFile = async (e) => {
     const f = e.target.files && e.target.files[0]; if (!f) return;
     resetFor(f.name);
@@ -4482,7 +4532,10 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
       const audioBuf = await new Promise((res, rej) => { const p = dctx.decodeAudioData(ab, res, rej); if (p && p.then) p.then(res, rej); });
       try { dctx.close(); } catch (_) {}
       if (onLoaded) { try { onLoaded(f, kept, audioBuf.duration); } catch (_) {} }
-      await loadBuffer(audioBuf);
+      // a file named like a drum stem ("Song - Drums.mp3", Demucs' "drums.wav") opens in 🥁 Drums
+      const asDrums = stemRoleFromName(f.name) === "drums";
+      if (asDrums) setKind("drums");
+      await loadBuffer(audioBuf, asDrums ? "drums" : null);
     } catch (_) { setErr("Couldn't decode audio from that file — try an audio file, or a video that has an audio track."); setBusy(false); }
   };
   // a library project (WO-6) handed in: the same path as a picked file
@@ -4492,7 +4545,7 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
     resetFor(label);
     try { await loadBuffer(audioBuf); } catch (_) { setErr("Couldn't analyse that recording."); setBusy(false); }
   };
-  const loadBuffer = async (audioBuf) => {
+  const loadBuffer = async (audioBuf, kOverride) => {
     const chs = audioBuf.numberOfChannels;
     const factor = Math.max(1, Math.floor(audioBuf.sampleRate / TARGET));
     const sr = audioBuf.sampleRate / factor;
@@ -4506,14 +4559,14 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
     for (let i = 0; i < L16.length; i++) mono[i] = (L16[i] + R16[i]) / 2;
     ref.current = { audioBuf, L16, R16, mono, sr, stereo: chs >= 2 };
     setDur(audioBuf.duration);
-    prepare(isolate, kind);
+    prepare(isolate, kOverride || kind);
   };
 
   // Build the analysis buffer (center-extracted vocals when isolate is on + the file is
   // stereo, else the plain mono downmix), cache it, then run the recogniser on it.
   const prepare = async (iso, k) => {
     const s = ref.current; if (!s.mono) return;
-    if (iso && s.stereo) {
+    if (iso && s.stereo && k !== "drums") {
       setBusy(true); setErr("");
       try { s.cur = await extractCenterOffThread(s.L16, s.R16, s.sr, { minFreq: 100 }); }
       catch (_) { s.cur = s.mono; }
@@ -4865,7 +4918,7 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
     <section className="panel-rise" style={{ position: "relative", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18 }}>
       <SectionLabel C={C}>AUDIO → CHART · isolated-stem recognition (experimental)</SectionLabel>
       <div style={{ fontSize: 12, color: C.dim, lineHeight: 1.6, marginBottom: 12 }}>
-        Upload a <b>clean, isolated instrument stem</b> (one guitar / piano / bass) — an <b>audio file</b> (MP3/M4A/WAV) <b>or a video</b> (MP4/MOV; the audio track is extracted). Decoded + analysed entirely on your device; nothing is uploaded. Chordal stems → a chord chart (export / send to Pro); a single-note stem (bass/lead) → notes. For a <b>full stereo mix</b>, tap <b>🎤 Isolate vocals</b> to center-extract the vocal (where lead + backing harmony usually sit) before charting — the zero-download karaoke trick.
+        Upload a <b>clean, isolated instrument stem</b> (one guitar / piano / bass) — an <b>audio file</b> (MP3/M4A/WAV) <b>or a video</b> (MP4/MOV; the audio track is extracted). Decoded + analysed entirely on your device; nothing is uploaded. Chordal stems → a chord chart (export / send to Pro); a single-note stem (bass/lead) → notes; a <b>drum</b> recording → <b>🥁 Drums</b> (a groove chart + drum MIDI / notation — no chords). For a <b>full stereo mix</b>, tap <b>🎤 Isolate vocals</b> to center-extract the vocal (where lead + backing harmony usually sit) before charting — the zero-download karaoke trick.
         <br />No file? <b>🖥 Capture a tab</b> records a song playing in another browser tab (desktop Chrome/Edge — tick “Share tab audio”), or <b>🎙 Record</b> from the mic. Have a <b>full mix</b>? <b>✂ Split this mix into stems</b> below charts every instrument.
         <br /><span style={{ color: C.dim }}>Already have real stems? A <b>ListenHub / Mureka</b> <code>listenhub music stem --audio song.mp3</code> split (per-instrument stems) drops straight in here — that separated stem is the cleanest possible input. <b>⚖ A/B clarity</b> tells you whether the separation actually helped before you commit to charting it.</span>
       </div>
@@ -4879,25 +4932,33 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
         </label>
         <LiveCapture C={C} onCaptured={onCaptured} disabled={busy} />
         <span style={{ display: "inline-flex", gap: 4 }}>
-          {[["chords", "Chords (guitar/piano)"], ["notes", "Notes (bass/lead)"]].map(([k, lbl]) => (
+          {[["chords", "Chords (guitar/piano)"], ["notes", "Notes (bass/lead)"], ["drums", "🥁 Drums"]].map(([k, lbl]) => (
             <button key={k} onClick={() => switchKind(k)} disabled={busy} style={{ ...chip(C), padding: "5px 10px", borderColor: kind === k ? C.cyan : C.border, color: kind === k ? C.cyan : C.dim }}>{lbl}</button>
           ))}
         </span>
-        <button onClick={toggleIsolate} disabled={busy} title="isolate the center channel (where vocals usually sit) before analysing — for scoring sung harmony from a full mix"
-          style={{ ...chip(C), padding: "5px 10px", borderColor: isolate ? C.green : C.border, color: isolate ? C.green : C.dim }}>{isolate ? "🎤 Vocals isolated ✓" : "🎤 Isolate vocals"}</button>
+        {kind !== "drums" && <button onClick={toggleIsolate} disabled={busy} title="isolate the center channel (where vocals usually sit) before analysing — for scoring sung harmony from a full mix"
+          style={{ ...chip(C), padding: "5px 10px", borderColor: isolate ? C.green : C.border, color: isolate ? C.green : C.dim }}>{isolate ? "🎤 Vocals isolated ✓" : "🎤 Isolate vocals"}</button>}
         {kind === "chords" && <ChordVocabPicker C={C} value={vocab} onChange={(v) => { setVocab(v); setOverrides({}); }} sixNine={sixNine} onSixNine={(v) => { setSixNine(v); setOverrides({}); }} disabled={busy} />}
         {kind === "chords" && <ChordReadingControls C={C} songKey={songKey} onSongKey={setSongKey} detectedKey={beatInfo && !songKey ? beatInfo.key : null} keyUse={keyUse} onKeyUse={setKeyUse} changes={changes} onChanges={setChanges} disabled={busy} useSharp={useSharp} />}
         {kind === "chords" && <button onClick={voices} disabled={busy} title="per-VOICE note transcription (the actual sung notes, not just a chord) via a pluggable ML model — for dense vocal harmony"
           style={{ ...chip(C), padding: "5px 10px", borderColor: mlScore ? C.green : C.border, color: mlScore ? C.green : C.dim }}>🎼 Voices (ML)</button>}
-        <button onClick={guitarTab} disabled={busy} title="guitar (or any plucked-string) stem → every note + the string it's on, as an editable tab chart (ML note model ≈ 25 MB, downloaded once; runs on this device)"
-          style={{ ...chip(C), padding: "5px 10px", borderColor: gtrScore ? C.green : C.border, color: gtrScore ? C.green : C.dim }}>🎸 Guitar → Tab (ML)</button>
-        {ref.current.stereo && <button onClick={runAB} disabled={busy || ab === "busy"} title="does isolating the center actually clean up THIS file's harmony? compares chroma clarity of the mix vs. the isolated center"
+        {kind !== "drums" && <button onClick={guitarTab} disabled={busy} title="guitar (or any plucked-string) stem → every note + the string it's on, as an editable tab chart (ML note model ≈ 25 MB, downloaded once; runs on this device)"
+          style={{ ...chip(C), padding: "5px 10px", borderColor: gtrScore ? C.green : C.border, color: gtrScore ? C.green : C.dim }}>🎸 Guitar → Tab (ML)</button>}
+        {ref.current.stereo && kind !== "drums" && <button onClick={runAB} disabled={busy || ab === "busy"} title="does isolating the center actually clean up THIS file's harmony? compares chroma clarity of the mix vs. the isolated center"
           style={{ ...chip(C), padding: "5px 10px", borderColor: C.border, color: C.dim }}>{ab === "busy" ? "measuring…" : "⚖ A/B clarity"}</button>}
         {name && <span style={{ fontSize: 11, color: C.dim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 180 }}>{name}{dur ? ` · ${fmt(dur)}` : ""}</span>}
       </div>
 
-      {busy && <div style={{ fontSize: 13, color: C.amber, marginBottom: 12 }}>{gtrProg ? `⏳ Transcribing guitar… ${gtrProg.total ? `${gtrProg.done}/${gtrProg.total} × 10 s` : "loading the model"}` : "⏳ Analyzing… (FFT over the whole stem)"}</div>}
+      {busy && <div style={{ fontSize: 13, color: C.amber, marginBottom: 12 }}>{kind === "drums" ? `⏳ Reading the drums…${drumProg && drumProg.total ? ` ${Math.round((100 * drumProg.done) / drumProg.total)}%` : ""}` : gtrProg ? `⏳ Transcribing guitar… ${gtrProg.total ? `${gtrProg.done}/${gtrProg.total} × 10 s` : "loading the model"}` : "⏳ Analyzing… (FFT over the whole stem)"}</div>}
       {err && <div style={{ fontSize: 12, color: C.red, marginBottom: 12 }}>{err}</div>}
+
+      {/* 🥁 the recording sounds like drums: offer the drum reader (the chord decoder names drums' pitch as chords) */}
+      {kind === "chords" && !busy && drumLike != null && drumLike >= 0.6 && (
+        <div style={{ fontSize: 12, color: C.text, marginBottom: 12, padding: "8px 12px", background: C.raised, border: `1px solid ${C.amber}`, borderRadius: 8, lineHeight: 1.6 }}>
+          🥁 <b>This sounds like a drum recording</b> ({Math.round(100 * drumLike)} % of its energy is percussive). Chords read from drums are just the drums' pitch, not harmony.{" "}
+          <button onClick={() => switchKind("drums")} style={{ ...chip(C), padding: "3px 10px", borderColor: C.amber, color: C.amber }}>🥁 Read it as drums</button>
+        </div>
+      )}
 
       {/* 📎 SCORE LINK — notation + recording read together (the bridge to the MusicXML / GP / Power Tab paths) */}
       {kind === "chords" && (
@@ -4920,9 +4981,21 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
       })()}
 
       {/* TEMPO & BARS → the one beat grid every chart below is laid on (Muscriptor's timing panel) */}
-      {!!ref.current.cur && (!!raw.length || !!mlNotes || !!gtrNotes) && (
+      {!!ref.current.cur && (!!raw.length || !!mlNotes || !!gtrNotes || (kind === "drums" && !!drumRes)) && (
         <TempoBarsPanel C={C} bg={bg} pos={pos} canFindBars={!!ref.current.audioBuf}
           onFindBars={() => { const b = ref.current.audioBuf; if (b) bg.findBars(monoOf(b), b.sampleRate); }} />
+      )}
+
+      {/* 🥁 DRUMS → the drum reader's groove grid + MIDI / notation / tab (no chords are read in this mode) */}
+      {kind === "drums" && drumRes && (
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 11, letterSpacing: 2, color: C.dim, marginBottom: 6 }}>DRUMS · {drumRes.hits.length} hits{drumRes.flags.length ? ` · ${drumRes.flags.length} low-confidence stretch${drumRes.flags.length > 1 ? "es" : ""} left out` : ""}</div>
+          <DrumChartView C={C} hits={drumRes.hits} model={drumRes.method === "oaf-drums"} timeline={tl} bpm={bpm} bpb={bpb} base={(name || "song").replace(/\.[^.]+$/, "").replace(/[^\w.-]+/g, "_") || "song"} note={drumRes.note}>
+            <button onClick={() => { const v = !drumML; setDrumML(v); try { localStorage.setItem("ttp:drumModel", v ? "1" : "0"); } catch (_) {} runDrums(v); }} disabled={busy}
+              title="read the drums with the drum model (Magenta Onsets & Frames drums, trained on real kits): kick · snare · toms · hi-hat · ride · crash with velocities — a 4.9 MB download the first time"
+              style={{ ...chip(C), padding: "4px 12px", borderColor: drumML ? C.green : C.border, color: drumML ? C.green : C.dim }}>{drumML ? "🥁 drum model ✓" : "🥁 drum model"}</button>
+          </DrumChartView>
+        </div>
       )}
 
       {/* VOICES (ML) → per-voice note transcription. Voice count controls the SATB
@@ -5577,10 +5650,6 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, reading
     if (chart.kind === "notes") { const ns = chart.notes.map((n) => ({ midi: n.midi, startSec: n.startSec, durSec: n.durSec })); return ns.length ? polyNotesToScore(ns, noteGridOpts(bg, ns, useSharp, { onsetGrid: 0.005 })) : null; }
     return null;
   }, [chart, bg.grid, useSharp]);
-  // the drum grid reads hits from bar 1 of the shared timeline (one ♩: the grid's)
-  const drumOff = timelineSecondsAt(bg.grid.timeline, 0);
-  const drumHits = useMemo(() => (chart && chart.kind === "drums" ? chart.hits.map((h) => ({ ...h, t: h.t - drumOff })).filter((h) => h.t > -0.05) : null), [chart, drumOff]);
-  const groove = useMemo(() => (drumHits ? drumPattern(drumHits, { bpm, beatsPerBar: bpb }) : null), [drumHits, bpm, bpb]);
   /* ⬇ All parts (zip) — every stem chart as files on the shared grid (engine.partsZip: per part
    * .musicxml / .mid / .csmpn, an .alphatex for guitar + bass, full_score.musicxml and a
    * multi-track score.mid with the drums on ch. 10), one STORED zip like Muscriptor's. */
@@ -5700,36 +5769,61 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, reading
             <ChartPanel score={chartScore} vocabPicker={false} title={`${base} — ${chart.name}`} meta={`${chartScore.bars.length} bars · ♩=${bg.grid.follow ? "~" + Math.round(bpm) : +bpm.toFixed(1)} · ${chart.name}`}
               C={C} useSharp={useSharp} overrides={ovr[chart.role] || {}} setOverrides={(f) => setOvr((o) => ({ ...o, [chart.role]: typeof f === "function" ? f(o[chart.role] || {}) : f }))} selKey="" onPick={() => {}} />
           )}
-          {groove && (
-            <div>
-              <div className="tdp-scroll" style={{ display: "grid", gap: 8, maxHeight: 360, overflow: "auto", fontFamily: "'Space Mono', monospace", fontSize: 11 }}>
-                {groove.bars.map((b) => (
-                  <div key={b.number} style={{ display: "grid", gridTemplateColumns: "28px 1fr", gap: 2 }}>
-                    <span style={{ color: C.dim, gridRow: "span 9" }}>{b.number}</span>
-                    {[["C", b.crash], ["R", b.ride], ["O", b.openHat], ["H", b.hat], ["S", b.snare], ["T1", b.tomHigh], ["T2", b.tomMid], ["FT", b.tomLow], ["K", b.kick]].filter(([lab, row]) => row && (/[HSK]/.test(lab[0]) && lab.length === 1 || row.includes("x"))).map(([lab, row]) => (
-                      <span key={lab} style={{ letterSpacing: 2, color: lab === "K" ? C.amber : lab === "S" ? C.cyan : C.dim }}>{lab} {row.replace(/(.{4})/g, "$1 ").trim()}</span>
-                    ))}
-                  </div>
-                ))}
-              </div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
-                <button onClick={() => saveBytes(fullKit || chart.model ? drumKitToMidi(drumHits || chart.hits, { bpm }) : drumHitsToMidi(drumHits || chart.hits, { bpm }), `${base}-drums.mid`, "audio/midi")} style={{ ...chip(C), padding: "4px 12px" }}>⬇ Drums MIDI</button>
-                <button onClick={() => { const hb = chart.hits.map((h) => ({ type: h.type, beat: timelineBeatsAt(bg.grid.timeline, h.t) })); saveBytes(new TextEncoder().encode(drumHitsToMusicXML(hb, { beatsPerBar: bpb, tempo: bpm, title: `${base} — drums` })), `${base}-drums.musicxml`, "application/vnd.recordare.musicxml+xml"); }}
-                  title="a percussion staff: hands stems-up, feet stems-down, GM drum sounds — opens in MuseScore / Sibelius / Dorico" style={{ ...chip(C), padding: "4px 12px" }}>⬇ Drum notation (MusicXML)</button>
-                <button onClick={() => { const hb = chart.hits.map((h) => ({ type: h.type, beat: timelineBeatsAt(bg.grid.timeline, h.t) })); saveBytes(new TextEncoder().encode(drumHitsToAsciiTab(hb, { beatsPerBar: bpb, title: `${base} — drums` })), `${base}-drums.txt`, "text/plain"); }}
-                  style={{ ...chip(C), padding: "4px 12px" }}>⬇ Drum tab (.txt)</button>
+          {chart && chart.kind === "drums" && (
+            <DrumChartView C={C} hits={chart.hits} model={chart.model} timeline={bg.grid.timeline} bpm={bpm} bpb={bpb} base={base} fullKit={fullKit} note={drumNote}>
                 <button onClick={() => { const v = !drumML; setDrumML(v); try { localStorage.setItem("ttp:drumModel", v ? "1" : "0"); } catch (_) {} }} title="read the drums with the drum model (Magenta Onsets & Frames drums, trained on real kits): kick · snare · toms · hi-hat · ride · crash with velocities — a 4.9 MB download the first time"
-                  style={{ ...chip(C), padding: "4px 12px", borderColor: drumML ? C.green : C.border, color: drumML ? C.green : C.dim }}>{drumML ? "🥁 drum model ✓" : "🥁 drum model"}</button>
-                {!drumML && <button onClick={() => { const v = !fullKit; setFullKit(v); try { localStorage.setItem("ttp:fullKit", v ? "1" : "0"); } catch (_) {} }} title="re-chart the stems to name toms, open hi-hat, crash and ride (else kick · snare · hi-hat)"
-                  style={{ ...chip(C), padding: "4px 12px", borderColor: fullKit ? C.green : C.border, color: fullKit ? C.green : C.dim }}>{fullKit ? "full kit ✓" : "full kit"}</button>}
-              </div>
-              <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>{chart.model
-                ? <>C crash · R ride · H hi-hat (open or closed) · S snare · T2 toms (one class) · K kick, sixteenths per beat. Read by the drum model (Magenta Onsets &amp; Frames drums, trained on real kits); the MIDI keeps each hit's velocity. Measured on held-out E-GMD drums: kick, snare, hi-hat ≈ 78 % F1, toms 94 %, cymbals 54 % — soft ghost notes are still often missed.{drumNote ? " " + drumNote : ""}</>
-                : <>C crash · R ride · O open hi-hat · H hi-hat · S snare · T1/T2/FT toms · K kick, sixteenths per beat. Soft ghost notes are left out. Full kit names toms / open hat / crash / ride (measured on a rendered kit; on real drums it misreads many snares — the drum model is better).{drumNote ? " " + drumNote : ""}</>}</div>
-            </div>
+                style={{ ...chip(C), padding: "4px 12px", borderColor: drumML ? C.green : C.border, color: drumML ? C.green : C.dim }}>{drumML ? "🥁 drum model ✓" : "🥁 drum model"}</button>
+              {!drumML && <button onClick={() => { const v = !fullKit; setFullKit(v); try { localStorage.setItem("ttp:fullKit", v ? "1" : "0"); } catch (_) {} }} title="re-chart the stems to name toms, open hi-hat, crash and ride (else kick · snare · hi-hat)"
+                style={{ ...chip(C), padding: "4px 12px", borderColor: fullKit ? C.green : C.border, color: fullKit ? C.green : C.dim }}>{fullKit ? "full kit ✓" : "full kit"}</button>}
+            </DrumChartView>
           )}
         </>
       )}
+    </div>
+  );
+}
+
+/* The drum chart — a groove grid on the recording's beat grid + MIDI / MusicXML / tab downloads.
+ * Shared by the stems panel (the drums stem) and the Audio panel's 🥁 Drums reading. `hits` are on
+ * the recording's clock ([{ t, type, velocity? }]); `timeline` is the shared beat grid, read from its
+ * bar 1; `model` = the drum model read them (its velocities go into the MIDI). Toggles come as children. */
+/* bytes → a downloaded file (Blob + anchor) */
+function _downloadBytes(bytes, filename, mime) {
+  try {
+    const url = URL.createObjectURL(new Blob([bytes], { type: mime })), a = document.createElement("a");
+    a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+  } catch (_) { /* nothing to save to */ }
+}
+function DrumChartView({ C, hits, model, timeline, bpm, bpb, base, fullKit, note, children }) {
+  const off = timelineSecondsAt(timeline, 0);
+  const shifted = useMemo(() => (hits || []).map((h) => ({ ...h, t: h.t - off })).filter((h) => h.t > -0.05), [hits, off]);
+  const groove = useMemo(() => drumPattern(shifted, { bpm, beatsPerBar: bpb }), [shifted, bpm, bpb]);
+  const beatHits = () => (hits || []).map((h) => ({ type: h.type, beat: timelineBeatsAt(timeline, h.t) }));
+  if (!hits || !hits.length) return <div style={{ fontSize: 11, color: C.dim }}>No drum hits found in this recording.{note ? " " + note : ""}</div>;
+  return (
+    <div>
+      <div className="tdp-scroll" style={{ display: "grid", gap: 8, maxHeight: 360, overflow: "auto", fontFamily: "'Space Mono', monospace", fontSize: 11 }}>
+        {groove.bars.map((b) => (
+          <div key={b.number} style={{ display: "grid", gridTemplateColumns: "28px 1fr", gap: 2 }}>
+            <span style={{ color: C.dim, gridRow: "span 9" }}>{b.number}</span>
+            {[["C", b.crash], ["R", b.ride], ["O", b.openHat], ["H", b.hat], ["S", b.snare], ["T1", b.tomHigh], ["T2", b.tomMid], ["FT", b.tomLow], ["K", b.kick]].filter(([lab, row]) => row && (/[HSK]/.test(lab[0]) && lab.length === 1 || row.includes("x"))).map(([lab, row]) => (
+              <span key={lab} style={{ letterSpacing: 2, color: lab === "K" ? C.amber : lab === "S" ? C.cyan : C.dim }}>{lab} {row.replace(/(.{4})/g, "$1 ").trim()}</span>
+            ))}
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+        <button onClick={() => _downloadBytes(fullKit || model ? drumKitToMidi(shifted, { bpm }) : drumHitsToMidi(shifted, { bpm }), `${base}-drums.mid`, "audio/midi")} style={{ ...chip(C), padding: "4px 12px" }}>⬇ Drums MIDI</button>
+        <button onClick={() => _downloadBytes(new TextEncoder().encode(drumHitsToMusicXML(beatHits(), { beatsPerBar: bpb, tempo: bpm, title: `${base} — drums` })), `${base}-drums.musicxml`, "application/vnd.recordare.musicxml+xml")}
+          title="a percussion staff: hands stems-up, feet stems-down, GM drum sounds — opens in MuseScore / Sibelius / Dorico" style={{ ...chip(C), padding: "4px 12px" }}>⬇ Drum notation (MusicXML)</button>
+        <button onClick={() => _downloadBytes(new TextEncoder().encode(drumHitsToAsciiTab(beatHits(), { beatsPerBar: bpb, title: `${base} — drums` })), `${base}-drums.txt`, "text/plain")}
+          style={{ ...chip(C), padding: "4px 12px" }}>⬇ Drum tab (.txt)</button>
+        {children}
+      </div>
+      <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>{model
+        ? <>C crash · R ride · H hi-hat (open or closed) · S snare · T2 toms (one class) · K kick, sixteenths per beat. Read by the drum model (Magenta Onsets &amp; Frames drums, trained on real kits); the MIDI keeps each hit's velocity. Measured on held-out E-GMD drums: kick, snare, hi-hat ≈ 78 % F1, toms 94 %, cymbals 54 % — soft ghost notes are still often missed.{note ? " " + note : ""}</>
+        : <>C crash · R ride · O open hi-hat · H hi-hat · S snare · T1/T2/FT toms · K kick, sixteenths per beat. Soft ghost notes are left out. Full kit names toms / open hat / crash / ride (measured on a rendered kit; on real drums it misreads many snares — the drum model is better).{note ? " " + note : ""}</>}</div>
     </div>
   );
 }

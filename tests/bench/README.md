@@ -299,4 +299,5 @@ The drum model (Magenta O&F drums, `models/oaf-drums/`) in Node on onnxruntime-w
 ```sh
 node bench/adt.mjs --data <dir> --split test --variant onnx --ort <dir with onnxruntime-web@1.23.2> [--model m.onnx] [--opts '{"chunk":600}']
 node bench/drum-model-e2e.mjs --deps $D/out --wav <dir>/drummer7/session2/112_jazz-fusion_96_beat_4-4_28.wav [--ua "<iPad UA>"]
+node bench/drum-audio-e2e.mjs --deps $D/out --wav take.mp3 [--ua "<iPhone UA>"]   # 🥁 Drums in the Audio panel (a drum file uploaded on its own)
 ```
