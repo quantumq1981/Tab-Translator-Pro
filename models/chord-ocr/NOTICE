@@ -19,4 +19,4 @@ Training data:  synthetic only. Chord symbols sampled from fake-book spellings (
 How it was made: scripts/chord-ocr/ — fetch_fonts.sh, synth.py, train.py (CTC, AdamW, one-cycle), export.py
                 (ONNX opset 17, checked against PyTorch, then the int8 step). README.md there has the
                 commands and the measurements.
-SHA-256:        __SHA__
+SHA-256:        6842e1fc32443e5fe8fb6e5160eff12fc58b0e8fca134e694f783f5df524e2b6

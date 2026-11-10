@@ -3808,7 +3808,7 @@ function LyricsCapture({ C }) {
  * carries no meter we read) and renders through the normal ChartPanel (edit, transpose, export,
  * → Chord Sheet Maker Pro). The file <input> has NO `accept` (iOS greys out what it can't map).
  * Browser-only glue; not persisted in the session yet. */
-const SCAN_MAX_PAGES = 12, SCAN_MAX_WIDTH = 1800, CHORD_OCR_SIZE_HINT = "2.4 MB";
+const SCAN_MAX_PAGES = 12, SCAN_MAX_WIDTH = 1800, CHORD_OCR_SIZE_HINT = "0.6 MB";
 function _scanGrey(canvas) {
   const ctx = canvas.getContext("2d"), { width, height } = canvas, rgba = ctx.getImageData(0, 0, width, height).data;
   const data = new Uint8Array(width * height);

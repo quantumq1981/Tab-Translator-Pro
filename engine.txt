@@ -13711,8 +13711,9 @@ function chordFromWritten(raw) {
   return p && p.ok ? { name, parsed: p } : null;
 }
 
-/** Recogniser output for one box → the most probable reading the chord grammar accepts:
- *  { name, raw, prob, alternatives:[name…] } or null (a bar number, tempo mark, word …). */
+/** Recogniser output for one box → the most probable reading the chord grammar accepts, if the model
+ *  gives it at least `minProb` (0.1) of the beam's probability: { name, raw, prob, alternatives:[name…] }
+ *  or null (a bar number, tempo mark, word …). */
 function chordOcrRead(logits, T, K, opts = {}) {
   const cands = ctcBeam(logits, T, K, { beam: opts.beam || 10 });
   const z = cands.reduce((a, c) => a + Math.exp(c.logp), 0) || 1;
@@ -13720,6 +13721,8 @@ function chordOcrRead(logits, T, K, opts = {}) {
   for (const c of cands) {
     const r = chordFromWritten(c.text);
     if (!r) continue;
+    // a grammar-valid reading the model doesn't believe (a bar number "7" → "D7" at ~0 %) is not taken
+    if (!best && Math.exp(c.logp) / z < (opts.minProb ?? 0.1)) continue;
     if (!best) best = { name: r.name, raw: c.text, prob: Math.exp(c.logp) / z, parsed: r.parsed };
     else if (r.name !== best.name && !alts.includes(r.name)) alts.push(r.name);
   }

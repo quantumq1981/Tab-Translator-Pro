@@ -95,6 +95,8 @@ function logits(seq) {        // seq: one class per frame ("_" = blank), confide
   expect(E.ctcBeam(a3, T3, K)[0].text === "Cmj" && r && r.name === "Cm7", `the most probable string "Cmj" is not a chord → Cm7 is read (${r && r.name})`);
   const { a: a4, T: T4 } = logits(["1", "5", "_"]);
   expect(E.chordOcrRead(a4, T4, K) === null, "a bar number is not a chord → null");
+  const { a: a5, T: T5 } = logits(["7", "_"]);
+  expect(E.chordOcrRead(a5, T5, K) === null && E.chordOcrNumber(a5, T5, K) === 7, "a confident \"7\" is bar number 7, never the unlikely chord \"D7\" further down the beam");
 }
 
 // ---- written spellings → the family's names ------------------------------------------------------
@@ -138,6 +140,21 @@ expect(notChords.every((t) => E.chordFromWritten(t) === null), "bar numbers, tem
   expect(prog === 1, "progress reaches 1 and a throwing callback does not break the read");
 }
 
+// ---- bar numbers re-anchor the systems ----------------------------------------------------------------
+{
+  // three systems of 4 bars, but system 1 found an extra bar line (5 bars): printed numbers 5 and 9
+  const mk = () => ({ staves: [{ edges: [0, 1, 2, 3, 4], barFrom: 0 }, { edges: [0, 1, 2, 3, 4, 5], barFrom: 4 }, { edges: [0, 1, 2, 3, 4], barFrom: 9 }],
+    tokens: [{ staff: 1, bar: 4 }, { staff: 2, bar: 9 }, { staff: 2, bar: 12 }], bars: 13 });
+  const L1 = E._ocrAnchorBars(mk(), [null, 5, 9]);
+  expect(L1.tokens.map((t) => t.bar).join(" ") === "4 8 11" && L1.bars === 12 && L1.firstNumber === 1, "a printed bar number re-anchors its system: an extra bar line in system 2 no longer shifts system 3 (" + L1.tokens.map((t) => t.bar).join(" ") + ")");
+  const L2 = E._ocrAnchorBars(mk(), [null, 5, 40]);
+  expect(L2.tokens.map((t) => t.bar).join(" ") === "4 9 12", "a misread number far from the count is ignored");
+  const L3 = E._ocrAnchorBars(mk(), [17, null, null]);
+  expect(L3.firstNumber === 17 && L3.tokens[0].bar === 4, "a number on the first system gives the page's first bar");
+  const L4 = E._ocrAnchorBars(mk(), [null, null, null]);
+  expect(L4.firstNumber === null && L4.tokens.map((t) => t.bar).join(" ") === "4 9 12", "no numbers: counting stands");
+}
+
 // ---- the shipped model + glue + UI contracts --------------------------------------------------------
 {
   const model = fs.readFileSync(path.join(repo, "models/chord-ocr/chord-ocr.onnx"));
@@ -156,7 +173,7 @@ expect(notChords.every((t) => E.chordFromWritten(t) === null), "bar numbers, tem
   const html = read("index.html"), pages = read(".github/workflows/pages.yml");
   expect(/<script type="module" src="\.\/chord-ocr-model\.js"><\/script>/.test(html), "index.html loads chord-ocr-model.js");
   expect(/cp chord-ocr-model\.js chord-ocr-core\.js chord-ocr-worker\.js _site\//.test(pages) && /models\/chord-ocr\/chord-ocr\.onnx models\/chord-ocr\/NOTICE/.test(pages) && /chord-ocr-model\.js\?v=\$\{BUILD\}/.test(pages), "pages.yml ships the glue, model + NOTICE, and stamps chord-ocr-model.js");
-  const ui = read("TabDecoderPro.tsx"), scan = ui.slice(ui.indexOf("function ScanPanel("), ui.indexOf("function LyricsPanel("));
+  const ui = read("TabDecoderPro.tsx"), scan = ui.slice(ui.indexOf("const SCAN_MAX_PAGES"), ui.indexOf("function LyricsPanel("));
   expect(/\["scan", "Scan 📷"\]/.test(ui) && /mode === "scan" \? <ScanPanel/.test(ui), "the Scan 📷 mode is listed and routed");
   expect(/window\.TTP_CHORD_OCR\(/.test(scan) && /chordPageScore\(/.test(scan) && /chordFromWritten\(/.test(scan) && /<ChartPanel/.test(scan), "ScanPanel reads pages in the worker, builds the chart with the engine, corrections go through the chord grammar, the chart is a ChartPanel");
   expect(/<input ref=\{fileRef\} type="file" onChange=\{onFile\}/.test(scan) && !/accept=/.test(scan), "the file input has no accept (iOS)");

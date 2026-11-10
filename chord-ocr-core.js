@@ -20,7 +20,7 @@ const stemCore = () => _stemCore || (_stemCore = import(/* @vite-ignore */ STEM_
 
 export const CHORD_OCR_MODEL = {
   url: new URL("./models/chord-ocr/chord-ocr.onnx", import.meta.url).href,
-  sha256: "__PIN__",
+  sha256: "6842e1fc32443e5fe8fb6e5160eff12fc58b0e8fca134e694f783f5df524e2b6",
 };
 
 /* Weights: Cache API first, else a fetch; the bytes must match the pinned SHA-256 either way
