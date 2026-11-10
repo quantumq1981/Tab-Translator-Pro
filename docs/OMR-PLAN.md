@@ -35,7 +35,7 @@ proposal against the three repos, and the order the work runs in.
 
 | Model | License (code / weights) | Size | Output | On-device? |
 |---|---|---|---|---|
-| **SMT — Sheet Music Transformer** (`antoniorv6/smt-camera-grandstaff`, `smt-grandstaff`, rev `9c13556…`) | MIT / MIT (model card) | 21.4 M params (≈ 86 MB fp32, ≈ 22 MB int8 weights) | Humdrum `**kern` tokens, one grand-staff **system** per image | **Candidate.** ConvNeXt encoder (64/128/256, depths 3/3/9) + transformer decoder (d_model 256), no KV cache. Full-page variants exist (`smtpp_*`). |
+| **SMT — Sheet Music Transformer** (`antoniorv6/smt-camera-grandstaff`, `smt-grandstaff`, rev `9c13556…`) | MIT / MIT (model card) | 21.4 M params (86 MB fp32 checkpoint; exported 29.8 MB int8 — measured below) | Humdrum `**kern` tokens, one grand-staff **system** per image | **Candidate.** ConvNeXt encoder (64/128/256, depths 3/3/9) + transformer decoder (d_model 256), no KV cache. Full-page variants exist (`smtpp_*`). |
 | LEGATO / legato-small (`guangyangmusic/…`) | MIT (code + weights) — **gated** | small = 10.9 M *trainable* params on top of the **frozen Llama 3.2 11B Vision encoder** | ABC | **No.** The encoder alone is far beyond a phone, and it sits under the Llama 3.2 licence. The model card itself says research use. |
 | oemer (`BreezeWhite/oemer`) | MIT code; checkpoint licence not stated | 2 UNets + 3 SVMs + heavy Python post-processing | MusicXML | Possible but costly: the UNets run in ONNX Runtime, the symbol assembly is ~thousands of lines of numpy/OpenCV to port. Already used server-side in Pro. |
 | homr (`liebharc/homr`) | **AGPL-3.0** | SegNet + TrOMR ONNX | MusicXML | **Rejected** (AGPL; the owner will monetise). |
@@ -66,12 +66,66 @@ Ground truth is free: render files we already own and know exactly.
   `**kern` → MusicXML needs a JS kern reader (grand-staff kern is a manageable subset);
   single-system input needs a system splitter (staff-line projection in JS).
 
-**Status:** the SMT source and weights are reachable from the cloud container
-(`huggingface.co`, `github.com`), and PyTorch installs from PyPI. Running the SMT repository's
-own Python code to export it was **blocked by the session's safety classifier** (third-party
-code). Next step: the owner approves running it (or it runs on the owner's Linux laptop), then
-`smt_export.py` (encoder → `raw/pos` features, decoder → last-token logits, dynamic H/W and
-length, opset 17) + a parity check vs PyTorch + int8 + an onnxruntime-web timing and memory run.
+## Phase 0 results — SMT measured (2026-11-09)
+
+Scripts: `scripts/smt/` (README has the pins). Running the SMT repository's own Python was blocked
+by the session's safety classifier, so **we wrote the model ourselves** (`smt_model.py`, from
+the MIT source) and load only the published weights (a safetensors file — data, no code).
+
+**Findings that change the picture — do not re-derive:**
+- The published weights (`smt-camera-grandstaff` @ `9c13556`, SHA-256 `93be49ca…5448`, 21.4 M
+  params, vocabulary **20,578** combined kern tokens) were trained with the **September 2024**
+  decoder (SMT `fdeb7c3`/`d25acd4`), not the current repo code: `lq/lk/lv` attention **with no
+  1/√d scaling**, ReLU + a 1×1 `Conv1d` output layer. A strict state-dict load caught it.
+- Its 2D position table was built at full PIXEL size (256 × 3056 × 256 floats); exporting it
+  as-is baked **800 MB** into the ONNX. Only the 16×-downsampled slice is ever read and the values
+  don't depend on the table size, so we build 32 × 192 (images up to 512 px tall; the camera set's
+  tallest is 312 px). The table stays fp32 in the int8 export (6.3 MB).
+- Without a KV cache each token re-runs the whole prefix (8 s per system in PyTorch). Exported as
+  **encoder** (image → the 8 layers' cross-attention K/V, once per system) + **one-step decoder**
+  (token + cache → logits + cache). Our PyTorch model and the cached ONNX produce **identical
+  tokens** on 5/5 test systems.
+- **Input scale matters.** The camera config resizes by `reduce_ratio` 0.85; camera photos at 1.0×
+  read 52 % median SER, at 0.7× 7.5 %. The preprocessing a phone needs is SCALE normalisation
+  (staff-line spacing), not binarisation — another reason OpenCV.js is the wrong tool.
+
+**Accuracy** (symbol error rate on the official test splits, 100 systems each, int8 weights;
+"runaway" = a decode stuck in a loop until the 1,280-token cap):
+
+| | clean GrandStaff (×1.0) | clean (×0.85) | camera (×0.85) | camera (×0.7) |
+|---|---|---|---|---|
+| pooled SER | **5.41 %** | 6.01 % | 25.2 % | 26.5 % |
+| SER without runaways | 5.41 % | 6.01 % | 20.2 % | 17.4 % |
+| median per system | 4.19 % | 4.44 % | 14.8 % | **7.5 %** |
+| runaways | 0/100 | 0/100 | 1/100 | 2/100 |
+
+fp32 vs int8: 5.59 % vs 5.41 % on 20 clean systems — weight-only int8 costs nothing.
+
+**On the phone's runtime** (onnxruntime-web **1.23.2** plain WASM, one thread, Node on the 4-core
+container, 8 clean systems, ~240 tokens each):
+
+| weights | download | per system | ms / token | encoder | peak RSS |
+|---|---|---|---|---|---|
+| fp32 | 93.3 MB | **3.4 s** | 10.4 | 0.86 s | 463 MB |
+| int8 (weight-only) | 29.8 MB | 5.1 s | 17.0 | 1.0 s | **320 MB** |
+
+(The int8 decoder is slower because the 5.3 M-entry embedding and output layer are dequantised on
+every step; a Gather-on-int8 embedding + int8 output projection is the obvious next fix.) A page of
+~6 systems ≈ 20–30 s here; a phone is slower.
+
+**Verdict.** SMT passes the technical gate (licence, size, phone memory, speed, accuracy on clean
+engraving) — **for piano grand-staff systems only.** It does NOT cover what the family mostly
+needs: it emits no chord symbols, reads no single-staff lead sheet, no guitar tab and no
+4-staff choir layout (all out of its training domain, untested), and a phone photo of a page
+still needs a JS system splitter + scale normaliser + a kern → MusicXML reader before
+`leadSheetFromMusicXML` can turn its notes into chords. Camera photos have a long tail of bad
+systems (pooled ~17–25 %). Recommended order from here:
+1. **Chord-symbol OCR for lead sheets** and **tab photos** (below) — they answer the fake-book use
+   directly and are cheaper.
+2. SMT as an on-demand "photo of piano music → notes → chords" tool, only if the owner wants
+   it: system splitter + scale normaliser (plain JS), `**kern` reader, a runaway guard (stop on a
+   repeated n-gram or > 3× the expected tokens for the width), the int8 embedding fix, the usual
+   worker rails, and a device check.
 
 ## Two cheaper routes worth measuring alongside
 

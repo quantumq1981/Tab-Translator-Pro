@@ -3677,10 +3677,18 @@ it pays off today for MusicXML / Muscriptor imports. UI wiring is not done yet.
 Raster input (a photo or scanned page) needs an OMR model, kept SEPARATE from the Path A parser.
 Decisions (2026-11-09): OpenCV.js not adopted (another ~9 MB WASM on phones; plain JS is
 enough); homr + Audiveris rejected (AGPL); LEGATO rejected for the client (frozen Llama 3.2 11B
-Vision encoder); **SMT** (MIT, 21.4 M params, `**kern` per grand-staff system) is the candidate,
-gated on the Phase 0 measurement in the plan. Exporting it needs the owner's OK to run the SMT
-repo's Python (the session's safety classifier blocked it). Cheaper routes to measure alongside:
-tab photos (digit recognition + Path A geometry) and chord-symbol OCR for lead sheets.
+Vision encoder); **SMT** (MIT, 21.4 M params, `**kern` per grand-staff system) **measured in Phase 0
+(2026-11-09, `scripts/smt/`, numbers in the plan)**: our own implementation of the Sept-2024
+architecture (no √d attention scaling — the weights need it; strict load proves the match), ONNX
+encoder + KV-cached one-step decoder (identical tokens to PyTorch), weight-only int8 29.8 MB.
+Clean GrandStaff SER **5.4 %**; camera photos median 7.5 % at a 0.7× resize but a long tail (pooled
+~17–26 %, 1–2 % runaway decodes) — input SCALE matters, so phone preprocessing = staff-spacing
+normalisation, not binarising. onnxruntime-web 1.23.2 one-thread WASM: **5.1 s / system, 320 MB
+peak** (int8). Verdict: passes the technical gate for **piano grand-staff only**; no chord
+symbols, no lead sheets / tab / choir layouts. Next: chord-symbol OCR for lead sheets + tab photos;
+SMT later as an on-demand piano tool (needs a JS system splitter, scale normaliser, `**kern`
+reader, runaway guard). Running third-party repo code is blocked by the session classifier —
+write the architecture ourselves and load only the weights (data), as done here.
 
 -----
 
