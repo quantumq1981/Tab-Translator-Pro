@@ -1,0 +1,22 @@
+chord-ocr.onnx — chord-symbol recogniser for the "Scan 📷" mode (a photo or scanned PDF of a lead sheet
+→ chord chart). Input: [1, 1, 32, W] — one box of text, 32 px tall, ink = 1, paper = 0 (engine.tsx
+chordOcrInput). Output: logits [1, W/4, 43] — CTC over the chord as drawn ("ABCDEFG", "abdgijlmnostuM",
+digits, "#/()+-,Δ°ø^"; class 0 = blank). The engine decodes it (ctcBeam), keeps the most probable reading
+the chord grammar accepts (chordOcrRead / chordFromWritten) and reads bar numbers (chordOcrNumber).
+
+Model:          our own — a CNN (6 conv layers, 32→128 channels) + a bidirectional GRU (96 per side) + a
+                linear layer, 588,011 parameters, weight-only int8 (per-output-row scale + DequantizeLinear;
+                activations fp32). Written and trained for this project; no third-party weights.
+Licence:        MIT, as the rest of this repository (see LICENSE).
+Training data:  synthetic only. Chord symbols sampled from fake-book spellings (maj7 / MA7 / Δ7 / M7, mi7 / -7,
+                ø, °, +, sus, 69, parenthesised alterations, slash basses), bar numbers (labelled with their
+                digits) and non-chord text (section names, tempo marks, directions, lyric words — labelled
+                empty), drawn with 24 open-licensed fonts (SIL OFL 1.1; Permanent Marker, Coming Soon and
+                Schoolbell: Apache 2.0) plus system DejaVu / FreeFont / Liberation Sans, ♯ ♭ from music-capable
+                fonts or typed as # b, raised/smaller suffixes, italics, then rotation, blur, low resolution,
+                noise, paper tone, stray staff lines and JPEG. No font is distributed with the app.
+                Held out (never trained on): Liberation Serif, Kalam, Schoolbell.
+How it was made: scripts/chord-ocr/ — fetch_fonts.sh, synth.py, train.py (CTC, AdamW, one-cycle), export.py
+                (ONNX opset 17, checked against PyTorch, then the int8 step). README.md there has the
+                commands and the measurements.
+SHA-256:        __SHA__

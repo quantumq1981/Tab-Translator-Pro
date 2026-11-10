@@ -82,6 +82,11 @@ jobs:
           cp drum-model.js drum-model-core.js drum-worker.js _site/
           mkdir -p _site/models/oaf-drums
           cp models/oaf-drums/oaf-drums.onnx models/oaf-drums/NOTICE _site/models/oaf-drums/
+          # Chord-symbol reader (Scan 📷): glue + our own small CTC recogniser (trained on synthetic chord
+          # images, SHA-256 pinned in chord-ocr-core.js; scripts/chord-ocr/ rebuilds it).
+          cp chord-ocr-model.js chord-ocr-core.js chord-ocr-worker.js _site/
+          mkdir -p _site/models/chord-ocr
+          cp models/chord-ocr/chord-ocr.onnx models/chord-ocr/NOTICE _site/models/chord-ocr/
           # Learned beat + downbeat tracker (Tempo & bars): glue + the weight-only int8 beat_this final0
           # (MIT, SHA-256 pinned in beat-model-core.js; scripts/beatthis_export.py rebuilds it).
           cp beat-model.js beat-model-core.js beat-worker.js _site/
@@ -104,6 +109,8 @@ jobs:
           grep -q "src=\"./guitar-model.js?v=${BUILD}\"" _site/index.html
           sed -i "s#src=\"./drum-model.js\"#src=\"./drum-model.js?v=${BUILD}\"#" _site/index.html
           grep -q "src=\"./drum-model.js?v=${BUILD}\"" _site/index.html
+          sed -i "s#src=\"./chord-ocr-model.js\"#src=\"./chord-ocr-model.js?v=${BUILD}\"#" _site/index.html
+          grep -q "src=\"./chord-ocr-model.js?v=${BUILD}\"" _site/index.html
           sed -i "s#src=\"./beat-model.js\"#src=\"./beat-model.js?v=${BUILD}\"#" _site/index.html
           grep -q "src=\"./beat-model.js?v=${BUILD}\"" _site/index.html
           sed -i "s#src=\"./tab-view.js\"#src=\"./tab-view.js?v=${BUILD}\"#" _site/index.html

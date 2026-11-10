@@ -341,6 +341,8 @@ import {
   detectTuningAndCapo,
   nashvilleFor,
   scoreToGridSVG,
+  chordPageScore,
+  chordFromWritten,
 } from "./engine.tsx";
 
 async function extractTokens(buf) {
@@ -1079,7 +1081,7 @@ export default function TabDecoderPro() {
             <span style={{ color: C.dim, fontSize: 12, letterSpacing: 3 }}>TABTRANSLATOR PRO</span>
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6, maxWidth: "100%" }}>
-            {[["manual", "Manual"], ["pdf", "PDF Chart"], ["xml", "MusicXML / GP"], ["audio", "Audio 🎵"], ["lyrics", "Lyrics 🎙️"], ["live", "Live chords 🎶"], ["tuner", "Tuner 🎤"], ["library", "Library 📚"]].map(([m, lbl]) => (
+            {[["manual", "Manual"], ["pdf", "PDF Chart"], ["scan", "Scan 📷"], ["xml", "MusicXML / GP"], ["audio", "Audio 🎵"], ["lyrics", "Lyrics 🎙️"], ["live", "Live chords 🎶"], ["tuner", "Tuner 🎤"], ["library", "Library 📚"]].map(([m, lbl]) => (
               <button key={m} onClick={() => { setMode(m); clearSel(); }} style={{ ...toggle(C), padding: "6px 14px", flex: "none", ...(mode === m ? activeToggle(C) : {}) }}>
                 {lbl}
               </button>
@@ -1104,7 +1106,7 @@ export default function TabDecoderPro() {
             <button onClick={() => setPlaySet(null)} style={{ ...toggle(C), flex: "none", padding: "3px 10px" }}>✕</button>
           </div>
         )}
-        {mode === "library" ? <LibraryPanel C={C} onOpen={openProject} currentId={projectId} /> : mode === "tuner" ? <LiveTuner C={C} useSharp={useSharp} /> : mode === "live" ? <LiveChords C={C} useSharp={useSharp} /> : mode === "lyrics" ? <LyricsPanel C={C} /> : mode === "audio" ? <AudioImport C={C} useSharp={useSharp} incoming={audioIncoming} scoreFile={scoreFile} linkAsk={linkAsk} onLoaded={(f, bytes, dur) => { if (!audioIncoming || audioIncoming.name !== f.name) rememberProject({ kind: "audio", filename: f.name, bytes, duration: dur }); }} /> : (
+        {mode === "library" ? <LibraryPanel C={C} onOpen={openProject} currentId={projectId} /> : mode === "scan" ? <ScanPanel C={C} useSharp={useSharp} pdfReady={pdfReady} /> : mode === "tuner" ? <LiveTuner C={C} useSharp={useSharp} /> : mode === "live" ? <LiveChords C={C} useSharp={useSharp} /> : mode === "lyrics" ? <LyricsPanel C={C} /> : mode === "audio" ? <AudioImport C={C} useSharp={useSharp} incoming={audioIncoming} scoreFile={scoreFile} linkAsk={linkAsk} onLoaded={(f, bytes, dur) => { if (!audioIncoming || audioIncoming.name !== f.name) rememberProject({ kind: "audio", filename: f.name, bytes, duration: dur }); }} /> : (
         <div className={"tdp-cols" + (mode === "manual" ? " manual" : "")} style={{ position: "relative" }}>
           <section className="panel-rise" style={{ animationDelay: ".05s", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
             {mode === "manual" ? (
@@ -3796,6 +3798,161 @@ function LyricsCapture({ C }) {
  *   • Live capture — the existing Web Speech mic transcription (LyricsCapture).
  *   • Import — paste/upload a chords-over-lyrics tab or a ChordPro file and get a
  *     clean, lyrics-ONLY sheet back (LyricsImport). */
+/* ---- Scan 📷 — chord symbols from a picture or a scanned PDF of a lead sheet ----
+ * Path B, text half (docs/OMR-PLAN.md): a fake book's harmony is TEXT above the staff, so no
+ * notation model is needed. Each page becomes a grey image here (pdf.js renders a PDF page — the
+ * same library Path A loads; an image is drawn to a canvas), then window.TTP_CHORD_OCR reads it
+ * in a worker (engine `readChordPage`: staves, bar lines, the chord row, a small CTC recogniser,
+ * the chord grammar). Every box is shown on the page; uncertain reads are listed for review, and
+ * any box can be corrected or dropped. The chart is `chordPageScore` (4/4 assumed — a picture
+ * carries no meter we read) and renders through the normal ChartPanel (edit, transpose, export,
+ * → Chord Sheet Maker Pro). The file <input> has NO `accept` (iOS greys out what it can't map).
+ * Browser-only glue; not persisted in the session yet. */
+const SCAN_MAX_PAGES = 12, SCAN_MAX_WIDTH = 1800, CHORD_OCR_SIZE_HINT = "2.4 MB";
+function _scanGrey(canvas) {
+  const ctx = canvas.getContext("2d"), { width, height } = canvas, rgba = ctx.getImageData(0, 0, width, height).data;
+  const data = new Uint8Array(width * height);
+  for (let i = 0, j = 0; j < data.length; i += 4, j++) data[j] = (rgba[i] * 77 + rgba[i + 1] * 150 + rgba[i + 2] * 29) >> 8;
+  return { data, width, height, preview: canvas.toDataURL("image/jpeg", 0.82) };
+}
+async function _scanPdfPages(bytes) {
+  const pdf = await window.pdfjsLib.getDocument({ data: bytes }).promise, out = [];
+  for (let i = 1; i <= Math.min(pdf.numPages, SCAN_MAX_PAGES); i++) {
+    const pg = await pdf.getPage(i), v1 = pg.getViewport({ scale: 1 });
+    const vp = pg.getViewport({ scale: Math.min(4, 1500 / v1.width) });
+    const cv = document.createElement("canvas"); cv.width = Math.round(vp.width); cv.height = Math.round(vp.height);
+    const ctx = cv.getContext("2d"); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, cv.width, cv.height);
+    await pg.render({ canvasContext: ctx, viewport: vp }).promise;
+    out.push(_scanGrey(cv));
+  }
+  return out;
+}
+async function _scanImagePage(file) {
+  const bmp = await createImageBitmap(file), k = Math.min(1, SCAN_MAX_WIDTH / bmp.width);
+  const cv = document.createElement("canvas"); cv.width = Math.round(bmp.width * k); cv.height = Math.round(bmp.height * k);
+  const ctx = cv.getContext("2d"); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, cv.width, cv.height);
+  ctx.drawImage(bmp, 0, 0, cv.width, cv.height);
+  if (bmp.close) bmp.close();
+  return [_scanGrey(cv)];
+}
+
+function ScanPanel({ C, useSharp, pdfReady }) {
+  const fileRef = useRef(null);
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState("");
+  const [err, setErr] = useState("");
+  const [pages, setPages] = useState(null);       // [{ preview, width, height, layout, reads }]
+  const [fix, setFix] = useState({});              // "page.box" → chord name, or "" = not a chord
+  const [sel, setSel] = useState(null);            // "page.box"
+  const [draft, setDraft] = useState("");
+  const [ovr, setOvr] = useState({});
+
+  const onFile = async (e) => {
+    const f = e.target.files && e.target.files[0]; e.target.value = "";
+    if (!f) return;
+    setErr(""); setPages(null); setFix({}); setSel(null); setOvr({}); setName(f.name.replace(/\.[^.]+$/, ""));
+    try {
+      if (typeof window.TTP_CHORD_OCR !== "function") throw new Error("the chord reader isn't loaded — reload the page");
+      const bytes = new Uint8Array(await f.arrayBuffer());
+      const isPdf = bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46;
+      if (isPdf && !pdfReady) throw new Error("PDF.js is still loading — try again in a moment");
+      setBusy("preparing the page…");
+      const imgs = isPdf ? await _scanPdfPages(bytes) : await _scanImagePage(f);
+      setBusy("reading chords…");
+      const res = await window.TTP_CHORD_OCR(imgs.map((p) => ({ data: p.data.slice(), width: p.width, height: p.height })), {
+        onProgress: (done, total, page) => setBusy(`reading chords… page ${page + 1}/${imgs.length} · ${done}/${total} boxes`),
+      });
+      const out = res.pages.map((r, i) => ({ preview: imgs[i].preview, width: imgs[i].width, height: imgs[i].height, layout: r.layout, reads: r.reads }));
+      if (!out.some((p) => p.layout.staves.length)) setErr("No staves found. Scan Path B reads lead sheets (chord symbols above a staff); a straight, well-lit, flat shot works best.");
+      setPages(out);
+    } catch (ex) { setErr("Couldn't read it: " + (ex && ex.message ? ex.message : String(ex))); }
+    finally { setBusy(""); }
+  };
+
+  const readsOf = (p, pi) => p.reads.map((r, i) => {
+    const k = `${pi}.${i}`;
+    if (fix[k] === undefined) return r;
+    if (!fix[k]) return null;
+    const w = chordFromWritten(fix[k]);
+    return w ? { name: w.name, prob: 1, parsed: w.parsed, fixed: true } : r;
+  });
+  const score = useMemo(() => {
+    if (!pages || !pages.some((p) => p.layout.bars)) return null;
+    return chordPageScore(pages.map((p, pi) => ({ layout: p.layout, reads: readsOf(p, pi) })), { title: name });
+  }, [pages, fix, name]);
+  const all = pages ? pages.flatMap((p, pi) => readsOf(p, pi).map((r, i) => ({ k: `${pi}.${i}`, pi, i, r, t: p.layout.tokens[i] }))) : [];
+  const review = all.filter((x) => x.r && !x.r.fixed && x.r.prob < 0.8);
+  const nRead = all.filter((x) => x.r).length;
+  const pick = (k) => { setSel(k); const x = all.find((y) => y.k === k); setDraft(x && x.r ? x.r.name : ""); };
+  const save = (val) => { if (!sel) return; setFix((f) => ({ ...f, [sel]: val })); setSel(null); };
+  const draftOk = !draft || !!chordFromWritten(draft);
+  const selX = sel ? all.find((y) => y.k === sel) : null;
+
+  return (
+    <div style={{ maxWidth: 820, margin: "0 auto" }}>
+      <SectionLabel C={C}>PATH B · PHOTO / SCAN OF A LEAD SHEET → CHORD CHART</SectionLabel>
+      <input ref={fileRef} type="file" onChange={onFile} style={{ display: "none" }} />
+      <button onClick={() => fileRef.current && fileRef.current.click()} disabled={!!busy}
+        style={{ width: "100%", background: C.bg, border: `1px dashed ${C.border}`, color: C.amber, borderRadius: 10, padding: "22px 12px", fontSize: 14, cursor: busy ? "default" : "pointer", fontFamily: "'IBM Plex Mono', monospace" }}>
+        {busy || "⬆  Upload a photo, screenshot or scanned PDF of a lead sheet"}
+      </button>
+      <div style={{ fontSize: 11, color: C.dim, marginTop: 8, lineHeight: 1.6 }}>
+        Reads the <b>chord symbols</b> above each staff and puts them in their bars (4/4 assumed). Best on a flat, straight, well-lit page
+        or an exported PDF; tap any box on the page to correct it. The notes themselves are not read. Runs on this device; the reader
+        downloads once (~{CHORD_OCR_SIZE_HINT}).
+      </div>
+      {err && <div style={{ marginTop: 10, color: C.red, fontSize: 12 }}>{err}</div>}
+      {pages && (
+        <div style={{ marginTop: 12, fontSize: 12, color: C.dim }}>
+          {pages.reduce((a, p) => a + p.layout.staves.length, 0)} systems · {pages.reduce((a, p) => a + p.layout.bars, 0)} bars · {nRead} chords read
+          {review.length ? <span style={{ color: C.amber }}> · {review.length} to check</span> : null}
+        </div>
+      )}
+      {review.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+          {review.map((x) => (
+            <button key={x.k} onClick={() => pick(x.k)} title={`bar ${x.t.bar + 1} — ${Math.round(x.r.prob * 100)}% sure${x.r.alternatives.length ? "; or " + x.r.alternatives.join(", ") : ""}`}
+              style={{ ...chip(C), borderColor: sel === x.k ? C.amber : C.border, color: C.amber }}>bar {x.t.bar + 1 + pages.slice(0, x.pi).reduce((a, p) => a + p.layout.bars, 0)}: {x.r.name}?</button>
+          ))}
+        </div>
+      )}
+      {selX && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginTop: 8, padding: 8, border: `1px solid ${C.amber}`, borderRadius: 8 }}>
+          <span style={{ fontSize: 11, color: C.dim }}>bar {selX.t.bar + 1 + pages.slice(0, selX.pi).reduce((a, p) => a + p.layout.bars, 0)}</span>
+          <input value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && draftOk) save(draft); }} placeholder="chord, e.g. Bb7"
+            style={{ width: 110, background: C.bg, border: `1px solid ${draftOk ? C.border : C.red}`, color: C.text, borderRadius: 6, padding: "4px 8px", fontSize: 13, fontFamily: "'IBM Plex Mono', monospace" }} />
+          <button disabled={!draftOk} onClick={() => save(draft)} style={{ ...chip(C), color: C.green }}>✓ Use</button>
+          {selX.r && selX.r.alternatives && selX.r.alternatives.map((a) => <button key={a} onClick={() => save(a)} style={chip(C)}>{a}</button>)}
+          <button onClick={() => save("")} style={chip(C)}>not a chord</button>
+          <button onClick={() => setSel(null)} style={chip(C)}>✕</button>
+        </div>
+      )}
+      {pages && pages.map((p, pi) => (
+        <div key={pi} style={{ position: "relative", marginTop: 12, border: `1px solid ${C.border}`, borderRadius: 6, overflow: "hidden", background: "#fff" }}>
+          <img src={p.preview} alt={`page ${pi + 1}`} style={{ width: "100%", display: "block" }} />
+          {p.layout.tokens.map((t, i) => {
+            const k = `${pi}.${i}`, r = readsOf(p, pi)[i], unsure = r && !r.fixed && r.prob < 0.8;
+            const col = !r ? "#9aa0a6" : r.fixed ? "#1e8e3e" : unsure ? "#e8710a" : "#1a73e8";
+            return (
+              <button key={k} onClick={() => pick(k)} title={r ? `${r.name} (${Math.round(r.prob * 100)}%)` : "not read as a chord — tap to add one"}
+                style={{ position: "absolute", left: `${(100 * (t.x0 - 3)) / p.width}%`, top: `${(100 * (t.y0 - 3)) / p.height}%`, width: `${(100 * (t.x1 - t.x0 + 7)) / p.width}%`, height: `${(100 * (t.y1 - t.y0 + 7)) / p.height}%`,
+                  border: `${sel === k ? 3 : 1.5}px solid ${col}`, background: r ? "transparent" : "rgba(154,160,166,0.12)", borderRadius: 3, padding: 0, cursor: "pointer" }}>
+                {r && <span style={{ position: "absolute", left: 0, top: "100%", fontSize: 10, lineHeight: 1.1, color: "#fff", background: col, padding: "0 3px", borderRadius: 2, whiteSpace: "nowrap", fontFamily: "'IBM Plex Mono', monospace" }}>{r.name}</span>}
+              </button>
+            );
+          })}
+        </div>
+      ))}
+      {score && (
+        <div style={{ marginTop: 14 }}>
+          <ChartPanel score={score} title={name || "Scanned chart"} meta={`${score.bars.length} bars · read from ${pages.length > 1 ? pages.length + " pages" : "the page"} · 4/4 assumed`}
+            C={C} useSharp={useSharp} overrides={ovr} setOverrides={setOvr} selKey="" onPick={() => {}} autoSimplify={false} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function LyricsPanel({ C }) {
   const [sub, setSub] = useState("import"); // default to the new, deterministic tool
   return (

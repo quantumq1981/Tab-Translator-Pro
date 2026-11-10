@@ -99,6 +99,8 @@ const score = (parts) => `<?xml version="1.0"?><score-partwise version="3.1"><wo
   const doc = new DOMParser().parseFromString(xml, "text/xml");
   expect(doc.getElementsByTagName("measure").length === 2, "export: well-formed, two measures");
   expect(/<kind text="7sus4">suspended-fourth<\/kind>/.test(xml) && /<degree-value>7<\/degree-value><degree-alter>-1<\/degree-alter>/.test(xml), "7sus4 = suspended-fourth + added ♭7");
+  expect([...xml.matchAll(/<degree( [^>]*)?>/g)].length === 3 && [...xml.matchAll(/<degree( [^>]*)?>/g)].every((m) => /print-object="no"/.test(m[0])),
+    "added degrees are hidden (print-object=\"no\"): the kind text already spells them, so an engraver must not print G7sus4(b7)");
   expect(/<kind text="6\/9">major-sixth<\/kind>/.test(xml) && /<bass><bass-step>E<\/bass-step><\/bass>/.test(xml), "6/9 = major-sixth + added 9, slash bass kept");
   expect(/<offset>960<\/offset>/.test(xml), "a chord on beat 3 of a whole note is written with an offset");
   expect(/<fifths>1<\/fifths>/.test(xml) && /<rehearsal[^>]*>A<\/rehearsal>/.test(xml) && /repeat direction="forward"/.test(xml) && /repeat direction="backward"/.test(xml), "key, rehearsal mark and repeats are written");
