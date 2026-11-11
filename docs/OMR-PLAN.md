@@ -120,12 +120,78 @@ needs: it emits no chord symbols, reads no single-staff lead sheet, no guitar ta
 still needs a JS system splitter + scale normaliser + a kern → MusicXML reader before
 `leadSheetFromMusicXML` can turn its notes into chords. Camera photos have a long tail of bad
 systems (pooled ~17–25 %). Recommended order from here:
-1. **Chord-symbol OCR for lead sheets** and **tab photos** (below) — they answer the fake-book use
-   directly and are cheaper.
+1. **Chord-symbol OCR for lead sheets — BUILT (2026-11-10), see the next section** — and **tab
+   photos** (below) — they answer the fake-book use directly and are cheaper.
 2. SMT as an on-demand "photo of piano music → notes → chords" tool, only if the owner wants
    it: system splitter + scale normaliser (plain JS), `**kern` reader, a runaway guard (stop on a
    repeated n-gram or > 3× the expected tokens for the width), the int8 embedding fix, the usual
    worker rails, and a device check.
+
+## Chord-symbol OCR for lead sheets — built (2026-11-10)
+
+The "Scan 📷" mode: a photo, screenshot or scanned PDF of a lead sheet → the chord chart, on the device.
+No notation model: staves, bar lines and the chord row are found geometrically, and only the text
+boxes go through a small learned recogniser.
+
+**Pipeline** (engine block "CHORD OCR", pure, `tests/chord-ocr.mjs`; glue `chord-ocr-model.js` →
+`chord-ocr-worker.js` → `chord-ocr-core.js`, the usual rails):
+1. `chordPageLayout`: two adaptive-threshold masks from one integral image (a shadow moves the local mean
+   with it) → staves found as pieces in narrow vertical strips, linked across the page, each line fitted
+   as y = a + b·x and refitted on the image (tilt and perspective) → bar lines = components, after the staff
+   lines are erased, that run the full four spaces and stay thin (a stem is 3.5 spaces and joined to its
+   head) → the chord row = the text row above each staff spread over the most BARS (a tempo mark or a bar
+   number sits in one) → boxes, each with its bar and x position.
+2. `chordOcrInput` → the recogniser (`models/chord-ocr/chord-ocr.onnx`) → `ctcBeam` → `chordOcrRead`: the
+   most probable reading the chord grammar accepts (`chordFromWritten` → `parseChordSymbolForVoicings`), and
+   only if the model gives it ≥ 10 % (otherwise a bar number "7" becomes "D7").
+3. A box at a system's start that reads as digits is that system's bar number; `_ocrAnchorBars` re-anchors
+   every numbered system, so one missed bar line no longer shifts the rest of the page.
+4. `chordPageScore` → the shared chord score (4/4 assumed; two chords in a bar → beats 1 and 3; an empty bar
+   holds the last chord) → ChartPanel, every export, the Pro handoff.
+
+**The recogniser is ours.** CNN + bidirectional GRU, 588 k parameters, CTC over the chord as drawn (43
+classes), weight-only int8 = **0.60 MB** (same accuracy as fp32). Trained only on synthetic images
+(`scripts/chord-ocr/`): fake-book spellings (maj7/MA7/Δ7/M7, mi7/-7, ø, °, +, sus, 69, parentheses,
+slash basses), ♯/♭ as music glyphs or typed, raised suffixes, italics, 24 open-licensed fonts (15
+handwritten, incl. Steinberg's Petaluma Script), heavy degradation; plus bar numbers labelled with their
+digits and words / tempo marks / directions labelled EMPTY — without those negatives every bar number was
+read as a chord (precision 78 %). Licence: MIT (our model, NOTICE alongside).
+
+**Measured** (78 lead sheets rendered by verovio from the repo's GP files, 1,722 known chords; even file =
+dev, odd = test; text in Liberation Serif, a font never trained on; photo conditions = homography with
+±1° / ±3° rotation + perspective, shadow ramp, paper tone, noise, blur, rescale, JPEG):
+
+| | chord right in its bar — P / R | chord name right | when ≥ 80 % sure: right |
+|---|---|---|---|
+| clean, dev | 99.0 / 98.7 | 99.7 % | 100 % |
+| clean, test | 98.1 / 98.4 | 100 % | 100 % |
+| photo ±1°, test | 99.4 / 98.1 | 98.1 % | 99.6 % |
+| photo ±3°, test | 95.0 / 93.3 | 98.1 % | 100 % |
+
+Recognition alone in the two HELD-OUT handwriting fonts (Kalam, Schoolbell): 97.2–97.5 % right, 99.6–99.9 %
+when sure. Baseline, tesseract.js 5.1.1 (eng, single line, chord whitelist) on the same clean crops: 66–70 %,
+and 26–30 % of chords with a ♯/♭. Speed on the phone's runtime (ORT 1.23.2 WASM, one thread, Node, 4-core
+container): ~250 ms per page (~27 boxes); the real app read a page in 1.4 s including the model download
+(`tests/bench/scan-e2e.mjs`).
+
+**Do not re-derive:**
+- Whole-row projections assume level staves: a ±1° photo dropped layout recall to 5 %. Strips + line fits fixed it.
+- Global Otsu fails under a shadow; one adaptive mask is not enough either — the strict one breaks thin grey
+  stems where they cross the staff (stem tips became "chords"), the lenient one is needed for staves and the
+  chord row. Bar lines stay on the strict mask: on blurred photos the lenient one can't erase the staff lines.
+- Searching for chord-row components only ABOVE the staff cuts every stem off its notehead; search into the
+  staff and drop components whose bottom is inside it.
+- A note-head-beside-the-stem test and a constant-width test both broke bar lines (notes sit right next to
+  bar lines; blur widens line ends). The full-span test (4 spaces vs a stem's 3.5) is what works.
+- `train.py`'s batched "dev exact" reads low (a narrow crop behind long padding loses its last character in
+  the bidirectional GRU); the app reads one box at a time — quote the benches.
+
+**Honest limits:** the corpus is engraved (verovio), not real fake books — real handwritten Real Book pages
+and phone photos are the device check that remains; a curled page (curved staff lines) is not modelled; no
+time-signature reading (4/4 assumed); rehearsal letters A/B can read as chords (they are valid chords — the
+review list and tap-to-fix are the answer); chords without a staff (chord-only charts) are not found;
+verovio ignores `print-object="no"` on `<degree>`, so the corpus prints "7sus4(b7)" (the lead-sheet export
+now sets it, per the MusicXML spec).
 
 ## Two cheaper routes worth measuring alongside
 

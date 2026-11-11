@@ -3672,7 +3672,34 @@ it pays off today for MusicXML / Muscriptor imports. UI wiring is not done yet.
   counts them. `_parseSym` only knows the family table — key-spelled names (G#, D#) must be
   parsed with `_PC_ANY` (`_leadHarmonyXML` does).
 
-## Path B (scans / photos) — not built; plan in `docs/OMR-PLAN.md`
+## Scan 📷 — chord symbols from a picture of a lead sheet (Path B, text half, 2026-11-10)
+
+Full write-up + numbers: `docs/OMR-PLAN.md` ("Chord-symbol OCR"). Engine block "CHORD OCR" (pure);
+glue `chord-ocr-model.js` → `chord-ocr-worker.js` → `chord-ocr-core.js` (drum-model rails: pinned ORT 1.23.2
+plain WASM, one thread, capWasmMemory, Cache + SHA-256, worker ended per job, no main-thread retry);
+UI `ScanPanel` (mode "Scan 📷"). Guards: `tests/chord-ocr.mjs` (in `npm test`). Kit + benches:
+`scripts/chord-ocr/` (README). Browser check: `tests/bench/scan-e2e.mjs`.
+- **No notation model.** `chordPageLayout`: two adaptive masks (one integral image) → staves as strip
+  pieces linked + each line fitted y = a + b·x and refitted on the image (tilt / perspective) → bar lines =
+  components that run the full 4 spaces and stay thin after the staff lines are erased (a stem is 3.5) →
+  the chord row = the text row spread over the most BARS → boxes with bar + x. Layout is plain data (it
+  crosses the worker boundary; internal staves carry closures that are stripped).
+- **Recogniser = ours** (`models/chord-ocr/chord-ocr.onnx`, MIT, 588 k params, int8 0.60 MB, SHA pinned):
+  CTC over the chord as drawn; trained only on synthetic images incl. NEGATIVES — bar numbers labelled as
+  digits, words / tempo marks labelled empty. `chordOcrRead` keeps the most probable grammar-valid reading
+  only if the model gives it ≥ 10 % (else "7" → "D7"). `chordFromWritten` normalises every fake-book spelling
+  through `parseChordSymbolForVoicings`.
+- **Bar numbers re-anchor systems** (`chordOcrNumber`, `_ocrAnchorBars`): a missed bar line shifts only its
+  own system. The page's first bar comes from its printed number or the caller (`opts.firstBar`, carried page
+  to page by the core) — never inferred from a later system.
+- `chordPageScore`: 4/4 assumed, two chords in a bar → beats 1 and 3, an empty bar holds the last chord.
+- **Measured (rendered GP corpus, held-out font):** chord in its right bar P/R clean 98–99 / 98.4–98.7,
+  ±1° photo 99 / 98, ±3° photo 95 / 93; chord name 98–100 %; held-out handwriting 97 %; ~250 ms/page.
+  tesseract.js baseline 66–70 % (26–30 % with ♯/♭). **Device check remaining:** real fake-book photos.
+- UI: no `accept` on the input; PDFs rendered with the pdf.js Path A already loads; every box tappable
+  (correct / "not a chord"); reads < 80 % sure listed to check. Not persisted in the session yet.
+
+## Path B (notation) — not built; plan in `docs/OMR-PLAN.md`
 
 Raster input (a photo or scanned page) needs an OMR model, kept SEPARATE from the Path A parser.
 Decisions (2026-11-09): OpenCV.js not adopted (another ~9 MB WASM on phones; plain JS is
@@ -3922,13 +3949,19 @@ accordingly.
   Since 2026-11-09 also `drumLikeness` (drum loop vs chords, rate-independent, empty input) and the Audio
   panel's 🥁 Drums contracts (no chord decode, full-rate reader, filename auto-pick, the 0.6 suggestion,
   isolation off, one shared `DrumChartView`, the `−0:00.01` bar-line time).
+- **Chord OCR** (`tests/chord-ocr.mjs`, in `npm test`): painted pages (a beam among staff lines, grey
+  between-row lines, a stem vs a bar line, a tilted + shaded page), word grouping, bar + position per box,
+  plain-data layout; the model input; CTC beam; the written-spelling table + non-chords; grammar-checked and
+  probability-gated reads ("7" is bar 7, not D7); bar-number re-anchoring (mutation-tested); page → score →
+  CSMPN; the orchestrator with a fake model; SHA pin, NOTICE, glue / pages.yml / index / UI contracts.
 - **Lead sheet** (`tests/lead-sheet.mjs`, in `npm test`): the skyline keeps a held melody over an
   inner voice, chord groups → top note, LH ignored; part choice (single-note high line, a
   voice-named part, override); written harmony from another part at its beat; "written" with no
   symbols → no chords; ties across a bar line, grace notes, meter change; choir rule; auto
   chord rate; key spelling; harmony export (degrees, slash, offset) and round trip; the 338 Bach
   chorales (soprano every time, exact round trip on the 336 on a 16th grid, the 2 with 32nds
-  flagged `offGrid`). Mutation-tested (held-note rule, choir rule).
+  flagged `offGrid`). Mutation-tested (held-note rule, choir rule). The export writes added degrees with
+  `print-object="no"` (the kind text already spells them; verovio 6.4.1 ignores it and prints "7sus4(b7)").
 - **Lyrics import (`parseLyrics`)**: `npm test` asserts the strict chord matcher accepts
   real chords and rejects note-letter lyric words (Add/Cab/Bad/Fed/Gem/Bee/Ace), the
   line-level `isChordLine` catches chord lines but spares lyric/blank lines, a full

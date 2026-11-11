@@ -2243,7 +2243,8 @@ function leadSheetToChordScore(lead) {
 /* MusicXML <kind> for a chord suffix beyond _XML_KIND (declared later in the file, so merged at
  * call time); a suffix with no exact kind keeps its own text. */
 /* Qualities MusicXML spells as a kind plus added degrees (MuseScore, Finale and music21 all read
- * these); the kind's `text` keeps the display name. */
+ * these); the kind's `text` keeps the display name, and print-object="no" on each degree stops
+ * engravers printing it twice (verovio drew "G7sus4(b7)"). */
 const _LEAD_DEGREES = { "7sus4": { kind: "suspended-fourth", add: [[7, -1]] }, "6/9": { kind: "major-sixth", add: [[9, 0]] }, add9: { kind: "major", add: [[9, 0]] },
   "7♭9": { kind: "dominant", add: [[9, -1]] }, "7♯9": { kind: "dominant", add: [[9, 1]] }, "7b9": { kind: "dominant", add: [[9, -1]] }, "7#9": { kind: "dominant", add: [[9, 1]] } };
 const _LEAD_EXTRA_KIND = { "7sus4": "suspended-fourth", "9": "dominant-ninth", maj9: "major-ninth", m9: "minor-ninth", m11: "minor-11th",
@@ -2266,7 +2267,7 @@ function _leadHarmonyXML(sym, spellKeyNames) {
   let s = "      <harmony>\n        <root><root-step>" + rs + "</root-step>" + (ra ? "<root-alter>" + ra + "</root-alter>" : "") + "</root>\n" +
     "        <kind" + (exact ? "" : ' text="' + _xmlEsc(suffix) + '"') + ">" + kind + "</kind>\n";
   if (p.bassPc != null) { const [bs, ba] = nameStep(p.bassPc); s += "        <bass><bass-step>" + bs + "</bass-step>" + (ba ? "<bass-alter>" + ba + "</bass-alter>" : "") + "</bass>\n"; }
-  if (deg) for (const [v, a] of deg.add) s += "        <degree><degree-value>" + v + "</degree-value><degree-alter>" + a + "</degree-alter><degree-type>add</degree-type></degree>\n";
+  if (deg) for (const [v, a] of deg.add) s += "        <degree print-object=\"no\"><degree-value>" + v + "</degree-value><degree-alter>" + a + "</degree-alter><degree-type>add</degree-type></degree>\n";
   return s + "      </harmony>";
 }
 /* Lead sheet → a one-part MusicXML 3.1 lead sheet: the melody in standard note values (16th
@@ -13346,6 +13347,485 @@ function scoreToGridSVG(score, opts = {}) {
   return L.join("\n");
 }
 
+
+/* ============================================================================
+ *  CHORD OCR — chord symbols from a picture of a lead sheet (Path B, text half)
+ * ============================================================================
+ * A fake book's harmony is TEXT above the staff, so a lead-sheet scan becomes a chord chart without
+ * a notation model: find the staves and bar lines, box the text row above each staff, read each box
+ * with a small CTC recogniser (run by the page in ONNX Runtime; this block only prepares its input
+ * and reads its output), keep the reading the chord grammar accepts, and place it in its bar.
+ * Pure: a page is { data: Uint8Array grey 0..255, width, height }. See docs/OMR-PLAN.md. */
+const CHORD_OCR = {
+  height: 32,
+  // the recogniser's output classes in order (class 0 = CTC blank): the chord as DRAWN — ♯/♭ glyphs
+  // are read as "#"/"b", and every spelling a fake book uses (Δ, mi, -, ø, °, +, parentheses)
+  charset: "ABCDEFG" + "abdgijlmnostuM" + "0123456789" + "#/()+-,Δ°ø^",
+};
+
+/* Bradley adaptive threshold (integral image): ink where a pixel is k darker than its (2r+1)² mean —
+ * a shadow across a phone photo moves the local mean with it, so one global threshold isn't used. */
+function _ocrAdaptiveInk(data, w, h, r, ks) {
+  // one integral image for every threshold asked for (ks: a number or a list → one mask each)
+  const list = Array.isArray(ks) ? ks : [ks], W1 = w + 1;
+  const I = new Float64Array(W1 * (h + 1));
+  for (let y = 0; y < h; y++) { let row = 0; for (let x = 0; x < w; x++) { row += data[y * w + x]; I[(y + 1) * W1 + x + 1] = I[y * W1 + x + 1] + row; } }
+  const outs = list.map(() => new Uint8Array(w * h));
+  for (let y = 0; y < h; y++) {
+    const y0 = Math.max(0, y - r), y1 = Math.min(h, y + r + 1);
+    for (let x = 0; x < w; x++) {
+      const x0 = Math.max(0, x - r), x1 = Math.min(w, x + r + 1), n = (x1 - x0) * (y1 - y0);
+      const sum = I[y1 * W1 + x1] - I[y0 * W1 + x1] - I[y1 * W1 + x0] + I[y0 * W1 + x0], v = data[y * w + x] * n;
+      for (let i = 0; i < list.length; i++) outs[i][y * w + x] = v < sum * (1 - list[i]) ? 1 : 0;
+    }
+  }
+  return Array.isArray(ks) ? outs : outs[0];
+}
+
+/* Five near-evenly spaced line candidates → staff groups, scored by their weakest line (a beam is
+ * much shorter than a staff line); the spacing is re-estimated line by line (it isn't an integer). */
+function _ocrFiveLines(lines, minGap) {
+  const groups = [];
+  for (let i = 0; i < lines.length; i++) for (let j = i + 1; j < Math.min(lines.length, i + 4); j++) {
+    if (lines[j].y - lines[i].y < minGap) continue;
+    const pick = [i, j];
+    for (let k = 2; k < 5; k++) {
+      const last = lines[pick[pick.length - 1]].y, sp = (last - lines[i].y) / (k - 1), want = last + sp;
+      let best = -1, bd = 0.22 * sp + 1;
+      for (let m = pick[pick.length - 1] + 1; m < lines.length && lines[m].y < want + bd; m++) if (Math.abs(lines[m].y - want) < bd) { best = m; bd = Math.abs(lines[m].y - want); }
+      if (best < 0) break;
+      pick.push(best);
+    }
+    if (pick.length === 5 && pick[4] - pick[0] <= 6) groups.push({ ys: pick.map((k) => lines[k].y), score: Math.min(...pick.map((k) => lines[k].r)) });
+  }
+  groups.sort((a, b) => b.score - a.score);
+  const out = [];
+  for (const g of groups) if (!out.some((o) => g.ys[0] < o.ys[4] + 1 && g.ys[4] > o.ys[0] - 1)) out.push(g);
+  return out;
+}
+
+/* Staves on a tilted / perspective page: staff pieces are found in narrow vertical strips (row
+ * coverage per strip), linked strip to strip, and each of the five lines is fitted as y = a + b·x,
+ * then refitted on the image itself (the thin ink run nearest the prediction, two trimming passes).
+ * Internal staff objects carry line(k, x) / top(x) / bottom(x). */
+function _ocrStaves(soft, w, h) {
+  const SW = Math.max(20, Math.round(w / 28)), nS = Math.ceil(w / SW), frags = [];
+  const cov = new Float64Array(h);
+  for (let si = 0; si < nS; si++) {
+    const xa = si * SW, xb = Math.min(w, xa + SW), ww = xb - xa;
+    for (let y = 0; y < h; y++) { let c = 0; for (let x = xa; x < xb; x++) if (soft[y * w + x] || (y > 0 && soft[(y - 1) * w + x]) || (y + 1 < h && soft[(y + 1) * w + x])) c++; cov[y] = c / ww; }
+    const lines = [];
+    for (let y = 0; y < h; y++) {
+      if (cov[y] < 0.7) continue;
+      let y1 = y; while (y1 + 1 < h && cov[y1 + 1] >= 0.7) y1++;
+      if (y1 - y < 8) { let r = 0; for (let k = y; k <= y1; k++) r = Math.max(r, cov[k]); lines.push({ y: (y + y1) / 2, r }); }
+      y = y1;
+    }
+    for (const g of _ocrFiveLines(lines, 3)) frags.push({ si, xc: (xa + xb) / 2, ys: g.ys, s: (g.ys[4] - g.ys[0]) / 4 });
+  }
+  // link fragments strip to strip
+  frags.sort((a, b) => a.si - b.si || a.ys[0] - b.ys[0]);
+  const used = new Uint8Array(frags.length), chains = [];
+  for (let i = 0; i < frags.length; i++) {
+    if (used[i]) continue;
+    const ch = [frags[i]]; used[i] = 1;
+    for (let j = i + 1; j < frags.length; j++) {
+      const last = ch[ch.length - 1], f = frags[j];
+      if (used[j] || f.si === last.si) continue;
+      if (f.si - last.si > 4) break;
+      let pred = last.ys[0];
+      if (ch.length >= 2) { const p = ch[ch.length - 2]; pred += ((last.ys[0] - p.ys[0]) / (last.xc - p.xc)) * (f.xc - last.xc); }
+      if (Math.abs(f.ys[0] - pred) < 0.7 * last.s && Math.abs(f.s - last.s) < 0.25 * last.s) { ch.push(f); used[j] = 1; }
+    }
+    if (ch.length >= 3) chains.push(ch);
+  }
+  const staves = [];
+  for (const ch of chains) {
+    const n = ch.length, mx = ch.reduce((a, f) => a + f.xc, 0) / n, a = [], b = [];
+    let sxx = 0; for (const f of ch) sxx += (f.xc - mx) ** 2;
+    for (let k = 0; k < 5; k++) {
+      const my = ch.reduce((acc, f) => acc + f.ys[k], 0) / n;
+      let sxy = 0; for (const f of ch) sxy += (f.xc - mx) * (f.ys[k] - my);
+      const bk = sxx > 0 ? sxy / sxx : 0; b.push(bk); a.push(my - bk * mx);
+    }
+    const st = { a, b, s: ch.reduce((acc, f) => acc + f.s, 0) / n };
+    st.line = (k, x) => st.a[k] + st.b[k] * x;
+    // refine each line on the image itself: at every few columns take the thin ink run nearest the
+    // prediction (a notehead or a beam is thick and skipped), then least squares with two trimming passes
+    const xs0 = Math.round(ch[0].xc - 2 * SW), xs1 = Math.round(ch[n - 1].xc + 2 * SW), step = Math.max(3, Math.round(st.s / 2));
+    for (let k = 0; k < 5; k++) {
+      let pts = [];
+      for (let x = Math.max(0, xs0); x <= Math.min(w - 1, xs1); x += step) {
+        const pred = st.line(k, x), y0 = Math.max(0, Math.round(pred - 0.45 * st.s)), y1 = Math.min(h - 1, Math.round(pred + 0.45 * st.s));
+        let best = null;
+        for (let y = y0; y <= y1; y++) {
+          if (!soft[y * w + x]) continue;
+          let e = y; while (e + 1 < h && soft[(e + 1) * w + x]) e++;
+          let a0 = y; while (a0 > 0 && soft[(a0 - 1) * w + x]) a0--;
+          if (e - a0 + 1 <= Math.max(3, 0.35 * st.s)) { const c = (a0 + e) / 2; if (!best || Math.abs(c - pred) < Math.abs(best - pred)) best = c; }
+          y = e;
+        }
+        if (best != null) pts.push([x, best]);
+      }
+      for (let pass = 0; pass < 3 && pts.length >= 6; pass++) {
+        const mx2 = pts.reduce((q, p) => q + p[0], 0) / pts.length, my2 = pts.reduce((q, p) => q + p[1], 0) / pts.length;
+        let sx = 0, sxy = 0; for (const [x, y] of pts) { sx += (x - mx2) ** 2; sxy += (x - mx2) * (y - my2); }
+        const bk = sx > 0 ? sxy / sx : 0, ak = my2 - bk * mx2;
+        st.a[k] = ak; st.b[k] = bk;
+        const keep = pts.filter(([x, y]) => Math.abs(y - (ak + bk * x)) <= (pass ? 1.5 : 3));
+        if (keep.length === pts.length) break;
+        pts = keep;
+      }
+    }
+    st.s = (st.line(4, w / 2) - st.line(0, w / 2)) / 4;
+    st.top = (x) => st.line(0, x); st.bottom = (x) => st.line(4, x);
+    // horizontal extent: walk the middle line outward from the chain while there is ink (gaps ≤ 2 s)
+    const on = (x) => { const y = Math.round(st.line(2, x)); for (let d = -1; d <= 1; d++) if (y + d >= 0 && y + d < h && soft[(y + d) * w + x]) return true; return false; };
+    const gap = Math.max(4, Math.round(2 * st.s));
+    let x0 = Math.round(ch[0].xc), x1 = Math.round(ch[n - 1].xc), miss = 0;
+    for (let x = x0; x >= 0; x--) { if (on(x)) { x0 = x; miss = 0; } else if (++miss > gap) break; }
+    miss = 0; for (let x = x1; x < w; x++) { if (on(x)) { x1 = x; miss = 0; } else if (++miss > gap) break; }
+    st.x0 = x0; st.x1 = x1; st.cover = n;
+    if (x1 - x0 > 0.15 * w) staves.push(st);
+  }
+  staves.sort((p, q) => p.top(w / 2) - q.top(w / 2));
+  // drop staves that overlap a stronger one
+  return staves.filter((st, i) => !staves.some((o, j) => j !== i && o.cover > st.cover && Math.abs(o.top(w / 2) - st.top(w / 2)) < 2 * st.s));
+}
+
+/* Bar lines: erase the staff lines (pixels whose vertical ink run is short), then a bar line is a
+ * component as tall as the staff — from the top line to the bottom line, a stem is only 3.5 spaces —
+ * and thin; a stem joined to its notehead / flag / beam is wide. */
+function _ocrBarlines(ink, w, h, st) {
+  const s = st.s, X0 = Math.max(0, Math.floor(st.x0 - 2)), X1 = Math.min(w - 1, Math.ceil(st.x1 + 2));
+  const yA = Math.max(0, Math.floor(Math.min(st.top(X0), st.top(X1)) - 1.5 * s)), yB = Math.min(h - 1, Math.ceil(Math.max(st.bottom(X0), st.bottom(X1)) + 1.5 * s));
+  const W = X1 - X0 + 1, H = yB - yA + 1, m = new Uint8Array(W * H), maxRun = Math.max(3, Math.round(0.3 * s));
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) m[y * W + x] = ink[(y + yA) * w + x + X0];
+  for (let k = 0; k < 5; k++) for (let x = 0; x < W; x++) {
+    const yc = Math.round(st.line(k, x + X0)) - yA;
+    for (let dy = -2; dy <= 2; dy++) {
+      const y = yc + dy; if (y < 0 || y >= H || !m[y * W + x]) continue;
+      let a = y, b = y; while (a > 0 && m[(a - 1) * W + x]) a--; while (b < H - 1 && m[(b + 1) * W + x]) b++;
+      if (b - a + 1 <= maxRun) for (let yy = a; yy <= b; yy++) m[yy * W + x] = 0;
+    }
+  }
+  const cs = _ocrComponents(m, W, H, 0, 0, W - 1, H - 1), out = [];
+  for (const c of cs) {
+    const cx = (c.x0 + c.x1) / 2 + X0, top = st.top(cx) - yA, bot = st.bottom(cx) - yA;
+    if (c.x1 - c.x0 + 1 > Math.max(3, 0.5 * s)) continue;
+    if (c.y1 - c.y0 + 1 < 0.85 * (bot - top)) continue;
+    if (c.y0 < top - 0.5 * s || c.y1 > bot + 0.5 * s) continue;
+    // a bar line runs the full four spaces from the top line to the bottom line; a stem is 3.5 long
+    if (c.y0 > top + 0.25 * s || c.y1 < bot - 0.25 * s) continue;
+    out.push(cx);
+  }
+  out.sort((a, b) => a - b);
+  return out.filter((x, i) => i === 0 || x - out[i - 1] > 1.2 * s);
+}
+
+/* The chord row above a staff: components between the previous staff and this one whose bottom is
+ * above the top line (searched down into the staff, so a stem stays joined to its notehead and is
+ * dropped), heights measured from the top line at their own x; the text row is the candidate row
+ * spread over the most BARS (a tempo mark or bar number sits in one); words merged by x gaps. */
+function _ocrChordRow(ink, w, h, st, prev, edges) {
+  const s = st.s, X0 = Math.max(0, st.x0 - 2 * s), X1 = Math.min(w - 1, st.x1 + 2 * s);
+  const topMin = Math.min(st.top(X0), st.top(X1)), topMax = Math.max(st.top(X0), st.top(X1));
+  const yTop = prev ? Math.min(prev.bottom(X0), prev.bottom(X1)) + 2.5 * s : 0;
+  // search down into the staff so a stem stays joined to its notehead (and is then dropped below)
+  const cs = _ocrComponents(ink, w, h, X0, Math.max(0, yTop), X1, Math.max(st.bottom(X0), st.bottom(X1)) + s).filter((c) => {
+    const cx = (c.x0 + c.x1) / 2, top = st.top(cx), pb = prev ? prev.bottom(cx) + 2.5 * s : 0;
+    c.rel0 = top - c.y1; c.rel1 = top - c.y0;                    // height above this staff's top line at its x
+    return c.rel0 > 0.6 * s && c.y0 > pb && c.n >= 3 && c.y1 - c.y0 < 4 * s && c.x1 - c.x0 < 6 * s;
+  });
+  if (!cs.length) return [];
+  // candidate text rows = local maxima of the overlap profile (height above the top line); the chord
+  // row is the one spread over the most BARS (a tempo mark or a bar number sits in one)
+  const R = Math.ceil(Math.max(...cs.map((c) => c.rel1))) + 2, prof = new Float64Array(R + 1);
+  for (const c of cs) for (let r = Math.floor(c.rel0); r <= Math.ceil(c.rel1) && r <= R; r++) prof[r] += 1;
+  const barOf = (x) => { let b = 0; while (edges && b + 1 < edges.length - 1 && x >= edges[b + 1]) b++; return b; };
+  let br = -1, bestScore = -1;
+  for (let r = 0; r <= R; r++) {
+    if (!prof[r] || (r > 0 && prof[r - 1] > prof[r]) || (r < R && prof[r + 1] > prof[r])) continue;
+    const on = cs.filter((c) => c.rel0 <= r && c.rel1 >= r), bars = new Set(on.map((c) => barOf(c.x0)));
+    const sc = bars.size + 0.01 * on.length - 0.001 * r;
+    if (sc > bestScore) { bestScore = sc; br = r; }
+  }
+  const core = cs.filter((c) => c.rel0 <= br + 0.2 * s && c.rel1 >= br - 0.2 * s);
+  const th0 = core.length ? core.map((c) => c.y1 - c.y0 + 1).sort((a, b) => a - b)[core.length >> 1] : s;
+  const lo = Math.min(...core.map((c) => c.rel0)), hi = Math.max(...core.map((c) => c.rel1));
+  // + small marks inside the row's band (an accidental, a superscript, a dot) — not stems from below
+  const row = cs.filter((c) => core.includes(c) || (c.rel0 >= lo - 0.3 * th0 && c.rel1 <= hi + 0.6 * th0 && c.y1 - c.y0 < 1.2 * s));
+  if (!row.length) return [];
+  const hts = row.map((c) => c.y1 - c.y0 + 1).sort((a, b) => a - b), th = hts[hts.length >> 1];
+  row.sort((a, b) => a.x0 - b.x0);
+  const toks = [];
+  for (const c of row) {
+    const t = toks[toks.length - 1];
+    if (t && c.x0 - t.x1 <= Math.max(0.55 * th, 0.6 * s)) { t.x0 = Math.min(t.x0, c.x0); t.x1 = Math.max(t.x1, c.x1); t.y0 = Math.min(t.y0, c.y0); t.y1 = Math.max(t.y1, c.y1); }
+    else toks.push({ x0: c.x0, y0: c.y0, x1: c.x1, y1: c.y1 });
+  }
+  return toks;
+}
+
+/* 8-connected ink components inside a rectangle → [{ x0, y0, x1, y1, n }]. */
+function _ocrComponents(ink, w, h, rx0, ry0, rx1, ry1) {
+  rx0 = Math.max(0, Math.floor(rx0)); ry0 = Math.max(0, Math.floor(ry0)); rx1 = Math.min(w - 1, Math.floor(rx1)); ry1 = Math.min(h - 1, Math.floor(ry1));
+  const W = rx1 - rx0 + 1, H = ry1 - ry0 + 1;
+  if (W <= 0 || H <= 0) return [];
+  const seen = new Uint8Array(W * H), out = [], stack = [];
+  for (let yy = 0; yy < H; yy++) for (let xx = 0; xx < W; xx++) {
+    const i = yy * W + xx;
+    if (seen[i] || !ink[(yy + ry0) * w + xx + rx0]) continue;
+    let x0 = xx, x1 = xx, y0 = yy, y1 = yy, n = 0;
+    seen[i] = 1; stack.push(i);
+    while (stack.length) {
+      const j = stack.pop(), jx = j % W, jy = (j - jx) / W; n++;
+      if (jx < x0) x0 = jx; if (jx > x1) x1 = jx; if (jy < y0) y0 = jy; if (jy > y1) y1 = jy;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const nx = jx + dx, ny = jy + dy;
+        if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+        const k = ny * W + nx;
+        if (!seen[k] && ink[(ny + ry0) * w + nx + rx0]) { seen[k] = 1; stack.push(k); }
+      }
+    }
+    out.push({ x0: x0 + rx0, y0: y0 + ry0, x1: x1 + rx0, y1: y1 + ry0, n });
+  }
+  return out;
+}
+
+/** A lead-sheet page → { staves, tokens, bars }. Each token is a box of text above a staff with its
+ *  bar (0-based, counted system by system over the page) and `frac`, its x position inside the bar
+ *  (0..1). Staves come back as plain data ({ a, b, s, x0, x1, barlines, edges }; line k at x is
+ *  a[k] + b[k]·x). Bar numbers, tempo marks and section labels also come out as tokens — the
+ *  recogniser + chord grammar drop them. Tilt and mild perspective are handled (each staff line is
+ *  fitted); a curled page is not. */
+function chordPageLayout(img) {
+  const { data, width: w, height: h } = img;
+  const r = Math.max(8, Math.round(w / 40));
+  // strict mask for bar lines; lenient one for staves (grey between-row lines) and the chord row
+  // (a thin grey stem must stay joined to its notehead)
+  const [ink, soft] = _ocrAdaptiveInk(data, w, h, r, [0.18, 0.08]);
+  const staves = _ocrStaves(soft, w, h), tokens = [];
+  let barBase = 0;
+  staves.forEach((st, si) => {
+    st.barlines = _ocrBarlines(ink, w, h, st);
+    const edges = [st.x0, ...st.barlines.filter((x) => x > st.x0 + 1.5 * st.s)];
+    if (edges[edges.length - 1] < st.x1 - 1.5 * st.s) edges.push(st.x1);
+    st.edges = edges; st.barFrom = barBase;
+    for (const t of _ocrChordRow(soft, w, h, st, si ? staves[si - 1] : null, edges)) {
+      let b = 0; while (b + 1 < edges.length - 1 && t.x0 >= edges[b + 1] - 0.3 * st.s) b++;
+      tokens.push({ ...t, staff: si, bar: barBase + b, frac: Math.max(0, Math.min(1, (t.x0 - edges[b]) / (edges[b + 1] - edges[b]))) });
+    }
+    barBase += edges.length - 1;
+  });
+  // plain data out (a worker posts it): drop the internal line/top/bottom closures
+  return { staves: staves.map(({ line, top, bottom, ...st }) => st), tokens, bars: barBase };
+}
+
+/** A token box → the recogniser's input: the box (+ padding) at 32 px tall, ink = 1, width ≤ 256.
+ *  Downscaling averages the source area (as the training images were resized), upscaling is bilinear. */
+function chordOcrInput(img, box, opts = {}) {
+  const { data, width: W, height: Hh } = img, H = CHORD_OCR.height, maxW = opts.maxWidth || 256;
+  const bh = box.y1 - box.y0 + 1, pad = Math.max(2, Math.round(bh * (opts.pad ?? 0.3)));
+  const x0 = Math.max(0, box.x0 - pad), y0 = Math.max(0, box.y0 - pad), x1 = Math.min(W - 1, box.x1 + pad), y1 = Math.min(Hh - 1, box.y1 + pad);
+  const sw = x1 - x0 + 1, sh = y1 - y0 + 1;
+  const ow = Math.max(8, Math.min(maxW, Math.round((sw * H) / sh)));
+  const out = new Float32Array(H * ow), fx = sw / ow, fy = sh / H, px = (x, y) => data[(y0 + y) * W + x0 + x];
+  for (let oy = 0; oy < H; oy++) {
+    const ya = oy * fy, yb = ya + fy;
+    for (let ox = 0; ox < ow; ox++) {
+      const xa = ox * fx, xb = xa + fx;
+      let v;
+      if (fx >= 1 && fy >= 1) {
+        let acc = 0, ws = 0;
+        for (let y = Math.floor(ya); y < Math.ceil(yb); y++) {
+          const wy = Math.min(yb, y + 1) - Math.max(ya, y); if (wy <= 0) continue;
+          for (let x = Math.floor(xa); x < Math.ceil(xb); x++) {
+            const wx = Math.min(xb, x + 1) - Math.max(xa, x); if (wx <= 0) continue;
+            acc += wx * wy * px(Math.min(sw - 1, x), Math.min(sh - 1, y)); ws += wx * wy;
+          }
+        }
+        v = acc / ws;
+      } else {
+        const sx = Math.min(sw - 1, Math.max(0, (xa + xb) / 2 - 0.5)), sy = Math.min(sh - 1, Math.max(0, (ya + yb) / 2 - 0.5));
+        const ix = Math.floor(sx), iy = Math.floor(sy), dx = sx - ix, dy = sy - iy, ix2 = Math.min(sw - 1, ix + 1), iy2 = Math.min(sh - 1, iy + 1);
+        v = (1 - dy) * ((1 - dx) * px(ix, iy) + dx * px(ix2, iy)) + dy * ((1 - dx) * px(ix, iy2) + dx * px(ix2, iy2));
+      }
+      out[oy * ow + ox] = 1 - v / 255;
+    }
+  }
+  return { data: out, width: ow, height: H };
+}
+
+/** CTC prefix beam search over logits [T × K] (class 0 = blank) → the `beam` most probable strings
+ *  [{ text, logp }], best first. */
+function ctcBeam(logits, T, K, opts = {}) {
+  const beam = opts.beam || 10, charset = opts.charset || CHORD_OCR.charset, LOG0 = -1e30;
+  const lse = (a, b) => (a < b ? b + Math.log1p(Math.exp(a - b)) : a + Math.log1p(Math.exp(b - a)));
+  let beams = new Map([["", { pb: 0, pnb: LOG0 }]]);
+  const lp = new Float64Array(K);
+  for (let t = 0; t < T; t++) {
+    let mx = -Infinity; for (let k = 0; k < K; k++) mx = Math.max(mx, logits[t * K + k]);
+    let z = 0; for (let k = 0; k < K; k++) z += Math.exp(logits[t * K + k] - mx);
+    for (let k = 0; k < K; k++) lp[k] = logits[t * K + k] - mx - Math.log(z);
+    const next = new Map(), get = (s) => { let e = next.get(s); if (!e) next.set(s, (e = { pb: LOG0, pnb: LOG0 })); return e; };
+    for (const [s, { pb, pnb }] of beams) {
+      const tot = lse(pb, pnb), e = get(s);
+      e.pb = lse(e.pb, tot + lp[0]);
+      const last = s ? s[s.length - 1] : null;
+      for (let k = 1; k < K; k++) {
+        if (lp[k] < -12) continue;
+        const c = charset[k - 1], n = get(s + c);
+        if (c === last) { n.pnb = lse(n.pnb, pb + lp[k]); const e2 = get(s); e2.pnb = lse(e2.pnb, pnb + lp[k]); }
+        else n.pnb = lse(n.pnb, tot + lp[k]);
+      }
+    }
+    beams = new Map([...next].sort((a, b) => lse(b[1].pb, b[1].pnb) - lse(a[1].pb, a[1].pnb)).slice(0, beam));
+  }
+  return [...beams].map(([text, v]) => ({ text, logp: lse(v.pb, v.pnb) }));
+}
+
+/** A chord as written in any fake-book spelling → the family's name, or null when it is not a chord:
+ *  Δ7/MA7/M7/Maj7 → maj7, mi/min/- → m, ø → m7b5, °/o → dim, + → aug, +7/7+ → 7#5, sus → sus4,
+ *  69/6(9) → 6/9, add2 → add9, 7(b9) → 7b9, alt → 7alt. Validated by the voicing grammar
+ *  (parseChordSymbolForVoicings); returns { name, parsed }. */
+function chordFromWritten(raw) {
+  const t = String(raw || "").replace(/♯/g, "#").replace(/♭/g, "b").replace(/\s+/g, "");
+  const m = t.match(/^([A-G][#b]?)(.*?)(?:\/([A-G][#b]?))?$/);
+  if (!m) return null;
+  let [, root, q, bass] = m;
+  q = q.replace(/^\(([#b]5)\)$/, (_, a) => (a === "#5" ? "aug" : "(b5)"));
+  q = q.replace(/^(?:mi|min|-)(?=$|[\d(]|maj|Ma|MA|M|Δ|add|6)/, "m")
+    .replace(/^m\(ma7\)|^m\(Ma7\)|^mMaj7|^mMA7|^mM7|^mΔ7?|^m\(Δ7?\)/, "m(maj7)")
+    .replace(/^(?:MA|Ma|ma|Maj|M)(?=\d)/, "maj").replace(/^Δ(?=\d)/, "maj").replace(/^Δ$/, "maj7").replace(/^Δ(?=\()/, "maj7")
+    .replace(/^ø7?/, "m7b5").replace(/^(?:°|o)7/, "dim7").replace(/^(?:°|o)$/, "dim")
+    .replace(/^\+7$|^7\+$/, "7#5").replace(/^\+$/, "aug")
+    .replace(/^69$|^6\(9\)$/, "6/9").replace(/^\(add9\)$|^add2$/, "add9")
+    .replace(/^alt$/, "7alt").replace(/sus$/, "sus4").replace(/sus\(4\)$/, "sus4").replace(/^7\(sus4\)$/, "7sus4");
+  // parenthesised alterations fold into the name: 7(b9) → 7b9, 7(b9,b13) → 7b9b13, m7(b5) → m7b5
+  q = q.replace(/\(([^)]*)\)/g, (all, a) => (/^[#b]?\d+(,[#b]?\d+)*$/.test(a) ? a.replace(/,/g, "") : all));
+  if (q !== "m(maj7)") q = q.replace(/[()]/g, "");
+  q = q.replace(/^(7sus4|9sus4|13sus4)b7$/, "$1");          // an engraver repeating a degree the name already has
+  const name = root + q + (bass && bass !== root ? "/" + bass : "");
+  const p = parseChordSymbolForVoicings(name);
+  return p && p.ok ? { name, parsed: p } : null;
+}
+
+/** Recogniser output for one box → the most probable reading the chord grammar accepts, if the model
+ *  gives it at least `minProb` (0.1) of the beam's probability: { name, raw, prob, alternatives:[name…] }
+ *  or null (a bar number, tempo mark, word …). */
+function chordOcrRead(logits, T, K, opts = {}) {
+  const cands = ctcBeam(logits, T, K, { beam: opts.beam || 10 });
+  const z = cands.reduce((a, c) => a + Math.exp(c.logp), 0) || 1;
+  let best = null; const alts = [];
+  for (const c of cands) {
+    const r = chordFromWritten(c.text);
+    if (!r) continue;
+    // a grammar-valid reading the model doesn't believe (a bar number "7" → "D7" at ~0 %) is not taken
+    if (!best && Math.exp(c.logp) / z < (opts.minProb ?? 0.1)) continue;
+    if (!best) best = { name: r.name, raw: c.text, prob: Math.exp(c.logp) / z, parsed: r.parsed };
+    else if (r.name !== best.name && !alts.includes(r.name)) alts.push(r.name);
+  }
+  if (!best) return null;
+  best.alternatives = alts.slice(0, 3);
+  return best;
+}
+
+/** Pages of reads → the shared CHORD score (4/4 assumed — a picture carries no meter we read).
+ *  pages: [{ layout, reads: [read|null per layout.tokens[i]] }]. Chords in a bar are ordered by x
+ *  and placed on beats from their position (first on beat 1); a bar with no chord holds the
+ *  previous one (fake-book simile). opts: beatsPerBar (4), title, tempo. */
+function chordPageScore(pages, opts = {}) {
+  const beats = opts.beatsPerBar || 4, bars = [];
+  let base = 0;
+  for (const pg of pages) {
+    const L = pg.layout;
+    // a printed bar number on this page wins over counting (a page can start mid-song)
+    if (L.firstNumber != null && L.firstNumber - 1 > base) for (let b = base; b < L.firstNumber - 1; b++) bars.push({ number: b + 1, timeSig: [beats, 4], melody: [], chords: [] });
+    if (L.firstNumber != null && L.firstNumber - 1 > base) base = L.firstNumber - 1;
+    for (let b = 0; b < L.bars; b++) bars.push({ number: base + b + 1, timeSig: [beats, 4], melody: [], chords: [] });
+    L.tokens.forEach((t, i) => {
+      const r = pg.reads[i]; if (!r) return;
+      const p = r.parsed || parseChordSymbolForVoicings(r.name);
+      if (!p || !p.ok) return;
+      const root = 48 + p.rootPc, midis = [...new Set(p.formula.tones.map((x) => root + x.semi))];
+      if (p.bassPc != null) midis.unshift(36 + p.bassPc);
+      bars[base + t.bar].chords.push({ x: t.frac, symbol: r.name, midis, prob: r.prob });
+    });
+    base += L.bars;
+  }
+  let prev = null;
+  for (const b of bars) {
+    b.chords.sort((a, c) => a.x - c.x);
+    // two chords in a bar are beats 1 and 3 (the fake-book convention: engraving spacing follows the
+    // notes, not the beat); more than two snap to the nearest beat in order
+    let last = -1;
+    b.chords.forEach((c, k) => {
+      let q = k === 0 && c.x < 0.4 ? 0 : b.chords.length === 2 && beats % 2 === 0 ? (k ? beats / 2 : 0) : Math.round(c.x * beats);
+      q = Math.min(beats - 1, Math.max(last + 1, q)); c.q = q; last = q;
+    });
+    b.chords = b.chords.filter((c) => c.q < beats);
+    if (!b.chords.length && prev) b.chords = [{ q: 0, symbol: prev.symbol, midis: prev.midis, held: true }];
+    if (b.chords.length) prev = b.chords[b.chords.length - 1];
+  }
+  const sc = leadSheetToChordScore({ title: opts.title || "", tempo: opts.tempo || 100, timeSig: [beats, 4], parts: [], melodyPart: 0, bars });
+  sc.source = "ocr";
+  sc.bars.forEach((b, i) => b.events.forEach((e, k) => { const c = bars[i].chords[k]; if (c && c.held) e.held = true; if (c && c.prob != null) e.ocrProb = c.prob; }));
+  return sc;
+}
+
+/** A box read as a bar number (digits only, the beam's best reading) → the number, else null. */
+function chordOcrNumber(logits, T, K) {
+  const best = ctcBeam(logits, T, K, { beam: 4 })[0];
+  return best && /^\d{1,3}$/.test(best.text) && Math.exp(best.logp) > 0.5 ? +best.text : null;
+}
+
+/* Re-anchor bars on the printed bar numbers at system starts, so one missed or extra bar line shifts
+ * only its own system, not the rest of the page. A number is trusted when it rises and lands within
+ * three bars of where counting puts that system. `firstBar` = the bar number the page starts on when
+ * its first system has none (1 on page 1). Sets layout.firstNumber (the page's first bar number, null
+ * when no number was read) and renumbers tokens + staves + layout.bars in place. */
+function _ocrAnchorBars(layout, numbers, firstBar = 1) {
+  const S = layout.staves;
+  if (!S.length || !numbers.some((n) => n != null)) { layout.firstNumber = null; return layout; }
+  // the page's first bar: printed on the first system, else where the caller says the page starts
+  // (bar 1 on page 1) — never inferred from a later system, whose count may already be off
+  const P = (numbers[0] != null ? numbers[0] : firstBar) - 1;
+  let start = 0, lastN = -Infinity;
+  const starts = S.map((st, si) => {
+    const counted = si ? start : 0, n = numbers[si];
+    let s0 = counted;
+    if (n != null && n > lastN && Math.abs(n - 1 - P - counted) <= 3 && n - 1 - P >= 0) { s0 = n - 1 - P; lastN = n; }
+    start = s0 + st.edges.length - 1;
+    return s0;
+  });
+  for (const t of layout.tokens) t.bar = starts[t.staff] + (t.bar - S[t.staff].barFrom);
+  S.forEach((st, si) => { st.barFrom = starts[si]; if (numbers[si] != null) st.number = numbers[si]; });
+  layout.bars = Math.max(...S.map((st, si) => starts[si] + st.edges.length - 1));
+  layout.firstNumber = P + 1;
+  return layout;
+}
+
+/** One page, end to end: layout → each box through the recogniser (`run(data, width) →
+ *  Promise<{ logits, frames, classes }>`, the ONNX session in the browser) → the grammar-checked
+ *  read; a box at a system's start that reads as digits is that system's bar number (bars are then
+ *  re-anchored on it). → { layout, reads } (reads[i] for layout.tokens[i], null when not a chord).
+ *  opts: onProgress(done, total), beam, firstBar (the bar the page starts on, default 1). */
+async function readChordPage(img, run, opts = {}) {
+  const layout = chordPageLayout(img), reads = [], numbers = layout.staves.map(() => null);
+  for (let i = 0; i < layout.tokens.length; i++) {
+    const t = layout.tokens[i], inp = chordOcrInput(img, t);
+    const out = await run(inp.data, inp.width);
+    const r = chordOcrRead(out.logits, out.frames, out.classes, opts);
+    reads.push(r);
+    const st = layout.staves[t.staff];
+    if (!r && numbers[t.staff] == null && t.x0 < st.x0 + 4 * st.s && (st.edges.length < 2 || t.x1 < st.edges[1])) numbers[t.staff] = chordOcrNumber(out.logits, out.frames, out.classes);
+    if (opts.onProgress) { try { opts.onProgress(i + 1, layout.tokens.length); } catch (_) { /* a UI callback must not break a read */ } }
+  }
+  _ocrAnchorBars(layout, numbers, opts.firstBar || 1);
+  return { layout, reads };
+}
+
 export {
   SCORE_LINK, unrollRepeatOrder, scorePartNotes, scoreLinkParts, scoreHarmonyGrid, linkBeatDTW, linkScoreToAudio, linkSecToQ, linkQToSec,
   analyzeAudioWithScore, linkedChartScore, SCORE_TAB, SCORE_TAB_FOLLOW, scoreTabNotes, scoreInformedTab, _crnnPeak, _scoreTabTuning, _validPins, _pinnedShape, STEM_COMPARE, scorePartRole, matchStemsToParts, compareStemsToScore, _partNotesSec, _GM_DRUM_CLASS, LYRIC_ASSIGN, _lyricChunks, _hyphenate, assignLyricText, _gpLyrics, _extendOverTies, _assignLyricLines, _gpifTrackTuning, _gpifLyrics, _beatLyricSyllables, _musicXmlLyrics, lyricPassOrder, scoreInPassOrder, _sheetScore, scoreLyricSyllables, lyricMapFromSyllables, scoreQToSec, linkedLyricMap, lyricMapToText, scoreLinkPriorGrid, _harmonyOfParts, _scorePriorBonus, _sameChordClass, _linkFeat, _linkBeatGrids,
@@ -13808,4 +14288,5 @@ export {
   scoreToGridSVG,
   transcribeDrumEvents, DRUM_CLASSES, DRUM_PIECE_CLASS, DRUM_NOTATION,
   drumLikeness, OAF_DRUMS, OAF_DRUM_PIECES, oafDrumLogMel, oafDrumInput, oafDrumWindows, oafDrumHits, transcribeDrumsWithModel,
+  CHORD_OCR, _ocrAdaptiveInk, _ocrStaves, _ocrBarlines, _ocrComponents, _ocrChordRow, chordPageLayout, chordOcrInput, ctcBeam, chordFromWritten, chordOcrRead, chordOcrNumber, _ocrAnchorBars, chordPageScore, readChordPage,
 };
