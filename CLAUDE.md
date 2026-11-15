@@ -3682,8 +3682,36 @@ UI `ScanPanel` (mode "Scan 📷"). Guards: `tests/chord-ocr.mjs` (in `npm test`)
 - **No notation model.** `chordPageLayout`: two adaptive masks (one integral image) → staves as strip
   pieces linked + each line fitted y = a + b·x and refitted on the image (tilt / perspective) → bar lines =
   components that run the full 4 spaces and stay thin after the staff lines are erased (a stem is 3.5) →
-  the chord row = the text row spread over the most BARS → boxes with bar + x. Layout is plain data (it
-  crosses the worker boundary; internal staves carry closures that are stripped).
+  **systems** (`_ocrSystems`) → words above each system's top staff → boxes with bar + x. Layout is plain data
+  (it crosses the worker boundary; internal staves carry closures that are stripped). One `layout.staves` entry
+  per SYSTEM (`staves` = how many staves it joins).
+- **Real pages (2026-11-15, the owner's Berklee Real Book scan + a Hal Leonard piano/vocal book; write-up and
+  every number in `docs/OMR-PLAN.md` "Real pages").** Do not re-derive:
+  - **Never pick ONE text row per staff.** "Row spread over the most bars" chose the triplet "3"s over the intro's
+    chords (the skipped sections). Every row is read; `readChordPage` keeps rows where ≥ 40 % of boxes read as chords
+    (`opts.rowMin`). Rows join by core band + similar letter height, NOT transitively (a descender or one tall mark
+    fused the chord row with the triplet row and voted it out).
+  - Words are grouped in 2-D (x gap + y overlap) so a raised suffix stays with its root, but a smaller mark hanging
+    BELOW the root's bottom does not join; then same-line words merge by the old letter gap (engraved "Emaj9").
+  - Bar lines up to 0.8 space wide only when SOLID (fill ≥ 0.75): hand-copied books draw them 0.65 thick; without
+    the solidity test slanted hairlines became bar lines (−10 points on the corpus). A bar line may run past its
+    staff only into the next one (grand staff).
+  - Systems = staves joined by a THIN straight line at the left edge (a wide dark mark isn't one). Bars counted once
+    per system; chords only above its top staff (lyrics between voice and piano / TAB techniques are never read).
+  - The outside spec's fixed chord bands (Real Book 1.0–2.0 spaces) were measured, not adopted: 22 of 58 chords on
+    the Real Book page sit outside (0.8–4.0).
+  - Search stops 8 spaces above a staff; bar number within 4 spaces of its staff; leading no-bar-line, no-chord
+    "staff" = title ruling, dropped after reading; flat dashes and thin long strokes (brackets) are not text; fret
+    grids + their open-string circles dropped; a non-reading word is tried split at its gaps ("B-7A-7").
+  - **Two readers ship** (`CHORD_OCR_MODELS` in chord-ocr-core.js; the page's "Book style", `ttp:scanStyle`; one-tap
+    "↻ Read again as …"): `chord-ocr.onnx` "printed" (default) and `chord-ocr-hand.onnx` "hand-copied (Real Book)".
+    Both are fine-tunes (`from_onnx.py` recovers PyTorch weights from the int8 ONNX exactly; `finetune.py`;
+    `synth_rb.py` = the hand-copied look — small raised suffix, dash minor, hand-drawn hook 7/9/1 — 30 % of images).
+    A pre-set gate (rendered dev P/R ≥ 98.5, held-out-hands dev ≥ 96.5, then best Real Book page-2 F1) chose the
+    default; the hand reader is better on the Real Book (53/62 vs 40/62; old 7/62) but fails the gate (bar numbers
+    read "G"/"B", −2.4 on held-out hand fonts). **The Real Book reading is brittle across training runs** (page 2
+    swings 2–26/30 between runs and steps) — real hand-copied pages are what would stabilise it; don't re-derive
+    MuseJazz-only (worse) or weight averaging (linear trade-off). Hal Leonard PVG: 16/16 with both (old: 1/16).
 - **Recogniser = ours** (`models/chord-ocr/chord-ocr.onnx`, MIT, 588 k params, int8 0.60 MB, SHA pinned):
   CTC over the chord as drawn; trained only on synthetic images incl. NEGATIVES — bar numbers labelled as
   digits, words / tempo marks labelled empty. `chordOcrRead` keeps the most probable grammar-valid reading
@@ -3697,7 +3725,10 @@ UI `ScanPanel` (mode "Scan 📷"). Guards: `tests/chord-ocr.mjs` (in `npm test`)
   ±1° photo 99 / 98, ±3° photo 95 / 93; chord name 98–100 %; held-out handwriting 97 %; ~250 ms/page.
   tesseract.js baseline 66–70 % (26–30 % with ♯/♭). **Device check remaining:** real fake-book photos.
 - UI: no `accept` on the input; PDFs rendered with the pdf.js Path A already loads; every box tappable
-  (correct / "not a chord"); reads < 80 % sure listed to check. Not persisted in the session yet.
+  (correct / "not a chord"). **Review list (2026-11-15):** EVERY chord read is a row (`ScanReviewRow`: a crop of the
+  page beside the reading, bar, confidence) — swipe right = approve, swipe left = not a chord, tap = edit; tick +
+  "Approve selected", "Approve all sure (≥ 80 %)"; filters To check / All / Approved; every change through
+  `applyFix` → Undo. Pure helper `ocrReviewItems` (headless-tested). Not persisted in the session yet.
 
 ## Path B (notation) — not built; plan in `docs/OMR-PLAN.md`
 
@@ -3950,7 +3981,11 @@ accordingly.
   panel's 🥁 Drums contracts (no chord decode, full-rate reader, filename auto-pick, the 0.6 suggestion,
   isolation off, one shared `DrumChartView`, the `−0:00.01` bar-line time).
 - **Chord OCR** (`tests/chord-ocr.mjs`, in `npm test`): painted pages (a beam among staff lines, grey
-  between-row lines, a stem vs a bar line, a tilted + shaded page), word grouping, bar + position per box,
+  between-row lines, a stem vs a bar line, a tilted + shaded page; since 2026-11-15 a hand-copied page — thick
+  solid bar lines vs a slanted stroke, a raised suffix, a triplet row, 8vb dashes, a tuplet bracket, title rulings,
+  a page number, two chords touching — a piano/vocal page — systems, grand-staff bar lines, lyrics between staves,
+  a fret grid with open-string circles, a title — a stain bridging two systems, a triplet row under descenders,
+  and `ocrReviewItems`), word grouping, bar + position per box,
   plain-data layout; the model input; CTC beam; the written-spelling table + non-chords; grammar-checked and
   probability-gated reads ("7" is bar 7, not D7); bar-number re-anchoring (mutation-tested); page → score →
   CSMPN; the orchestrator with a fake model; SHA pin, NOTICE, glue / pages.yml / index / UI contracts.

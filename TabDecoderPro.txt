@@ -343,6 +343,7 @@ import {
   scoreToGridSVG,
   chordPageScore,
   chordFromWritten,
+  ocrReviewItems,
 } from "./engine.tsx";
 
 async function extractTokens(buf) {
@@ -3803,12 +3804,15 @@ function LyricsCapture({ C }) {
  * notation model is needed. Each page becomes a grey image here (pdf.js renders a PDF page — the
  * same library Path A loads; an image is drawn to a canvas), then window.TTP_CHORD_OCR reads it
  * in a worker (engine `readChordPage`: staves, bar lines, the chord row, a small CTC recogniser,
- * the chord grammar). Every box is shown on the page; uncertain reads are listed for review, and
- * any box can be corrected or dropped. The chart is `chordPageScore` (4/4 assumed — a picture
+ * the chord grammar). Every box is shown on the page, and EVERY chord read is listed for review
+ * (ScanReviewRow: a thumbnail of what is written beside what was read) — swipe right to approve,
+ * swipe left for "not a chord", tap to edit; or tick rows / "all sure" and approve them in one go,
+ * leaving the uncertain ones (filter "To check") to fix. Approve / remove / edit are undoable. Two readers
+ * ("Book style": printed — the default — or hand-copied / Real Book), and a one-tap re-read with the other. The chart is `chordPageScore` (4/4 assumed — a picture
  * carries no meter we read) and renders through the normal ChartPanel (edit, transpose, export,
  * → Chord Sheet Maker Pro). The file <input> has NO `accept` (iOS greys out what it can't map).
  * Browser-only glue; not persisted in the session yet. */
-const SCAN_MAX_PAGES = 12, SCAN_MAX_WIDTH = 1800, CHORD_OCR_SIZE_HINT = "0.6 MB";
+const SCAN_MAX_PAGES = 12, SCAN_MAX_WIDTH = 1800, CHORD_OCR_SIZE_HINT = "0.6 MB";   // each reader (printed / hand-copied) is 0.6 MB
 function _scanGrey(canvas) {
   const ctx = canvas.getContext("2d"), { width, height } = canvas, rgba = ctx.getImageData(0, 0, width, height).data;
   const data = new Uint8Array(width * height);
@@ -3836,6 +3840,54 @@ async function _scanImagePage(file) {
   return [_scanGrey(cv)];
 }
 
+/* One chord in the scan review list: what is written (a crop of the page) beside what was read.
+ * Swipe right = approve, swipe left = not a chord, tap = edit; the checkbox selects it for a bulk
+ * approve. Pointer events with touch-action pan-y, so a vertical drag still scrolls the page. */
+function ScanReviewRow({ C, it, pg, tok, checked, onCheck, onApprove, onReject, onOpen, onPick, selected, children }) {
+  const [dx, setDx] = useState(0);
+  const drag = useRef(null);
+  const down = (e) => { drag.current = { x: e.clientX, y: e.clientY, moved: false, dx: 0 }; };
+  const move = (e) => {
+    const d = drag.current; if (!d) return;
+    const mx = e.clientX - d.x, my = e.clientY - d.y;
+    if (!d.moved && Math.abs(mx) > 10 && Math.abs(mx) > 1.5 * Math.abs(my)) { d.moved = true; try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_) {} }
+    if (d.moved) { d.dx = Math.max(-130, Math.min(130, mx)); setDx(d.dx); }
+  };
+  const up = () => {
+    const d = drag.current; drag.current = null; setDx(0);
+    if (!d) return;
+    if (!d.moved) onOpen();
+    else if (d.dx > 70) onApprove();
+    else if (d.dx < -70) onReject();
+  };
+  const pad = 6, bx0 = Math.max(0, tok.x0 - pad), by0 = Math.max(0, tok.y0 - pad), bw = tok.x1 - tok.x0 + 2 * pad, bh = tok.y1 - tok.y0 + 2 * pad;
+  const k = Math.min(36 / bh, 130 / bw);
+  const col = it.status === "approved" ? C.green : it.status === "sure" ? C.text : C.amber;
+  const badge = it.status === "approved" ? "✓" : it.status === "sure" ? `${Math.round(it.prob * 100)}%` : `${Math.round(it.prob * 100)}% ?`;
+  return (
+    <div style={{ position: "relative", borderRadius: 8, overflow: "hidden", border: `1px solid ${selected ? C.amber : C.border}`, background: dx > 0 ? "rgba(30,142,62,0.25)" : dx < 0 ? "rgba(217,48,37,0.22)" : C.bg }}>
+      <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 14px", fontSize: 12, color: C.text, pointerEvents: "none" }}>
+        <span style={{ opacity: dx > 20 ? 1 : 0 }}>✓ approve</span><span style={{ opacity: dx < -20 ? 1 : 0 }}>not a chord ✕</span>
+      </div>
+      <div onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={() => { drag.current = null; setDx(0); }}
+        style={{ position: "relative", display: "flex", alignItems: "center", gap: 10, padding: "6px 8px", background: C.panel, transform: `translateX(${dx}px)`, transition: dx ? "none" : "transform 0.15s", touchAction: "pan-y", cursor: "pointer", userSelect: "none" }}>
+        <input type="checkbox" checked={checked} onChange={(e) => onCheck(e.target.checked)} onPointerDown={(e) => e.stopPropagation()} onPointerUp={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}
+          aria-label={`select bar ${it.bar} ${it.name}`} style={{ width: 18, height: 18, flex: "none" }} />
+        <div aria-hidden style={{ flex: "none", width: Math.round(bw * k), height: Math.round(bh * k), borderRadius: 3, background: `#fff url(${pg.preview}) no-repeat`, backgroundSize: `${pg.width * k}px ${pg.height * k}px`, backgroundPosition: `${-bx0 * k}px ${-by0 * k}px` }} />
+        <span style={{ fontSize: 10, color: C.dim, flex: "none", width: 42 }}>bar {it.bar}</span>
+        <span style={{ fontSize: 15, fontWeight: 700, color: col, flex: 1, minWidth: 0, fontFamily: "'IBM Plex Mono', monospace" }}>{it.name}</span>
+        {it.status === "check" && onPick && it.alternatives.slice(0, 2).map((a) => (
+          // the reader's runner-up readings: one tap uses (and approves) it
+          <button key={a} onPointerDown={(e) => e.stopPropagation()} onPointerUp={(e) => e.stopPropagation()} onClick={(e) => { e.stopPropagation(); onPick(a); }}
+            title={`use ${a}`} style={{ ...chip(C), flex: "none", padding: "2px 7px", fontSize: 11, color: C.text }}>{a}</button>
+        ))}
+        <span style={{ fontSize: 11, color: col, flex: "none" }}>{badge}</span>
+      </div>
+      {children}
+    </div>
+  );
+}
+
 function ScanPanel({ C, useSharp, pdfReady }) {
   const fileRef = useRef(null);
   const [name, setName] = useState("");
@@ -3843,14 +3895,37 @@ function ScanPanel({ C, useSharp, pdfReady }) {
   const [err, setErr] = useState("");
   const [pages, setPages] = useState(null);       // [{ preview, width, height, layout, reads }]
   const [fix, setFix] = useState({});              // "page.box" → chord name, or "" = not a chord
+  const [hist, setHist] = useState([]);            // previous `fix` maps, for Undo
   const [sel, setSel] = useState(null);            // "page.box"
   const [draft, setDraft] = useState("");
   const [ovr, setOvr] = useState({});
+  const [filter, setFilter] = useState("all");     // "check" | "all" | "approved"
+  const [picked, setPicked] = useState({});        // "page.box" → true (ticked for a bulk approve)
+  const [style, setStyle] = _usePref("ttp:scanStyle", "printed", (x) => x === "printed" || x === "hand");   // which reader
+  const [readWith, setReadWith] = useState("");    // the reader the shown pages were read with
+  const imgsRef = useRef(null);                    // the prepared page images, kept for a re-read with the other reader
 
+  // read prepared page images with one reader; corrections and approvals start over (the boxes may change)
+  const readImages = async (imgs, which) => {
+    setErr(""); setFix({}); setHist([]); setPicked({}); setSel(null); setOvr({});
+    setBusy("reading chords…");
+    try {
+      const res = await window.TTP_CHORD_OCR(imgs.map((p) => ({ data: p.data.slice(), width: p.width, height: p.height })), {
+        style: which,
+        onProgress: (done, total, page) => setBusy(`reading chords… page ${page + 1}/${imgs.length} · ${done}/${total} boxes`),
+      });
+      const out = res.pages.map((r, i) => ({ preview: imgs[i].preview, width: imgs[i].width, height: imgs[i].height, layout: r.layout, reads: r.reads }));
+      if (!out.some((p) => p.layout.staves.length)) setErr("No staves found. Scan Path B reads lead sheets (chord symbols above a staff); a straight, well-lit, flat shot works best.");
+      setPages(out); setReadWith(res.style || which);
+      setFilter("all");
+    } catch (ex) { setErr("Couldn't read it: " + (ex && ex.message ? ex.message : String(ex))); }
+    finally { setBusy(""); }
+  };
   const onFile = async (e) => {
     const f = e.target.files && e.target.files[0]; e.target.value = "";
     if (!f) return;
-    setErr(""); setPages(null); setFix({}); setSel(null); setOvr({}); setName(f.name.replace(/\.[^.]+$/, ""));
+    setErr(""); setPages(null); setFix({}); setHist([]); setPicked({}); setSel(null); setOvr({}); setName(f.name.replace(/\.[^.]+$/, ""));
+    imgsRef.current = null;
     try {
       if (typeof window.TTP_CHORD_OCR !== "function") throw new Error("the chord reader isn't loaded — reload the page");
       const bytes = new Uint8Array(await f.arrayBuffer());
@@ -3858,16 +3933,12 @@ function ScanPanel({ C, useSharp, pdfReady }) {
       if (isPdf && !pdfReady) throw new Error("PDF.js is still loading — try again in a moment");
       setBusy("preparing the page…");
       const imgs = isPdf ? await _scanPdfPages(bytes) : await _scanImagePage(f);
-      setBusy("reading chords…");
-      const res = await window.TTP_CHORD_OCR(imgs.map((p) => ({ data: p.data.slice(), width: p.width, height: p.height })), {
-        onProgress: (done, total, page) => setBusy(`reading chords… page ${page + 1}/${imgs.length} · ${done}/${total} boxes`),
-      });
-      const out = res.pages.map((r, i) => ({ preview: imgs[i].preview, width: imgs[i].width, height: imgs[i].height, layout: r.layout, reads: r.reads }));
-      if (!out.some((p) => p.layout.staves.length)) setErr("No staves found. Scan Path B reads lead sheets (chord symbols above a staff); a straight, well-lit, flat shot works best.");
-      setPages(out);
-    } catch (ex) { setErr("Couldn't read it: " + (ex && ex.message ? ex.message : String(ex))); }
-    finally { setBusy(""); }
+      imgsRef.current = imgs;
+      await readImages(imgs, style);
+    } catch (ex) { setErr("Couldn't read it: " + (ex && ex.message ? ex.message : String(ex))); setBusy(""); }
   };
+  const other = readWith === "hand" ? "printed" : "hand";
+  const reread = () => { if (!imgsRef.current || busy) return; setStyle(other); readImages(imgsRef.current, other); };
 
   const readsOf = (p, pi) => p.reads.map((r, i) => {
     const k = `${pi}.${i}`;
@@ -3880,13 +3951,44 @@ function ScanPanel({ C, useSharp, pdfReady }) {
     if (!pages || !pages.some((p) => p.layout.bars)) return null;
     return chordPageScore(pages.map((p, pi) => ({ layout: p.layout, reads: readsOf(p, pi) })), { title: name });
   }, [pages, fix, name]);
-  const all = pages ? pages.flatMap((p, pi) => readsOf(p, pi).map((r, i) => ({ k: `${pi}.${i}`, pi, i, r, t: p.layout.tokens[i] }))) : [];
-  const review = all.filter((x) => x.r && !x.r.fixed && x.r.prob < 0.8);
-  const nRead = all.filter((x) => x.r).length;
-  const pick = (k) => { setSel(k); const x = all.find((y) => y.k === k); setDraft(x && x.r ? x.r.name : ""); };
-  const save = (val) => { if (!sel) return; setFix((f) => ({ ...f, [sel]: val })); setSel(null); };
+  const items = useMemo(() => (pages ? ocrReviewItems(pages, fix) : []), [pages, fix]);
+  const n = { check: 0, sure: 0, approved: 0 };
+  for (const it of items) n[it.status]++;
+  const shown = items.filter((it) => filter === "all" || (filter === "check" ? it.status === "check" : it.status === "approved"));
+  const pickedKeys = items.filter((it) => picked[it.key] && it.status !== "approved").map((it) => it.key);
+
+  // every change to the readings goes through here, so it can be undone
+  const applyFix = (upd) => { setHist((h) => [...h.slice(-40), fix]); setFix((f) => ({ ...f, ...upd })); };
+  const approve = (keys) => {
+    const upd = {}; for (const k of keys) { const it = items.find((x) => x.key === k); if (it) upd[k] = it.name; }
+    if (Object.keys(upd).length) applyFix(upd);
+    setPicked((p) => { const q = { ...p }; for (const k of keys) delete q[k]; return q; });
+  };
+  const reject = (keys) => { const upd = {}; for (const k of keys) upd[k] = ""; applyFix(upd); if (keys.includes(sel)) setSel(null); setPicked((p) => { const q = { ...p }; for (const k of keys) delete q[k]; return q; }); };
+  const undo = () => { if (!hist.length) return; setFix(hist[hist.length - 1]); setHist((h) => h.slice(0, -1)); };
+  const pick = (k) => {
+    if (sel === k) { setSel(null); return; }
+    setSel(k);
+    const [pi, i] = k.split(".").map(Number), p = pages && pages[pi], r = p ? readsOf(p, pi)[i] : null;
+    setDraft(r ? r.name : "");
+  };
+  const save = (val) => { if (!sel) return; applyFix({ [sel]: val }); setSel(null); };
   const draftOk = !draft || !!chordFromWritten(draft);
-  const selX = sel ? all.find((y) => y.k === sel) : null;
+  const selRead = sel && pages ? (() => { const [pi, i] = sel.split(".").map(Number); return { pi, i, r: pages[pi] ? pages[pi].reads[i] : null, t: pages[pi] ? pages[pi].layout.tokens[i] : null }; })() : null;
+  const selItem = sel ? items.find((x) => x.key === sel) : null;
+  const editor = selRead && selRead.t && (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", padding: 8, borderTop: `1px solid ${C.amber}`, background: C.panel }}>
+      <span style={{ fontSize: 11, color: C.dim }}>{selItem ? `bar ${selItem.bar}` : "this box"}</span>
+      <input value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && draftOk) save(draft); }} placeholder="chord, e.g. Bb7"
+        style={{ width: 110, background: C.bg, border: `1px solid ${draftOk ? C.border : C.red}`, color: C.text, borderRadius: 6, padding: "4px 8px", fontSize: 13, fontFamily: "'IBM Plex Mono', monospace" }} />
+      <button disabled={!draftOk} onClick={() => save(draft)} style={{ ...chip(C), color: C.green }}>✓ Use</button>
+      {selRead.r && selRead.r.alternatives && selRead.r.alternatives.map((a) => <button key={a} onClick={() => save(a)} style={chip(C)}>{a}</button>)}
+      <button onClick={() => save("")} style={chip(C)}>not a chord</button>
+      {fix[sel] !== undefined && <button onClick={() => { const { [sel]: _, ...rest } = fix; setHist((h) => [...h.slice(-40), fix]); setFix(rest); setSel(null); }} style={chip(C)}>↺ as read</button>}
+      <button onClick={() => setSel(null)} style={chip(C)}>✕</button>
+    </div>
+  );
+  const fbtn = (id, label) => <button onClick={() => setFilter(id)} style={{ ...chip(C), ...(filter === id ? { borderColor: C.amber, color: C.amber } : {}) }}>{label}</button>;
 
   return (
     <div style={{ maxWidth: 820, margin: "0 auto" }}>
@@ -3898,35 +4000,56 @@ function ScanPanel({ C, useSharp, pdfReady }) {
       </button>
       <div style={{ fontSize: 11, color: C.dim, marginTop: 8, lineHeight: 1.6 }}>
         Reads the <b>chord symbols</b> above each staff and puts them in their bars (4/4 assumed). Best on a flat, straight, well-lit page
-        or an exported PDF; tap any box on the page to correct it. The notes themselves are not read. Runs on this device; the reader
-        downloads once (~{CHORD_OCR_SIZE_HINT}).
+        or an exported PDF. Every chord is listed below to review; tap any box on the page to correct it. The notes themselves are not read.
+        Runs on this device; the reader downloads once (~{CHORD_OCR_SIZE_HINT}).
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginTop: 8 }}>
+        <span style={{ fontSize: 11, color: C.dim }}>Book style:</span>
+        {[["printed", "Printed / engraved"], ["hand", "Hand-copied (Real Book)"]].map(([id, label]) => (
+          <button key={id} onClick={() => setStyle(id)} disabled={!!busy}
+            style={{ ...chip(C), ...(style === id ? { borderColor: C.amber, color: C.amber } : {}) }}>{label}</button>
+        ))}
       </div>
       {err && <div style={{ marginTop: 10, color: C.red, fontSize: 12 }}>{err}</div>}
       {pages && (
         <div style={{ marginTop: 12, fontSize: 12, color: C.dim }}>
-          {pages.reduce((a, p) => a + p.layout.staves.length, 0)} systems · {pages.reduce((a, p) => a + p.layout.bars, 0)} bars · {nRead} chords read
-          {review.length ? <span style={{ color: C.amber }}> · {review.length} to check</span> : null}
+          {pages.reduce((a, p) => a + p.layout.staves.length, 0)} systems · {pages.reduce((a, p) => a + p.layout.bars, 0)} bars · {items.length} chords
+          {n.approved ? <span style={{ color: C.green }}> · {n.approved} approved</span> : null}
+          {n.check ? <span style={{ color: C.amber }}> · {n.check} to check</span> : null}
+          <span> · read as {readWith === "hand" ? "hand-copied" : "printed"} </span>
+          {imgsRef.current && <button onClick={reread} disabled={!!busy} style={{ ...chip(C), marginLeft: 4 }}>↻ Read again as {other === "hand" ? "hand-copied (Real Book)" : "printed"}</button>}
         </div>
       )}
-      {review.length > 0 && (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
-          {review.map((x) => (
-            <button key={x.k} onClick={() => pick(x.k)} title={`bar ${x.t.bar + 1} — ${Math.round(x.r.prob * 100)}% sure${x.r.alternatives.length ? "; or " + x.r.alternatives.join(", ") : ""}`}
-              style={{ ...chip(C), borderColor: sel === x.k ? C.amber : C.border, color: C.amber }}>bar {x.t.bar + 1 + pages.slice(0, x.pi).reduce((a, p) => a + p.layout.bars, 0)}: {x.r.name}?</button>
-          ))}
+      {items.length > 0 && (
+        <div style={{ marginTop: 10, border: `1px solid ${C.border}`, borderRadius: 10, padding: 8, background: C.bg }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+            {fbtn("check", `To check (${n.check})`)}{fbtn("all", `All (${items.length})`)}{fbtn("approved", `Approved (${n.approved})`)}
+            <span style={{ flex: 1 }} />
+            <button onClick={undo} disabled={!hist.length} style={{ ...chip(C), opacity: hist.length ? 1 : 0.4 }}>↶ Undo</button>
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginTop: 8 }}>
+            {n.sure > 0 && <button onClick={() => approve(items.filter((x) => x.status === "sure").map((x) => x.key))} style={{ ...chip(C), color: C.green, borderColor: C.green }}>✓ Approve all sure ({n.sure})</button>}
+            <button onClick={() => { const q = {}; for (const it of shown) if (it.status !== "approved") q[it.key] = true; setPicked(q); }} style={chip(C)}>Select shown</button>
+            {pickedKeys.length > 0 && <>
+              <button onClick={() => approve(pickedKeys)} style={{ ...chip(C), color: C.green, borderColor: C.green }}>✓ Approve selected ({pickedKeys.length})</button>
+              <button onClick={() => reject(pickedKeys)} style={chip(C)}>✕ Not chords ({pickedKeys.length})</button>
+              <button onClick={() => setPicked({})} style={chip(C)}>Clear</button>
+            </>}
+          </div>
+          <div style={{ fontSize: 10, color: C.dim, margin: "8px 2px 6px" }}>Swipe a row right to approve it, left if it isn't a chord; tap it to change it.</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {shown.length === 0 && <div style={{ fontSize: 12, color: C.dim, padding: 8 }}>{filter === "check" ? "Nothing left to check." : "None yet."}</div>}
+            {shown.map((it) => (
+              <ScanReviewRow key={it.key} C={C} it={it} pg={pages[it.page]} tok={pages[it.page].layout.tokens[it.box]} selected={sel === it.key}
+                checked={!!picked[it.key]} onCheck={(v) => setPicked((p) => { const q = { ...p }; if (v) q[it.key] = true; else delete q[it.key]; return q; })}
+                onApprove={() => approve([it.key])} onReject={() => reject([it.key])} onOpen={() => pick(it.key)} onPick={(a) => applyFix({ [it.key]: a })}>
+                {sel === it.key ? editor : null}
+              </ScanReviewRow>
+            ))}
+          </div>
         </div>
       )}
-      {selX && (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginTop: 8, padding: 8, border: `1px solid ${C.amber}`, borderRadius: 8 }}>
-          <span style={{ fontSize: 11, color: C.dim }}>bar {selX.t.bar + 1 + pages.slice(0, selX.pi).reduce((a, p) => a + p.layout.bars, 0)}</span>
-          <input value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && draftOk) save(draft); }} placeholder="chord, e.g. Bb7"
-            style={{ width: 110, background: C.bg, border: `1px solid ${draftOk ? C.border : C.red}`, color: C.text, borderRadius: 6, padding: "4px 8px", fontSize: 13, fontFamily: "'IBM Plex Mono', monospace" }} />
-          <button disabled={!draftOk} onClick={() => save(draft)} style={{ ...chip(C), color: C.green }}>✓ Use</button>
-          {selX.r && selX.r.alternatives && selX.r.alternatives.map((a) => <button key={a} onClick={() => save(a)} style={chip(C)}>{a}</button>)}
-          <button onClick={() => save("")} style={chip(C)}>not a chord</button>
-          <button onClick={() => setSel(null)} style={chip(C)}>✕</button>
-        </div>
-      )}
+      {sel && !shown.some((it) => it.key === sel) && editor && <div style={{ marginTop: 8, border: `1px solid ${C.amber}`, borderRadius: 8, overflow: "hidden" }}>{editor}</div>}
       {pages && pages.map((p, pi) => (
         <div key={pi} style={{ position: "relative", marginTop: 12, border: `1px solid ${C.border}`, borderRadius: 6, overflow: "hidden", background: "#fff" }}>
           <img src={p.preview} alt={`page ${pi + 1}`} style={{ width: "100%", display: "block" }} />

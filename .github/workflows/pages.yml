@@ -86,7 +86,7 @@ jobs:
           # images, SHA-256 pinned in chord-ocr-core.js; scripts/chord-ocr/ rebuilds it).
           cp chord-ocr-model.js chord-ocr-core.js chord-ocr-worker.js _site/
           mkdir -p _site/models/chord-ocr
-          cp models/chord-ocr/chord-ocr.onnx models/chord-ocr/NOTICE _site/models/chord-ocr/
+          cp models/chord-ocr/chord-ocr.onnx models/chord-ocr/chord-ocr-hand.onnx models/chord-ocr/NOTICE _site/models/chord-ocr/
           # Learned beat + downbeat tracker (Tempo & bars): glue + the weight-only int8 beat_this final0
           # (MIT, SHA-256 pinned in beat-model-core.js; scripts/beatthis_export.py rebuilds it).
           cp beat-model.js beat-model-core.js beat-worker.js _site/

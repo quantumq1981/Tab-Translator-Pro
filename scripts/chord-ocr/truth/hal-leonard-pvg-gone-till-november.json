@@ -1,0 +1,8 @@
+{"source": "Hal Leonard piano/vocal/guitar arrangement, 'Gone Till November' (Wyclef Jean), from 'Selections from MTV's 100 Greatest Pop Songs', pp. 112-115 — the owner's PDF (pages 1-4), rendered with: pdftoppm -gray -f 1 -l 4 -scale-to-x 1500 -scale-to-y -1 -png <pdf> h. Pages NOT in the repo (copyright); chord symbols per system read by hand.",
+ "note": "systems: one list per system (vocal staff + piano grand staff), top to bottom; [bar within the system (1-based), chord]. ys: the system's TOP staff (the vocal staff) top-line y in the 1500-px render.",
+ "pages": {
+  "h-01.png": {"ys": [356, 899, 1421], "systems": [[[2, "E5"], [4, "E"]], [[2, "Em7"], [4, "E5"]], [[2, "Em7"], [4, "E5"]]]},
+  "h-02.png": {"ys": [147, 621, 1073, 1536], "systems": [[[2, "E"]], [], [[2, "Em7"]], [[1, "E"], [3, "Em7"]]]},
+  "h-03.png": {"ys": [134, 600, 1071, 1530], "systems": [[[2, "E"]], [], [[2, "A"]], []]},
+  "h-04.png": {"ys": [147, 613, 1060, 1510], "systems": [[[1, "E"]], [[2, "A"]], [[3, "E"]], [[2, "B7"]]]}
+ }}

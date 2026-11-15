@@ -1,5 +1,5 @@
 /* ==========================================================================
- * chord-ocr-model.js — publishes window.TTP_CHORD_OCR(pages, { onProgress })
+ * chord-ocr-model.js — publishes window.TTP_CHORD_OCR(pages, { onProgress, style })
  * → Promise<{ pages: [{ layout, reads }] }> for the "Scan 📷" mode (chord symbols
  * from a picture or a scanned PDF of a lead sheet).
  *
@@ -12,6 +12,7 @@
  * there (same rule as the stem separator and the drum model). The worker is ended
  * after each job. Never throws at boot. See chord-ocr-core.js.
  * pages: [{ data: Uint8Array (grey 0..255), width, height }] — transferred.
+ * style: "printed" (default) | "hand" — which reader (chord-ocr-core.js CHORD_OCR_MODELS).
  * ========================================================================== */
 const BUILD_QS = (() => { try { return new URL(import.meta.url).search; } catch (_) { return ""; } })();
 const WORKER_URL = new URL("./chord-ocr-worker.js" + BUILD_QS, import.meta.url);
@@ -26,10 +27,10 @@ async function readChordSheets(pages, opts = {}) {
   if (!pages || !pages.length) throw new Error("no page to read");
   const engineUrl = typeof window !== "undefined" && window.__TTP_ENGINE_URL__;
   if (!engineUrl) throw new Error("the engine isn't loaded yet — try again in a moment");
-  const { onProgress } = opts;
+  const { onProgress, style } = opts;
   let w = null;
   try { w = new Worker(WORKER_URL, { type: "module" }); } catch (_) { w = null; }
-  if (!w) return onMainThread(pages, engineUrl, { onProgress });
+  if (!w) return onMainThread(pages, engineUrl, { onProgress, style });
   try {
     return await new Promise((resolve, reject) => {
       w.onmessage = (ev) => {
@@ -39,7 +40,7 @@ async function readChordSheets(pages, opts = {}) {
         else reject(new Error(m.message || "chord reading failed"));
       };
       w.onerror = (e) => reject(new Error((e && e.message) || "chord reader crashed"));
-      w.postMessage({ id: 1, pages, engineUrl }, pages.map((p) => p.data.buffer));
+      w.postMessage({ id: 1, pages, engineUrl, style }, pages.map((p) => p.data.buffer));
     });
   } finally {
     try { w.terminate(); } catch (_) { /* gone */ }

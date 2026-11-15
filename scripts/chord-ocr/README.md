@@ -23,6 +23,37 @@ that first. Its printed "dev exact" pads a batch to its widest crop and reads lo
 narrow crop behind a long blank pad loses its last character through the bidirectional GRU); quote the
 benches, which read one box at a time as the app does.
 
+## Fine-tune for hand-copied (Real Book) pages
+
+Both shipped readers are fine-tunes of the first model (2026-11-15): `chord-ocr.onnx` ("printed", the default) and
+`chord-ocr-hand.onnx` ("hand-copied (Real Book)"), see docs/OMR-PLAN.md "Real pages" for which run/step each is and
+why. The PyTorch weights were never committed, so the start point is recovered from the first model's ONNX, exactly
+(BatchNorm is folded into the convolutions there, so it is set to identity and kept frozen):
+
+```sh
+python from_onnx.py ../../models/chord-ocr/chord-ocr.onnx base.pt     # prints max |Δ logits| vs the ONNX (3.8e-6)
+CHORD_OCR_FONTS=fonts RB_SHARE=0.3 LR=5e-4 python finetune.py 3000 ft.pt base.pt   # ~25 min on 4 CPU cores
+python export.py ft.pt chord-ocr.onnx --int8
+```
+
+`synth_rb.py` draws the hand-copied Real Book look the original fonts never had: a small suffix raised to the
+root's top, the dash minor, and the 7 as a short hook (also hand-drawn 9 and 1, so the three are told apart by
+shape) — 30 % of the fine-tune's images; the other 70 % are the original `synth.py` mix, so engraved and photo
+accuracy is kept (checked below). A fine-tune on MuseJazz Text alone made it worse (it read the hook-7 as 9 at 90 %).
+`RB_NEG` (0.2) adds bar numbers and words, in the hand fonts, to that branch. The real-page result swings a lot between
+runs and steps — evaluate every checkpoint (`finetune.py` saves one each 250 steps) and choose on page 2 only.
+
+## Real pages with hand-read truth
+
+```sh
+node bench_page.mjs truth/berklee-if-i-aint-got-you.json chord-ocr.onnx <dir with p-1.png p-2.png>
+node bench_page.mjs truth/hal-leonard-pvg-gone-till-november.json chord-ocr.onnx <dir with h-01.png … h-04.png>
+```
+
+The truth files hold only the chord symbols per system (the pages are the owner's copies of published books and
+are not in the repo); each file's `source` says how to render the PDF so the staff positions match. Checkpoints were
+chosen on the Real Book page 2 only; page 1 is the held-out read.
+
 ## The rendered corpus (ground truth for free)
 
 ```sh

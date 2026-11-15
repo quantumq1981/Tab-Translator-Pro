@@ -33,3 +33,5 @@ get "$G/ofl/sriracha/Sriracha-Regular.ttf" Sriracha.ttf
 get "$G/ofl/itim/Itim-Regular.ttf" Itim.ttf
 # Steinberg's jazz-handwriting text font (SMuFL companion), SIL OFL 1.1
 get "https://raw.githubusercontent.com/steinbergmedia/petaluma/master/redist/otf/PetalumaScript.otf" PetalumaScript.otf
+# MuseScore's Real-Book-style text font (© 2016 Torsten Hämmerle, Abraham Lee), SIL OFL 1.1 — used by synth_rb.py
+get "https://raw.githubusercontent.com/musescore/MuseScore/deprecated_master/fonts/musejazz/MuseJazzText.otf" MuseJazzText.otf

@@ -18,10 +18,15 @@ const STEM_CORE_URL = new URL("./stem-model-core.js" + BUILD_QS, import.meta.url
 let _stemCore = null;
 const stemCore = () => _stemCore || (_stemCore = import(/* @vite-ignore */ STEM_CORE_URL).catch((e) => { _stemCore = null; throw e; }));
 
-export const CHORD_OCR_MODEL = {
-  url: new URL("./models/chord-ocr/chord-ocr.onnx", import.meta.url).href,
-  sha256: "6842e1fc32443e5fe8fb6e5160eff12fc58b0e8fca134e694f783f5df524e2b6",
+/* Two readers, same network: "printed" (the default — engraved, typeset and photographed lead sheets, and
+ * already much better on hand-copied pages) and "hand" (tuned further on the hand-copied Real Book look; it
+ * reads those pages best but costs a little on engraved ones — it can take a bar number for a letter).
+ * The page asks for one with opts.style; only the one used is downloaded. See models/chord-ocr/NOTICE. */
+export const CHORD_OCR_MODELS = {
+  printed: { url: new URL("./models/chord-ocr/chord-ocr.onnx", import.meta.url).href, sha256: "9d1a5854dbd8d5e31fe2a240860b15e131713343a24bb52d52f4e049ad8c13be" },
+  hand: { url: new URL("./models/chord-ocr/chord-ocr-hand.onnx", import.meta.url).href, sha256: "214c6806e5cc582eed6145424d01f3eb9767f2c266be19455a135f341df5b738" },
 };
+export const CHORD_OCR_MODEL = CHORD_OCR_MODELS.printed;
 
 /* Weights: Cache API first, else a fetch; the bytes must match the pinned SHA-256 either way
  * (a partial download or a stale file is refused, and a bad cached copy is evicted). */
@@ -69,10 +74,12 @@ export async function chordOcrSession(bytes, ortImport = (u) => import(/* @vite-
   };
 }
 
-/* The whole job: weights → session → engine.readChordPage per page → { pages: [{ layout, reads }] }. */
+/* The whole job: weights → session → engine.readChordPage per page → { pages: [{ layout, reads }], style }.
+ * opts.style: "printed" (default) | "hand". */
 export async function readChordPages(pages, engine, opts = {}) {
   if (!pages || !pages.length) throw new Error("no page to read");
-  const bytes = await chordOcrModelBytes();
+  const style = CHORD_OCR_MODELS[opts.style] ? opts.style : "printed";
+  const bytes = await chordOcrModelBytes(CHORD_OCR_MODELS[style]);
   const sess = await chordOcrSession(bytes);
   try {
     const out = [];
@@ -84,6 +91,6 @@ export async function readChordPages(pages, engine, opts = {}) {
       out.push(r);
       firstBar = (r.layout.firstNumber != null ? r.layout.firstNumber : firstBar) + r.layout.bars;
     }
-    return { pages: out };
+    return { pages: out, style };
   } finally { sess.release(); }
 }
