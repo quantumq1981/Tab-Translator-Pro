@@ -140,6 +140,127 @@ expect(notChords.every((t) => E.chordFromWritten(t) === null), "bar numbers, tem
   expect(prog === 1, "progress reaches 1 and a throwing callback does not break the read");
 }
 
+// ---- a hand-copied page (Real Book style): thick bar lines, raised suffixes, a triplet row, 8va dashes,
+//      a tuplet bracket, ruled lines under a title, a page number --------------------------------------
+const RB = page(1000, 640);
+staff(RB, 40, 40, 960);                                          // ruled title lines: 5 lines, no bar line
+for (const top of [250, 470]) {
+  staff(RB, top, 40, 960);
+  for (const x of [40, 270, 500, 730, 954]) rect(RB, x, top, x + 5, top + 40);     // bar lines 6 px = 0.6 space, solid
+}
+for (let y = 0; y <= 40; y++) { const x = 600 + Math.floor(y / 6); rect(RB, x, 250 + y, x + 1, 250 + y); }   // a slanted 2-px stroke across staff 1, 8 px wide overall
+word(RB, 60, 196, [9, 8, 8]); rect(RB, 93, 190, 98, 200);       // bar 1: a chord with its suffix raised (top above the letters, touching nothing)
+for (const x of [300, 540, 770]) rect(RB, x, 228, x + 5, 236);  // a triplet "3" over every beam group, bars 2–4
+word(RB, 520, 196, [9, 8, 8, 8]);                                // bar 3: a chord (the triplet "3" at 540 sits right under it)
+rect(RB, 860, 200, 866, 232);                                    // bar 4: one tall mark overlapping both the chord row and the triplet row
+for (let x = 600; x < 720; x += 14) rect(RB, x, 214, x + 7, 215);  // 8vb dashes, flat
+rect(RB, 300, 242, 340, 242); rect(RB, 300, 238, 300, 242); rect(RB, 340, 238, 340, 242);   // a tuplet bracket over bar 2
+word(RB, 290, 416, [9, 8, 8, 8]); word(RB, 333, 416, [9, 8, 8, 8]);   // bar 6: two chords written touching
+rect(RB, 50, 10, 56, 22); rect(RB, 60, 10, 66, 22);              // a page number at the top left
+const LR = E.chordPageLayout(RB);
+// (layout alone keeps the ruled title lines as staff 0, one bar; readChordPage drops them below)
+expect(LR.staves.length === 3 && LR.bars === 9 && LR.staves[0].barlines.length === 0, `hand-drawn bar lines 0.6 space thick are found: 2 × 4 bars + the ruled title lines (${LR.staves.length} staves, ${LR.bars} bars)`);
+expect(LR.staves[1] && !LR.staves[1].barlines.some((x) => Math.abs(x - 603) < 5), "a slanted stroke across the staff, as wide as a hand bar line, is not a bar line (bar lines are solid)");
+LR.tokens = LR.tokens.filter((t) => t.staff > 0).map((t) => ({ ...t, staff: t.staff - 1, bar: t.bar - 1 }));
+const rb1 = LR.tokens.find((t) => t.staff === 0 && t.bar === 0 && t.y0 > 150 && t.x0 <= 62);
+expect(rb1 && rb1.x1 >= 97 && rb1.y0 <= 191, `a raised suffix stays in its chord's box (${rb1 && [rb1.x0, rb1.y0, rb1.x1, rb1.y1]})`);
+const rows0 = new Set(LR.tokens.filter((t) => t.staff === 0 && t.y0 > 150).map((t) => t.row));
+const trip = LR.tokens.filter((t) => t.staff === 0 && t.y0 >= 226);
+expect(trip.length === 3 && trip.every((t) => t.row !== rb1.row && t.y1 - t.y0 < 12), `the triplet numbers are their own row (not glued to the chord above them, not fused into the chord row by a tall mark), kept beside it (${trip.length} boxes, ${rows0.size} rows)`);
+const c3 = LR.tokens.find((t) => t.staff === 0 && t.x0 === 520);
+expect(c3 && c3.y1 < 215 && c3.row === rb1.row, `a chord with a triplet number under it is boxed alone, in the chord row (${c3 && [c3.x0, c3.y0, c3.x1, c3.y1]})`);
+expect(!LR.tokens.some((t) => t.y0 >= 205 && t.y1 <= 220), "8va dashes are not text");
+expect(!LR.tokens.some((t) => t.y1 >= 238 && t.y0 <= 242 && t.x1 - t.x0 > 30), "a tuplet bracket is not text");
+expect(LR.tokens.filter((t) => t.staff === 1).length === 1 && LR.tokens.find((t) => t.staff === 1).cuts.length >= 1, "two chords written touching are one box with a cut between them");
+{
+  // fake recogniser: by the box's shape — a digit is narrow, a chord wide, two chords touching wider still
+  const widths = [];
+  const run = async (data, width) => { widths.push(width); const { a, T } = logits(width < 45 ? ["3", "_"] : width > 110 ? ["C", "m", "j"] : ["C", "_", "7"]); return { logits: a, frames: T, classes: K }; };
+  const r = await E.readChordPage(RB, run);
+  const toks = r.layout.tokens.map((t, i) => `${t.staff}:${t.bar}:${r.reads[i] ? r.reads[i].name : "-"}${t.split ? "s" : ""}`).join(" ");
+  expect(!r.layout.tokens.some((t) => t.staff === 0 && t.y0 >= 226), `a row that reads as no chords (the triplet numbers) is dropped: ${toks}`);
+  expect(r.reads.filter((x) => x && x.name === "C7").length === 4 && r.layout.tokens.filter((t) => t.split).length === 2, `the touching pair is split in two chords, the row of chords kept: ${toks} (widths ${widths.join(",")})`);
+  expect(r.layout.staves.length === 2 && r.layout.bars === 8 && r.layout.tokens.every((t) => t.staff <= 1 && t.bar < 8), `ruled lines under a title (no bar line, no chord) are dropped, not bar 1 (${r.layout.staves.length} staves, ${r.layout.bars} bars)`);
+  expect(r.layout.firstNumber == null, "a page number high above the first staff is not its bar number");
+  expect(r.reads.length === r.layout.tokens.length, "one read per kept box");
+}
+
+// ---- a piano/vocal/guitar page: voice + piano grand staff joined at the left, grand-staff bar lines, lyrics
+//      between the voice and the piano, a chord name over a fret grid with open-string circles ------------
+{
+  const PV = page(1000, 820);
+  const sys = (top) => {
+    staff(PV, top, 60, 960); staff(PV, top + 150, 60, 960); staff(PV, top + 230, 60, 960);
+    if (top < 300) rect(PV, 60, top, 61, top + 270);                            // the system's opening line joins all three
+    else { rect(PV, 60, top, 60, top + 135); rect(PV, 61, top + 136, 61, top + 270); }   // (system 2: 1 px, stepping a pixel sideways — a slightly tilted scan)
+    for (let y = top + 150; y <= top + 270; y++) { const x = 44 + Math.round(3 * Math.sin((y - top) / 9)); rect(PV, x, y, x + 2, y); }   // a curvy piano brace left of it…
+    rect(PV, 46, top + 170, 59, top + 170);                                     // …touching the treble's middle line (the staff's start is then found on the brace)
+    for (const x of [300, 540, 780, 959]) { rect(PV, x, top, x + 1, top + 40); rect(PV, x, top + 150, x + 1, top + 270); }   // voice bars; piano bars cross both staves
+    for (const x of [120, 330, 560, 800]) word(PV, x, top + 75, [7, 6, 7]);    // a lyric line under the voice staff
+  };
+  sys(110); sys(500);
+  word(PV, 320, 30, [9]);                                                       // chord name "E" over a grid, bar 2 of system 1
+  for (let k = 0; k < 6; k++) rect(PV, 318 + 5 * k, 62, 318 + 5 * k, 90); for (let k = 0; k < 5; k++) rect(PV, 318, 62 + 7 * k, 343, 62 + 7 * k);   // the fret grid
+  for (const x of [318, 338, 343]) { rect(PV, x - 2, 54, x + 2, 54); rect(PV, x - 2, 58, x + 2, 58); rect(PV, x - 2, 54, x - 2, 58); rect(PV, x + 2, 54, x + 2, 58); }   // open-string circles
+  word(PV, 580, 440, [9, 8, 8]);                                                // a chord over system 2, bar 3
+  word(PV, 400, 4, [9, 9, 9, 9]);                                                // a title far above (more than 8 spaces over the staff)
+  const LP = E.chordPageLayout(PV);
+  expect(LP.staves.length === 2 && LP.staves.every((st) => st.staves === 3), `voice + piano joined at the left = one system each (${LP.staves.length} systems: ${LP.staves.map((st) => st.staves).join(",")})`);
+  expect(LP.bars === 8, `bars counted once per system, not per staff (${LP.bars})`);
+  {
+    const all = E._ocrStaves(E._ocrAdaptiveInk(PV.data, PV.width, PV.height, Math.max(8, Math.round(PV.width / 40)), 0.08), PV.width, PV.height);
+    const [inkS] = E._ocrAdaptiveInk(PV.data, PV.width, PV.height, Math.max(8, Math.round(PV.width / 40)), [0.18]);
+    const treble = all.find((st) => Math.abs(st.top(500) - 260) < 4);
+    expect(treble && E._ocrBarlines(inkS, PV.width, PV.height, treble).length >= 3, "a grand-staff bar line running on into the next staff is a bar line");
+  }
+  expect(!LP.tokens.some((t) => t.y0 > 170 && t.y1 < 260) && !LP.tokens.some((t) => t.y0 > 560 && t.y1 < 650), "the lyric line between the voice and the piano is never searched for chords");
+  const pv = LP.tokens.map((t) => `${t.bar}:${t.x0}`).join(" ");
+  expect(!LP.tokens.some((t) => t.y1 < 20), "text more than 8 spaces above the first staff (a title, a page header) is not searched");
+  expect(pv === "1:320 6:580", `the chord name over the grid is kept, the grid and its open-string circles are not boxes; chords land in their bars (${pv})`);
+}
+
+{
+  // two single-staff systems and a wide dark mark bridging the gap at their left edge (a stain, a thick printed
+  // rule): a system's joining line is thin, so these stay two systems
+  const DE = page(1000, 420);
+  staff(DE, 100, 60, 960); staff(DE, 300, 60, 960);
+  for (const top of [100, 300]) for (const x of [60, 360, 660, 959]) rect(DE, x, top, x + 1, top + 40);
+  rect(DE, 58, 141, 72, 299, 40);
+  word(DE, 380, 60, [9, 8]); word(DE, 380, 260, [9, 8]);
+  const LD = E.chordPageLayout(DE);
+  expect(LD.staves.length === 2 && LD.bars === 6 && LD.tokens.length === 2, `a wide dark mark bridging the gap does not join two lead-sheet systems (${LD.staves.length} systems, ${LD.bars} bars, ${LD.tokens.length} chords)`);
+}
+
+{
+  // chords whose descender ("j" of maj) reaches down beside the triplet numerals: the numerals stay their own
+  // row, so the chord row is not voted out by them
+  const TD = page(1000, 360);
+  staff(TD, 250, 60, 960);
+  for (const x of [60, 290, 520, 750, 959]) rect(TD, x, 250, x + 1, 290);
+  for (const x0 of [80, 310]) { word(TD, x0, 190, [9, 8, 8, 8]); rect(TD, x0 + 30, 190, x0 + 32, 228); }   // a chord with a long descender
+  for (const x of [145, 175, 375, 405, 560, 600, 790, 830]) rect(TD, x, 222, x + 5, 230);                  // triplet numerals, tops beside the descenders
+  const run = async (data, width) => { const { a, T } = logits(width < 28 ? ["3", "_"] : ["C", "_", "7"]); return { logits: a, frames: T, classes: K }; };   // a numeral's box is narrow, a chord's (with its descender) square
+  const r = await E.readChordPage(TD, run);
+  const kept = r.layout.tokens.map((t, i) => `${t.bar}:${r.reads[i] ? r.reads[i].name : "-"}`).join(" ");
+  expect(kept === "0:C7 1:C7", `a triplet row tucked under the chords' descenders is dropped, the chord row kept (${kept})`);
+}
+
+// ---- the review list ---------------------------------------------------------------------------------
+{
+  const mkL = (bars, toks, firstNumber = null) => ({ bars, firstNumber, tokens: toks.map(([staff, bar, x]) => ({ staff, bar, x0: x })) });
+  const pages = [
+    { layout: mkL(4, [[0, 0, 10], [0, 1, 50], [0, 1, 80], [1, 2, 10]]), reads: [{ name: "C", prob: 0.95, alternatives: [] }, { name: "Am7", prob: 0.4, alternatives: ["Am9"] }, null, { name: "F", prob: 0.85, alternatives: [] }] },
+    { layout: mkL(4, [[0, 0, 10]], 9), reads: [{ name: "G7", prob: 0.6, alternatives: [] }] },
+  ];
+  const it = E.ocrReviewItems(pages, { "0.3": "Fmaj7", "0.2": "" });
+  const show = it.map((x) => `${x.bar}${x.name}:${x.status}`).join(" ");
+  expect(show === "1C:sure 2Am7:check 3Fmaj7:approved 9G7:check", "every chord listed in reading order with its bar over the piece (a printed number on page 2 wins): " + show);
+  const it2 = E.ocrReviewItems(pages, { "0.0": "", "0.2": "" }, { removed: true });
+  expect(it2.find((x) => x.key === "0.0").status === "removed" && !it2.some((x) => x.key === "0.2"), "a box marked not-a-chord is left out (or listed as removed); an empty box marked so stays out");
+  expect(E.ocrReviewItems(pages, { "0.1": "Hm7" }).find((x) => x.key === "0.1") === undefined && E.ocrReviewItems(null).length === 0, "a fix the chord grammar can't read is not listed; no pages → empty");
+  expect(E.ocrReviewItems(pages, {}, { sure: 0.5 }).find((x) => x.key === "1.0").status === "sure", "the sure threshold is an option");
+}
+
 // ---- bar numbers re-anchor the systems ----------------------------------------------------------------
 {
   // three systems of 4 bars, but system 1 found an extra bar line (5 bars): printed numbers 5 and 9
@@ -157,13 +278,15 @@ expect(notChords.every((t) => E.chordFromWritten(t) === null), "bar numbers, tem
 
 // ---- the shipped model + glue + UI contracts --------------------------------------------------------
 {
-  const model = fs.readFileSync(path.join(repo, "models/chord-ocr/chord-ocr.onnx"));
-  const sha = crypto.createHash("sha256").update(model).digest("hex");
+  const model = fs.readFileSync(path.join(repo, "models/chord-ocr/chord-ocr.onnx")), hand = fs.readFileSync(path.join(repo, "models/chord-ocr/chord-ocr-hand.onnx"));
+  const sha = crypto.createHash("sha256").update(model).digest("hex"), shaH = crypto.createHash("sha256").update(hand).digest("hex");
   const core = read("chord-ocr-core.js"), glue = read("chord-ocr-model.js"), worker = read("chord-ocr-worker.js");
-  expect(core.includes(`sha256: "${sha}"`), `chord-ocr-core.js pins the committed model (${sha.slice(0, 12)}…)`);
+  expect(core.includes(`sha256: "${sha}"`) && core.includes(`sha256: "${shaH}"`) && sha !== shaH, `chord-ocr-core.js pins both committed readers (${sha.slice(0, 12)}…, ${shaH.slice(0, 12)}…)`);
+  expect(/const style = CHORD_OCR_MODELS\[opts\.style\] \? opts\.style : "printed"/.test(core) && /chordOcrModelBytes\(CHORD_OCR_MODELS\[style\]\)/.test(core) && /return \{ pages: out, style \}/.test(core), "core: the reader is chosen by opts.style (unknown → printed), only that one is downloaded, the result says which");
+  expect(/postMessage\(\{ id: 1, pages, engineUrl, style \}/.test(glue) && /onMainThread\(pages, engineUrl, \{ onProgress, style \}\)/.test(glue) && /readChordPages\(pages, engine, \{ style,/.test(worker), "the style reaches the core from the page, through the worker or the main-thread path");
   expect(model.length > 2e5 && model.length < 4e6, `the model is small (${(model.length / 1e6).toFixed(2)} MB)`);
   const notice = read("models/chord-ocr/NOTICE");
-  expect(notice.includes(sha) && /MIT/.test(notice) && /synthetic/.test(notice) && /scripts\/chord-ocr/.test(notice), "NOTICE: the file's SHA-256, the licence, synthetic training data, how it was made");
+  expect(notice.includes(sha) && notice.includes(shaH) && /MIT/.test(notice) && /synthetic/.test(notice) && /scripts\/chord-ocr/.test(notice) && /MuseJazz Text/.test(notice), "NOTICE: both files' SHA-256, the licence, synthetic training data (and the OFL font), how they were made");
   expect(/stem-model-core\.js/.test(core) && /capWasmMemory\(\)/.test(core) && /ORT_WASM_PATHS/.test(core) && /numThreads = 1/.test(core), "core: the pinned ORT 1.23.2 plain WASM rails from stem-model-core.js, one thread, the memory cap");
   expect(/sha256Hex\(b\) === model\.sha256/.test(core) && /cache\.delete\(key\)/.test(core) && /integrity check/.test(core), "core: SHA-256 checked, a bad cached copy evicted");
   expect(/engine\.readChordPage/.test(core) && /sess\.release\(\)/.test(core) && /firstBar/.test(core), "core: the engine's pipeline per page, bar numbering carried page to page, the session released");
@@ -172,12 +295,18 @@ expect(notChords.every((t) => E.chordFromWritten(t) === null), "bar numbers, tem
   expect(/readChordPages/.test(worker) && /type: "progress"/.test(worker), "the worker runs the core and reports progress");
   const html = read("index.html"), pages = read(".github/workflows/pages.yml");
   expect(/<script type="module" src="\.\/chord-ocr-model\.js"><\/script>/.test(html), "index.html loads chord-ocr-model.js");
-  expect(/cp chord-ocr-model\.js chord-ocr-core\.js chord-ocr-worker\.js _site\//.test(pages) && /models\/chord-ocr\/chord-ocr\.onnx models\/chord-ocr\/NOTICE/.test(pages) && /chord-ocr-model\.js\?v=\$\{BUILD\}/.test(pages), "pages.yml ships the glue, model + NOTICE, and stamps chord-ocr-model.js");
+  expect(/cp chord-ocr-model\.js chord-ocr-core\.js chord-ocr-worker\.js _site\//.test(pages) && /models\/chord-ocr\/chord-ocr\.onnx models\/chord-ocr\/chord-ocr-hand\.onnx models\/chord-ocr\/NOTICE/.test(pages) && /chord-ocr-model\.js\?v=\$\{BUILD\}/.test(pages), "pages.yml ships the glue, both readers + NOTICE, and stamps chord-ocr-model.js");
   const ui = read("TabDecoderPro.tsx"), scan = ui.slice(ui.indexOf("const SCAN_MAX_PAGES"), ui.indexOf("function LyricsPanel("));
   expect(/\["scan", "Scan 📷"\]/.test(ui) && /mode === "scan" \? <ScanPanel/.test(ui), "the Scan 📷 mode is listed and routed");
   expect(/window\.TTP_CHORD_OCR\(/.test(scan) && /chordPageScore\(/.test(scan) && /chordFromWritten\(/.test(scan) && /<ChartPanel/.test(scan), "ScanPanel reads pages in the worker, builds the chart with the engine, corrections go through the chord grammar, the chart is a ChartPanel");
   expect(/<input ref=\{fileRef\} type="file" onChange=\{onFile\}/.test(scan) && !/accept=/.test(scan), "the file input has no accept (iOS)");
   expect(/window\.pdfjsLib\.getDocument/.test(scan) && /createImageBitmap/.test(scan), "PDF pages via pdf.js, images via createImageBitmap");
+  expect(/ocrReviewItems\(pages, fix\)/.test(scan) && /function ScanReviewRow/.test(scan) && /onPointerMove=\{move\}/.test(scan) && /touchAction: "pan-y"/.test(scan), "every chord is listed for review with swipe rows (pointer events, vertical scroll kept)");
+  expect(/d\.dx > 70\) onApprove\(\)/.test(scan) && /d\.dx < -70\) onReject\(\)/.test(scan), "swipe right approves, swipe left marks not-a-chord");
+  expect(/Approve all sure/.test(scan) && /Approve selected/.test(scan) && /type="checkbox"/.test(scan) && /To check \(/.test(scan) && /↶ Undo/.test(scan), "bulk approve (all sure / ticked), the To-check filter and Undo");
+  expect(/const applyFix = /.test(scan) && (scan.match(/setFix\((?!\{\}\))/g) || []).length <= 3, "every change to the readings goes through applyFix (undoable); only a new read resets them");
+  expect(/_usePref\("ttp:scanStyle", "printed"/.test(scan) && /Hand-copied \(Real Book\)/.test(scan) && /style: which/.test(scan) && /↻ Read again as/.test(scan) && /imgsRef\.current = imgs/.test(scan), "Book style picker (printed default, remembered), the style is sent to the reader, one-tap re-read with the other reader on the same images");
+  expect(/it\.status === "check" && onPick && it\.alternatives\.slice\(0, 2\)/.test(scan) && /onPick=\{\(a\) => applyFix\(\{ \[it\.key\]: a \}\)\}/.test(scan), "a row still to check offers the runner-up readings as one-tap chips (undoable)");
 }
 
 console.log(`chord-ocr: ${pass} passed, ${fail} failed`);

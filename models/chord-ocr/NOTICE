@@ -1,9 +1,16 @@
-chord-ocr.onnx — chord-symbol recogniser for the "Scan 📷" mode (a photo or scanned PDF of a lead sheet
-→ chord chart). Input: [1, 1, 32, W] — one box of text, 32 px tall, ink = 1, paper = 0 (engine.tsx
-chordOcrInput). Output: logits [1, W/4, 43] — CTC over the chord as drawn ("ABCDEFG", "abdgijlmnostuM",
-digits, "#/()+-,Δ°ø^"; class 0 = blank). The engine decodes it (ctcBeam), keeps the most probable reading
-the chord grammar accepts (chordOcrRead / chordFromWritten) and reads bar numbers (chordOcrNumber).
+chord-ocr.onnx, chord-ocr-hand.onnx — chord-symbol recognisers for the "Scan 📷" mode (a photo or scanned
+PDF of a lead sheet → chord chart). Input: [1, 1, 32, W] — one box of text, 32 px tall, ink = 1, paper = 0
+(engine.tsx chordOcrInput). Output: logits [1, W/4, 43] — CTC over the chord as drawn ("ABCDEFG",
+"abdgijlmnostuM", digits, "#/()+-,Δ°ø^"; class 0 = blank). The engine decodes it (ctcBeam), keeps the most
+probable reading the chord grammar accepts (chordOcrRead / chordFromWritten) and reads bar numbers (chordOcrNumber).
 
+Two readers, same network (the page picks one: "Book style"):
+  chord-ocr.onnx       "printed" — the default. The first model (2026-11-10) fine-tuned 3,000 steps with 30 % of
+                       the images in the hand-copied Real Book style (scripts/chord-ocr/synth_rb.py); it passed
+                       every regression check on engraved, photographed and held-out-handwriting text.
+  chord-ocr-hand.onnx  "hand" — the same recipe with a finer pen in synth_rb.py, step 1,000. Reads hand-copied
+                       Real Book pages best, but on engraved pages it can take a bar number for a letter and it
+                       is ~2 points lower on the held-out handwriting fonts. Measurements: docs/OMR-PLAN.md.
 Model:          our own — a CNN (6 conv layers, 32→128 channels) + a bidirectional GRU (96 per side) + a
                 linear layer, 588,011 parameters, weight-only int8 (per-output-row scale + DequantizeLinear;
                 activations fp32). Written and trained for this project; no third-party weights.
@@ -11,12 +18,15 @@ Licence:        MIT, as the rest of this repository (see LICENSE).
 Training data:  synthetic only. Chord symbols sampled from fake-book spellings (maj7 / MA7 / Δ7 / M7, mi7 / -7,
                 ø, °, +, sus, 69, parenthesised alterations, slash basses), bar numbers (labelled with their
                 digits) and non-chord text (section names, tempo marks, directions, lyric words — labelled
-                empty), drawn with 24 open-licensed fonts (SIL OFL 1.1; Permanent Marker, Coming Soon and
+                empty), drawn with 25 open-licensed fonts (SIL OFL 1.1; Permanent Marker, Coming Soon and
                 Schoolbell: Apache 2.0) plus system DejaVu / FreeFont / Liberation Sans, ♯ ♭ from music-capable
                 fonts or typed as # b, raised/smaller suffixes, italics, then rotation, blur, low resolution,
                 noise, paper tone, stray staff lines and JPEG. No font is distributed with the app.
                 Held out (never trained on): Liberation Serif, Kalam, Schoolbell.
 How it was made: scripts/chord-ocr/ — fetch_fonts.sh, synth.py, train.py (CTC, AdamW, one-cycle), export.py
-                (ONNX opset 17, checked against PyTorch, then the int8 step). README.md there has the
-                commands and the measurements.
-SHA-256:        6842e1fc32443e5fe8fb6e5160eff12fc58b0e8fca134e694f783f5df524e2b6
+                (ONNX opset 17, checked against PyTorch, then the int8 step); the fine-tunes: from_onnx.py (the
+                first model's weights recovered from its ONNX), synth_rb.py, finetune.py. The hand-copied images
+                also use MuseJazz Text (© 2016 Torsten Hämmerle, Abraham Lee; SIL OFL 1.1). README.md there has
+                the commands and the measurements.
+SHA-256:        chord-ocr.onnx       9d1a5854dbd8d5e31fe2a240860b15e131713343a24bb52d52f4e049ad8c13be
+                chord-ocr-hand.onnx  214c6806e5cc582eed6145424d01f3eb9767f2c266be19455a135f341df5b738

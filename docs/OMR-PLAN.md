@@ -193,6 +193,95 @@ review list and tap-to-fix are the answer); chords without a staff (chord-only c
 verovio ignores `print-object="no"` on `<degree>`, so the corpus prints "7sus4(b7)" (the lead-sheet export
 now sets it, per the MusicXML spec).
 
+## Real pages: a Real Book and a piano/vocal book — layout fixes, a fine-tune, the review list (2026-11-15)
+
+**The report:** the owner scanned *If I Ain't Got You* from **The Berklee Real Book** (an iPhone PDF of the
+printed book) on a phone. The suggestions it made were mostly right, but whole sections were skipped. The first
+real-book page measured here — the engraved corpus above is not hand-copied — and every claim below is measured on
+it, with the rendered corpus as the regression guard.
+
+**Real pages with hand-read truth** (`scripts/chord-ocr/bench_page.mjs`, `truth/*.json`: chord names per system
+only; the pages are the owner's copies of published books and stay out of the repo):
+- *The Berklee Real Book*, pp. 234–235: 62 chords, 18 systems, hand-copied (Inkpen-style) chords.
+- A Hal Leonard piano/vocal/guitar book (*Gone Till November*), pp. 112–115: 16 chords over fret grids, voice
+  staff + piano grand staff, lyrics between.
+
+**What was wrong (old reader on the Real Book pages: 7 of 62 right, 11 %):**
+1. **Hand-drawn bar lines were never found.** They are ~0.65 space thick; the test allowed 0.5. Every system was one
+   "bar" (the phone showed "19 systems · 20 bars").
+2. **One text row per staff, chosen as "spread over the most bars".** In the intro the triplet "3"s cover more bars
+   than the chords, so the chord row was thrown away — the skipped sections.
+3. **A fixed band per row** cut the raised suffix off ("Cmaj7" → "Cmaj", "B-7" → "Dm").
+4. Ruled lines under the title were taken for a staff (bar 1), and the page number "234" for its bar number.
+5. **The recogniser had never seen this hand.** Its 7 is a small raised hook; read as "9" or "1" ("A-1" 67 %).
+   No training font draws it that way (MuseJazz Text and Petaluma Script draw a full-size 7).
+
+**Layout fixes (engine, pure, `tests/chord-ocr.mjs`; each rule fails a test when removed):**
+- Bar lines up to 0.8 space wide when SOLID (ink ≥ 75 % of the box). Without the solidity test the rendered corpus
+  lost 10 points: slanted hairlines (fill 0.2–0.3) became bar lines.
+- Words grouped in 2-D (close in x AND overlapping in y), so a raised suffix stays with its root — but a mark whose
+  bottom hangs below the root's ("1st X, 8vb") does not join; then words on one line merge by the old letter gap
+  (an engraved "Emaj9" whose j-descender reaches the staff margin was otherwise cut in two).
+- **Every text row is read; `readChordPage` keeps a row when ≥ 40 % of its boxes read as chords.** Rows join by
+  the core band (median top/bottom) and similar letter height — not transitively, so a tall mark or a chord's
+  descender cannot fuse the chord row with the triplet row (measured: that fusion alone dropped intro system 2).
+- Flat marks (8va/8vb dashes) and thin long strokes (tuplet brackets) are not text; a word that doesn't read is
+  tried split at its widest gaps ("B-7A-7" written touching), halves chord-sized and ≥ 40 % each.
+- The search stops 8 spaces above a staff (title, composer, page header); a bar number must sit within 4 spaces of
+  its staff; a leading "staff" with no bar line and no chord is the title's ruling and is dropped after reading.
+- **Systems:** staves joined by a thin straight line at their left edge are one system (voice + piano grand staff,
+  notation + TAB). Bars are counted once per system, on its staff with the most bar lines; a bar line may run on
+  into the next staff (grand staff); chords are read above the system's top staff only — never in the lyrics
+  between voice and piano, or between notation and TAB. Fret grids (≥ 4 string and ≥ 3 fret lines) and their
+  open-string circles are dropped; the chord name above stays. Before: the piano staves added their own "bars"
+  (three per system) and lyric lines read as chords.
+
+**The outside spec's fixed zones were checked, not adopted:** it puts Real Book chord baselines 1.0–2.0 spaces above
+the top line. On this page the chord boxes sit 0.8–4.0 spaces up and 22 of 58 fall outside that band (the intro's
+are pushed up by the triplet numbers) — a fixed band is the old one-row behaviour. Its metrical rule (two chords →
+beats 1 and 3) was already `chordPageScore`'s.
+
+**The fine-tunes** (`from_onnx.py`, `finetune.py`, `synth_rb.py`): the PyTorch weights were never committed, so
+the start point is recovered exactly from the shipped int8 ONNX (BatchNorm folded → identity, frozen; max |Δ logits|
+3.8e-6). 30 % of the images are drawn in the hand-copied style — a small suffix raised to the root's top, dash
+minors, the 7 as a hand-drawn hook (and hand-drawn 9 and 1 beside it); 70 % are the original mix. 3,000 steps,
+~25 min on 4 CPU cores. Checkpoints were chosen on Real Book **page 2 only**; page 1 is the held-out read.
+
+**Do not re-derive — the Real Book reading is brittle across runs.** MuseJazz Text alone made it worse (the hook-7
+read "9" at 90 %). Run 2 (pen 0.06–0.1 of the letter): page 2 reads 2–18/30 depending on the step. Run 3 (finer pen
+0.045–0.085): 12–26/30. Run 4 (run 3 + bar-number negatives in the hand branch): 2–20/30 — while passing every
+engraved check. Weight averaging with the first model traded the two off linearly (no free lunch). The synthetic
+hand is close to the real one but does not capture it; **real hand-copied pages are what would make it stable.**
+
+**Two readers ship** (`chord-ocr-core.js` `CHORD_OCR_MODELS`, the page's "Book style"; only the chosen one is
+downloaded, 0.6 MB each). The gate fixed before choosing — rendered dev P/R ≥ 98.5, held-out-hands dev ≥ 96.5 %,
+then best Real Book page-2 F1 — picked **run 2, step 3000** as the default ("printed"). Run 3 step 1000 (best page-2
+F1 of all, 0.85) fails that gate — on engraved pages it reads a bar number at a system's start as "G"/"B"
+(precision −1.6) and it is 2.4 points lower on held-out handwriting fonts — so it ships as the opt-in **"Hand-copied
+(Real Book)"** reader, with a one-tap "↻ Read again as …" after any scan.
+
+**Measured** (final engine; chord right = same root, bass and tone set; real pages matched per system in reading
+order; rendered = chord right in its bar, P / R):
+
+| | Real Book p. 1 (held out) | Real Book p. 2 | Hal Leonard PVG (16) | rendered clean dev · test | photo ±3° dev · test | held-out hands dev · test |
+|---|---|---|---|---|---|---|
+| old reader (layout + model) | 6/32 | 1/30 | 1/16, 64 extra | 99.0/98.7 · 98.1/98.4 | 96.5/95.2 · 95.0/93.3 | 97.1 · 97.1 % |
+| new layout, old model | 6/32 | 1/30 | 16/16, 1 extra | 99.1/98.7 · 98.4/98.4 | 97.0/95.4 · 94.9/93.4 | 97.1 · 97.1 % |
+| **"printed" (default)** | **22/32**, 6 extra | 18/30, 12 extra | **16/16**, 1 extra | 99.1/98.7 · 98.4/98.4 | 96.6/95.7 · 94.9/94.4 | 97.2 · 96.9 % |
+| **"hand-copied"** | **28/32**, 1 extra | 25/30, 4 extra | **16/16**, 0 extra | 97.5/98.6 · 97.5/98.1 | 95.0/96.2 · 92.2/92.8 | 94.8 · 94.6 % |
+
+Real Book, hand-copied reader: 53 of 62 right, 50 in the right bar, 44 of its 46 reads ≥ 80 % sure are right. Every
+reader, every page: ≥ 80 % sure is ≥ 99.6 % right on rendered text, so "Approve all sure" is safe there. **Honest
+limits:** one real Real Book song (two pages, same hand) and one PVG song — a weak held-out; the hand-copied reader
+is a better guess for this hand, not a solved problem; the phone itself (pdf.js render, iOS) is the device check.
+
+**The review list (UI, `ScanReviewRow` in `ScanPanel`):** every chord read is listed (not only the uncertain ones),
+each row with a crop of what is written beside what was read, its bar and confidence. Swipe right = approve, swipe
+left = not a chord, tap = edit (alternatives, type a chord); tick rows and "Approve selected", or "Approve all sure";
+filters To check / All / Approved; Undo for every change. Pure helper `ocrReviewItems` (statuses, bar numbering as
+`chordPageScore` numbers them). Browser check: `tests/bench/scan-e2e.mjs` (swipe both ways, tick-and-approve, undo,
+filter; real model, 430 px).
+
 ## Two cheaper routes worth measuring alongside
 
 1. **Tab photos.** Guitar tab is digits on six lines — far easier than notation. Text recognition
