@@ -23,8 +23,8 @@ const stemCore = () => _stemCore || (_stemCore = import(/* @vite-ignore */ STEM_
  * reads those pages best but costs a little on engraved ones — it can take a bar number for a letter).
  * The page asks for one with opts.style; only the one used is downloaded. See models/chord-ocr/NOTICE. */
 export const CHORD_OCR_MODELS = {
-  printed: { url: new URL("./models/chord-ocr/chord-ocr.onnx", import.meta.url).href, sha256: "9d1a5854dbd8d5e31fe2a240860b15e131713343a24bb52d52f4e049ad8c13be" },
-  hand: { url: new URL("./models/chord-ocr/chord-ocr-hand.onnx", import.meta.url).href, sha256: "214c6806e5cc582eed6145424d01f3eb9767f2c266be19455a135f341df5b738" },
+  printed: { url: new URL("./models/chord-ocr/chord-ocr.onnx", import.meta.url).href, sha256: "88aed1b39da2630984ff3fb8da1728b52b3006674c774ae5c3949e93b3a723a7" },
+  hand: { url: new URL("./models/chord-ocr/chord-ocr-hand.onnx", import.meta.url).href, sha256: "905a861fa1ead1633097e4700c9705fb2d6243e518bc3d52434d58ff5ac1bdd6" },
 };
 export const CHORD_OCR_MODEL = CHORD_OCR_MODELS.printed;
 

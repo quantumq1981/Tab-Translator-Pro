@@ -43,12 +43,34 @@ accuracy is kept (checked below). A fine-tune on MuseJazz Text alone made it wor
 `RB_NEG` (0.2) adds bar numbers and words, in the hand fonts, to that branch. The real-page result swings a lot between
 runs and steps — evaluate every checkpoint (`finetune.py` saves one each 250 steps) and choose on page 2 only.
 
+## N.C. and the guitar-book negatives (2026-11-15)
+
+Both readers gained two output classes, "N" and "." (appended to the charset, so a 43-class reader still decodes),
+and were trained further FROM the shipped weights — `from_onnx.py` recovers each int8 ONNX exactly and starts the new
+classes silent — on the original mix plus `synth_extra.py`: N.C. (and "N.C.(A7)"), guitar-book text and articulation
+marks as negatives (P.M., H, P, sl., 1/2, full, let ring, Gtr. 1, Rhy. Fig. 1, 8va, Ped., tacet, sim., the bend / marcato
+hat), crops with rhythm-slash stems, beams or a nut bar under the name, stacked alterations and diagonal slash chords.
+A distillation term holds each reader to its shipped self on the original-mix images (the hand reader's Real Book
+pages are not in the repo, so its drift there can't be re-measured):
+
+```sh
+python from_onnx.py ../../models/chord-ocr/chord-ocr.onnx base-printed.pt            # 43 shipped classes, 45 now
+CHORD_OCR_FONTS=fonts python finetune_nc.py 1500 nc-printed.pt base-printed.pt         # run from the corpus folder
+python export.py nc-printed_1500.pt chord-ocr.onnx --int8
+python synth_extra.py                                                                  # 48 samples → extra_samples/
+```
+
 ## Real pages with hand-read truth
 
 ```sh
 node bench_page.mjs truth/berklee-if-i-aint-got-you.json chord-ocr.onnx <dir with p-1.png p-2.png>
 node bench_page.mjs truth/hal-leonard-pvg-gone-till-november.json chord-ocr.onnx <dir with h-01.png … h-04.png>
+node bench_page.mjs truth/hal-leonard-guitar-allman-brothers.json chord-ocr.onnx <dir with p-03.png p-05.png p-20.png>
+node bench_page.mjs truth/berklee-real-book-everyday-fallin.json chord-ocr.onnx <dir with p-14.png p-15.png>
 ```
+
+(`ENGINE=<another engine.tsx>` runs any bench on another engine for an A/B; `OCR_OPTS='{"clean":false}'` passes
+options to `readChordPage`. A truth chord "N.C." matches a read of N.C.)
 
 The truth files hold only the chord symbols per system (the pages are the owner's copies of published books and
 are not in the repo); each file's `source` says how to render the PDF so the staff positions match. Checkpoints were

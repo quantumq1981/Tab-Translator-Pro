@@ -6,10 +6,10 @@ import { loadEngine } from "../../tests/bench/lib.mjs";
 const ort = (await import(path.resolve(process.env.ORT_WEB || "node_modules/onnxruntime-web/dist/ort.wasm.min.mjs"))).default;   // onnxruntime-web 1.23.2
 ort.env.wasm.numThreads = 1; ort.env.logLevel = "error";
 const [dir, model, splitArg] = process.argv.slice(2);
-const E = await loadEngine();
+const E = await loadEngine(process.env.ENGINE || undefined);   // ENGINE: another engine.tsx (A/B)
 const sess = await ort.InferenceSession.create(new Uint8Array(fs.readFileSync(model)));
 const run = async (data, width) => { const o = (await sess.run({ image: new ort.Tensor("float32", data, [1, 1, 32, width]) })).logits; return { logits: o.data, frames: o.dims[1], classes: o.dims[2] }; };
-const sig = (p) => p.rootPc + "|" + (p.bassPc ?? "") + "|" + p.formula.tones.map((t) => t.semi).sort((a, b) => a - b).join(",");
+const sig = (p) => !p ? "NC" : p.rootPc + "|" + (p.bassPc ?? "") + "|" + p.formula.tones.map((t) => t.semi).sort((a, b) => a - b).join(",");
 const pages = JSON.parse(fs.readFileSync(dir + "/boxes.json")), truth = JSON.parse(fs.readFileSync("lead/truth.json"));
 const st = {}; const bad = [];
 for (const p of pages) {
@@ -17,7 +17,7 @@ for (const p of pages) {
   const v = (st[sp] ||= { tp: 0, fp: 0, fn: 0, nameOk: 0, ms: 0, pages: 0, tok: 0, sure: 0, sureOk: 0 });
   const img = { data: new Uint8Array(fs.readFileSync(dir + "/" + p.png.replace(".png", ".raw"))), width: p.w, height: p.h };
   const t0 = performance.now();
-  const { layout, reads } = await E.readChordPage(img, run);
+  const { layout, reads } = await E.readChordPage(img, run, JSON.parse(process.env.OCR_OPTS || "{}"));
   v.ms += performance.now() - t0; v.pages++; v.tok += layout.tokens.length;
   const got = layout.tokens.map((t, i) => ({ t, r: reads[i] })).filter((g) => g.r);
   const used = new Set();

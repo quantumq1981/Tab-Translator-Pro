@@ -10,16 +10,16 @@ const ort = (await import(path.resolve(process.env.ORT_WEB || "node_modules/onnx
 ort.env.wasm.numThreads = 1; ort.env.logLevel = "error";
 const require = createRequire(path.resolve(process.env.PNGJS_FROM || "package.json"));
 const { PNG } = require("pngjs");
-const E = await loadEngine();
+const E = await loadEngine(process.env.ENGINE || undefined);
 const sess = await ort.InferenceSession.create(new Uint8Array(fs.readFileSync(model)));
 const run = async (data, width) => { const o = (await sess.run({ image: new ort.Tensor("float32", data, [1, 1, 32, width]) })).logits; return { logits: o.data, frames: o.dims[1], classes: o.dims[2] }; };
-const sig = (n) => { const p = E.chordFromWritten(n).parsed; return p.rootPc + "|" + (p.bassPc ?? "") + "|" + p.formula.tones.map((t) => t.semi).sort((a, b) => a - b).join(","); };
+const sig = (n) => { if (/^N\.?C\.?$/.test(n)) return "NC"; const w = E.chordFromWritten(n); if (!w || !w.parsed) return "?" + n; const p = w.parsed; return p.rootPc + "|" + (p.bassPc ?? "") + "|" + p.formula.tones.map((t) => t.semi).sort((a, b) => a - b).join(","); };
 const T = JSON.parse(fs.readFileSync(truthF)).pages;
 let tp = 0, fp = 0, fn = 0, bar = 0, sure = 0, sureOk = 0, first = 1, n = 0; const miss = [], extra = [], per = [];
 for (const [file, tr] of Object.entries(T)) {
   const png = PNG.sync.read(fs.readFileSync(path.join(dir, file))), ch = png.data.length / (png.width * png.height), g = new Uint8Array(png.width * png.height);
   for (let i = 0; i < g.length; i++) g[i] = ch >= 3 ? Math.round(0.299 * png.data[ch * i] + 0.587 * png.data[ch * i + 1] + 0.114 * png.data[ch * i + 2]) : png.data[ch * i];
-  const { layout: L, reads } = await E.readChordPage({ data: g, width: png.width, height: png.height }, run, { firstBar: first });
+  const { layout: L, reads } = await E.readChordPage({ data: g, width: png.width, height: png.height }, run, { firstBar: first, ...JSON.parse(process.env.OCR_OPTS || "{}") });
   first = (L.firstNumber || first) + L.bars;
   const bySys = tr.systems.map(() => []), tp0 = tp, n0 = n, fp0 = fp;
   L.tokens.forEach((t, i) => {

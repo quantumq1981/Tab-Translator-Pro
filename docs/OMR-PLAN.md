@@ -150,7 +150,7 @@ boxes go through a small learned recogniser.
    holds the last chord) → ChartPanel, every export, the Pro handoff.
 
 **The recogniser is ours.** CNN + bidirectional GRU, 588 k parameters, CTC over the chord as drawn (43
-classes), weight-only int8 = **0.60 MB** (same accuracy as fp32). Trained only on synthetic images
+classes; 45 since 2026-11-15, with N.C.), weight-only int8 = **0.60 MB** (same accuracy as fp32). Trained only on synthetic images
 (`scripts/chord-ocr/`): fake-book spellings (maj7/MA7/Δ7/M7, mi7/-7, ø, °, +, sus, 69, parentheses,
 slash basses), ♯/♭ as music glyphs or typed, raised suffixes, italics, 24 open-licensed fonts (15
 handwritten, incl. Steinberg's Petaluma Script), heavy degradation; plus bar numbers labelled with their
@@ -281,6 +281,79 @@ left = not a chord, tap = edit (alternatives, type a chord); tick rows and "Appr
 filters To check / All / Approved; Undo for every change. Pure helper `ocrReviewItems` (statuses, bar numbering as
 `chordPageScore` numbers them). Browser check: `tests/bench/scan-e2e.mjs` (swipe both ways, tick-and-approve, undo,
 filter; real model, 430 px).
+
+## Guitar books, N.C. and the chord-lane traps (2026-11-15)
+
+**The ask:** the owner's add-ons/fixes spec (model vocabulary, system geometry, cropper traps, synthetic data, grammar,
+false-positive filters, 10 regression fixtures) for Hal Leonard Artist Songbooks (notation + TAB), P/V/G, Easy Piano /
+Big-Note and choral layouts, with two reference PDFs: an iPhone scan of a **Hal Leonard guitar recorded-versions book**
+(The Allman Brothers Band, 41 pages) and of **The Berklee Real Book** (pp. 120–141, 22 pages). Five of those pages got
+hand-read truth (`truth/hal-leonard-guitar-allman-brothers.json`: pp. 3, 5, 20 — 57 chords; `truth/berklee-real-book-
+everyday-fallin.json`: pp. 14–15 — 42 chords incl. 3 N.C.); the pages stay out of the repo.
+
+**What was wrong on the guitar book (shipped engine + printed reader: 44 of 57 right, 33 extra):** its staff and bar
+lines are 1-px hairlines lost to the strict mask, so bar lines and the line joining notation to TAB were not found; the
+TAB staff was found as five of its six lines (its bar lines "stuck out" by a space and were rejected); notation and TAB
+were therefore separate "systems" and the gap between them was searched; chords over a rhythm-slash band sit ~10 spaces
+up, past the 8-space search; the bend / marcato hats over the notes ("Λ") read "A" at 97–100 %.
+
+**Engine (pure, `tests/chord-ocr.mjs`, each rule mutation-tested):**
+- **Six-line staves:** after a five-line fit, a sixth line one space above or below running ≥ 60 % of the staff joins
+  it (`st.n` = 6); bar lines and the bottom use all six.
+- **System grouping:** a six-line staff within 8 spaces (2 × H5) under a five-line staff is its TAB — one system even
+  with no joining line found (the spec's 1.5 × H_staff is too tight: the measured gaps are 1.45–1.6 × H5). The joining
+  line is looked for on both masks.
+- **Bar lines:** the union of the strict and lenient masks (on the lenient mask a blurred staff line can't be erased and
+  everything joins into one wide blob the thinness test rejects, so the union adds faint bar lines and nothing else);
+  in a multi-staff system a bar line must be found on two staves or on a five-line staff (a TAB staff's tall
+  parentheses stand alone); a final thin + thick double bar found as two lines is one.
+- **Rhythm slashes** (`_ocrLeadBand`): tall beamed groups clear of the staff spanning ≥ half its width extend the chord
+  search above them.
+- **Bar numbers** (spec 2.7): a box centred within a space of the opening bar line, close above the staff, is read only
+  as a number — never a chord, whatever the reader makes of it.
+- **Crop cleaning** (spec 2.6 / 3.1): rows of the crop's padding that are ≥ 50 % ink (a fret grid's nut bar, a staff line,
+  a beam) are whitened before the crop is scaled to 32 px (`chordOcrInput` `clean`: "lines" default, "pad", false).
+  Neutral on every page we have (none has a nut bar touching a chord box); guarded by a test.
+- **Grammar** (spec 5.3): `chordFromWritten` matches N.C. first ("N.C.", "NC", "N.C.(A7)" → the no-chord mark) and
+  rejects a suffix not built like a chord name — "G#969" (two chords read as one box, accepted before), "C77", "Cm711".
+  A "7sus4(b7)" missing its "(" or flat still reads 7sus4.
+- **N.C. in the chart:** `chordPageScore` makes it the engine's "—" (every exporter writes N.C.), and the bars after it
+  hold silence, not the previous chord.
+
+**The readers** (spec 1.2–1.3, 4.x): two classes appended ("N", "." — a 43-class reader still decodes), both readers
+trained 1,500 more steps from their shipped weights (`finetune_nc.py`, `synth_extra.py`: N.C.; guitar-book text and the
+hats as negatives; crops with stems, beams or a nut bar; stacked alterations; diagonal slash chords), with a distillation
+term (KL to the shipped reader on the original-mix images, weight 1.0). First try labelled digit-only marks ("1/2",
+"(3)", "8va") EMPTY: held-out handwriting −1.0 / −1.4 (the reader started dropping the "11" of "Gm11"); without them
+and with distillation 1.0 the drift is ≤ 0.3. "e f r c" (Ped., tacet, Fine) were NOT added: those are negatives.
+
+**Measured** (same engine for the old/new reader rows; guitar book / Real Book = chord right per system, extras; rendered
+= chord right in its bar, P / R; hands = held-out handwriting fonts, recognition):
+
+| | guitar book (57) | Real Book (42) | rendered clean dev · test | photo ±3° dev · test | hands dev · test |
+|---|---|---|---|---|---|
+| old engine, old printed | 44, 33 extra | 32, 12 extra | 99.1/98.7 · 98.4/98.4 | 96.6/95.7 · 94.9/94.4 | 97.2 · 96.9 |
+| new engine, old printed | 56, 30 extra | 32, 12 extra | 99.1/98.7 · 98.4/98.4 | 97.3/95.7 · 95.0/94.4 | 97.2 · 96.9 |
+| **new engine, new printed (default)** | **56, 2 extra** | **33, 8 extra** | 99.1/98.7 · 98.4/98.4 | 97.0/95.7 · 95.1/94.1 | 96.9 · 96.6 |
+| new engine, old hand | 56, 23 extra | 34, 7 extra | 98.8/98.6 · 98.4/98.1 | 97.2/96.1 · 93.5/92.8 | 94.8 · 94.7 |
+| **new engine, new hand** | **55, 4 extra** | **38, 4 extra** | 99.1/98.7 · 98.4/98.4 | 97.2/96.2 · 95.0/93.8 | 96.6 · 95.8 |
+
+N.C.: 0 of 3 before (no class for it); both new readers read 2 of 3 on the Real Book pages (the miss is "B-7 N.C."
+written almost touching, one box). The new hand reader now passes the gate the default was chosen by (rendered dev ≥
+98.5, hands dev ≥ 96.5); the default stays "printed" (better on engraved and held-out hands) until real hand-copied pages
+are measured — the original Real Book truth pages (*If I Ain't Got You*) are not here to re-check.
+
+**Checked, not adopted — the spec's fixed chord band** (`chord_roi_y = [y_top − 2.5s, y_top − 1.5s]`): on the guitar
+book the read chords' baselines sit 1.2–9.3 spaces above the top line (median 5.4; only 11 of 102 inside 1.5–2.5); on the
+Real Book 1.0–4.1 (16 of 39 inside). The band would drop most of them; the system grouping + row vote + 8-space search
+(+ the rhythm-slash extension) does the job the band was meant to.
+
+**Covered by what was already there:** P/V/G and choral (chords only above a system's top staff — lyrics and the piano
+never searched), Big-Note letters inside noteheads (a box must end ≥ 0.6 space above the top line; new test), page
+headers (8-space cap, title-ruling drop), boxed section labels (border strokes), fret grids (grid detector).
+**Not built:** syllable-level checks of "Words and Music by" placement (the reader's negatives + the 8-space cap cover
+it), a downbeat-aware placement of N.C. inside a bar (it takes the beat its x gives, as chords do), `*`-footnote stars
+glued to a chord ("*Cm/Eb" is still missed).
 
 ## Two cheaper routes worth measuring alongside
 
