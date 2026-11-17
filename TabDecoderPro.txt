@@ -3836,8 +3836,12 @@ async function _scanPdfPages(bytes) {
     out.push(_scanGrey(cv));
     // the vector layer in the SAME viewport, so its token boxes land on the rendered page's pixels; any failure here
     // (an odd PDF, an old pdf.js) only means OCR reads the page
-    try { vecs.push(pdfPageVectors(await pg.getTextContent(), vp, await pg.getOperatorList(), window.pdfjsLib.OPS)); }
-    catch (_) { vecs.push(null); }
+    try {
+      const tc = await pg.getTextContent(), ol = await pg.getOperatorList(), fontNames = {};
+      // the fonts are loaded once the page is rendered: their real names (Leland, Edwin …) help tell music glyphs from text
+      for (const it of tc.items) if (it.fontName && !(it.fontName in fontNames)) { try { fontNames[it.fontName] = (pg.commonObjs.get(it.fontName) || {}).name || ""; } catch (_) { fontNames[it.fontName] = ""; } }
+      vecs.push(pdfPageVectors(tc, vp, ol, window.pdfjsLib.OPS, { fontNames }));
+    } catch (_) { vecs.push(null); }
   }
   return { imgs: out, vecs: vecs.every(Boolean) ? vecs : null };
 }

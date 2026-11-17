@@ -1,8 +1,9 @@
 # Ultimate Guitar Pro PDFs — OCR/OMR calibration (corrected, measured)
 
-This revises the owner's *UG Pro PDF OCR/OMR Calibration Specification (Final)* against six real UG "Pro" PDFs
-(Revelation, Pretzel Logic, Sultans of Swing, Room 335, I Ain't Got Nothin' But the Blues, Listen to the Music —
-37 pages, 591 bars, 819 printed chords). Every claim below was measured on those files; where the original spec was wrong or
+This revises the owner's *UG Pro PDF OCR/OMR Calibration Specification (Final)* against nine real UG "Pro" PDFs:
+six in the first batch (Revelation, Pretzel Logic, Sultans of Swing, Room 335, I Ain't Got Nothin' But the Blues,
+Listen to the Music — 37 pages, 591 bars, 820 printed chords) and three iOS 27 "print from the site" copies in a second
+(This Masquerade, Sleepwalk, Affirmation — 8 pages, 205 bars, 186 chords; §9). Every claim below was measured on those files; where the original spec was wrong or
 silent, the correction says so and gives the evidence. The PDFs are copyrighted and are **not** in the repo.
 
 **What was built (2026-11-17):**
@@ -34,8 +35,10 @@ The two Ain't Got Nothin' "misses" (bar 5 `Gm9`, bar 9 `Bb/F`) are chords the Gu
 does not print (checked on the render) — every *printed* chord is read. Precision 100 % on all three.
 
 The other three have no source file in the repo; their text-layer reading was checked by eye against renders (Sultans
-p1, Room 335 p1–p2 and p6, Listen to the Music p4) and its bar count against the printed bar numbers: Sultans 213/213,
-Room 335 129/129, Listen to the Music 46/46 numbers agree. In the real app (headless Chromium): Room 335 read in 3.1 s
+p1, Room 335 p1–p2 and p6, Listen to the Music p4–p5) and its bar count against the printed bar numbers: Sultans 213/213,
+Room 335 129/129, Listen to the Music 46/46 numbers agree. **Correction (second batch):** the first version of the
+reader missed one Listen to the Music chord (bar 31's `E`, printed against the 1st-ending bracket's "1" and glued to
+it); a spot check that uses the reader's own output as truth can't see that. It reads 60 chords now (was 59). In the real app (headless Chromium): Room 335 read in 3.1 s
 (131 bars, 278 chords, ♩=120, the 3/4 bars in the MusicXML export), Sultans 213 bars / 182 chords / 8 sections,
 Revelation 1.5 s; no model download, no console errors.
 
@@ -128,7 +131,7 @@ The spec named pdfminer / PyMuPDF; this app is client-side and already loads **P
 `pdfPageVectors` is the only PDF.js-shaped function and is pure, so Node runs the same code. A page with no text layer
 (a scan), text without staves, or a text layer that fails to parse gives `ok:false` and the page goes to OCR — the
 "corrupt / empty stream" rule of the spec. (The Listen to the Music PDF the spec says "failed to extract cleanly" reads
-fully: 6 pages, 49 bars, 59 chords, 46/46 bar numbers.)
+fully: 6 pages, 49 bars, 60 chords, 46/46 bar numbers.)
 
 ## 7. A defect this exposed (fixed): written chords were re-named
 
@@ -152,7 +155,28 @@ from Scan (OCR or text layer) are now marked `written`: `respellScore` keeps the
 * **Beats inside a bar** come from the chord's position (chordPageScore's convention). The vector layer has every
   notehead and rest; a rhythm reading from SMuFL note values would place chords exactly.
 
-## 9. Reproduce
+## 9. Second batch: iOS 27 prints (This Masquerade, Sleepwalk, Affirmation)
+
+All 8 pages checked chord by chord against renders: **This Masquerade 37/37, Sleepwalk 97/97, Affirmation 52/52**,
+every section label in its bar, every printed bar number agreeing with the count (36/36, 75/75, 84/84). Real app:
+all three read from the text layer with their titles and tempos. What these copies changed:
+
+| finding | evidence | what the reader does |
+|---|---|---|
+| **The music fonts lost their Unicode map.** iOS 27 "Quartz" prints write Leland / LelandText glyphs as plain ASCII (`$`, `,`, `!`) instead of SMuFL code points; BravuraText chord accidentals keep theirs. | A 10-bar rest's "10" read as `+,` and became the "title" (biggest text); the metronome `!` glued onto "= 75" and was dropped; time signatures unreadable. | A font is musical when most of its items are SMuFL, or notation-sized punctuation (a title is letters), or its name is a SMuFL font (the app passes PDF.js font names); its non-SMuFL glyphs are never text. |
+| **Time signatures cannot be read** from these prints (the digits are garbled). | Sleepwalk is in 12/8. | 4/4 assumed — the honest limit; fix in the chart's meter. |
+| **Multi-measure rests**: one measure stands for many; the printed numbers jump (1, 2, 12, 13). | Affirmation drifted 9 bars from bar 12. | A printed number far from the count is accepted when the next bar's number confirms it (n, n+1) — a tuplet "3" never does. A rest at the very end has no following number: it counts as one bar. |
+| **An empty real first bar** (a whole-bar rest whose glyph is unreadable) looked like the clef area before a start-repeat. | Affirmation started at bar 2. | That empty first interval is dropped only when narrow (≤ 8 spaces) or closed by a double / repeat bar line. |
+| **A bar number set against the chord before it** (`G7b9` + bar 7 → `G7b97`), and a **volta's "1" against a chord** (`1E`). | Sleepwalk bar 6; also Listen to the Music bar 31 and This Masquerade bars 20 / 24 (`20Ab7`), which the first reader lost silently. | A smaller glyph that is not raised does not join a word (a superscript extension is smaller AND raised). |
+| **A chord against bigger text** ("Da Coda" + `C7(♯5)`, chord slightly raised). | This Masquerade bar 16. | A smaller glyph starting with A–G never joins (an extension never starts with a root). |
+| **Drawn parentheses**: `G7(♯5)` has no "(" ")" in the text; the gap they leave split `G7` from `♯5`. | This Masquerade bars 10, 16, 28, 34, 35 (`G7` lost its ♯5). | An alteration alone (`#5`, `b9#11`) right after a chord on its baseline is that chord's. |
+| **Labels centred on the bar line** ("THEME" starts inside the bar before). | Affirmation bar 12. | A label straddling a bar line with its centre on it (within a space) belongs to that bar; otherwise its left edge decides (a long label is not moved). |
+| Lower-case labels ("intro", "verse 1"), timestamps ("01:41"), "SOLO / A", dash-minor chords (`E-7`), `GMaj7`, `Fm7M`. | — | Already handled; "SOLO /" is trimmed to "SOLO". |
+
+The six first-batch files read exactly as before (the bench numbers in §1 are unchanged), except the Listen to the
+Music correction above.
+
+## 10. Reproduce
 
 ```sh
 cd tests && npm install && npm test                                  # includes pdf-text.mjs
