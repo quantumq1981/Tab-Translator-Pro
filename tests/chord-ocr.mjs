@@ -276,6 +276,115 @@ expect(LR.tokens.filter((t) => t.staff === 1).length === 1 && LR.tokens.find((t)
   expect(L4.firstNumber === null && L4.tokens.map((t) => t.bar).join(" ") === "4 9 12", "no numbers: counting stands");
 }
 
+// ---- guitar books (2026-11-15): a 6-line TAB staff under the notation = one system (the gap's P.M. / full /
+//      1/2 text is never searched), hairline bar lines only the lenient mask keeps, a TAB staff's tall
+//      parentheses are not bar lines, rhythm slashes push the chords up, a bar number over the opening line,
+//      a final double bar ---------------------------------------------------------------------------------
+{
+  const G = page(1000, 660), faint = 222;
+  const lines = (top, n, gap, x0 = 40, x1 = 960) => { for (let k = 0; k < n; k++) rect(G, x0, top + k * gap, x1, top + k * gap, faint); };
+  const sysA = 120, sysB = 400;
+  for (const top of [sysA, sysB]) { lines(top, 5, 10); lines(top + 100, 6, 16); }
+  // system A: hairline bar lines running from the notation top through the gap to the TAB bottom (one stroke)
+  for (const x of [40, 360, 680, 960]) rect(G, x, sysA, x, sysA + 180, faint);
+  // system B: bar lines per staff, nothing joining the two staves at the left
+  for (const x of [40, 360, 680, 960]) { rect(G, x, sysB, x, sysB + 40, faint); rect(G, x, sysB + 100, x, sysB + 180, faint); }
+  for (const top of [sysA, sysB]) rect(G, 500, top + 104, 501, top + 176);       // a tall "(" around a held TAB chord
+  for (const top of [sysA, sysB]) { word(G, 80, top - 32, [9]); word(G, 400, top - 32, [9, 6]); word(G, 720, top - 32, [9]); }   // chords: bars 1, 2, 3
+  for (const top of [sysA, sysB]) word(G, 420, top + 72, [7, 5, 5, 5]);           // "full" in the gap, just above the TAB
+  const [, soft] = E._ocrAdaptiveInk(G.data, G.width, G.height, Math.max(8, Math.round(G.width / 40)), [0.18, 0.08]);
+  const tabs = E._ocrStaves(soft, G.width, G.height).filter((st) => st.n === 6);
+  expect(tabs.length === 2 && tabs.every((st) => Math.abs(st.s - 16) < 0.8), `a TAB staff is found with its six lines (${tabs.map((st) => st.n + "@" + st.s.toFixed(1)).join(" ")})`);
+  const LG = E.chordPageLayout(G);
+  expect(LG.staves.length === 2 && LG.staves.every((st) => st.staves === 2), `notation + TAB = one system, with or without a joining line (${LG.staves.map((st) => st.staves).join(",")})`);
+  expect(LG.bars === 6, `hairline bar lines found, a TAB parenthesis is not a bar line: 3 + 3 bars (${LG.bars})`);
+  const gb = LG.tokens.map((t) => `${t.bar}`).join(" ");
+  expect(gb === "0 1 2 3 4 5", `the chords above each system in their bars, nothing from the TAB gap (${gb})`);
+}
+{
+  const mk = (band) => {
+    const R = page(1000, 420);
+    staff(R, 250, 40, 960); for (const x of [40, 500, 960]) rect(R, x, 250, x + 1, 290);
+    if (band) for (let gx = 60; gx < 900; gx += 100) {                           // beamed rhythm slashes, 3–8 spaces over the staff
+      rect(R, gx, 170, gx + 60, 173);
+      for (const sx of [gx, gx + 30, gx + 60]) { rect(R, sx, 170, sx + 1, 215); rect(R, sx - 6, 214, sx + 1, 218); }
+    }
+    word(R, 80, 140, [9]); word(R, 560, 140, [9, 6]);                             // chord names ~10 spaces up, above the slashes
+    return E.chordPageLayout(R);
+  };
+  const withBand = mk(true), without = mk(false);
+  expect(withBand.tokens.map((t) => t.bar).join(" ") === "0 1" && withBand.staves[0].lead > 0, `rhythm slashes over the staff: the chord names above them are read (${withBand.tokens.map((t) => t.bar).join(" ")})`);
+  expect(without.tokens.length === 0, "without the slashes, text 10 spaces above a staff stays out of the search (a title, a header)");
+}
+{
+  // a bar number over the opening bar line is read as a number only — never as a chord, however the reader reads it
+  const N = page(1000, 300); staff(N, 150, 40, 960); for (const x of [40, 270, 500, 730, 960]) rect(N, x, 150, x + 1, 190);
+  word(N, 36, 126, [9]); word(N, 90, 120, [9, 8, 6]);
+  const run = async (data, width) => { const { a, T } = logits(width < 30 ? ["1", "2"] : ["G", "_"]); return { logits: a, frames: T, classes: K }; };
+  const r = await E.readChordPage(N, run);
+  const nb = r.layout.tokens.findIndex((t) => t.number);
+  expect(nb >= 0 && r.reads[nb] === null && r.layout.firstNumber === 12, `the number over the opening line anchors the system (bar ${r.layout.firstNumber}) and is not a chord`);
+  const runG = async (data, width) => { const { a, T } = logits(["G", "_"]); return { logits: a, frames: T, classes: K }; };
+  const rg = await E.readChordPage(N, runG);
+  expect(rg.reads.filter(Boolean).length === 1, `a reader that takes the number for "G" adds no chord there (${rg.reads.filter(Boolean).length} chords)`);
+  // a final double bar line found as two lines is one bar line
+  const D = page(1000, 300); staff(D, 150, 40, 960); for (const x of [40, 500, 935, 958]) rect(D, x, 150, x + (x === 958 ? 3 : 1), 190);
+  expect(E.chordPageLayout(D).bars === 2, `a final thin + thick double bar does not add a sliver of a bar (${E.chordPageLayout(D).bars})`);
+}
+
+// ---- Easy Piano / Big-Note: pitch letters printed INSIDE enlarged noteheads on the staff are never chord boxes
+{
+  const BN = page(1000, 300); staff(BN, 150, 40, 960); for (const x of [40, 500, 960]) rect(BN, x, 150, x + 1, 190);
+  for (const [x, y] of [[120, 160], [300, 170], [620, 150], [800, 175]]) {                // big white noteheads with a letter inside
+    for (let a = 0; a < 360; a += 2) { const r = a * Math.PI / 180; rect(BN, Math.round(x + 16 * Math.cos(r)), Math.round(y + 11 * Math.sin(r)), Math.round(x + 16 * Math.cos(r)) + 1, Math.round(y + 11 * Math.sin(r)) + 1); }
+    rect(BN, x - 4, y - 5, x + 4, y + 5);                                               // the letter
+  }
+  rect(BN, 600, 128, 602, 160);                                                          // a note's stem reaching above the staff
+  word(BN, 100, 112, [9]); word(BN, 560, 112, [9, 6]);                                    // the chord names above
+  const LB = E.chordPageLayout(BN);
+  expect(LB.tokens.map((t) => t.bar).join(" ") === "0 1", `Big-Note letters in the noteheads are not chord boxes, the names above are (${LB.tokens.map((t) => t.bar + "@" + t.x0).join(" ")})`);
+}
+
+// ---- N.C., the no-chord mark (2026-11-15): two classes appended to the charset ------------------------------
+{
+  expect(E.CHORD_OCR.charset.endsWith("N.") && E.CHORD_OCR.charset.indexOf("N") === 42, "N and . are appended at the end of the charset (older 43-class readers keep their classes)");
+  for (const w of ["N.C.", "NC", "N.C", "N.C.(A7)", "N. C."]) { const r = E.chordFromWritten(w); expect(r && r.noChord && r.name === "N.C.", `"${w}" is N.C.`); }
+  const { a, T } = logits(["N", ".", "C", ".", "_"]);
+  const r = E.chordOcrRead(a, T, K);
+  expect(r && r.name === "N.C." && r.noChord, `a read of "N.C." is the no-chord mark (${r && r.name})`);
+  // a 43-class reader (before N.C.) still decodes
+  const K43 = 43, T2 = 3, a2 = new Float32Array(T2 * K43).fill(-8); a2[cls("C")] = 4; a2[K43 + cls("7")] = 4; a2[2 * K43] = 4;
+  expect((E.chordOcrRead(a2, T2, K43) || {}).name === "C7", "a reader with the original 43 classes reads as before");
+  // in the chart: N.C. sounds nothing until the next chord, and every exporter writes N.C.
+  const lay = { bars: 4, tokens: [{ bar: 0, frac: 0.1 }, { bar: 1, frac: 0.1 }, { bar: 3, frac: 0.1 }], staves: [] };
+  const sc = E.chordPageScore([{ layout: lay, reads: [{ name: "G7", prob: 0.9 }, r, { name: "C", prob: 0.9 }] }]);
+  const ev = sc.bars.map((b) => b.events.map((e) => e.symbol + (e.held ? "h" : "")).join(" ")).join(" | ");
+  expect(ev === "G7 | — | —h | C" && sc.bars[1].events[0].midis.length === 0, `N.C. holds silence, not the previous chord: ${ev}`);
+  expect(/G7 \| N\.C\. \| (N\.C\.|%) \| C/.test(E.scoreToCSMPN(sc, { title: "x" })), "CSMPN writes it as N.C.");
+}
+
+// ---- the chord grammar rejects suffixes no chord name is built like (spec 5.3) ------------------------------
+{
+  const junk = ["G#969", "C77", "C99", "C79", "Cm711", "CMaj", "C7b"];
+  expect(junk.every((t) => E.chordFromWritten(t) === null), "two chords run together or misreads are not chords: " + junk.filter((t) => E.chordFromWritten(t)).join(" "));
+  const ok = [["C13#11", "C13#11"], ["C7#9b13", "C7#9b13"], ["Cm69", "Cm6/9"], ["D7sus47)", "D7sus4"], ["Cmadd9", "Cmadd9"], ["C7#9#5", "C7#9#5"]];
+  const bad = ok.filter(([w, n]) => (E.chordFromWritten(w) || {}).name !== n);
+  expect(!bad.length, "real chords still read: " + bad.map(([w]) => w + "→" + (E.chordFromWritten(w) || {}).name).join(" "));
+}
+
+// ---- the crop is cleaned before it is scaled: a fret grid's nut bar under the chord name ---------------------
+{
+  const img = page(200, 100); rect(img, 50, 40, 89, 59); rect(img, 30, 64, 120, 66);      // the name, then the nut bar 4 px under it
+  const box = { x0: 50, y0: 40, x1: 89, y1: 59 };
+  const cl = E.chordOcrInput(img, box), raw = E.chordOcrInput(img, box, { clean: false });
+  const lastInk = (inp) => { let y = 31; for (; y >= 0; y--) { let n = 0; for (let x = 0; x < inp.width; x++) n += inp.data[y * inp.width + x] > 0.5; if (n > 0.3 * inp.width) break; } return y; };
+  expect(lastInk(raw) > lastInk(cl) + 2, `the nut bar is whitened (last ink row ${lastInk(raw)} → ${lastInk(cl)})`);
+  const mid = cl.data[16 * cl.width + (cl.width >> 1)];
+  expect(mid > 0.95, "the chord itself is untouched");
+  const pd = E.chordOcrInput(img, box, { clean: "pad" });
+  expect(lastInk(pd) <= lastInk(cl), "\"pad\" whitens every padding pixel");
+}
+
 // ---- the shipped model + glue + UI contracts --------------------------------------------------------
 {
   const model = fs.readFileSync(path.join(repo, "models/chord-ocr/chord-ocr.onnx")), hand = fs.readFileSync(path.join(repo, "models/chord-ocr/chord-ocr-hand.onnx"));

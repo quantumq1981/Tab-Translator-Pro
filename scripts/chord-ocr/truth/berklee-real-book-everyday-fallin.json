@@ -1,0 +1,7 @@
+{"source": "The Berklee Real Book (hand-copied), 'Everyday People' p. 133 and 'Fallin'' p. 134 — the owner's iPhone-scanned PDF 'The Berklee Real Book example examples' (22 pages, book pp. 120-141), pages 14 and 15, rendered with: pdftoppm -gray -f N -l N -scale-to-x 1500 -scale-to-y -1 -png <pdf> p (→ p-14.png, p-15.png). Pages NOT in the repo (copyright); chord symbols per system read by hand (2026-11-15).",
+ "note": "systems: one list per staff, top to bottom; [bar within the system (1-based), chord]. N.C. = no chord (both pages print it in the chord lane). ys: the staff's top-line y in the 1500-px render.",
+ "pages": {
+  "p-14.png": {"ys": [210, 448, 716, 970, 1238, 1491, 1743], "systems": [[[1, "G"], [1, "C/G"], [2, "G"]], [[1, "C/G"], [2, "G"]], [[1, "C/G"], [2, "G"]], [[1, "C/G"], [2, "G"], [3, "C/G"]], [[1, "G"], [2, "C/G"], [3, "G"]], [[1, "C/G"], [2, "G"]], [[2, "N.C."]]]},
+  "p-15.png": {"ys": [350, 587, 797, 1020, 1244, 1467, 1690], "systems": [[[1, "N.C."]], [[1, "E-"], [1, "B-7"], [2, "E-"], [2, "B-7"]], [[1, "E-"], [1, "B-7"], [2, "E-"], [2, "B-7"]], [[1, "E-"], [1, "B-7"], [2, "E-"], [2, "B-7"]], [[1, "E-"], [1, "B-7"], [2, "E-"], [2, "B-7"]], [[1, "E-"], [1, "B-7"], [2, "E-"], [2, "B-7"]], [[1, "E-"], [1, "B-7"], [2, "E-"], [2, "B-7"], [2, "N.C."]]]}
+ }
+}

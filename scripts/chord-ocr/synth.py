@@ -11,7 +11,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 from fontTools.ttLib import TTFont
 
 H = 32
-CHARSET = "ABCDEFG" + "abdgijlmnostuM" + "0123456789" + "#/()+-,Δ°ø^"
+CHARSET = "ABCDEFG" + "abdgijlmnostuM" + "0123456789" + "#/()+-,Δ°ø^" + "N."   # "N." added 2026-11-15 (N.C.)
 FONT_DIR = os.environ.get("CHORD_OCR_FONTS", "fonts")   # see fetch_fonts.sh
 HOLDOUT = {"Kalam-Regular.ttf", "Schoolbell.ttf"}          # + Liberation Serif (system) = eval only
 SYS = ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
@@ -140,7 +140,7 @@ def render(rng, fonts, label=None):
     im = augment(rng, im)
     return to_input(im), label
 
-def augment(rng, im):
+def augment(rng, im, line=True):
     if rng.random() < 0.5: im = im.rotate(rng.uniform(-3, 3), resample=Image.BILINEAR, expand=True, fillcolor=255)
     if rng.random() < 0.3: im = im.filter(ImageFilter.MinFilter(3))              # bolder strokes
     elif rng.random() < 0.15: im = im.filter(ImageFilter.MaxFilter(3))
@@ -153,7 +153,7 @@ def augment(rng, im):
     lo, hi = rng.uniform(0, 80), rng.uniform(170, 255)                           # contrast / paper tone
     a = lo + (hi - lo) * a / 255.0
     a += np.random.default_rng(rng.getrandbits(32)).normal(0, rng.uniform(0, 12), a.shape)
-    if rng.random() < 0.25:                                                       # a staff line / stray stroke below
+    if line and rng.random() < 0.25:                                              # a staff line / stray stroke below
         y = int(a.shape[0] * rng.uniform(0.85, 1.0)) - 1
         t = 1 + rng.randint(0, 1)
         a[y:y + t, :] = np.minimum(a[y:y + t, :], rng.uniform(20, 90))

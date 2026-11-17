@@ -1,0 +1,8 @@
+{"source": "Hal Leonard guitar recorded-versions book (notation + TAB), The Allman Brothers Band — the owner's iPhone-scanned PDF 'Allman bros Hal Leonard sheet music examples' (41 pages, book pp. 36-76), pages 3, 5 and 20, rendered with: pdftoppm -gray -f N -l N -scale-to-x 1500 -scale-to-y -1 -png <pdf> p (→ p-03.png, p-05.png, p-20.png). Pages NOT in the repo (copyright); chord symbols per system read by hand (2026-11-15).",
+ "note": "systems: one list per system (rhythm-slash line and/or vocal staff + guitar notation + TAB, joined at the left edge), top to bottom; [bar within the system (1-based), chord]. ys: the system's TOP 5-line staff top-line y in the 1500-px render. p-03 systems 3-4 carry their chords above a one-line rhythm-slash staff, ~10 spaces over the vocal staff; p-20 '*Cm/Eb' has a footnote star.",
+ "pages": {
+  "p-03.png": {"ys": [238, 657, 1189, 1674], "systems": [[[1, "E"], [1, "B"], [2, "A"], [2, "E"]], [[1, "B"], [2, "A"], [2, "D/A"], [2, "A"], [3, "D/A"], [3, "A"]], [[1, "E"], [2, "A"], [3, "B"], [3, "A"]], [[1, "E"], [1, "D/A"], [1, "A"], [2, "B"], [2, "D/A"], [2, "A"]]]},
+  "p-05.png": {"ys": [165, 482, 813, 1140, 1467, 1795], "systems": [[[1, "A"], [2, "E"], [3, "A"]], [[1, "E"], [2, "A"]], [[1, "E"], [2, "A"], [3, "E"]], [[1, "A"], [2, "E"]], [[1, "A"], [2, "E"]], [[1, "A"], [2, "E"]]]},
+  "p-20.png": {"ys": [208, 849, 1496], "systems": [[[1, "G9"], [1, "G#9"], [1, "G9"], [1, "G#m9"], [2, "C9"], [2, "C6"], [2, "C9"], [3, "C7"], [3, "C6"], [3, "C9"]], [[1, "G7"], [1, "Am7"], [2, "Bm7"], [2, "Bbm7"], [3, "Am7"], [3, "Abm7"], [3, "Am7"]], [[1, "Cm/Eb"], [1, "Cm7"], [2, "G7"], [2, "C7"], [3, "G7"], [3, "D+"]]]}
+ }
+}

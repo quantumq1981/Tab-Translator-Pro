@@ -4,7 +4,7 @@ import fs from "node:fs"; import path from "node:path";
 import { loadEngine } from "../../tests/bench/lib.mjs";
 const ort = (await import(path.resolve(process.env.ORT_WEB || "node_modules/onnxruntime-web/dist/ort.wasm.min.mjs"))).default;   // onnxruntime-web 1.23.2
 ort.env.wasm.numThreads = 1; ort.env.logLevel = "error";
-const [dir, model] = process.argv.slice(2), E = await loadEngine();
+const [dir, model] = process.argv.slice(2), E = await loadEngine(process.env.ENGINE || undefined);
 const sess = await ort.InferenceSession.create(new Uint8Array(fs.readFileSync(model)));
 const idx = JSON.parse(fs.readFileSync(dir + "/inputs.json")), bin = fs.readFileSync(dir + "/inputs.bin");
 const sig = (p) => p.rootPc + "|" + (p.bassPc ?? "") + "|" + p.formula.tones.map((t) => t.semi).sort((a, b) => a - b).join(",");

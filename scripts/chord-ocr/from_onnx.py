@@ -25,11 +25,16 @@ re = lambda a: np.concatenate([a[H:2 * H], a[:H], a[2 * H:]], 0)
 for d, suf in ((0, ""), (1, "_reverse")):
     sd["rnn.weight_ih_l0" + suf] = torch.tensor(re(W[d])); sd["rnn.weight_hh_l0" + suf] = torch.tensor(re(R[d]))
     sd["rnn.bias_ih_l0" + suf] = torch.tensor(re(B[d][:3 * H])); sd["rnn.bias_hh_l0" + suf] = torch.tensor(re(B[d][3 * H:]))
-sd["out.weight"] = torch.tensor(deq("onnx::MatMul_290").T.copy()); sd["out.bias"] = torch.tensor(deq("out.bias"))
+# the output layer: the shipped model's classes, then any classes the charset gained since (N.C.: "N", ".")
+# start silent (zero weights, bias -10) so the recovered net reads exactly as the ONNX until fine-tuned
+Wo, Bo = deq("onnx::MatMul_290").T.copy(), deq("out.bias"); K0 = Wo.shape[0]
+ow, ob = sd["out.weight"].clone().zero_(), torch.full_like(sd["out.bias"], -10.0)
+ow[:K0] = torch.tensor(Wo); ob[:K0] = torch.tensor(Bo)
+sd["out.weight"] = ow; sd["out.bias"] = ob
 net.load_state_dict(sd); net.eval()
 s = ort.InferenceSession(sys.argv[1]); d = 0
 for wdt in (40, 120, 256):
     x = np.random.rand(1, 1, 32, wdt).astype(np.float32)
-    with torch.no_grad(): d = max(d, float(np.abs(net(torch.tensor(x)).numpy() - s.run(None, {"image": x})[0]).max()))
-print("max |Δ logits| PyTorch vs shipped ONNX:", d)
+    with torch.no_grad(): d = max(d, float(np.abs(net(torch.tensor(x)).numpy()[..., :K0] - s.run(None, {"image": x})[0]).max()))
+print(f"max |Δ logits| PyTorch vs shipped ONNX: {d} ({K0} shipped classes, {sd['out.bias'].shape[0]} now)")
 torch.save(net.state_dict(), sys.argv[2])

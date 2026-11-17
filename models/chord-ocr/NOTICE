@@ -1,7 +1,7 @@
 chord-ocr.onnx, chord-ocr-hand.onnx — chord-symbol recognisers for the "Scan 📷" mode (a photo or scanned
 PDF of a lead sheet → chord chart). Input: [1, 1, 32, W] — one box of text, 32 px tall, ink = 1, paper = 0
-(engine.tsx chordOcrInput). Output: logits [1, W/4, 43] — CTC over the chord as drawn ("ABCDEFG",
-"abdgijlmnostuM", digits, "#/()+-,Δ°ø^"; class 0 = blank). The engine decodes it (ctcBeam), keeps the most
+(engine.tsx chordOcrInput). Output: logits [1, W/4, 45] — CTC over the chord as drawn ("ABCDEFG",
+"abdgijlmnostuM", digits, "#/()+-,Δ°ø^", then "N." for N.C., the no-chord mark — added 2026-11-15; class 0 = blank). The engine decodes it (ctcBeam), keeps the most
 probable reading the chord grammar accepts (chordOcrRead / chordFromWritten) and reads bar numbers (chordOcrNumber).
 
 Two readers, same network (the page picks one: "Book style"):
@@ -11,8 +11,13 @@ Two readers, same network (the page picks one: "Book style"):
   chord-ocr-hand.onnx  "hand" — the same recipe with a finer pen in synth_rb.py, step 1,000. Reads hand-copied
                        Real Book pages best, but on engraved pages it can take a bar number for a letter and it
                        is ~2 points lower on the held-out handwriting fonts. Measurements: docs/OMR-PLAN.md.
+2026-11-15:     both readers trained 1,500 steps further from their shipped weights (scripts/chord-ocr/finetune_nc.py:
+                two new output classes for N.C., guitar-book text and articulation marks as negatives, crops with
+                rhythm-slash stems / a nut bar, stacked alterations, diagonal slash chords — synth_extra.py — with a
+                distillation term holding each to its shipped self on the original images). Both kept or improved
+                every regression number; measurements in docs/OMR-PLAN.md.
 Model:          our own — a CNN (6 conv layers, 32→128 channels) + a bidirectional GRU (96 per side) + a
-                linear layer, 588,011 parameters, weight-only int8 (per-output-row scale + DequantizeLinear;
+                linear layer, 588,397 parameters, weight-only int8 (per-output-row scale + DequantizeLinear;
                 activations fp32). Written and trained for this project; no third-party weights.
 Licence:        MIT, as the rest of this repository (see LICENSE).
 Training data:  synthetic only. Chord symbols sampled from fake-book spellings (maj7 / MA7 / Δ7 / M7, mi7 / -7,
@@ -25,8 +30,8 @@ Training data:  synthetic only. Chord symbols sampled from fake-book spellings (
                 Held out (never trained on): Liberation Serif, Kalam, Schoolbell.
 How it was made: scripts/chord-ocr/ — fetch_fonts.sh, synth.py, train.py (CTC, AdamW, one-cycle), export.py
                 (ONNX opset 17, checked against PyTorch, then the int8 step); the fine-tunes: from_onnx.py (the
-                first model's weights recovered from its ONNX), synth_rb.py, finetune.py. The hand-copied images
+                first model's weights recovered from its ONNX), synth_rb.py, finetune.py, finetune_nc.py + synth_extra.py. The hand-copied images
                 also use MuseJazz Text (© 2016 Torsten Hämmerle, Abraham Lee; SIL OFL 1.1). README.md there has
                 the commands and the measurements.
-SHA-256:        chord-ocr.onnx       9d1a5854dbd8d5e31fe2a240860b15e131713343a24bb52d52f4e049ad8c13be
-                chord-ocr-hand.onnx  214c6806e5cc582eed6145424d01f3eb9767f2c266be19455a135f341df5b738
+SHA-256:        chord-ocr.onnx       88aed1b39da2630984ff3fb8da1728b52b3006674c774ae5c3949e93b3a723a7
+                chord-ocr-hand.onnx  905a861fa1ead1633097e4700c9705fb2d6243e518bc3d52434d58ff5ac1bdd6

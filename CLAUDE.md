@@ -3730,6 +3730,27 @@ UI `ScanPanel` (mode "Scan 📷"). Guards: `tests/chord-ocr.mjs` (in `npm test`)
   "Approve selected", "Approve all sure (≥ 80 %)"; filters To check / All / Approved; every change through
   `applyFix` → Undo. Pure helper `ocrReviewItems` (headless-tested). Not persisted in the session yet.
 
+- **Guitar books, N.C. and the chord-lane traps (2026-11-15, the owner's add-ons spec + two reference PDFs; write-up and
+  every number in `docs/OMR-PLAN.md` "Guitar books, N.C. …").** New truth: `truth/hal-leonard-guitar-allman-brothers.json`
+  (notation + TAB book, 57 chords) and `truth/berklee-real-book-everyday-fallin.json` (42 incl. N.C.); pages not in the repo.
+  - **Six-line TAB staves** (`st.n` = 6, a sixth line one space out on ≥ 60 % of the staff) and **TAB = part of the
+    system above it** when within 8 spaces (2 × H5; the spec's 1.5 × was too tight — measured 1.45–1.6), so the gap's
+    P.M. / full / lyrics are never searched. Bar lines = strict ∪ lenient mask (scanned hairlines); in a multi-staff
+    system a bar line must be on 2 staves or on a five-line one (TAB parentheses); a final double bar is one.
+    `_ocrLeadBand`: rhythm-slash groups over a system extend the chord search above them.
+  - A box centred within a space of the **opening bar line** is read only as a bar number. `chordOcrInput` whitens
+    padding rows that are ≥ 50 % ink (nut bar / staff line / beam; `clean` "lines" default, "pad", false).
+  - **Grammar:** `chordFromWritten` matches **N.C.** first ("N.C.", "NC", "N.C.(A7)") and rejects suffixes not built like
+    a chord name ("G#969", "C77"). `chordPageScore`: N.C. → "—", the bars after it hold silence.
+  - **Readers:** charset + "N." (appended: a 43-class reader still decodes); both trained 1,500 more steps FROM the
+    shipped weights (`finetune_nc.py`, `synth_extra.py`, distillation 1.0). Guitar book extras 30 → 2 (printed) /
+    23 → 4 (hand); Real Book 32 → 33 / 34 → 38 of 42; rendered + held-out hands within 0.3 of before (hand: better).
+    **Do not re-derive:** digit-only negatives ("1/2", "(3)", "8va" → EMPTY) cost −1 on held-out hands (it dropped the
+    "11" of m11) — the grammar rejects rootless digits anyway. The spec's fixed band (1.5–2.5 spaces) holds 11 of 102
+    guitar-book chords (median 5.4 spaces up) — not adopted.
+  - Not built: "*"-footnote star glued to a chord ("*Cm/Eb" missed); the new hand reader passes the default's gate, but
+    the default stays printed until real hand-copied pages are re-measured.
+
 ## Path B (notation) — not built; plan in `docs/OMR-PLAN.md`
 
 Raster input (a photo or scanned page) needs an OMR model, kept SEPARATE from the Path A parser.
@@ -3980,7 +4001,9 @@ accordingly.
   Since 2026-11-09 also `drumLikeness` (drum loop vs chords, rate-independent, empty input) and the Audio
   panel's 🥁 Drums contracts (no chord decode, full-rate reader, filename auto-pick, the 0.6 suggestion,
   isolation off, one shared `DrumChartView`, the `−0:00.01` bar-line time).
-- **Chord OCR** (`tests/chord-ocr.mjs`, in `npm test`): painted pages (a beam among staff lines, grey
+- **Chord OCR** (`tests/chord-ocr.mjs`, in `npm test`; since 2026-11-15 also notation + TAB systems, hairline bar
+  lines, TAB parentheses, rhythm slashes, the opening-bar-line number, Big-Note letters, N.C., the strict grammar, crop
+  cleaning): painted pages (a beam among staff lines, grey
   between-row lines, a stem vs a bar line, a tilted + shaded page; since 2026-11-15 a hand-copied page — thick
   solid bar lines vs a slanted stroke, a raised suffix, a triplet row, 8vb dashes, a tuplet bracket, title rulings,
   a page number, two chords touching — a piano/vocal page — systems, grand-staff bar lines, lyrics between staves,
