@@ -462,7 +462,7 @@ function respellScore(score, vocabulary, opts = {}) {
   const bars = score.bars.map((b) => {
     let changed = false;
     const events = (b.events || []).map((e) => {
-      if (!e || e.reviewed) return e;                     // a person chose this name in the review list
+      if (!e || e.reviewed || e.written) return e;        // a person chose this name / it was read as written on a page
       const ms = Array.isArray(e.midis) ? [...new Set(e.midis)].sort((x, y) => x - y) : null;
       if (!ms || new Set(ms.map((m) => ((m % 12) + 12) % 12)).size < 2) return e;
       const norm = normalise(ms.map((m) => ({ midi: m })));
@@ -4329,7 +4329,7 @@ function transposeScore(score, n, useSharp) {
       const midis = (e.midis || []).map((m) => m + n);
       // frets and the string-keyed techniques are position-specific; fingerScore can re-finger.
       // A chord the user LOCKED keeps its own name, moved with the music (not re-named).
-      return { ...e, midis, frets: undefined, tech: undefined, bends: undefined, symbol: e.locked ? transposeSymbol(e.symbol, n, useSharp) : midis.length ? symbolForMidis(midis, useSharp) : e.symbol };
+      return { ...e, midis, frets: undefined, tech: undefined, bends: undefined, symbol: e.locked || e.written ? transposeSymbol(e.symbol, n, useSharp) : midis.length ? symbolForMidis(midis, useSharp) : e.symbol };
     }),
   }));
   return { ...score, bars, transposedBy: n };
@@ -13839,6 +13839,37 @@ function _ocrPlace(st, x0) {
   return { bar: st.barFrom + b, frac: Math.max(0, Math.min(1, (x0 - e[b]) / (e[b + 1] - e[b]))) };
 }
 
+/** A box whose best reading is two chords run together ("Bb13Bb9", "Gm7Gm11" — chords set closer than the gap that
+ *  separates words) → the two readings and where to cut the box, or null. The greedy CTC path gives each character's
+ *  first frame, so the cut falls between the last character of the first chord and the root of the second. A slash
+ *  the reader put in the gap ("Cm7/Bb/D") is dropped only when no clean split exists. Only a reading that does NOT
+ *  parse as one chord is split ("C/E" stays one chord). box: the token; img width for the crop geometry. */
+function chordOcrSplitRead(logits, T, K, box, opts = {}) {
+  const charset = opts.charset || CHORD_OCR.charset, chars = [];
+  let prev = 0;
+  for (let t = 0; t < T; t++) {
+    let k = 0, mx = -Infinity; for (let q = 0; q < K; q++) if (logits[t * K + q] > mx) { mx = logits[t * K + q]; k = q; }
+    if (k && k !== prev && k - 1 < charset.length) chars.push({ c: charset[k - 1], t });
+    prev = k;
+  }
+  const text = chars.map((c) => c.c).join("");
+  if (text.length < 2 || !/^[A-G]/.test(text) || chordFromWritten(text)) return null;
+  // the crop chordOcrInput made: the box plus padding; frame t covers (t + 0.5) / T of it
+  const bh = box.y1 - box.y0 + 1, pad = Math.max(2, Math.round(bh * (opts.pad ?? 0.3)));
+  const cx0 = Math.max(0, box.x0 - pad), cx1 = Math.min((opts.width || Infinity) - 1, box.x1 + pad), fx = (t) => cx0 + ((t + 0.5) / T) * (cx1 - cx0 + 1);
+  for (const dropSlash of [false, true]) for (let q = 1; q < text.length; q++) {
+    if (!/[A-G]/.test(text[q])) continue;
+    let a = text.slice(0, q); const b = text.slice(q);
+    if (text[q - 1] === "/") { if (!dropSlash) continue; a = a.slice(0, -1); } else if (dropSlash) continue;
+    const ra = chordFromWritten(a), rb = chordFromWritten(b);
+    if (!ra || !rb || ra.noChord || rb.noChord) continue;
+    const x = Math.round((fx(chars[q - 1].t) + fx(chars[q].t)) / 2);
+    if (x <= box.x0 + 2 || x >= box.x1 - 2) continue;
+    return { left: { name: ra.name, raw: a, parsed: ra.parsed }, right: { name: rb.name, raw: b, parsed: rb.parsed }, x, text };
+  }
+  return null;
+}
+
 /** A token box → the recogniser's input: the box (+ padding) at 32 px tall, ink = 1, width ≤ 256.
  *  Downscaling averages the source area (as the training images were resized), upscaling is bilinear. */
 function chordOcrInput(img, box, opts = {}) {
@@ -13926,12 +13957,26 @@ function ctcBeam(logits, T, K, opts = {}) {
  *  69/6(9) → 6/9, add2 → add9, 7(b9) → 7b9, alt → 7alt. Validated by the voicing grammar
  *  (parseChordSymbolForVoicings); returns { name, parsed }. */
 function chordFromWritten(raw) {
-  const t = String(raw || "").replace(/♯/g, "#").replace(/♭/g, "b").replace(/\s+/g, "");
+  // an optional / passing chord written in parentheses, "(Gm7)", is that chord
+  const t = String(raw || "").replace(/♯/g, "#").replace(/♭/g, "b").replace(/\s+/g, "").replace(/^\(([A-G][^()]*(?:\([^()]*\)[^()]*)*)\)$/, "$1");
   // N.C. (no chord) first — "N.C.", "NC", "N.C.(A7)" (the chord implied by the melody in parentheses is not played)
   if (/^N\.?C\.?(?:\(.*\))?$/.test(t)) return { name: CHORD_OCR.noChord, noChord: true, parsed: null };
   const m = t.match(/^([A-G][#b]?)(.*?)(?:\/([A-G][#b]?))?$/);
   if (!m) return null;
   let [, root, q, bass] = m;
+  // Ultimate Guitar / Guitar Pro (European) spellings, before anything reads a "/" or a "-" as something else:
+  // an altered degree written after a slash ("C#m7/5+", "G7/5-", "A7/9-") is the alteration, not a bass note;
+  // a plain "/9" "/11" "/13" after a 7th adds that degree ("E7/9" = E9, "Am7/11" = Am11); a sign after a
+  // degree ("7-9", "7+5") alters it; "7M" "9M" "13M" is the major 7th ("D7M" = Dmaj7, "Em7M" = Em(maj7)).
+  // A minus sign right after the root is still minor ("C-7"): the sign rules only fire after a digit or slash.
+  q = q.replace(/\/(5|9|11|13)([+-])/g, (_, d, s) => (s === "+" ? "#" : "b") + d)
+    .replace(/^(m?7)\/(9|11|13)(?=$|[#b])/, (_, a, d) => (a === "m7" ? "m" : "") + d)
+    .replace(/(\d)([+-])(5|9|11|13)/g, (_, a, s, d) => a + (s === "+" ? "#" : "b") + d)
+    .replace(/^(m?)9([+-])(?=$|[#b(]|add|sus)/, (_, mm, sg) => mm + "7" + (sg === "+" ? "#" : "b") + "9")   // UG "C#9-" = C#7b9, "B9+" = B7#9
+    .replace(/^7dim$/, "dim7").replace(/^sus2\/?4$|^sus4\/?2$/, "sus4add9")                         // UG "E7dim" = E°7; "Fsus2/4"
+    .replace(/^m(7|9|11|13)M(?=$|[#b(]|add|sus)/, (_, d) => "m(maj7)" + (d === "7" ? "" : d))
+    .replace(/^(7|9|11|13)M(?=$|[#b(]|add|sus)/, "maj$1");
+  if (q.startsWith("m(maj7)") && q !== "m(maj7)") return null;
   q = q.replace(/^\(([#b]5)\)$/, (_, a) => (a === "#5" ? "aug" : "(b5)"));
   q = q.replace(/^(?:mi|min|-)(?=$|[\d(]|maj|Ma|MA|M|Δ|add|6)/, "m")
     .replace(/^m\(ma7\)|^m\(Ma7\)|^mMaj7|^mMA7|^mM7|^mΔ7?|^m\(Δ7?\)/, "m(maj7)")
@@ -13973,12 +14018,14 @@ function chordOcrRead(logits, T, K, opts = {}) {
   return best;
 }
 
-/** Pages of reads → the shared CHORD score (4/4 assumed — a picture carries no meter we read).
- *  pages: [{ layout, reads: [read|null per layout.tokens[i]] }]. Chords in a bar are ordered by x
- *  and placed on beats from their position (first on beat 1); a bar with no chord holds the
- *  previous one (fake-book simile). opts: beatsPerBar (4), title, tempo. */
+/** Pages of reads → the shared CHORD score (4/4 assumed — a picture carries no meter we read; a PDF read from its
+ *  text layer gives its time signatures in layout.timeSigs [{ bar, num, den }] and its sections in layout.sections
+ *  [{ bar, name }], page-local bar indexes, which are honoured). pages: [{ layout, reads: [read|null per
+ *  layout.tokens[i]] }]. Chords in a bar are ordered by x and placed on beats from their position (first on beat 1);
+ *  a bar with no chord holds the previous one (fake-book simile). opts: beatsPerBar (4), title, tempo. */
 function chordPageScore(pages, opts = {}) {
-  const beats = opts.beatsPerBar || 4, bars = [];
+  const beats0 = opts.beatsPerBar || 4, bars = [], tsAt = new Map(), secAt = new Map();
+  const beats = beats0;
   let base = 0;
   for (const pg of pages) {
     const L = pg.layout;
@@ -13986,6 +14033,8 @@ function chordPageScore(pages, opts = {}) {
     if (L.firstNumber != null && L.firstNumber - 1 > base) for (let b = base; b < L.firstNumber - 1; b++) bars.push({ number: b + 1, timeSig: [beats, 4], melody: [], chords: [] });
     if (L.firstNumber != null && L.firstNumber - 1 > base) base = L.firstNumber - 1;
     for (let b = 0; b < L.bars; b++) bars.push({ number: base + b + 1, timeSig: [beats, 4], melody: [], chords: [] });
+    for (const ts of L.timeSigs || []) if (ts.num > 0 && ts.den > 0) tsAt.set(base + ts.bar, [ts.num, ts.den]);
+    for (const sc of L.sections || []) if (sc.name && !secAt.has(base + sc.bar)) secAt.set(base + sc.bar, sc.name);
     L.tokens.forEach((t, i) => {
       const r = pg.reads[i]; if (!r) return;
       // N.C.: no chord until the next one (the engine's "—", which every exporter writes as N.C.)
@@ -13998,8 +14047,12 @@ function chordPageScore(pages, opts = {}) {
     });
     base += L.bars;
   }
+  // the printed meter carries until the next time signature; a section label starts its bar
+  let meter = [beats0, 4];
+  bars.forEach((b, i) => { if (tsAt.has(i)) meter = tsAt.get(i); b.timeSig = meter; if (secAt.has(i)) b.section = secAt.get(i); });
   let prev = null;
   for (const b of bars) {
+    const beats = b.timeSig[0];
     b.chords.sort((a, c) => a.x - c.x);
     // two chords in a bar are beats 1 and 3 (the fake-book convention: engraving spacing follows the
     // notes, not the beat); more than two snap to the nearest beat in order
@@ -14012,9 +14065,11 @@ function chordPageScore(pages, opts = {}) {
     if (!b.chords.length && prev) b.chords = [{ q: 0, symbol: prev.symbol, midis: prev.midis, held: true }];
     if (b.chords.length) prev = b.chords[b.chords.length - 1];
   }
-  const sc = leadSheetToChordScore({ title: opts.title || "", tempo: opts.tempo || 100, timeSig: [beats, 4], parts: [], melodyPart: 0, bars });
+  const sc = leadSheetToChordScore({ title: opts.title || "", tempo: opts.tempo || 100, timeSig: bars.length ? bars[0].timeSig : [beats0, 4], parts: [], melodyPart: 0, bars });
   sc.source = "ocr";
-  sc.bars.forEach((b, i) => b.events.forEach((e, k) => { const c = bars[i].chords[k]; if (c && c.held) e.held = true; if (c && c.prob != null) e.ocrProb = c.prob; }));
+  // a chord read off a page is the arranger's spelling: it is kept as written (respellScore leaves it, transposeScore
+  // moves its text) — "C#m7#5" must not become the note-derived "A/C#", nor "F#7b9#5" lose its #5
+  sc.bars.forEach((b, i) => b.events.forEach((e, k) => { const c = bars[i].chords[k]; if (c && c.held) e.held = true; if (c && c.prob != null) e.ocrProb = c.prob; if (c && !c.noChord) e.written = true; }));
   return sc;
 }
 
@@ -14105,6 +14160,22 @@ async function readChordPage(img, run, opts = {}) {
     }
     const { out, r } = await readBox(t);
     let done = false;
+    // two chords read as one run-together string: split the TEXT where both halves are chords, the box at the frame
+    // boundary between them (the recogniser read every letter; only the gap was too small to separate the boxes)
+    if (!r) {
+      const sp = chordOcrSplitRead(out.logits, out.frames, out.classes, t, { width: img.width });
+      if (sp) {
+        const best0 = ctcBeam(out.logits, out.frames, out.classes, { beam: opts.beam || 10 }), z = best0.reduce((a, c) => a + Math.exp(c.logp), 0) || 1;
+        const pr = best0[0] && best0[0].text === sp.text ? Math.exp(best0[0].logp) / z : 0.5;
+        const { cuts, ...rest } = t;
+        for (const [box, rd] of [[{ ...rest, x1: sp.x - 1 }, sp.left], [{ ...rest, x0: sp.x + 1 }, sp.right]]) {
+          toks.push({ ...box, cuts: [], split: true, ..._ocrPlace(st, box.x0) }); reads.push({ ...rd, prob: pr, alternatives: [] });
+        }
+        done = true;
+        if (opts.onProgress) { try { opts.onProgress(i + 1, total); } catch (_) { /* a UI callback must not break a read */ } }
+        continue;
+      }
+    }
     if ((!r || r.prob < 0.5) && t.cuts && t.cuts.length) {
       let best = null;
       const th = t.y1 - t.y0 + 1;
@@ -14157,7 +14228,423 @@ async function readChordPage(img, run, opts = {}) {
   return { layout, reads: kr };
 }
 
+
+/* ============================ PDF TEXT LAYER — chord symbols from a digital score PDF ============================
+ * Vector-first (docs/UG-PRO-PDF-CALIBRATION.md). An exported score PDF — Ultimate Guitar "Pro" / Official tab, which
+ * UG engraves with MuseScore 4 (Edwin, Leland, BravuraText, Roboto TAB digits), or any MuseScore export — already
+ * holds every chord symbol, bar number, section label and tempo as TEXT, and every staff line and bar line as a
+ * stroked path. Reading those is exact: no recogniser, no grammar guess, no misread "Bb" for "B6". OCR stays the
+ * route for photos, scans and PDFs whose text layer is missing or unreadable.
+ *
+ * pdfPageVectors(textContent, viewport, opList, OPS) — the only PDF.js-shaped input; pure (plain arrays in, plain
+ *   data out), so Node and the browser run the same code. → { width, height, items:[{ s, x, y, w, h, pua }], segs }
+ *   Coordinates are the viewport's (top-down, y = text BASELINE); `h` is the font size.
+ * pdfScoreLayout(vec) — staves from the stroked lines (5 equidistant = notation, 6 or a TAB clef = TAB), systems,
+ *   bar lines, measures (a clef / key area before a start-repeat is not a measure), printed bar numbers, time
+ *   signatures (SMuFL glyphs U+E080–E08B), and the text WORDS (glyphs merged: iOS reprints split every letter).
+ * pdfChordPages(vecPages, opts) — the whole document: the chord size is learned across pages, then each system's
+ *   band above its top staff is read: chords (chordFromWritten), section labels, boxed rehearsal letters, tempo.
+ *   → { pages:[{ layout, reads }], title, artist, tuning, tempo, chords, ok } — the same { layout, reads } pages the
+ *   OCR returns, so chordPageScore / ocrReviewItems / the Scan review are shared. Token boxes are in the pixels of a
+ *   page rendered at opts.scale (default 1).
+ * HONEST LIMITS: an image-only PDF (a scan) has no text layer → OCR. A PDF whose fonts carry no character map
+ *   prints letters as unreadable glyph ids → `ok:false` → OCR. Beats inside a bar come from the chord's position
+ *   (chordPageScore's convention), not from the rhythm. Repeats are not unrolled (bars are numbered as printed). */
+
+const PDF_TEXT = {
+  // SMuFL glyphs that appear INSIDE chord symbols / text (small accidentals, chord-symbol signs) → their text
+  glyphText: { 0xe260: "b", 0xe261: "", 0xe262: "#", 0xe263: "x", 0xe264: "bb", 0xed60: "b", 0xed61: "", 0xed62: "#",
+    0xe870: "°", 0xe871: "ø", 0xe872: "+", 0xe873: "Δ", 0xe874: "-", 0xe875: "(", 0xe876: ")", 0xe877: "(", 0xe878: ")", 0xe87b: "/" },
+  // a PUA glyph at least this many staff spaces tall is notation (noteheads, rests, clefs, dynamics), not text
+  notationSize: 2.6,
+  sectionWords: /^(?:intro|verse|(?:pre|post)-?\w+|chorus|bridge|solo|guitar solo|outro|interlude|coda|fade|riff|break|breakdown|instrumental|refrain|ending|tag|vamp|head|theme|middle|turnaround|hook|drop|build|reprise|segue|section|part)\b/i,
+};
+
+/** PDF.js page objects → plain vectors (see the block note). opList/OPS optional (text only without them). */
+function pdfPageVectors(textContent, viewport, opList, OPS) {
+  const T = viewport.transform, k = Math.hypot(T[0], T[1]) || 1;
+  const mul = (m, n) => [m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1], m[0] * n[2] + m[2] * n[3], m[1] * n[2] + m[3] * n[3], m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5]];
+  const items = [];
+  for (const it of (textContent && textContent.items) || []) {
+    if (!it || typeof it.str !== "string" || !it.str.trim() || !it.transform) continue;
+    const m = mul(T, it.transform), h = Math.hypot(m[2], m[3]);
+    if (!(h > 0) || Math.abs(m[1]) > 0.2 * Math.abs(m[0])) continue;          // rotated text (a sideways label) is not read
+    items.push({ s: it.str, x: m[4], y: m[5], w: (it.width || 0) * k, h, pua: /^[\ue000-\uf8ff]+$/.test(it.str.trim()) });
+  }
+  const segs = [];
+  if (opList && OPS && opList.fnArray) {
+    const fn = opList.fnArray, args = opList.argsArray, stack = [];
+    // the pen (current / start point) lives until the path is painted: PDF.js may split one path over several
+    // constructPath ops ("moveTo" in one, "lineTo … stroke" in the next)
+    let ctm = [1, 0, 0, 1, 0, 0], lw = 1, path = [], cur = null, start = null;
+    const pt = (x, y) => { const d = mul(T, ctm); return [d[0] * x + d[2] * y + d[4], d[1] * x + d[3] * y + d[5]]; };
+    const lwDev = () => lw * Math.hypot(...(() => { const d = mul(T, ctm); return [d[0], d[1]]; })());
+    const flush = (kind) => {
+      for (const p of path) {
+        if (p.r) {
+          const [x, y, w, h] = p.r, a = pt(x, y), b = pt(x + w, y + h), x0 = Math.min(a[0], b[0]), x1 = Math.max(a[0], b[0]), y0 = Math.min(a[1], b[1]), y1 = Math.max(a[1], b[1]);
+          if (kind === "fill") {
+            // a filled thin rectangle is a line (staff lines, bar lines and stems are drawn this way by some engravers)
+            if (y1 - y0 < 0.25 * (x1 - x0)) segs.push({ x0, y0: (y0 + y1) / 2, x1, y1: (y0 + y1) / 2, w: y1 - y0 });
+            else if (x1 - x0 < 0.25 * (y1 - y0)) segs.push({ x0: (x0 + x1) / 2, y0, x1: (x0 + x1) / 2, y1, w: x1 - x0 });
+          } else for (const [p0, p1] of [[[x0, y0], [x1, y0]], [[x1, y0], [x1, y1]], [[x0, y1], [x1, y1]], [[x0, y0], [x0, y1]]]) segs.push({ x0: p0[0], y0: p0[1], x1: p1[0], y1: p1[1], w: lwDev() });
+        } else if (kind === "stroke") segs.push({ x0: p.a[0], y0: p.a[1], x1: p.b[0], y1: p.b[1], w: lwDev() });
+      }
+      path = []; cur = start = null;
+    };
+    for (let i = 0; i < fn.length; i++) {
+      const f = fn[i], a = args[i];
+      if (f === OPS.save) stack.push([ctm, lw]);
+      else if (f === OPS.restore) { const s = stack.pop(); if (s) [ctm, lw] = s; }
+      else if (f === OPS.transform) ctm = mul(ctm, a);
+      else if (f === OPS.paintFormXObjectBegin) { stack.push([ctm, lw]); if (a && a[0] && a[0].length === 6) ctm = mul(ctm, a[0]); }
+      else if (f === OPS.paintFormXObjectEnd) { const s = stack.pop(); if (s) [ctm, lw] = s; }
+      else if (f === OPS.setLineWidth) lw = a[0];
+      else if (f === OPS.constructPath) {
+        const ops = a[0], co = a[1]; let j = 0;
+        for (const o of ops) {
+          if (o === OPS.moveTo) { cur = pt(co[j], co[j + 1]); start = cur; j += 2; }
+          else if (o === OPS.lineTo) { const n = pt(co[j], co[j + 1]); j += 2; if (cur) path.push({ a: cur, b: n }); cur = n; }
+          else if (o === OPS.curveTo) { cur = pt(co[j + 4], co[j + 5]); j += 6; path.push({ curve: true }); }
+          else if (o === OPS.curveTo2 || o === OPS.curveTo3) { cur = pt(co[j + 2], co[j + 3]); j += 4; path.push({ curve: true }); }
+          else if (o === OPS.rectangle) { path.push({ r: co.slice(j, j + 4) }); j += 4; }
+          else if (o === OPS.closePath) { if (cur && start && (cur[0] !== start[0] || cur[1] !== start[1])) path.push({ a: cur, b: start }); cur = start; }
+        }
+        path = path.filter((p) => !p.curve);
+      }
+      else if (f === OPS.stroke || f === OPS.closeStroke) flush("stroke");
+      else if (f === OPS.fill || f === OPS.eoFill || f === OPS.fillStroke || f === OPS.eoFillStroke || f === OPS.closeFillStroke || f === OPS.closeEOFillStroke) flush("fill");
+      else if (f === OPS.endPath) { path = []; cur = start = null; }
+    }
+  }
+  return { width: viewport.width, height: viewport.height, items, segs };
+}
+
+/* the code point list of a PUA string */
+const _pdfCps = (s) => [...s].map((c) => c.codePointAt(0));
+
+/** One page's geometry (see the block note). → { staves, systems, words, sp, notation:[{cp,x,y,h}], firstNumber } */
+function pdfScoreLayout(vec) {
+  const W = vec.width, H = vec.height, tolY = Math.max(0.05, H * 1.2e-4);
+  // ---- staff lines: horizontal strokes grouped by y, joined along x (engravers draw them bar by bar)
+  const hs = vec.segs.filter((s) => Math.abs(s.y1 - s.y0) <= tolY && Math.abs(s.x1 - s.x0) > 0).map((s) => ({ y: (s.y0 + s.y1) / 2, x0: Math.min(s.x0, s.x1), x1: Math.max(s.x0, s.x1) })).sort((a, b) => a.y - b.y);
+  const rows = [];
+  for (const s of hs) { const r = rows.length && Math.abs(rows[rows.length - 1].y - s.y) <= tolY ? rows[rows.length - 1] : null; if (r) r.segs.push(s); else rows.push({ y: s.y, segs: [s] }); }
+  const lines = [];
+  for (const r of rows) {
+    // TAB string lines are often drawn broken around the fret numbers ("(5)", "10"): pieces up to 3 % of the page
+    // apart are one line
+    const sg = r.segs.sort((a, b) => a.x0 - b.x0), joinGap = W * 0.03;
+    let c = null;
+    for (const s of sg) {
+      if (c && s.x0 <= c.x1 + joinGap) { c.ink += Math.max(0, s.x1 - Math.max(s.x0, c.x1)); c.x1 = Math.max(c.x1, s.x1); }
+      else { if (c) lines.push(c); c = { y: r.y, x0: s.x0, x1: s.x1, ink: s.x1 - s.x0 }; }
+    }
+    if (c) lines.push(c);
+  }
+  // a staff or TAB line is mostly ink along its length even where fret numbers break it; a row of ledger lines over
+  // a run of high notes, joined the same way, is mostly gaps and must not become a sixth "staff line"
+  const long = lines.filter((l) => l.x1 - l.x0 >= 0.08 * W && l.ink >= 0.6 * (l.x1 - l.x0)).sort((a, b) => a.y - b.y || a.x0 - b.x0);
+  // ---- staves: runs of 4–6 equidistant lines that overlap along x
+  const vert = vec.segs.filter((s) => Math.abs(s.x1 - s.x0) <= tolY * 2 && Math.abs(s.y1 - s.y0) > 0).map((s) => ({ x: (s.x0 + s.x1) / 2, y0: Math.min(s.y0, s.y1), y1: Math.max(s.y0, s.y1) }));
+  const used = new Set(), staves = [];
+  const ov = (a, b) => (Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0)) / Math.min(a.x1 - a.x0, b.x1 - b.x0);
+  for (let i = 0; i < long.length; i++) {
+    if (used.has(i)) continue;
+    let best = null;
+    // the lines of one staff are drawn together, so they start and end at the same x; a volta bracket, a row of
+    // ledger lines or a hairpin does not, and must not seed or join a staff
+    const same = (a, b) => Math.abs(a.x0 - b.x0) < 0.02 * W && Math.abs(a.x1 - b.x1) < 0.02 * W;
+    for (let j = i + 1; j < long.length && long[j].y - long[i].y < 0.015 * H; j++) {
+      if (used.has(j) || !same(long[i], long[j])) continue;
+      const d = long[j].y - long[i].y; if (d < 0.002 * H) continue;
+      const run = [i, j];
+      for (let n = 2; n < 6; n++) {
+        const want = long[i].y + n * d, q = long.findIndex((l, qi) => !used.has(qi) && Math.abs(l.y - want) <= 0.07 * d && same(long[i], l));
+        if (q < 0) break; run.push(q);
+      }
+      if (run.length >= 5 && (!best || run.length > best.run.length)) best = { run, d };
+      if (best && best.run.length === 6) break;
+    }
+    if (!best) continue;
+    // a 6-line run can be a 5-line staff + a row of ledger lines one space above or below it (dense high or low notes,
+    // drawn end to end): the staff is the sub-run its BAR LINES start and end on
+    if (best.run.length === 6) {
+      const ends = (q0, q1) => { const y0 = long[best.run[q0]].y, y1 = long[best.run[q1]].y, t = 0.2 * best.d;
+        return vert.filter((v) => Math.abs(v.y0 - y0) < t && Math.abs(v.y1 - y1) < t && v.x >= long[i].x0 - t && v.x <= long[i].x1 + t).length; };
+      const whole = ends(0, 5), top5 = ends(0, 4), bot5 = ends(1, 5);
+      if (Math.max(top5, bot5) > whole) best.run = top5 >= bot5 ? best.run.slice(0, 5) : best.run.slice(1);
+    }
+    best.run.forEach((q) => used.add(q));
+    const ls = best.run.map((q) => long[q]);
+    staves.push({ top: ls[0].y, bottom: ls[ls.length - 1].y, n: ls.length, d: best.d, x0: Math.min(...ls.map((l) => l.x0)), x1: Math.max(...ls.map((l) => l.x1)) });
+  }
+  staves.sort((a, b) => a.top - b.top);
+  // ---- notation glyphs (SMuFL) and text
+  const notes = vec.items.filter((it) => it.pua);
+  const stdD = staves.filter((s) => s.n === 5).map((s) => s.d).sort((a, b) => a - b);
+  let sp = stdD.length ? stdD[stdD.length >> 1] : 0;
+  if (!sp) {   // no notation staff found from paths: the SMuFL font size is 4 staff spaces
+    const hs2 = notes.map((n) => Math.round(n.h)).sort((a, b) => a - b);
+    sp = hs2.length ? hs2[hs2.length >> 1] / 4 : 0;
+  }
+  if (!sp) sp = staves.length ? staves[0].d : H / 160;
+  const notation = [];
+  for (const it of notes) if (it.h >= PDF_TEXT.notationSize * sp) for (const cp of _pdfCps(it.s.trim())) notation.push({ cp, x: it.x, y: it.y, w: it.w, h: it.h });
+  // a staff is TAB when it has 6 lines or a TAB clef (U+E06D / E06E) sits on it
+  for (const st of staves) {
+    st.tab = st.n === 6 || notation.some((g) => (g.cp === 0xe06d || g.cp === 0xe06e) && g.x < st.x0 + 6 * st.d && g.y > st.top - st.d && g.y < st.bottom + 2 * st.d);
+  }
+  // ---- systems: a notation staff + the TAB staff right under it; or staves joined by a line at their left edge
+  const vs = vec.segs.filter((s) => Math.abs(s.x1 - s.x0) <= tolY * 2 && Math.abs(s.y1 - s.y0) > 0).map((s) => ({ x: (s.x0 + s.x1) / 2, y0: Math.min(s.y0, s.y1), y1: Math.max(s.y0, s.y1), w: s.w || 0 }));
+  const systems = [];
+  for (const st of staves) {
+    const sys = systems[systems.length - 1], prev = sys && sys.staves[sys.staves.length - 1];
+    const joinedLine = prev && vs.some((v) => Math.abs(v.x - st.x0) < 1.5 * sp && v.y0 <= prev.bottom + 0.5 * sp && v.y1 >= st.top - 0.5 * sp);
+    const tabUnder = prev && !prev.tab && st.tab && st.top - prev.bottom < 14 * sp && ov(prev, st) > 0.8;
+    if (prev && (joinedLine || tabUnder)) sys.staves.push(st); else systems.push({ staves: [st] });
+  }
+  for (const sys of systems) {
+    const s0 = sys.staves[0];
+    Object.assign(sys, { top: s0.top, bottom: sys.staves[sys.staves.length - 1].bottom, x0: Math.min(...sys.staves.map((s) => s.x0)), x1: Math.max(...sys.staves.map((s) => s.x1)), d: s0.d });
+    // bar lines: vertical strokes covering the top staff, clustered (double / repeat bars are one bar line)
+    // A bar line ENDS on staff lines (a stem spanning the staff overshoots it) and is drawn on every staff of the
+    // system (TAB has no stems in these exports) — or is one stroke through all of them.
+    const onLine = (y) => sys.staves.some((st) => Math.abs(y - st.top) < 0.2 * st.d || Math.abs(y - st.bottom) < 0.2 * st.d);
+    const spans = (v, st) => v.y0 <= st.top + 0.2 * st.d && v.y1 >= st.bottom - 0.2 * st.d;
+    const cand = vs.filter((v) => onLine(v.y0) && onLine(v.y1) && v.x >= sys.x0 - 0.5 * s0.d && v.x <= sys.x1 + 0.5 * s0.d && sys.staves.some((st) => spans(v, st)));
+    const xs = cand.filter((v) => spans(v, s0) && sys.staves.every((st) => cand.some((u) => Math.abs(u.x - v.x) < 0.4 * s0.d && spans(u, st)))).map((v) => v.x).sort((a, b) => a - b);
+    const bl = []; for (const x of xs) { if (bl.length && x - bl[bl.length - 1].x1 < 1.4 * s0.d) bl[bl.length - 1].x1 = x; else bl.push({ x0: x, x1: x }); }
+    let edges = [sys.x0, ...bl.map((b) => b.x0).filter((x) => x > sys.x0 + 1.0 * s0.d && x < sys.x1 - 1.0 * s0.d), sys.x1];
+    // content (noteheads, rests, multi-bar rests, TAB digits) in each measure; an empty first "measure" is the
+    // clef / key / time area before a start-repeat bar line and is not a bar
+    const content = notation.filter((g) => ((g.cp >= 0xe0a0 && g.cp <= 0xe0ff) || (g.cp >= 0xe4e0 && g.cp <= 0xe4ff) || (g.cp >= 0xe500 && g.cp <= 0xe50f)) && g.y >= sys.top - 6 * s0.d && g.y <= sys.bottom + 6 * s0.d).map((g) => g.x + g.w / 2);
+    for (const it of vec.items) if (!it.pua && /^[\dX()\s.]+$/.test(it.s) && sys.staves.some((s) => s.tab && it.y >= s.top - 0.2 * s.d && it.y <= s.bottom + 1.2 * s.d)) content.push(it.x + it.w / 2);
+    sys.content = content.sort((a, b) => a - b);
+    if (edges.length > 2 && !content.some((x) => x >= edges[0] && x < edges[1])) edges = edges.slice(1);
+    sys.edges = edges;
+  }
+  // ---- words: glyphs on one baseline, touching along x (an iOS reprint splits every letter into its own item)
+  const textItems = vec.items.map((it, i) => ({ ...it, i })).filter((it) => !it.pua || it.h < PDF_TEXT.notationSize * sp);
+  const toText = (s) => s.replace(/[\ue000-\uf8ff]/g, (c) => { const t = PDF_TEXT.glyphText[c.codePointAt(0)]; return t === undefined ? "\ufffd" : t; });
+  textItems.sort((a, b) => a.x - b.x);
+  const parent = textItems.map((_, i) => i), find = (i) => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+  for (let i = 0; i < textItems.length; i++) {
+    const a = textItems[i], aR = a.x + a.w;
+    for (let j = i + 1; j < textItems.length; j++) {
+      const b = textItems[j];
+      if (b.x > aR + 0.45 * Math.max(a.h, b.h)) break;
+      const hh = Math.min(a.h, b.h), top = Math.max(a.y - 0.75 * a.h, b.y - 0.75 * b.h), bot = Math.min(a.y + 0.2 * a.h, b.y + 0.2 * b.h);
+      // touching (a space-sized gap splits two words), sharing most of their height, sizes alike or a raised
+      // chord extension (≥ 45 % of the root's size)
+      const gap = b.x - aR, gapMax = 0.18 * Math.max(a.h, b.h);
+      if (gap > gapMax || gap < -0.6 * Math.min(a.w || hh, b.w || hh) || bot - top < 0.45 * 0.95 * hh || hh < 0.45 * Math.max(a.h, b.h)) continue;
+      if (/\s$/.test(a.s) || /^\s/.test(b.s)) continue;
+      parent[find(j)] = find(i);
+    }
+  }
+  const groups = new Map();
+  textItems.forEach((it, i) => { const r = find(i); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(it); });
+  const words = [];
+  for (const g of groups.values()) {
+    g.sort((a, b) => a.x - b.x);
+    const main = g.reduce((m, it) => (it.h > m.h ? it : m), g[0]);
+    const x0 = g[0].x, x1 = Math.max(...g.map((it) => it.x + it.w));
+    words.push({ s: g.map((it) => toText(it.s)).join("").trim(), raw: g.map((it) => it.s).join(""), x: x0, x1, y: main.y, h: main.h,
+      parts: g.map((it) => ({ s: toText(it.s), x: it.x, x1: it.x + it.w })),
+      top: Math.min(...g.map((it) => it.y - 0.75 * it.h)), bot: Math.max(...g.map((it) => it.y + 0.22 * it.h)), n: g.length });
+  }
+  words.sort((a, b) => a.y - b.y || a.x - b.x);
+  // ---- time signatures on each system's top staff: numerator above the middle line, denominator below
+  for (const sys of systems) {
+    const s0 = sys.staves[0], mid = (s0.top + s0.bottom) / 2;
+    const ts = notation.filter((g) => g.cp >= 0xe080 && g.cp <= 0xe08b && g.y >= s0.top - s0.d && g.y <= s0.bottom + 3 * s0.d).sort((a, b) => a.x - b.x);
+    const cols = []; for (const g of ts) { const c = cols.length && g.x - cols[cols.length - 1].x1 < 1.6 * s0.d ? cols[cols.length - 1] : null; if (c) { c.g.push(g); c.x1 = g.x + g.w; } else cols.push({ x: g.x, x1: g.x + g.w, g: [g] }); }
+    sys.timeSigs = [];
+    for (const c of cols) {
+      if (c.g.some((g) => g.cp === 0xe08a)) { sys.timeSigs.push({ x: c.x, num: 4, den: 4 }); continue; }
+      if (c.g.some((g) => g.cp === 0xe08b)) { sys.timeSigs.push({ x: c.x, num: 2, den: 2 }); continue; }
+      // a digit glyph's baseline: the numerator sits on the middle line, the denominator on the bottom line
+      const dig = (ps) => +ps.sort((a, b) => a.x - b.x).map((g) => g.cp - 0xe080).join("");
+      const up = c.g.filter((g) => g.y <= mid + 0.5 * s0.d), lo = c.g.filter((g) => g.y > mid + 0.5 * s0.d);
+      if (up.length && lo.length) sys.timeSigs.push({ x: c.x, num: dig(up), den: dig(lo) });
+    }
+  }
+  return { width: W, height: H, sp, staves, systems, words, notation };
+}
+
+/* which measure of a system x falls in (edges from pdfScoreLayout); a hair left of a bar line counts as the next bar */
+function _pdfMeasureAt(sys, x) {
+  const e = sys.edges;
+  for (let m = 0; m < e.length - 1; m++) if (x + 0.3 * sys.d < e[m + 1]) return Math.max(0, m);
+  return Math.max(0, e.length - 2);
+}
+
+/** Every page of a score PDF → chord pages (see the block note). vecPages = pdfPageVectors(...) per page.
+ *  opts: scale (token pixels per unit, default 1), firstBar (1). */
+function pdfChordPages(vecPages, opts = {}) {
+  const scale = opts.scale || 1, L = vecPages.map((v) => pdfScoreLayout(v));
+  // ---- the document's chord size: the modal font size (in staff spaces) of words that read as chords above a staff
+  const sizes = [];
+  L.forEach((lay) => lay.systems.forEach((sys, k) => {
+    const lo = k ? lay.systems[k - 1].bottom : 0;
+    for (const w of lay.words) if (w.y > lo && w.y <= sys.top + 0.5 * sys.d && w.y >= sys.top - 14 * sys.d && /^[A-G]/.test(w.s) && chordFromWritten(w.s)) sizes.push(w.h / lay.sp);
+  }));
+  const hist = new Map(); for (const s of sizes) { const b = Math.round(s * 20) / 20; hist.set(b, (hist.get(b) || 0) + 1); }
+  const chordSp = [...hist].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0]?.[0] || 1.6;
+  // ---- how the engraver aligns a chord over its note: by its left edge (MuseScore's default) or centred (some UG
+  // exports). Whichever point sits closer to a note / TAB onset across the document is the anchor; the chord belongs
+  // to the bar of the onset under that anchor (a centred "Bm7#5" on a bar's first note starts left of the bar line).
+  const near = (sys, x) => { let b = Infinity; for (const c of sys.content) { const dd = Math.abs(c - x); if (dd < b) b = dd; } return b; };
+  const dl = [], dc = [];
+  L.forEach((lay) => lay.systems.forEach((sys, k) => {
+    const lo = k ? lay.systems[k - 1].bottom : 0;
+    for (const w of lay.words) if (w.y > lo && w.y <= sys.top + 0.5 * sys.d && w.y >= sys.top - 14 * sys.d && /^[A-G]/.test(w.s) && chordFromWritten(w.s) && sys.content.length) {
+      dl.push(near(sys, w.x + 0.6 * sys.d)); dc.push(near(sys, (w.x + w.x1) / 2));
+    }
+  }));
+  const med = (a) => { const b = a.slice().sort((x, y) => x - y); return b.length ? b[b.length >> 1] : 0; };
+  const centred = dc.length >= 3 && med(dc) < 0.6 * med(dl);
+  let title = "", artist = "", tuning = "", tempo = null, firstNum = opts.firstBar || 1, nChords = 0, nWords = 0, printed = 0, agree = 0;
+  // page 1 furniture: the biggest words above the first system are the title, then the artist
+  if (L[0]) {
+    const lay = L[0], top = lay.systems.length ? lay.systems[0].top : lay.height;
+    // (an iOS reprint splits the title into one word per space: a line is every big word on that baseline)
+    const above = lay.words.filter((w) => w.y < top && w.h > 1.25 * chordSp * lay.sp);
+    const lineOf = (w0) => above.filter((w) => Math.abs(w.y - w0.y) < 0.3 * w0.h && Math.abs(w.h - w0.h) < 0.1 * w0.h).sort((a, b) => a.x - b.x).map((w) => w.s).join(" ");
+    const big = above.filter((w) => !/^\d+$/.test(w.s)).sort((a, b) => b.h - a.h || a.y - b.y);
+    if (big[0]) { title = lineOf(big[0]); const second = big.find((w) => w.h < 0.9 * big[0].h); if (second) artist = lineOf(second); }
+    const tw = lay.words.find((w) => /^Tuning\b/i.test(w.s));
+    if (tw) tuning = lay.words.filter((w) => Math.abs(w.y - tw.y) < 0.3 * tw.h && w.x >= tw.x).sort((a, b) => a.x - b.x).map((w) => w.s).join(" ").replace(/^Tuning\s*:?\s*/i, "");
+  }
+  const pages = L.map((lay, pi) => {
+    const sp = lay.sp, tokens = [], reads = [], sections = [], timeSigs = [];
+    const isFurniture = (w) => {
+      if (/^Tuning\b/i.test(w.s)) return true;
+      if (w.h > 1.25 * chordSp * sp) return true;                                                   // title, artist, page number
+      const tw = lay.words.find((u) => /^Tuning\b/i.test(u.s));
+      return !!(tw && Math.abs(w.y - tw.y) < 0.3 * tw.h && w.x >= tw.x);                            // the tuning line's letters
+    };
+    // ---- measures of the page in reading order, numbered from the printed bar numbers
+    const meas = [];
+    lay.systems.forEach((sys, k) => { for (let m = 0; m < sys.edges.length - 1; m++) meas.push({ k, m, x0: sys.edges[m], x1: sys.edges[m + 1], num: null }); });
+    const numWords = new Set();
+    const nSizes = [];
+    for (const ms of meas) {
+      const sys = lay.systems[ms.k], d = sys.d;
+      const c = lay.words.filter((w) => /^\d{1,4}$/.test(w.s) && w.y <= sys.top + 0.3 * d && w.y >= sys.top - 4 * d && w.x >= ms.x0 - 2.5 * d && w.x <= ms.x0 + 1.5 * d && w.h < 1.5 * chordSp * sp);
+      if (c.length) { const w = c.sort((a, b) => Math.abs(a.x - ms.x0) - Math.abs(b.x - ms.x0))[0]; ms.cand = w; nSizes.push(w.h); }
+    }
+    // tuplet numbers can sit at a bar's start too: a bar number has the page's bar-number size
+    nSizes.sort((a, b) => a - b);
+    const nSize = nSizes.length ? nSizes[nSizes.length >> 1] : 0;
+    for (const ms of meas) if (ms.cand && Math.abs(ms.cand.h - nSize) <= 0.12 * nSize) { ms.num = +ms.cand.s; numWords.add(ms.cand); }
+    // counting from the first printed number; a printed number that rises and lands within 3 of the count wins
+    let cur = null, last = -Infinity;
+    const firstPrinted = meas.find((ms) => ms.num != null);
+    const start = firstPrinted ? firstPrinted.num - meas.indexOf(firstPrinted) : firstNum;
+    meas.forEach((ms, i) => {
+      const counted = cur == null ? start : cur + 1;
+      cur = ms.num != null && ms.num > last && Math.abs(ms.num - counted) <= 3 ? ms.num : counted;
+      if (ms.num != null && cur === ms.num) last = ms.num;
+      ms.bar = cur;
+    });
+    // a self-check: how many printed bar numbers the bar-line count agrees with
+    for (const ms of meas) if (ms.num != null) { printed++; if (ms.bar === ms.num) agree++; }
+    const firstNumber = meas.length ? meas[0].bar : firstNum;
+    firstNum = meas.length ? meas[meas.length - 1].bar + 1 : firstNum;
+    const barIdx = (k, m) => { const ms = meas.find((q) => q.k === k && q.m === m); return ms ? ms.bar - firstNumber : 0; };
+    // ---- the band above each system
+    lay.systems.forEach((sys, k) => {
+      const d = sys.d, lo = k ? lay.systems[k - 1].bottom + 0.5 * d : 0, s0 = sys.staves[0];
+      for (const ts of sys.timeSigs) timeSigs.push({ bar: barIdx(k, _pdfMeasureAt(sys, Math.max(ts.x, sys.edges[0]))), num: ts.num, den: ts.den });
+      const band0 = lay.words.filter((w) => w.top > lo && w.y <= sys.top + 0.5 * d && w.y >= sys.top - 16 * d && !numWords.has(w) && w.x1 > sys.x0 - 2 * d && w.x < sys.x1 + d);
+      // two chords set close together can arrive as one word ("G#m7/5-C#9-"): split at a root letter when the whole
+      // does not read as a chord and both halves do
+      const band = [];
+      for (const w of band0) {
+        const pp = w.parts || [];
+        let cut = null;
+        if (/^[A-G]/.test(w.s) && !chordFromWritten(w.s)) for (let q = 1; q < pp.length && !cut; q++) {
+          if (!/^[A-G]/.test(pp[q].s) || /\/$/.test(pp[q - 1].s)) continue;
+          const a = pp.slice(0, q).map((u) => u.s).join(""), b = pp.slice(q).map((u) => u.s).join("");
+          if (chordFromWritten(a) && chordFromWritten(b)) cut = q;
+        }
+        if (!cut) { band.push(w); continue; }
+        const L2 = pp.slice(0, cut), R2 = pp.slice(cut);
+        band.push({ ...w, s: L2.map((u) => u.s).join(""), x1: L2[L2.length - 1].x1, parts: L2 }, { ...w, s: R2.map((u) => u.s).join(""), x: R2[0].x, parts: R2 });
+      }
+      // words that are not chords, on one baseline and a space apart, are one phrase ("Solo Continued As Verse",
+      // "1st & 3rd Verse:", "= 120"): an iOS reprint splits them at every space. Chords are never joined.
+      band.sort((a, b) => a.y - b.y || a.x - b.x);
+      for (let q = 0; q + 1 < band.length; q++) {
+        const a = band[q], b = band[q + 1];
+        if (Math.abs(a.y - b.y) > 0.3 * a.h || b.x - a.x1 > 0.7 * a.h || b.x < a.x) continue;
+        if (chordFromWritten(a.s) || chordFromWritten(b.s)) continue;
+        band.splice(q, 2, { ...a, s: a.s + " " + b.s, x1: b.x1, top: Math.min(a.top, b.top), bot: Math.max(a.bot, b.bot), parts: [...(a.parts || []), ...(b.parts || [])] });
+        q--;
+      }
+      for (const w of band) {
+        nWords++;
+        if (pi === 0 && isFurniture(w)) continue;
+        // the chord's anchor (left edge or centre) snapped to the note / TAB onset under it decides its bar
+        const ax = centred ? (w.x + w.x1) / 2 : w.x + 0.6 * d;
+        let ox = ax, bd = 1.5 * d; for (const c of sys.content) { const dd = Math.abs(c - ax); if (dd < bd) { bd = dd; ox = c; } }
+        const s = w.s, m = _pdfMeasureAt(sys, centred || ox !== ax ? ox : w.x), bar = barIdx(k, m);
+        // tempo: "♩ = 120" (the note is a SMuFL glyph, so the phrase starts at "="; an iOS reprint's "=" and "120" were
+        // joined into one phrase above)
+        const tm = s.match(/=\s*(\d{2,3})(?:\.\d+)?(?!\d)/);
+        if (tm) { if (tempo == null) tempo = +tm[1]; continue; }
+        if (/=/.test(s)) continue;
+        const label = s.match(/^\[(.+)\]$/) ? s.slice(1, -1).trim() : PDF_TEXT.sectionWords.test(s) || /:$/.test(s) ? s.replace(/:$/, "").trim() : null;
+        // a lone capital in a box (or a size above the chords) is a rehearsal mark, not a chord
+        const single = /^[A-Z]\d?$/.test(s);
+        const big = w.h > 1.08 * chordSp * sp;
+        if (label) { sections.push({ bar, name: label, x: w.x, k }); continue; }
+        if (single && (big || _pdfBoxed(vecPages[pi], w, d))) { sections.push({ bar, name: s, x: w.x, k, letter: true }); continue; }
+        const r = /^[A-G]/.test(s) || /^N\.?C\.?/.test(s) ? chordFromWritten(s) : null;
+        // an unread chord-like word is kept (unread) for the user to fix — not a direction in capitals ("DOUBLE-TIME")
+        const chordLike = /^[A-G][^\s]{0,13}$/.test(s) && !/\ufffd/.test(s) && !/[A-Z]{2}/.test(s.replace(/\/[A-G][#b]?$/, "").replace(/MA7|MAJ7?/, "")) && w.h <= 1.25 * chordSp * sp && w.h >= 0.7 * chordSp * sp;
+        if (!r && !chordLike) continue;
+        if (r && (w.h > 1.25 * chordSp * sp || w.h < 0.6 * chordSp * sp)) continue;
+        const e0 = sys.edges[m], e1 = sys.edges[m + 1], c0 = sys.content.find((x) => x >= e0 && x < e1);
+        const from = c0 != null ? Math.min(c0, ox) - 0.5 * d : e0, frac = Math.max(0, Math.min(0.999, (ox - from) / Math.max(1, e1 - from)));
+        tokens.push({ x0: w.x * scale, y0: w.top * scale, x1: w.x1 * scale, y1: w.bot * scale, staff: k, bar, frac, row: 0, text: s, vector: true });
+        reads.push(r ? { name: r.name, raw: s, prob: 1, parsed: r.parsed, alternatives: [], source: "text", ...(r.noChord ? { noChord: true } : {}) } : null);
+        if (r) nChords++;
+      }
+    });
+    // a rehearsal letter and a section name at the same bar are one section: keep the name
+    const secs = [];
+    for (const sct of sections.sort((a, b) => a.bar - b.bar || a.x - b.x)) {
+      const prev = secs.find((q) => q.bar === sct.bar);
+      if (!prev) secs.push(sct); else if (prev.letter && !sct.letter) secs[secs.indexOf(prev)] = sct;
+    }
+    const layout = { tokens, staves: lay.systems.map((sys, k) => ({ x0: sys.x0 * scale, x1: sys.x1 * scale, top: sys.top * scale, s: sys.d * scale, edges: sys.edges.map((x) => x * scale), staves: sys.staves.length, tab: sys.staves.some((s) => s.tab), barFrom: barIdx(k, 0), barlines: sys.edges.slice(1, -1) })),
+      bars: meas.length ? meas[meas.length - 1].bar - firstNumber + 1 : 0, firstNumber: meas.length ? firstNumber : null,
+      sections: secs.map(({ bar, name }) => ({ bar, name })), timeSigs, vector: true };
+    return { layout, reads };
+  });
+  return { pages, title, artist, tuning, tempo, chords: nChords, words: nWords, chordSize: chordSp, numbering: { printed, agree }, align: centred ? "centre" : "left",
+    ok: nChords > 0 && pages.some((p) => p.layout.bars > 0) };
+}
+
+/* a word enclosed by four strokes (a boxed rehearsal letter) */
+function _pdfBoxed(vec, w, d) {
+  const pad = 1.2 * d, x0 = w.x - pad, x1 = w.x1 + pad, y0 = w.top - pad, y1 = w.bot + pad;
+  let l = false, r = false, t = false, b = false;
+  for (const s of vec.segs) {
+    const hz = Math.abs(s.y1 - s.y0) < 0.1 * d, vt = Math.abs(s.x1 - s.x0) < 0.1 * d;
+    const sx0 = Math.min(s.x0, s.x1), sx1 = Math.max(s.x0, s.x1), sy0 = Math.min(s.y0, s.y1), sy1 = Math.max(s.y0, s.y1);
+    if (hz && sx0 <= w.x + 0.1 * d && sx1 >= w.x1 - 0.1 * d && sx1 - sx0 < 4 * (w.x1 - w.x + 2 * d)) { if (s.y0 >= y0 && s.y0 < w.top + 0.2 * d) t = true; if (s.y0 <= y1 && s.y0 > w.bot - 0.2 * d) b = true; }
+    if (vt && sy0 <= w.top + 0.2 * d && sy1 >= w.bot - 0.2 * d && sy1 - sy0 < 4 * (w.bot - w.top + 2 * d)) { if (s.x0 >= x0 && s.x0 < w.x + 0.2 * d) l = true; if (s.x0 <= x1 && s.x0 > w.x1 - 0.2 * d) r = true; }
+  }
+  return l && r && t && b;
+}
+
 export {
+  chordOcrSplitRead,
+  PDF_TEXT, pdfPageVectors, pdfScoreLayout, pdfChordPages, _pdfBoxed, _pdfMeasureAt,
   SCORE_LINK, unrollRepeatOrder, scorePartNotes, scoreLinkParts, scoreHarmonyGrid, linkBeatDTW, linkScoreToAudio, linkSecToQ, linkQToSec,
   analyzeAudioWithScore, linkedChartScore, SCORE_TAB, SCORE_TAB_FOLLOW, scoreTabNotes, scoreInformedTab, _crnnPeak, _scoreTabTuning, _validPins, _pinnedShape, STEM_COMPARE, scorePartRole, matchStemsToParts, compareStemsToScore, _partNotesSec, _GM_DRUM_CLASS, LYRIC_ASSIGN, _lyricChunks, _hyphenate, assignLyricText, _gpLyrics, _extendOverTies, _assignLyricLines, _gpifTrackTuning, _gpifLyrics, _beatLyricSyllables, _musicXmlLyrics, lyricPassOrder, scoreInPassOrder, _sheetScore, scoreLyricSyllables, lyricMapFromSyllables, scoreQToSec, linkedLyricMap, lyricMapToText, scoreLinkPriorGrid, _harmonyOfParts, _scorePriorBonus, _sameChordClass, _linkFeat, _linkBeatGrids,
   makeMask,

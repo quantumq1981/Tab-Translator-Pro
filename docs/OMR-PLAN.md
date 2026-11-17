@@ -355,6 +355,17 @@ headers (8-space cap, title-ruling drop), boxed section labels (border strokes),
 it), a downbeat-aware placement of N.C. inside a bar (it takes the beat its x gives, as chords do), `*`-footnote stars
 glued to a chord ("*Cm/Eb" is still missed).
 
+## Digital PDFs: read the text layer, don't OCR it (2026-11-17)
+
+Full write-up, every number and the corrected UG calibration spec: **`docs/UG-PRO-PDF-CALIBRATION.md`**. An exported
+score PDF (Ultimate Guitar "Pro" tabs are MuseScore 4 engravings) carries every chord, bar number, time signature,
+section and tempo as text and every staff / bar line as a path. `pdfChordPages` reads them exactly (engine block
+"PDF TEXT LAYER"); the Scan panel uses it whenever a PDF has a usable text layer and falls back to OCR otherwise.
+Against the Guitar Pro sources: Revelation 56/56, Pretzel Logic 79/79, Ain't Got Nothin' 165/167 (the 2 are not
+printed), precision 100 %; the raster reader on the same pages: 39–82 %. Also from this work, for OCR: the UG
+spellings in `chordFromWritten` (`7M`, `/5+`, `9-` … Room 335 raster 30.6 → 58.6 %), the run-together text split
+(`chordOcrSplitRead`, Ain't Got Nothin' 65.9 → 76.0 %), and page charts keep chords as written (`e.written`).
+
 ## Two cheaper routes worth measuring alongside
 
 1. **Tab photos.** Guitar tab is digits on six lines — far easier than notation. Text recognition

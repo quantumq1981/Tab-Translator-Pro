@@ -3751,6 +3751,48 @@ UI `ScanPanel` (mode "Scan 📷"). Guards: `tests/chord-ocr.mjs` (in `npm test`)
   - Not built: "*"-footnote star glued to a chord ("*Cm/Eb" missed); the new hand reader passes the default's gate, but
     the default stays printed until real hand-copied pages are re-measured.
 
+## Digital score PDFs — chords from the TEXT LAYER, not OCR (2026-11-17)
+
+Full write-up, measurements and the corrected UG calibration spec: **`docs/UG-PRO-PDF-CALIBRATION.md`**. Engine block
+"PDF TEXT LAYER" (pure): `pdfPageVectors(textContent, viewport, opList, OPS)` (the only PDF.js-shaped function: plain
+arrays in, `{ items, segs }` out, top-down coordinates, y = baseline, h = font size) → `pdfScoreLayout` → `pdfChordPages`
+→ the same `{ layout, reads }` pages as the OCR, so `chordPageScore` / `ocrReviewItems` / the review UI are shared.
+Guards: `tests/pdf-text.mjs` (in `npm test`, synthetic PDF.js pages, mutation-tested). Bench:
+`scripts/chord-ocr/bench_pdf_text.mjs` (vs the `.gp` source). Browser: `tests/bench/scan-pdf-e2e.mjs`.
+- **Ultimate Guitar "Pro" PDFs are MuseScore 4 engravings** (Edwin / Leland / BravuraText / Roboto TAB). Native
+  export = 2976 × 4209 pt (A4 × 5), an iOS reprint = Letter and **one text item per glyph**. Everything is in staff
+  spaces measured from the lines; font names classify nothing (Room 335 prints chords in the tuning line's font).
+- **Staves:** horizontal strokes joined along x (bar by bar, TAB lines broken around fret digits, ≤ 3 % gaps), ≥ 60 %
+  ink, the SAME x-extent for every line of a staff (a volta / ledger row doesn't share it), 5–6 lines ≤ 1.5 % of the
+  page apart; a 6-line run is trimmed to the sub-run its bar lines end on (a dense ledger row drawn end to end).
+  TAB = 6 lines or a TAB clef (U+E06D). PDF.js can split ONE path over two `constructPath` ops: the pen persists
+  until the path is painted.
+- **Bar lines:** vertical strokes that END on the outer staff lines (stems overshoot) and appear on EVERY staff of
+  the system (TAB has no stems). An empty first "measure" (clef/key/time before a start-repeat) is not a bar.
+- **Chord anchor is learned per document:** 5 of the 6 UG files CENTRE chords (a centred `Bm7#5` starts left of its
+  bar line), Room 335 left-aligns. The chord goes to the bar of the note / TAB onset under its anchor.
+- Words: glyphs on one baseline that touch (gap ≤ 0.18 × size); SMuFL U+ED60/ED62/E870 → `b` `#` `°`; a word that
+  fails the grammar is split at a root letter where both halves parse; non-chord words a space apart are one phrase
+  (sections "Solo Continued As Chorus", tempo "= 120"). Rehearsal letter = a single capital boxed or bigger than the
+  chords. Tuning line dropped as a line (its letters are valid chords). Time signatures from U+E080–E08B →
+  `layout.timeSigs`; sections → `layout.sections`; both honoured by `chordPageScore` (OCR pages: unchanged 4/4).
+- **Measured** (vs the GP sources): Revelation 56/56, Pretzel Logic 79/79, Ain't Got Nothin' 165/167 (the 2 are not
+  printed), precision 100 %; printed bar numbers agree with the bar-line count 585/585 across the six files; ~30–150
+  ms per document. The raster reader on the same pages: 39–82 % (Listen to the Music 15 %) — never OCR a digital PDF.
+- **Scan panel:** a PDF's text + paths are taken in the same viewport it is rendered in (token boxes = render pixels);
+  `ok` → text reading (status "read from the PDF's text layer", title / tempo / tuning, no model download), else OCR;
+  "↻ Read with OCR instead" / "↻ Read the PDF's text". Any text-layer failure falls back to OCR.
+- **Also from this work (OCR side):** `chordFromWritten` takes UG / GP spellings (`D7M`, `Dm7M`, `C#m7/5+`, `G7/5-`,
+  `F#9-/5+`, `C#9-`, `B9+`, `C7-9`, `E7/9`, `E7dim`, `Fsus2/4`, `(Gm7)`; `C-7` stays minor) — Room 335 raster
+  30.6 → 58.6 %; `chordOcrSplitRead` splits a run-together reading (`Bb13Bb9`) at the CTC frame between the chords —
+  Ain't Got Nothin' 65.9 → 76.0 %. A "centre past the bar line" placement rule measured 0 gain and was NOT shipped.
+- **Written chords are kept as written:** every `chordPageScore` event is `written` — `respellScore` (the Pro
+  vocabulary) leaves it and `transposeScore` moves its text. Before, Pro turned Room 335's printed `C#m7#5` into
+  `A/C#` and `F#9-/5+` into `F#7b9` on every Scan chart.
+- Limits / next: beats inside a bar still from the chord's x (the vector layer has every notehead — a rhythm reading
+  would place them exactly); for photos of UG pages, re-anchoring raster bars on the printed bar numbers is the next
+  step (spec §8); CSMPN carries one `Time:` header (meter changes reach MusicXML / the chart, not CSMPN).
+
 ## Path B (notation) — not built; plan in `docs/OMR-PLAN.md`
 
 Raster input (a photo or scanned page) needs an OMR model, kept SEPARATE from the Path A parser.
@@ -4001,6 +4043,14 @@ accordingly.
   Since 2026-11-09 also `drumLikeness` (drum loop vs chords, rate-independent, empty input) and the Audio
   panel's 🥁 Drums contracts (no chord decode, full-rate reader, filename auto-pick, the 0.6 suggestion,
   isolation off, one shared `DrumChartView`, the `−0:00.01` bar-line time).
+- **PDF text layer** (`tests/pdf-text.mjs`, in `npm test`): UG / GP spellings in the grammar (and what must not change);
+  a synthetic two-system notation+TAB page with stems spanning the staff, a strum line through both staves, ledger
+  rows (incl. one end to end), a volta, a TAB line broken around digits and one split over two path ops → 2 systems,
+  4 bars each, 4/4 then 3/4; a per-glyph tuning line, a centred chord starting left of its bar line, a boxed
+  rehearsal letter beside "Pre-Verse", a tuplet "3", per-glyph chords with the small-flat glyph, two touching chords,
+  "Verse" + "1", a capitals direction, title / artist / tempo (incl. a split "=" "120"), page 2 continuing the bar
+  numbers, written chords kept by Pro and transposed as text, the CSMPN sections, no-text-layer → `ok:false`, the
+  raster run-together split, and the Scan panel wiring. Mutation-tested.
 - **Chord OCR** (`tests/chord-ocr.mjs`, in `npm test`; since 2026-11-15 also notation + TAB systems, hairline bar
   lines, TAB parentheses, rhythm slashes, the opening-bar-line number, Big-Note letters, N.C., the strict grammar, crop
   cleaning): painted pages (a beam among staff lines, grey
