@@ -3789,9 +3789,20 @@ Guards: `tests/pdf-text.mjs` (in `npm test`, synthetic PDF.js pages, mutation-te
 - **Written chords are kept as written:** every `chordPageScore` event is `written` — `respellScore` (the Pro
   vocabulary) leaves it and `transposeScore` moves its text. Before, Pro turned Room 335's printed `C#m7#5` into
   `A/C#` and `F#9-/5+` into `F#7b9` on every Scan chart.
+- **iOS 27 prints (second batch, 2026-11-17; spec §9):** the music fonts lose their Unicode map — Leland glyphs
+  arrive as ASCII (`$ , !`), so a 10-bar rest's "10" became the "title" and the metronome glued onto the tempo. A font
+  is musical when most items are SMuFL or notation-sized punctuation or its PDF.js name is a SMuFL font (the Scan glue
+  passes `fontNames` from `pg.commonObjs`); its non-SMuFL glyphs are never text. Time signatures are unreadable there
+  (4/4 assumed). Multi-bar rests: a printed number far from the count is taken when the next bar's number confirms it.
+  An empty first interval is dropped only when narrow or closed by a double/repeat bar line. A smaller glyph that is
+  not raised, or that starts with A–G, doesn't join a word (bar numbers / volta "1" against chords — this also
+  recovered chords batch 1 had lost: Listen to the Music bar 31, This Masquerade bars 20/24). A lone alteration
+  after a chord joins it (`G7` + `#5` — the parentheses are drawn). A label straddling a bar line with its centre on
+  it belongs to that bar. Measured: This Masquerade 37/37, Sleepwalk 97/97, Affirmation 52/52, all pages checked.
 - Limits / next: beats inside a bar still from the chord's x (the vector layer has every notehead — a rhythm reading
   would place them exactly); for photos of UG pages, re-anchoring raster bars on the printed bar numbers is the next
-  step (spec §8); CSMPN carries one `Time:` header (meter changes reach MusicXML / the chart, not CSMPN).
+  step (spec §8); CSMPN carries one `Time:` header (meter changes reach MusicXML / the chart, not CSMPN); a
+  multi-bar rest at the very end counts as one bar.
 
 ## Path B (notation) — not built; plan in `docs/OMR-PLAN.md`
 

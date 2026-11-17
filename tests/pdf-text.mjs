@@ -35,8 +35,8 @@ function page(H = 1000, W = 700) {
   const Y = (y) => H - y;
   return {
     H, W,
-    text(str, x, y, size, w) { items.push({ str, transform: [size, 0, 0, size, x, Y(y)], width: w ?? size * 0.6 * [...str].length }); },
-    glyphs(str, x, y, size, adv = size * 0.6) { let cx = x; for (const ch of [...str]) { this.text(ch, cx, y, size, adv); cx += adv; } return cx; },
+    text(str, x, y, size, w, font = "fText") { items.push({ str, transform: [size, 0, 0, size, x, Y(y)], width: w ?? size * 0.6 * [...str].length, fontName: font }); },
+    glyphs(str, x, y, size, adv = size * 0.6, font = "fText") { let cx = x; for (const ch of [...str]) { this.text(ch, cx, y, size, adv, font); cx += adv; } return cx; },
     line(x0, y0, x1, y1, lw = 1) { fn.push(OPS.setLineWidth, OPS.constructPath, OPS.stroke); args.push([lw], [[OPS.moveTo, OPS.lineTo], [x0, Y(y0), x1, Y(y1)], null], null); },
     splitLine(x0, y0, x1, y1) { fn.push(OPS.constructPath, OPS.constructPath, OPS.stroke); args.push([[OPS.moveTo], [x0, Y(y0)], null], [[OPS.lineTo], [x1, Y(y1)], null], null); },
     get vp() { return { width: W, height: H, transform: [1, 0, 0, -1, 0, H] }; },
@@ -55,11 +55,13 @@ function system(P, top, edges, o = {}) {
     else P.line(edges[0], y, edges[edges.length - 1], y);
   }
   for (const x of edges) { P.line(x, top, x, top + 4 * sp); P.line(x, tabTop, x, tabTop + 5 * tabD); }        // bar lines on BOTH staves
-  P.text("", edges[0] + 2, tabTop + 5 * tabD, 4 * sp, 10);                                                 // TAB clef
+  P.text("\ue06d", edges[0] + 2, tabTop + 5 * tabD, 4 * sp, 10, "fLeland");                                      // TAB clef
   const notes = [];
   for (let m = 0; m + 1 < edges.length; m++) for (const f of [0.15, 0.55]) {
+    if (o.empty && o.empty.includes(m)) continue;                                                                // a whole-bar rest
     const x = edges[m] + f * (edges[m + 1] - edges[m]); notes.push(x);
-    P.text("", x - 4, top + 2 * sp, 4 * sp, 8);                                                            // a notehead
+    if (o.garbled) P.text("$", x - 4, top + 2 * sp, 4 * sp, 8, "fLelandX");                                       // a notehead, its glyph unmapped (iOS 27)
+    else P.text("\ue0a4", x - 4, top + 2 * sp, 4 * sp, 8, "fLeland");                                           // a notehead
     P.text("5", x - 3, tabTop + 2 * tabD + 3, 1.8 * sp, 6);                                                      // its TAB digit
     // a stem spanning the whole staff (it overshoots the outer lines, and the TAB has none) — not a bar line
     P.line(x + 3, top - 1.3 * sp, x + 3, top + 4 * sp + 1.1 * sp, 0.4);
@@ -74,8 +76,8 @@ P1.text("Revelation Test", 250, 40, 4.5 * sp); P1.text("Some Artist", 290, 70, 2
 // the tuning line as an iOS reprint gives it: one item per glyph, so "E" "A" "D" "G" "B" "E" are each a valid chord
 { let x = 30; for (const tok of ["Tuning", ":", "E", "A", "D", "G", "B", "E"]) { x = P1.glyphs(tok, x, 105, 1.6 * sp, 7) + 5; } }
 const E1 = [50, 200, 350, 500, 650], S1 = system(P1, 170, E1, { brokenTab: true, splitPath: true });
-P1.text("", 62, 170 + 2 * sp, 4 * sp, 10); P1.text("", 62, 170 + 4 * sp, 4 * sp, 10);   // 4/4: numerator on the middle line, denominator on the bottom
-P1.text("", 60, 128, 4 * sp, 8); P1.text("= 96", 70, 128, 1.8 * sp);                          // ♩ = 96
+P1.text("\ue084", 62, 170 + 2 * sp, 4 * sp, 10); P1.text("\ue084", 62, 170 + 4 * sp, 4 * sp, 10);   // 4/4: numerator on the middle line, denominator on the bottom
+P1.text("\ueca5", 60, 128, 4 * sp, 8); P1.text("= 96", 70, 128, 1.8 * sp);                          // ♩ = 96
 E1.slice(0, 4).forEach((x, i) => P1.text(String(i + 1), x + 1, 166, 1.2 * sp));                     // a bar number at every bar
 const cy = 170 - 1.8 * sp;
 centred(P1, "Dm", S1.notes[0], cy); centred(P1, "C#m7/5+", S1.notes[2], cy); centred(P1, "D7M", S1.notes[3], cy);
@@ -101,9 +103,9 @@ P1.text("X", 120, S1.bottom + 0.4 * sp, 1.8 * sp);                              
 // system 2: an iOS-style reprint of its chords (one item per glyph), a split "= 1 2 0" tempo is NOT here; 3/4 change
 const E2 = [50, 210, 370, 530, 650], S2 = system(P1, 420, E2);
 E2.slice(0, 4).forEach((x, i) => P1.text(String(i + 5), x + 1, 416, 1.2 * sp));
-P1.text("", E2[1] + 8, 420 + 2 * sp, 4 * sp, 10); P1.text("", E2[1] + 8, 420 + 4 * sp, 4 * sp, 10);   // 3/4 from bar 6
+P1.text("\ue083", E2[1] + 8, 420 + 2 * sp, 4 * sp, 10); P1.text("\ue084", E2[1] + 8, 420 + 4 * sp, 4 * sp, 10);   // 3/4 from bar 6
 const cy2 = 420 - 1.8 * sp, g = 1.6 * sp;
-P1.glyphs("Cm7", S2.notes[0] - 10, cy2, g); P1.glyphs("B", S2.notes[2] - 6, cy2, g, 8); P1.text("", S2.notes[2] + 2, cy2, g, 4); P1.glyphs("7", S2.notes[2] + 6, cy2, g);
+P1.glyphs("Cm7", S2.notes[0] - 10, cy2, g); P1.glyphs("B", S2.notes[2] - 6, cy2, g, 8); P1.text("\ued60", S2.notes[2] + 2, cy2, g, 4); P1.glyphs("7", S2.notes[2] + 6, cy2, g);
 P1.glyphs("G#m7/5-C#9-", S2.notes[4] - 30, cy2, g, 6.4);                                            // two chords set touching
 P1.glyphs("Verse", 60, 420 - 3.6 * sp, 1.8 * sp, 9); P1.glyphs("1", 60 + 5 * 9 + 6, 420 - 3.6 * sp, 1.8 * sp, 9);   // "Verse 1" split at the space
 P1.glyphs("DOUBLE-TIME", E2[3] + 5, 420 - 3.6 * sp, 1.6 * sp, 8);                                   // a direction in capitals
@@ -174,7 +176,7 @@ expect(E.chordPageScore(RR.pages).bars.length === 10, "two pages → 10 bars");
 
 // ---- an iOS reprint's tempo: "=" and "120" are separate words
 const P3 = page(); const S4 = system(P3, 200, [50, 650]);
-P3.text("", 60, 150, 4 * sp, 8); P3.glyphs("=", 72, 150, 1.8 * sp, 8); P3.glyphs("120", 86, 150, 1.8 * sp, 8);
+P3.text("\ueca5", 60, 150, 4 * sp, 8); P3.glyphs("=", 72, 150, 1.8 * sp, 8); P3.glyphs("120", 86, 150, 1.8 * sp, 8);
 P3.text("1", 51, 196, 1.2 * sp); centred(P3, "G", S4.notes[0], 200 - 1.8 * sp); centred(P3, "C", S4.notes[1], 200 - 1.8 * sp); centred(P3, "D", S4.notes[1] + 1, 200 - 3.8 * sp);
 const R3 = E.pdfChordPages([P3.vec()]);
 expect(R3.tempo === 120, `split tempo "=" "120" read (${R3.tempo})`);
@@ -202,12 +204,48 @@ expect(rot.items.length === 0, "rotated text is skipped");
   expect(sl && sl.left.name === "Cm7" && sl.right.name === "Bb/D", `a slash the reader put in the gap is dropped ("Cm7/Bb/D" → Cm7 + Bb/D: ${sl && sl.left.name} ${sl && sl.right.name})`);
 }
 
+// ---- an iOS 27 print: the music font has lost its Unicode map (glyphs arrive as ASCII), a 10-bar rest, a bar number
+// set against a chord, a chord against "Da Coda", "G7(#5)" whose parentheses are drawn, labels centred on a bar line
+{
+  const P = page(); const E5 = [50, 190, 330, 480, 650];
+  P.glyphs("Affirmation", 260, 40, 4.5 * sp, 2.7 * sp, "fTitle"); P.glyphs("George", 290, 70, 2.7 * sp, 13, "fTitle");
+  const S5 = system(P, 200, E5, { empty: [0, 1], garbled: true });
+  P.text("+", 250, 200 - 1.5 * sp, 4.7 * sp, 10, "fLelandX"); P.text(",", 260, 200 - 1.5 * sp, 4.7 * sp, 10, "fLelandX");   // the rest's "10", unmapped
+  P.text("!", 60, 150, 3 * sp, 4, "fLelandText"); P.glyphs("=", 66, 150, 1.8 * sp, 6, "fBold"); P.glyphs("75", 76, 150, 1.8 * sp, 7, "fBold");   // ♩ = 75
+  const cy5 = 200 - 1.8 * sp;
+  // bar 13's number sits as in Sleepwalk: right against the chord before it, its baseline 0.28 × the chord's size lower
+  [1, 2, 12, 13].forEach((n, i) => P.text(String(n), E5[i] + 1, n === 13 ? cy5 + 0.28 * 1.6 * sp : 196, 1.2 * sp, String(n).length * 5, "fItalic"));
+  // bar 12: "G7" … (drawn parenthesis gap) … "#5", then "Bb7" whose last glyph touches bar 13's number "13" (smaller, lower)
+  let x = P.glyphs("G7", S5.notes[0] - 3, cy5, 1.6 * sp, 7.7, "fChord"); P.text("\ued62", x + 6, cy5, 1.6 * sp, 4, "fChordAcc"); P.glyphs("5", x + 10, cy5, 1.6 * sp, 7.7, "fChord");
+  P.glyphs("Bb7", E5[3] - 23.1, cy5, 1.6 * sp, 7.7, "fChord");
+  // bar 13: "Da Coda" (bigger text) touching a chord that is smaller and slightly raised
+  x = P.glyphs("Da", E5[3] + 20, cy5 + 2, 2.0 * sp, 9.6, "fRoman"); x = P.glyphs("Coda", x + 4, cy5 + 2, 2.0 * sp, 9.6, "fRoman");
+  P.glyphs("C7", x, cy5, 1.6 * sp, 7.7, "fChord");
+  // labels: "THEME" centred ON bar 12's bar line; a long label starting in bar 1 that runs over bar 2's line
+  P.glyphs("THEME", E5[2] - 22, 200 - 4 * sp, 1.8 * sp, 9, "fBold");
+  P.glyphs("INTRO", E5[0] + 70, 200 - 4 * sp, 1.8 * sp, 9, "fBold"); P.glyphs("ALONG", E5[0] + 70 + 50, 200 - 4 * sp, 1.8 * sp, 9, "fBold");
+  const R5 = E.pdfChordPages([P.vec()]), L5 = R5.pages[0].layout, C5 = chords(R5.pages[0]);
+  expect(R5.title === "Affirmation" && R5.tempo === 75, `an unmapped music font is not text: title "${R5.title}" (not the rest's "+,"), tempo ${R5.tempo} (the metronome "!" is not glued to "= 75")`);
+  expect(L5.firstNumber === 1 && L5.bars === 13 && R5.numbering.printed === 4 && R5.numbering.agree === 4, `a 10-bar rest: printed 1, 2, 12, 13 confirmed by the next number (first ${L5.firstNumber}, ${L5.bars} bars, ${JSON.stringify(R5.numbering)})`);
+  expect(C5[12] && C5[12].join() === "G7#5,Bb7", `bar 12: "G7" + "#5" across the parenthesis gap; "Bb7" not glued to bar number 13 (${JSON.stringify(C5)})`);
+  expect(C5[13] && C5[13].join() === "C7", `bar 13: a chord touching "Da Coda" (${JSON.stringify(C5[13])})`);
+  expect(!C5[1] && !C5[2], "the empty real first bar is kept (bar 1 stays bar 1) and holds no chord");
+  const sec5 = L5.sections;
+  expect(sec5.some((q) => q.name === "THEME" && q.bar === 11) && sec5.some((q) => /^INTRO/.test(q.name) && q.bar === 0), `labels: THEME centred on bar 12's line → bar 12; a long label from bar 1 stays in bar 1 (${JSON.stringify(sec5)})`);
+  expect(E.chordPageScore(R5.pages).bars.length === 13, "the chart has all 13 bars (the rest's 10 included)");
+  // a music font is recognised by its NAME too (when the app passes PDF.js font names)
+  const V5n = E.pdfPageVectors({ items: [{ str: "q", transform: [12, 0, 0, 12, 100, 900], width: 7, fontName: "g1" }] }, P.vp, null, null, { fontNames: { g1: "ABCDEF+Leland" } });
+  expect(V5n.items[0].fn === "ABCDEF+Leland", "font names ride on the items");
+  expect(E.PDF_TEXT.smuflFont.test("Leland") && E.PDF_TEXT.smuflFont.test("BravuraText") && !E.PDF_TEXT.smuflFont.test("Edwin-Roman") && !E.PDF_TEXT.smuflFont.test("MuseJazzText"), "SMuFL font names (MuseJazz Text is a text font)");
+}
+
 // ---- the Scan panel wiring (browser glue)
 const ui = fs.readFileSync(path.join(repo, "TabDecoderPro.tsx"), "utf8");
 const scan = ui.slice(ui.indexOf("async function _scanPdfPages"), ui.indexOf("function LyricsPanel"));
 expect(/pdfPageVectors,/.test(ui) && /pdfChordPages,/.test(ui), "the UI imports the text-layer reader");
-expect(/getOperatorList\(\)/.test(scan) && /window\.pdfjsLib\.OPS/.test(scan) && /pdfPageVectors\(await pg\.getTextContent\(\), vp,/.test(scan), "a PDF page's text + paths are taken in the SAME viewport it is rendered in");
-expect(/try \{ vecs\.push\(pdfPageVectors/.test(scan) && /catch \(_\) \{ vecs\.push\(null\); \}/.test(scan), "a text-layer failure falls back to OCR (never throws)");
+expect(/getOperatorList\(\)/.test(scan) && /window\.pdfjsLib\.OPS/.test(scan) && /pdfPageVectors\(tc, vp, ol,/.test(scan), "a PDF page's text + paths are taken in the SAME viewport it is rendered in");
+expect(/commonObjs\.get\(it\.fontName\)/.test(scan) && /\{ fontNames \}/.test(scan), "the real font names are passed along (music fonts by name)");
+expect(/catch \(_\) \{ vecs\.push\(null\); \}/.test(scan) && /catch \(_\) \{ fontNames\[it\.fontName\] = ""; \}/.test(scan), "a text-layer or font-name failure falls back (never throws)");
 expect(/if \(tr\.ok\) textRef\.current = tr/.test(scan) && /else await readImages\(imgs, style\)/.test(scan), "a usable text layer is read; anything else goes to OCR");
 expect(/Read with OCR instead/.test(scan) && /Read the PDF's text/.test(scan), "one tap between the text reading and OCR");
 expect(/tempo: doc && doc\.tempo/.test(scan), "the chart takes the PDF's tempo");

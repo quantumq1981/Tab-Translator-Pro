@@ -14257,11 +14257,14 @@ const PDF_TEXT = {
     0xe870: "°", 0xe871: "ø", 0xe872: "+", 0xe873: "Δ", 0xe874: "-", 0xe875: "(", 0xe876: ")", 0xe877: "(", 0xe878: ")", 0xe87b: "/" },
   // a PUA glyph at least this many staff spaces tall is notation (noteheads, rests, clefs, dynamics), not text
   notationSize: 2.6,
+  // SMuFL music fonts by name (when the caller passes PDF.js font names); MuseJazz Text etc. are TEXT fonts
+  smuflFont: /^(?:Leland|Bravura|Petaluma|Leipzig|Gonville|Sebastian|Emmentaler|Finale ?(?:Maestro|Broadway|Ash|Jazz|Engraver|Legacy)|MScore|Opus|Sonata)(?!.*Jazz ?Text)/i,
   sectionWords: /^(?:intro|verse|(?:pre|post)-?\w+|chorus|bridge|solo|guitar solo|outro|interlude|coda|fade|riff|break|breakdown|instrumental|refrain|ending|tag|vamp|head|theme|middle|turnaround|hook|drop|build|reprise|segue|section|part)\b/i,
 };
 
 /** PDF.js page objects → plain vectors (see the block note). opList/OPS optional (text only without them). */
-function pdfPageVectors(textContent, viewport, opList, OPS) {
+function pdfPageVectors(textContent, viewport, opList, OPS, opts = {}) {
+  const fontNames = opts.fontNames || {};
   const T = viewport.transform, k = Math.hypot(T[0], T[1]) || 1;
   const mul = (m, n) => [m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1], m[0] * n[2] + m[2] * n[3], m[1] * n[2] + m[3] * n[3], m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5]];
   const items = [];
@@ -14269,7 +14272,7 @@ function pdfPageVectors(textContent, viewport, opList, OPS) {
     if (!it || typeof it.str !== "string" || !it.str.trim() || !it.transform) continue;
     const m = mul(T, it.transform), h = Math.hypot(m[2], m[3]);
     if (!(h > 0) || Math.abs(m[1]) > 0.2 * Math.abs(m[0])) continue;          // rotated text (a sideways label) is not read
-    items.push({ s: it.str, x: m[4], y: m[5], w: (it.width || 0) * k, h, pua: /^[\ue000-\uf8ff]+$/.test(it.str.trim()) });
+    items.push({ s: it.str, x: m[4], y: m[5], w: (it.width || 0) * k, h, pua: /^[\ue000-\uf8ff]+$/.test(it.str.trim()), f: it.fontName || "", fn: fontNames[it.fontName] || "" });
   }
   const segs = [];
   if (opList && OPS && opList.fnArray) {
@@ -14389,6 +14392,19 @@ function pdfScoreLayout(vec) {
     sp = hs2.length ? hs2[hs2.length >> 1] / 4 : 0;
   }
   if (!sp) sp = staves.length ? staves[0].d : H / 160;
+  // ---- music fonts. A SMuFL font (Leland, Bravura …) normally maps its glyphs to SMuFL code points, but some PDF
+  // writers drop that map (iOS 27 "Quartz" prints of UG tabs): its glyphs then arrive as ASCII garbage ("$", ",", "!"),
+  // a 10-bar rest's "10" turns into "+," and a metronome note into "!". A font is musical when most of its items are
+  // SMuFL code points, or notation-sized punctuation (a title is letters); its non-SMuFL items are unknown glyphs, never text.
+  const fst = new Map();
+  for (const it of vec.items) {
+    const q = fst.get(it.f) || { n: 0, pua: 0, sym: 0, named: false }; q.n++;
+    if (it.pua) q.pua++; else if (it.h >= PDF_TEXT.notationSize * sp && !/[A-Za-z0-9]/.test(it.s.replace(/^\s+|\s+$/g, "").slice(0, 1) || "")) q.sym++;
+    if (it.fn && PDF_TEXT.smuflFont.test(it.fn.replace(/^[A-Z]{6}\+/, ""))) q.named = true;
+    fst.set(it.f, q);
+  }
+  const musicFont = (f) => { const q = fst.get(f); return !!(f && q && (q.named || q.pua >= 0.5 * q.n || q.sym >= 0.5 * q.n)); };
+  for (const it of vec.items) it.music = musicFont(it.f);
   const notation = [];
   for (const it of notes) if (it.h >= PDF_TEXT.notationSize * sp) for (const cp of _pdfCps(it.s.trim())) notation.push({ cp, x: it.x, y: it.y, w: it.w, h: it.h });
   // a staff is TAB when it has 6 lines or a TAB clef (U+E06D / E06E) sits on it
@@ -14414,18 +14430,21 @@ function pdfScoreLayout(vec) {
     const spans = (v, st) => v.y0 <= st.top + 0.2 * st.d && v.y1 >= st.bottom - 0.2 * st.d;
     const cand = vs.filter((v) => onLine(v.y0) && onLine(v.y1) && v.x >= sys.x0 - 0.5 * s0.d && v.x <= sys.x1 + 0.5 * s0.d && sys.staves.some((st) => spans(v, st)));
     const xs = cand.filter((v) => spans(v, s0) && sys.staves.every((st) => cand.some((u) => Math.abs(u.x - v.x) < 0.4 * s0.d && spans(u, st)))).map((v) => v.x).sort((a, b) => a - b);
-    const bl = []; for (const x of xs) { if (bl.length && x - bl[bl.length - 1].x1 < 1.4 * s0.d) bl[bl.length - 1].x1 = x; else bl.push({ x0: x, x1: x }); }
+    const bl = []; for (const x of xs) { if (bl.length && x - bl[bl.length - 1].x1 < 1.4 * s0.d) { bl[bl.length - 1].x1 = x; bl[bl.length - 1].n++; } else bl.push({ x0: x, x1: x, n: 1 }); }
     let edges = [sys.x0, ...bl.map((b) => b.x0).filter((x) => x > sys.x0 + 1.0 * s0.d && x < sys.x1 - 1.0 * s0.d), sys.x1];
     // content (noteheads, rests, multi-bar rests, TAB digits) in each measure; an empty first "measure" is the
     // clef / key / time area before a start-repeat bar line and is not a bar
     const content = notation.filter((g) => ((g.cp >= 0xe0a0 && g.cp <= 0xe0ff) || (g.cp >= 0xe4e0 && g.cp <= 0xe4ff) || (g.cp >= 0xe500 && g.cp <= 0xe50f)) && g.y >= sys.top - 6 * s0.d && g.y <= sys.bottom + 6 * s0.d).map((g) => g.x + g.w / 2);
     for (const it of vec.items) if (!it.pua && /^[\dX()\s.]+$/.test(it.s) && sys.staves.some((s) => s.tab && it.y >= s.top - 0.2 * s.d && it.y <= s.bottom + 1.2 * s.d)) content.push(it.x + it.w / 2);
     sys.content = content.sort((a, b) => a - b);
-    if (edges.length > 2 && !content.some((x) => x >= edges[0] && x < edges[1])) edges = edges.slice(1);
+    // ... but only when it is narrow or ends on a double / repeat bar line: an empty REAL first bar (a whole-bar rest
+    // whose glyph a print left unreadable) ends on a single bar line and is kept
+    const firstBl = bl.find((b) => b.x0 === edges[1]);
+    if (edges.length > 2 && !content.some((x) => x >= edges[0] && x < edges[1]) && (edges[1] - edges[0] <= 8 * s0.d || (firstBl && firstBl.n >= 2))) edges = edges.slice(1);
     sys.edges = edges;
   }
   // ---- words: glyphs on one baseline, touching along x (an iOS reprint splits every letter into its own item)
-  const textItems = vec.items.map((it, i) => ({ ...it, i })).filter((it) => !it.pua || it.h < PDF_TEXT.notationSize * sp);
+  const textItems = vec.items.map((it, i) => ({ ...it, i })).filter((it) => (it.pua ? it.h < PDF_TEXT.notationSize * sp : !it.music));
   const toText = (s) => s.replace(/[\ue000-\uf8ff]/g, (c) => { const t = PDF_TEXT.glyphText[c.codePointAt(0)]; return t === undefined ? "\ufffd" : t; });
   textItems.sort((a, b) => a.x - b.x);
   const parent = textItems.map((_, i) => i), find = (i) => (parent[i] === i ? i : (parent[i] = find(parent[i])));
@@ -14440,6 +14459,11 @@ function pdfScoreLayout(vec) {
       const gap = b.x - aR, gapMax = 0.18 * Math.max(a.h, b.h);
       if (gap > gapMax || gap < -0.6 * Math.min(a.w || hh, b.w || hh) || bot - top < 0.45 * 0.95 * hh || hh < 0.45 * Math.max(a.h, b.h)) continue;
       if (/\s$/.test(a.s) || /^\s/.test(b.s)) continue;
+      // a smaller glyph that is NOT raised is other text set against this word — a bar number printed right after a
+      // chord ("G7b9" + bar 7 → "G7b97", Sleepwalk); a superscript extension is smaller AND raised
+      // … nor a smaller ROOT letter: an extension never starts with A–G (a chord set against "Da Coda", This Masquerade)
+      const small = (u, v) => u.h < 0.85 * v.h && (u.y > v.y - 0.12 * v.h || /^[A-G]/.test(u.s));
+      if (small(b, a) || small(a, b)) continue;
       parent[find(j)] = find(i);
     }
   }
@@ -14543,9 +14567,12 @@ function pdfChordPages(vecPages, opts = {}) {
     let cur = null, last = -Infinity;
     const firstPrinted = meas.find((ms) => ms.num != null);
     const start = firstPrinted ? firstPrinted.num - meas.indexOf(firstPrinted) : firstNum;
+    // a printed number far from the count is trusted when the next bar's printed number follows it (n, n+1): a
+    // multi-bar rest ("10" over one measure: bars 2, then 12), never a lone tuplet "3"
     meas.forEach((ms, i) => {
-      const counted = cur == null ? start : cur + 1;
-      cur = ms.num != null && ms.num > last && Math.abs(ms.num - counted) <= 3 ? ms.num : counted;
+      const counted = cur == null ? start : cur + 1, nx = meas[i + 1];
+      const near = ms.num != null && Math.abs(ms.num - counted) <= 3, confirmed = ms.num != null && nx && nx.num === ms.num + 1;
+      cur = ms.num != null && ms.num > last && (near || confirmed) ? ms.num : counted;
       if (ms.num != null && cur === ms.num) last = ms.num;
       ms.bar = cur;
     });
@@ -14574,6 +14601,16 @@ function pdfChordPages(vecPages, opts = {}) {
         const L2 = pp.slice(0, cut), R2 = pp.slice(cut);
         band.push({ ...w, s: L2.map((u) => u.s).join(""), x1: L2[L2.length - 1].x1, parts: L2 }, { ...w, s: R2.map((u) => u.s).join(""), x: R2[0].x, parts: R2 });
       }
+      // an alteration on its own ("#5", "b9#11") just after a chord on its baseline is that chord's: MuseScore draws the
+      // parentheses of "G7(#5)" as curves, not text, and their width splits the word (This Masquerade bar 28)
+      band.sort((a, b) => a.y - b.y || a.x - b.x);
+      for (let q = 0; q + 1 < band.length; q++) {
+        const a = band[q], b = band[q + 1];
+        if (Math.abs(a.y - b.y) > 0.3 * a.h || b.x < a.x1 || b.x - a.x1 > 1.0 * a.h || !/^(?:[#b](?:5|9|11|13))+$/.test(b.s)) continue;
+        const joined = a.s + "(" + b.s + ")";
+        if (!chordFromWritten(a.s) || !chordFromWritten(joined)) continue;
+        band.splice(q, 2, { ...a, s: joined, x1: b.x1, parts: [...(a.parts || []), ...(b.parts || [])] });
+      }
       // words that are not chords, on one baseline and a space apart, are one phrase ("Solo Continued As Verse",
       // "1st & 3rd Verse:", "= 120"): an iOS reprint splits them at every space. Chords are never joined.
       band.sort((a, b) => a.y - b.y || a.x - b.x);
@@ -14600,8 +14637,16 @@ function pdfChordPages(vecPages, opts = {}) {
         // a lone capital in a box (or a size above the chords) is a rehearsal mark, not a chord
         const single = /^[A-Z]\d?$/.test(s);
         const big = w.h > 1.08 * chordSp * sp;
-        if (label) { sections.push({ bar, name: label, x: w.x, k }); continue; }
-        if (single && (big || _pdfBoxed(vecPages[pi], w, d))) { sections.push({ bar, name: s, x: w.x, k, letter: true }); continue; }
+        // a section label belongs to the bar its left edge is in — unless it straddles a bar line with its centre ON
+        // that line (within a space): UG centres some labels and rehearsal letters on the bar that starts the section,
+        // so "THEME" over bar 12 starts a few spaces inside bar 11 (Affirmation)
+        const secBar = () => {
+          const cx = (w.x + w.x1) / 2;
+          for (let q = 1; q < sys.edges.length - 1; q++) if (w.x < sys.edges[q] && w.x1 > sys.edges[q] && Math.abs(cx - sys.edges[q]) <= d) return barIdx(k, q);
+          return barIdx(k, _pdfMeasureAt(sys, w.x));
+        };
+        if (label) { sections.push({ bar: secBar(), name: label.replace(/[\s/:–-]+$/, "") || label, x: w.x, k }); continue; }
+        if (single && (big || _pdfBoxed(vecPages[pi], w, d))) { sections.push({ bar: secBar(), name: s, x: w.x, k, letter: true }); continue; }
         const r = /^[A-G]/.test(s) || /^N\.?C\.?/.test(s) ? chordFromWritten(s) : null;
         // an unread chord-like word is kept (unread) for the user to fix — not a direction in capitals ("DOUBLE-TIME")
         const chordLike = /^[A-G][^\s]{0,13}$/.test(s) && !/\ufffd/.test(s) && !/[A-Z]{2}/.test(s.replace(/\/[A-G][#b]?$/, "").replace(/MA7|MAJ7?/, "")) && w.h <= 1.25 * chordSp * sp && w.h >= 0.7 * chordSp * sp;
