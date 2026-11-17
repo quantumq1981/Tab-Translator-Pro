@@ -301,3 +301,16 @@ node bench/adt.mjs --data <dir> --split test --variant onnx --ort <dir with onnx
 node bench/drum-model-e2e.mjs --deps $D/out --wav <dir>/drummer7/session2/112_jazz-fusion_96_beat_4-4_28.wav [--ua "<iPad UA>"]
 node bench/drum-audio-e2e.mjs --deps $D/out --wav take.mp3 [--ua "<iPhone UA>"]   # 🥁 Drums in the Audio panel (a drum file uploaded on its own)
 ```
+
+## Scan a digital PDF (text layer)
+
+`scan-pdf-e2e.mjs` drives the real app in headless Chromium with a score PDF: PDF.js 3.11.174 is served locally at the
+cdnjs URLs the app uses (from `tests/node_modules/pdfjs-dist`). It checks the text-layer status line, that no OCR model
+or runtime was fetched, the expected chords on the page and in the review list, the PDF's title / tempo / meter (in the
+MusicXML export) / sections (in CSMPN), no console errors, and with `--ocr` the one-tap switch to OCR and back.
+
+```sh
+node bench/scan-pdf-e2e.mjs --deps $D/out --pdf Room_335.pdf --expect "Dmaj7,C#m7#5,Bm7" --meter 3/4
+node bench/scan-pdf-e2e.mjs --deps $D/out --pdf Revelation.pdf --section "Pre-Verse" --ocr
+```
+

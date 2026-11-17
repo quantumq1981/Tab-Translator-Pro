@@ -76,6 +76,19 @@ The truth files hold only the chord symbols per system (the pages are the owner'
 are not in the repo); each file's `source` says how to render the PDF so the staff positions match. Checkpoints were
 chosen on the Real Book page 2 only; page 1 is the held-out read.
 
+## Digital score PDFs (Ultimate Guitar "Pro", MuseScore exports)
+
+`bench_pdf_text.mjs` reads a PDF from its text layer (engine `pdfChordPages`) and scores it against the Guitar Pro file
+it was engraved from — the chord names on the GP beats, matched by root / bass / tone set — or, with `-`, against the
+text layer itself (verify that by eye first). `--ocr <model>` also renders the pages with poppler at the app's Scan
+width and runs the raster reader on them. Numbers and the corrected calibration spec: `docs/UG-PRO-PDF-CALIBRATION.md`.
+
+```sh
+node bench_pdf_text.mjs <Revelation.pdf> "../../Robben Ford - Revelation.gp"
+PNGJS_FROM=<dir>/package.json ORT_WEB=<dir>/node_modules/onnxruntime-web/dist/ort.wasm.min.mjs \
+  node bench_pdf_text.mjs <pdf> <gp|-> --ocr ../../models/chord-ocr/chord-ocr.onnx   # OCR_ENGINE=<older engine.tsx> for an A/B
+```
+
 ## The rendered corpus (ground truth for free)
 
 ```sh

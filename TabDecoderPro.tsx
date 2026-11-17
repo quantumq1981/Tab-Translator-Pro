@@ -342,6 +342,8 @@ import {
   nashvilleFor,
   scoreToGridSVG,
   chordPageScore,
+  pdfPageVectors,
+  pdfChordPages,
   chordFromWritten,
   ocrReviewItems,
 } from "./engine.tsx";
@@ -3811,7 +3813,11 @@ function LyricsCapture({ C }) {
  * ("Book style": printed — the default — or hand-copied / Real Book), and a one-tap re-read with the other. The chart is `chordPageScore` (4/4 assumed — a picture
  * carries no meter we read) and renders through the normal ChartPanel (edit, transpose, export,
  * → Chord Sheet Maker Pro). The file <input> has NO `accept` (iOS greys out what it can't map).
- * Browser-only glue; not persisted in the session yet. */
+ * A DIGITAL PDF is read from its TEXT LAYER first (engine pdfChordPages, docs/UG-PRO-PDF-CALIBRATION.md): an exported
+ * score — Ultimate Guitar "Pro" tabs are MuseScore engravings — holds every chord symbol, bar number, time signature,
+ * section label and tempo as text and every staff / bar line as a path, so it is read exactly, with its own meter
+ * and sections, and no reader download. A scan or photo (no text layer) goes to OCR; "↻ Read with OCR instead" and
+ * back are one tap. Browser-only glue; not persisted in the session yet. */
 const SCAN_MAX_PAGES = 12, SCAN_MAX_WIDTH = 1800, CHORD_OCR_SIZE_HINT = "0.6 MB";   // each reader (printed / hand-copied) is 0.6 MB
 function _scanGrey(canvas) {
   const ctx = canvas.getContext("2d"), { width, height } = canvas, rgba = ctx.getImageData(0, 0, width, height).data;
@@ -3820,7 +3826,7 @@ function _scanGrey(canvas) {
   return { data, width, height, preview: canvas.toDataURL("image/jpeg", 0.82) };
 }
 async function _scanPdfPages(bytes) {
-  const pdf = await window.pdfjsLib.getDocument({ data: bytes }).promise, out = [];
+  const pdf = await window.pdfjsLib.getDocument({ data: bytes }).promise, out = [], vecs = [];
   for (let i = 1; i <= Math.min(pdf.numPages, SCAN_MAX_PAGES); i++) {
     const pg = await pdf.getPage(i), v1 = pg.getViewport({ scale: 1 });
     const vp = pg.getViewport({ scale: Math.min(4, 1500 / v1.width) });
@@ -3828,8 +3834,12 @@ async function _scanPdfPages(bytes) {
     const ctx = cv.getContext("2d"); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, cv.width, cv.height);
     await pg.render({ canvasContext: ctx, viewport: vp }).promise;
     out.push(_scanGrey(cv));
+    // the vector layer in the SAME viewport, so its token boxes land on the rendered page's pixels; any failure here
+    // (an odd PDF, an old pdf.js) only means OCR reads the page
+    try { vecs.push(pdfPageVectors(await pg.getTextContent(), vp, await pg.getOperatorList(), window.pdfjsLib.OPS)); }
+    catch (_) { vecs.push(null); }
   }
-  return out;
+  return { imgs: out, vecs: vecs.every(Boolean) ? vecs : null };
 }
 async function _scanImagePage(file) {
   const bmp = await createImageBitmap(file), k = Math.min(1, SCAN_MAX_WIDTH / bmp.width);
@@ -3837,7 +3847,7 @@ async function _scanImagePage(file) {
   const ctx = cv.getContext("2d"); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, cv.width, cv.height);
   ctx.drawImage(bmp, 0, 0, cv.width, cv.height);
   if (bmp.close) bmp.close();
-  return [_scanGrey(cv)];
+  return { imgs: [_scanGrey(cv)], vecs: null };
 }
 
 /* One chord in the scan review list: what is written (a crop of the page) beside what was read.
@@ -3904,6 +3914,8 @@ function ScanPanel({ C, useSharp, pdfReady }) {
   const [style, setStyle] = _usePref("ttp:scanStyle", "printed", (x) => x === "printed" || x === "hand");   // which reader
   const [readWith, setReadWith] = useState("");    // the reader the shown pages were read with
   const imgsRef = useRef(null);                    // the prepared page images, kept for a re-read with the other reader
+  const textRef = useRef(null);                    // a PDF's text-layer reading (pdfChordPages), when it has one
+  const [doc, setDoc] = useState(null);            // { title, artist, tempo, tuning } read from a PDF's text layer
 
   // read prepared page images with one reader; corrections and approvals start over (the boxes may change)
   const readImages = async (imgs, which) => {
@@ -3916,7 +3928,7 @@ function ScanPanel({ C, useSharp, pdfReady }) {
       });
       const out = res.pages.map((r, i) => ({ preview: imgs[i].preview, width: imgs[i].width, height: imgs[i].height, layout: r.layout, reads: r.reads }));
       if (!out.some((p) => p.layout.staves.length)) setErr("No staves found. Scan Path B reads lead sheets (chord symbols above a staff); a straight, well-lit, flat shot works best.");
-      setPages(out); setReadWith(res.style || which);
+      setPages(out); setReadWith(res.style || which); setDoc(null);
       setFilter("all");
     } catch (ex) { setErr("Couldn't read it: " + (ex && ex.message ? ex.message : String(ex))); }
     finally { setBusy(""); }
@@ -3932,13 +3944,23 @@ function ScanPanel({ C, useSharp, pdfReady }) {
       const isPdf = bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46;
       if (isPdf && !pdfReady) throw new Error("PDF.js is still loading — try again in a moment");
       setBusy("preparing the page…");
-      const imgs = isPdf ? await _scanPdfPages(bytes) : await _scanImagePage(f);
+      const { imgs, vecs } = isPdf ? await _scanPdfPages(bytes) : await _scanImagePage(f);
       imgsRef.current = imgs;
-      await readImages(imgs, style);
+      textRef.current = null;
+      if (vecs) { try { const tr = pdfChordPages(vecs); if (tr.ok) textRef.current = tr; } catch (_) { /* unreadable text layer → OCR */ } }
+      if (textRef.current) { showText(textRef.current); setBusy(""); }
+      else await readImages(imgs, style);
     } catch (ex) { setErr("Couldn't read it: " + (ex && ex.message ? ex.message : String(ex))); setBusy(""); }
   };
+  // a PDF read from its text layer: exact chords, bars from its bar lines, its own meter / sections / tempo
+  const showText = (tr) => {
+    const imgs = imgsRef.current;
+    setErr(""); setFix({}); setHist([]); setPicked({}); setSel(null); setOvr({}); setFilter("all");
+    setPages(tr.pages.map((r, i) => ({ preview: imgs[i].preview, width: imgs[i].width, height: imgs[i].height, layout: r.layout, reads: r.reads })));
+    setReadWith("text"); setDoc({ title: tr.title, artist: tr.artist, tempo: tr.tempo, tuning: tr.tuning });
+  };
   const other = readWith === "hand" ? "printed" : "hand";
-  const reread = () => { if (!imgsRef.current || busy) return; setStyle(other); readImages(imgsRef.current, other); };
+  const reread = () => { if (!imgsRef.current || busy) return; if (readWith === "text") { readImages(imgsRef.current, style); return; } setStyle(other); readImages(imgsRef.current, other); };
 
   const readsOf = (p, pi) => p.reads.map((r, i) => {
     const k = `${pi}.${i}`;
@@ -3949,8 +3971,8 @@ function ScanPanel({ C, useSharp, pdfReady }) {
   });
   const score = useMemo(() => {
     if (!pages || !pages.some((p) => p.layout.bars)) return null;
-    return chordPageScore(pages.map((p, pi) => ({ layout: p.layout, reads: readsOf(p, pi) })), { title: name });
-  }, [pages, fix, name]);
+    return chordPageScore(pages.map((p, pi) => ({ layout: p.layout, reads: readsOf(p, pi) })), { title: (doc && doc.title) || name, tempo: doc && doc.tempo });
+  }, [pages, fix, name, doc]);
   const items = useMemo(() => (pages ? ocrReviewItems(pages, fix) : []), [pages, fix]);
   const n = { check: 0, sure: 0, approved: 0 };
   for (const it of items) n[it.status]++;
@@ -4000,7 +4022,7 @@ function ScanPanel({ C, useSharp, pdfReady }) {
       </button>
       <div style={{ fontSize: 11, color: C.dim, marginTop: 8, lineHeight: 1.6 }}>
         Reads the <b>chord symbols</b> above each staff and puts them in their bars (4/4 assumed). Best on a flat, straight, well-lit page
-        or an exported PDF. Every chord is listed below to review; tap any box on the page to correct it. The notes themselves are not read.
+        or an exported PDF — a digital PDF (Ultimate Guitar Pro, MuseScore, Guitar Pro export) is read exactly from its text layer, with its own time signatures, sections and tempo. Every chord is listed below to review; tap any box on the page to correct it. The notes themselves are not read.
         Runs on this device; the reader downloads once (~{CHORD_OCR_SIZE_HINT}).
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginTop: 8 }}>
@@ -4016,8 +4038,11 @@ function ScanPanel({ C, useSharp, pdfReady }) {
           {pages.reduce((a, p) => a + p.layout.staves.length, 0)} systems · {pages.reduce((a, p) => a + p.layout.bars, 0)} bars · {items.length} chords
           {n.approved ? <span style={{ color: C.green }}> · {n.approved} approved</span> : null}
           {n.check ? <span style={{ color: C.amber }}> · {n.check} to check</span> : null}
-          <span> · read as {readWith === "hand" ? "hand-copied" : "printed"} </span>
-          {imgsRef.current && <button onClick={reread} disabled={!!busy} style={{ ...chip(C), marginLeft: 4 }}>↻ Read again as {other === "hand" ? "hand-copied (Real Book)" : "printed"}</button>}
+          {readWith === "text"
+            ? <span style={{ color: C.green }}> · read from the PDF's text layer (exact — no OCR){doc && doc.tempo ? ` · ♩=${doc.tempo}` : ""}{doc && doc.tuning ? ` · tuning ${doc.tuning}` : ""} </span>
+            : <span> · read as {readWith === "hand" ? "hand-copied" : "printed"} </span>}
+          {imgsRef.current && <button onClick={reread} disabled={!!busy} style={{ ...chip(C), marginLeft: 4 }}>{readWith === "text" ? "↻ Read with OCR instead" : `↻ Read again as ${other === "hand" ? "hand-copied (Real Book)" : "printed"}`}</button>}
+          {readWith !== "text" && textRef.current && <button onClick={() => showText(textRef.current)} disabled={!!busy} style={{ ...chip(C), marginLeft: 4 }}>↻ Read the PDF's text</button>}
         </div>
       )}
       {items.length > 0 && (
@@ -4068,7 +4093,7 @@ function ScanPanel({ C, useSharp, pdfReady }) {
       ))}
       {score && (
         <div style={{ marginTop: 14 }}>
-          <ChartPanel score={score} title={name || "Scanned chart"} meta={`${score.bars.length} bars · read from ${pages.length > 1 ? pages.length + " pages" : "the page"} · 4/4 assumed`}
+          <ChartPanel score={score} title={(doc && doc.title) || name || "Scanned chart"} meta={`${score.bars.length} bars · read from ${pages.length > 1 ? pages.length + " pages" : "the page"}${readWith === "text" ? ` · the PDF's text layer${doc && doc.artist ? " · " + doc.artist : ""}` : " · 4/4 assumed"}`}
             C={C} useSharp={useSharp} overrides={ovr} setOverrides={setOvr} selKey="" onPick={() => {}} autoSimplify={false} />
         </div>
       )}
