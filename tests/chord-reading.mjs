@@ -131,6 +131,53 @@ section("evidence-adaptive decoding");
 }
 
 /* ---------------------------------------------------------------------------- */
+section("the chosen chord is the top percentage (labelBy: posterior)");
+{
+  /* A real report: Auto showed "Gmaj7 14 %" chosen next to "G 42 %". The Viterbi path names the
+   * best single STATE (one written chord is several states — "G" = G + Gsus2 + Gadd9 + hidden
+   * inversions) and, with a minimum chord length, comes from the semi-Markov decode, not the model
+   * the percentages are read from. Seeded random chord audio (Fisher–Yates, engine-independent). */
+  const VSR = 16000, hz = (m) => 440 * Math.pow(2, (m - 69) / 12);
+  const mk = (seed) => {
+    const R = rng(seed), sig = new Float32Array(VSR * 8);
+    const tone = (f, t0, t1, a) => { for (let i = Math.floor(t0 * VSR); i < Math.floor(t1 * VSR); i++) { let v = 0; for (let h = 1; h <= 6; h++) v += Math.sin(2 * Math.PI * h * f * i / VSR) / h; sig[i] += a * v; } };
+    let t = 0;
+    while (t < 8) {
+      const d = 0.5 + Math.floor(R() * 4) * 0.5, root = 48 + Math.floor(R() * 12), n = 3 + Math.floor(R() * 3);
+      const pool = [0, 4, 7, 2, 9, 10, 11, 5, 3];
+      for (let i = pool.length - 1; i > 0; i--) { const j = Math.floor(R() * (i + 1)); [pool[i], pool[j]] = [pool[j], pool[i]]; }
+      for (const iv of pool.slice(0, n)) tone(hz(root + iv), t, Math.min(8, t + d), 0.08 + 0.06 * R());
+      t += d;
+    }
+    for (let i = 0; i < sig.length; i++) sig[i] += 0.03 * (R() * 2 - 1);
+    return sig;
+  };
+  const beats = []; for (let t = 0; t <= 8.0001; t += 0.5) beats.push(+t.toFixed(3));
+  const below = (ev) => ev.filter((e) => (e.alternatives || []).some((a) => a.prob > e.prob + 1e-6));
+  let oldBad = 0, newBad = 0, subset = true, joined = true, auto = true, n = 0;
+  for (let seed = 1; seed <= 12; seed++) {
+    const sig = mk(seed);
+    for (const mcb of [0, 2]) {
+      const o = { vocabulary: "chart", beats, bpm: 120, ...(mcb ? { minChordBeats: mcb } : {}) };
+      const old = eng.transcribeChordsV2(sig, VSR, { ...o, labelBy: "path" }).events;
+      const now = eng.transcribeChordsV2(sig, VSR, o).events;
+      oldBad += below(old).length; newBad += below(now).length; n += now.length;
+      // the decoder's segmentation is kept: every chord still starts where a path chord started
+      const starts = new Set(old.map((e) => e.startSec));
+      if (!now.every((e) => starts.has(e.startSec))) subset = false;
+      for (let i = 1; i < now.length; i++) if (now[i].symbol === now[i - 1].symbol && Math.abs(now[i - 1].startSec + now[i - 1].durSec - now[i].startSec) < 1e-3) joined = false;
+      // Auto keeps the decoder's label — which is now the top choice of every row it resolves
+      for (const e of eng.autoResolveChords(now)) if (e.autoResolved && (e.alternatives || []).some((a) => a.prob > e.prob + 1e-6)) auto = false;
+    }
+  }
+  expect(oldBad > 0, `the old path labels did choose chords below an alternative (${oldBad} on these seeds) — the case is reproduced`);
+  expect(newBad === 0, `no chord is chosen below one of its own alternatives (${newBad} of ${n})`);
+  expect(subset, "relabelling keeps the decoder's chord boundaries (every chord starts where a path chord started)");
+  expect(joined, "neighbours that end up with the same name are joined into one chord");
+  expect(auto, "⚡ Auto resolves every uncertain chord to its highest-probability candidate");
+}
+
+/* ---------------------------------------------------------------------------- */
 section("review list — delete / merge");
 {
   const ev = [
