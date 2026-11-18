@@ -181,7 +181,7 @@ section("Harmony (all parts) for Guitar Pro / Power Tab, drum kits out");
 section("UI contract");
 {
   expect(/import\s*\{[^}]*\banalyzeAudioWithScore\b[^}]*\}\s*from\s*"\.\/engine\.tsx"/.test(uiSrc) && /\blinkedChartScore\b/.test(uiSrc), "UI imports the link engine");
-  expect(/_engineRPC\("analyzeAudioWithScore"/.test(uiSrc) && /catch \(_\) \{ return analyzeAudioWithScore\(/.test(uiSrc), "linked analysis runs off-thread with the main-thread fallback");
+  expect(/_offThread\("analyzeAudioWithScore", \[samples, sr, partScores, opts\], \(\) => analyzeAudioWithScore\(/.test(uiSrc), "linked analysis runs off-thread with the main-thread fallback (when no worker exists)");
   expect(/function ScoreLinkPanel\(/.test(uiSrc) && /<ScoreLinkPanel /.test(uiSrc), "Audio panel renders the 📎 score link panel");
   const panel = uiSrc.slice(uiSrc.indexOf("function ScoreLinkPanel("), uiSrc.indexOf("function AudioImport("));
   expect(/<input type="file" onChange=\{onPick\}/.test(panel) && !/accept=/.test(panel), "the score picker has no accept filter (iOS greys out .gp/.gpx/.ptb)");

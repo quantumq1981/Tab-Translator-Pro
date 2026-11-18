@@ -11,3 +11,4 @@ bench/*.ttp.zip
 bench/.cache-link/
 bench/_scratch/
 .engine.scorelink.mjs
+.engine.audit.mjs
