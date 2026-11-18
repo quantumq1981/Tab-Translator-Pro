@@ -7482,8 +7482,9 @@ function transcribeChordsV2(samples, sampleRate, opts = {}) {
   // (a hidden inversion carries no bass note, so re-naming the midis — transpose — can't bring the slash back)
   const midisOf = (st) => (st.showBass ? [36 + st.bassPc] : []).concat((st.writeQ || st.quality).intervals.map((i) => 48 + st.root + i));
   const logK = Math.log(K);
-  // collapse runs of one state into events
-  const events = [];
+  const labelOf = states.map(symOf);                             // each state's written chord, once
+  // collapse runs of one state into events (the decoder's segmentation)
+  let events = [];
   let cur = null;
   for (let t = 0; t < segs.length; t++) {
     const s = path[t];
@@ -7493,6 +7494,48 @@ function transcribeChordsV2(samples, sampleRate, opts = {}) {
     cur = { state: s, t0: segs[t].t0, t1: segs[t].t1, beats: [t] };
   }
   if (cur) events.push(cur);
+  // per-label posterior mass averaged over a run's beats (k = a state carrying that label —
+  // every state of one label has the same written chord, so the same voicing)
+  const massOf = (beats) => {
+    const mass = new Map();
+    let ent = 0;
+    for (const t of beats) {
+      const g = post[t];
+      let H = 0; for (let k = 0; k < K; k++) if (g[k] > 1e-12) H -= g[k] * Math.log(g[k]);
+      ent += 1 - H / logK;
+      for (let k = 0; k < S; k++) if (g[k] > 1e-4) {
+        const lab = labelOf[k], prevM = mass.get(lab);
+        if (prevM) { prevM.p += g[k] / beats.length; prevM.k = k; } else mass.set(lab, { p: g[k] / beats.length, k });
+      }
+    }
+    return { mass, ent };
+  };
+  /* NAME each segment by its most probable LABEL (opts.labelBy, default "posterior").
+   * The Viterbi path picks the best single STATE, but one written chord is several states —
+   * in Pro naming "G" is G + Gsus2 + Gadd9 + its hidden inversions, "Gmaj7" is Gmaj7 + G6 —
+   * and with a minimum chord length the path comes from the semi-Markov decode, not from the
+   * model the posteriors are read from. So the path's label could be one the review list
+   * itself scored far below an alternative (a real report: Gmaj7 14 % chosen over G 42 %).
+   * The decoder's segmentation (where chords change) is kept; each segment takes the label
+   * with the highest posterior mass over its beats (minimum Bayes risk for that segment), and
+   * neighbours that end up with the same name are joined. The chosen chord is then always the
+   * top percentage shown. "path" = the old behaviour (the state path's own label). */
+  if (opts.labelBy !== "path") {
+    const named = [];
+    for (const e of events) {
+      const { mass } = massOf(e.beats);
+      const own = labelOf[e.state], ownP = mass.has(own) ? mass.get(own).p : 0;
+      let lab = own, bp = ownP;
+      for (const [l, v] of mass) if (v.p > bp + 1e-9) { lab = l; bp = v.p; }
+      const st = lab === own ? e.state : mass.get(lab).k;
+      const last = named[named.length - 1];
+      if (last && last.label === lab && last.beats[last.beats.length - 1] + 1 === e.beats[0]) {
+        last.t1 = e.t1; last.beats.push(...e.beats); continue;
+      }
+      named.push({ ...e, state: st, label: lab });
+    }
+    events = named;
+  }
   const ambThr = opts.ambiguityThreshold != null ? opts.ambiguityThreshold : 0.4;
   const out = events.map((e) => {
     const st = states[e.state];
@@ -7506,18 +7549,8 @@ function transcribeChordsV2(samples, sampleRate, opts = {}) {
       if (bk >= 0) { scoreSym = symOf(states[bk]); e.scoreMidis = midisOf(states[bk]); }
     }
     // per-label posterior mass averaged over the event's beats
-    const mass = new Map();
-    let ent = 0;
-    for (const t of e.beats) {
-      const g = post[t];
-      let H = 0; for (let k = 0; k < K; k++) if (g[k] > 1e-12) H -= g[k] * Math.log(g[k]);
-      ent += 1 - H / logK;
-      for (let k = 0; k < S; k++) if (g[k] > 1e-4) {
-        const lab = symOf(states[k]), prevM = mass.get(lab);
-        mass.set(lab, { p: (prevM ? prevM.p : 0) + g[k] / e.beats.length, k });
-      }
-    }
-    const label = symOf(st);
+    const { mass, ent } = massOf(e.beats);
+    const label = labelOf[e.state];
     const prob = mass.has(label) ? mass.get(label).p : 0;
     const alternatives = [...mass.entries()].filter(([l]) => l !== label).sort((a, b) => b[1].p - a[1].p).slice(0, 3)
       .map(([symbol, v]) => ({ symbol, prob: +v.p.toFixed(3), midis: midisOf(states[v.k]) }));

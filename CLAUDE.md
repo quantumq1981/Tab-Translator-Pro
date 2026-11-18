@@ -3420,6 +3420,27 @@ Tests: `tests/chord-reading.mjs` (in `npm test`). Benches: `rhythm-key.mjs`, `fu
 ≥1 bar 49 → 30 chords, delete 8 → 7, merge 7 → 5, no overflow at 390 px). Device check remaining: the owner's
 own recording on the iPad.
 
+### The chosen chord is the top percentage — `labelBy: "posterior"` (2026-11-18)
+
+**Report (iPhone, ⚡ Auto on):** rows like `Gmaj7 14 %` chosen next to `G 42 %`. Auto was not the bug: it keeps
+the decoder's label. The label came from the **Viterbi path = the best single STATE**, while the review list shows
+**posterior mass summed per LABEL**, and one written chord is several states (Pro: "G" = G + Gsus2 + Gadd9 + its
+hidden inversions; "Gmaj7" = Gmaj7 + G6). Worse, with a minimum chord length (≥1 beat / ≥½ bar, or the adaptive
+full-mix re-decode) the path is the semi-Markov decode while the percentages are the plain HMM's — on seeded
+synthetic audio it chose chords at ~0 % next to a 40 %+ alternative.
+- **Fix (`transcribeChordsV2`, default):** keep the decoder's SEGMENTATION, name each segment by the label with the
+  highest posterior mass over its beats (minimum Bayes risk per segment), join same-name neighbours.
+  `opts.labelBy: "path"` = the old behaviour (bench only). All states of one label share `midisOf`, so the voicing is exact.
+- **Measured (Pro names, 6 conditions incl. full mix; old → new):** chosen below an alternative **3.4 % of 7,153 chords
+  (gap up to 67 pts) → 0**. Held-out: default root 72.3 → 72.5, majmin 73.6 → 74.2, sevenths 67.0 → 67.6, seg ±0.1,
+  changes 45.4 → 44.1/min (truth 48.7); ≥1 beat majmin 72.1 → 72.7; **≥½ bar sevenths 55.8 → 58.9**, root 64.4 → 65.4,
+  seg 70.4 → 69.2; full mix ±0.2. Run time unchanged (labels precomputed per state).
+- Guard: `tests/chord-reading.mjs` "the chosen chord is the top percentage" — the old labels reproduce the mismatch,
+  the new ones never choose below an alternative, boundaries ⊆ the path's, same-name neighbours joined, Auto picks
+  the top; mutation-tested (fix off → 2 failures). Device check remaining: the owner's recording on the iPhone.
+- "Inconsistent results" between two runs of one song = different reading settings (song key, chord changes, the
+  adaptive full-mix re-decode); the decode itself is deterministic for one file + one set of settings.
+
 ## Score ↔ recording link — notation and audio read together (2026-11-06)
 
 **The ask:** the notation paths (C–G) and the audio tools had no connection; a recording plus an accurate
