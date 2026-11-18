@@ -53,6 +53,7 @@ jobs:
           cp index.html _site/
           cp engine.tsx _site/
           cp TabDecoderPro.tsx _site/
+          cp session-store.js _site/   # session/library byte store (the loader serves it to the UI)
           # Optional ML note-transcription (Spotify basic-pitch). Ships the
           # browser-only inference glue + the vendored TF.js graph model.
           cp note-model.js _site/

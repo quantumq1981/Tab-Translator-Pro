@@ -126,20 +126,27 @@
         ],
       }).code;
 
-      // 1. fetch the engine module + the UI component in parallel.
-      const [engRes, appRes] = await Promise.all([
+      // 1. fetch the engine module, the session store and the UI component in parallel
+      //    (no-cache, so all three always come from the same deploy).
+      const [engRes, storeRes, appRes] = await Promise.all([
         fetch("./engine.tsx", { cache: "no-cache" }),
+        fetch("./session-store.js", { cache: "no-cache" }),
         fetch("./TabDecoderPro.tsx", { cache: "no-cache" }),
       ]);
       if (!engRes.ok) throw new Error("fetch engine.tsx → HTTP " + engRes.status);
+      if (!storeRes.ok) throw new Error("fetch session-store.js → HTTP " + storeRes.status);
       if (!appRes.ok) throw new Error("fetch TabDecoderPro.tsx → HTTP " + appRes.status);
       const engineSrc = await engRes.text();
+      const storeSrc = await storeRes.text();
       let appSrc = await appRes.text();
 
-      // 2. transpile the engine, publish it at a Blob URL, and repoint the UI's
-      //    `import ... from "./engine.tsx"` at that URL (no bundler needed).
+      // 2. transpile the engine, publish it at a Blob URL, and repoint EVERY
+      //    `import ... from "./engine.tsx"` in the UI at that URL (no bundler needed).
+      //    session-store.js is plain ES already: published as-is at its own Blob URL.
       const engineUrl = URL.createObjectURL(new Blob([transpile(engineSrc, "engine.tsx")], { type: "text/javascript" }));
-      appSrc = appSrc.replace(/from\s*["']\.\/engine\.tsx["']/, 'from "' + engineUrl + '"');
+      const storeUrl = URL.createObjectURL(new Blob([storeSrc], { type: "text/javascript" }));
+      appSrc = appSrc.replace(/from\s*["']\.\/engine\.tsx["']/g, 'from "' + engineUrl + '"');
+      appSrc = appSrc.replace(/from\s*["']\.\/session-store\.js["']/g, 'from "' + storeUrl + '"');
       // Rewrite the UI's bare `react` import to an explicit URL — a blob-URL
       // module can't resolve bare specifiers via the importmap in WebKit.
       appSrc = appSrc.replace(/from\s*["']react["']/g, 'from "' + REACT_URL + '"');
@@ -157,7 +164,7 @@
         import(REACT_DOM_CLIENT_URL),
       ]);
       URL.revokeObjectURL(appUrl);
-      // engineUrl is left alive: the UI module's import binding resolves against it.
+      // engineUrl and storeUrl are left alive: the UI module's import bindings resolve against them.
 
       createRoot(boot).render(React.createElement(TabDecoderPro));
       splash.remove();

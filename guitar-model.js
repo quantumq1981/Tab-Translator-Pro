@@ -6,9 +6,12 @@
  * the worker are fetched on first use only. Runs in a module Worker
  * (guitar-worker.js) that imports the app's own transpiled engine
  * (window.__TTP_ENGINE_URL__), so the notes come out of the SAME validated
- * post-processor + fingering the headless tests pin. Falls back to the main thread
- * if Workers are unavailable. The worker is ended after each job (a WASM heap never
- * shrinks). Never throws at boot. See guitar-model-core.js for the model + runtime.
+ * post-processor + fingering the headless tests pin. The main thread is used ONLY
+ * when no Worker can be made: a run that failed or crashed in the worker (usually
+ * out of memory on a phone) is reported, never retried on the page's own thread —
+ * that is what froze or killed the tab (audit 2026-11-18 M3). The worker is ended
+ * after each job (a WASM heap never shrinks). Never throws at boot. See
+ * guitar-model-core.js for the model + runtime.
  * ========================================================================== */
 const BUILD_QS = (() => { try { return new URL(import.meta.url).search; } catch (_) { return ""; } })();
 const WORKER_URL = new URL("./guitar-worker.js" + BUILD_QS, import.meta.url);
@@ -38,9 +41,6 @@ async function transcribeGuitarAudio(pcm16k, opts = {}) {
       w.onerror = (e) => reject(new Error((e && e.message) || "guitar worker crashed"));
       w.postMessage({ id: 1, pcm, engineUrl, keepOnset: !!opts.keepOnset }, [pcm.buffer]);
     });
-  } catch (err) {
-    if (/worker|module|import/i.test(String(err && err.message))) return onMainThread(Float32Array.from(pcm16k), engineUrl, opts);
-    throw err;
   } finally {
     try { w.terminate(); } catch (_) { /* gone */ }
   }

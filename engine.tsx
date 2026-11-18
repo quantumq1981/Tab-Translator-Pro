@@ -1649,8 +1649,12 @@ function _gpxBitReader(u8) {
   return { readBits, readBitsRev, readByte, readBytes };
 }
 const _gpxLE32 = (d, o) => ((d[o + 3] << 24) | (d[o + 2] << 16) | (d[o + 1] << 8) | d[o]) >>> 0;
+/* Hard ceiling on what a .gpx may unpack to (audit 2026-11-18 m5). The largest real GP6 score.gpif in
+ * the corpus is ~0.7 MB; a corrupt 32-bit length could otherwise ask for 4 GB and kill a phone's tab. */
+const GPX_MAX_BYTES = 64 * 1024 * 1024;
 function _gpxDecompress(br, skipHeader) {                                                                        // BCFZ → raw bytes
   const expected = _gpxLE32(br.readBytes(4), 0);
+  if (expected > GPX_MAX_BYTES) throw new Error("Corrupt .gpx: it claims to unpack to " + Math.round(expected / 1048576) + " MB.");
   const out = [];
   try {
     while (out.length < expected) {
@@ -1665,15 +1669,23 @@ function _gpxDecompress(br, skipHeader) {                                       
   const u = new Uint8Array(out);
   return skipHeader ? u.subarray(4) : u;
 }
+/* Audit 2026-11-18 M2.1: the port of alphaTab's GpxFileSystem jumps `offset` to a file's last data
+ * sector, so a sector pointer that points BACK before its own entry re-reads that entry forever.
+ * Control state is `offset` alone, so for any file that terminates no entry is ever visited twice —
+ * stopping on a repeat changes nothing for valid files and turns the hang into an error. Chunks past
+ * the entry's own size are no longer copied (same bytes: the result was truncated to fileSize). */
 function _gpxReadFS(data) {                                                                                       // BCFS sector filesystem
-  const SS = 0x1000, files = [];
+  const SS = 0x1000, files = [], seen = new Set();
   let offset = SS;
   while (offset + 3 < data.length) {
     if (_gpxLE32(data, offset) === 2) {                                                                          // file entry
+      if (seen.has(offset)) throw new Error("Corrupt .gpx: its sector table loops back on itself.");
+      seen.add(offset);
       let name = ""; for (let i = 0; i < 127; i++) { const c = data[offset + 4 + i]; if (c === 0) break; name += String.fromCharCode(c); }
       const fileSize = _gpxLE32(data, offset + 0x8c);
-      const dpo = offset + 0x94; let sc = 0; const chunks = [];
-      for (;;) { const sector = _gpxLE32(data, dpo + 4 * sc++); if (sector === 0) break; offset = sector * SS; chunks.push(data.subarray(offset, offset + SS)); }
+      if (fileSize > GPX_MAX_BYTES) throw new Error("Corrupt .gpx: a file inside claims " + Math.round(fileSize / 1048576) + " MB.");
+      const dpo = offset + 0x94; let sc = 0, got = 0; const chunks = [];
+      for (;;) { const sector = _gpxLE32(data, dpo + 4 * sc++); if (sector === 0) break; offset = sector * SS; if (got < fileSize) { const c = data.subarray(offset, offset + SS); chunks.push(c); got += c.length; } }
       let total = 0; chunks.forEach((c) => (total += c.length));
       const buf = new Uint8Array(total); let p = 0; chunks.forEach((c) => { buf.set(c, p); p += c.length; });
       files.push({ name, data: buf.subarray(0, Math.min(fileSize, buf.length)) });
@@ -9480,7 +9492,7 @@ function alignPcmToScore(samples, sampleRate, score, opts = {}) {
     costSum += _cosDist(audioMat[ai], scoreMat[sj]); costN++;
   }
   const confidence = costN ? Math.max(0, 1 - costSum / costN) : 0;
-  const segments = []; let last = " ";
+  const segments = []; let last = "\u0000";
   for (let f = 0; f < audioSeq.length; f++) {
     let k;
     if (f < lo || f > hi) k = null;                               // trimmed silence -> no highlight
@@ -13122,6 +13134,8 @@ function makeProjectRecord(o = {}) {
     createdAt: o.createdAt || now, updatedAt: now, bytes: o.bytes || 0, duration: o.duration || 0, bars: o.bars || 0,
     key: o.key || "", bpm: o.bpm ? Math.round(o.bpm) : 0, tags: Array.isArray(o.tags) ? [...new Set(o.tags.map((t) => String(t).trim().toLowerCase()).filter(Boolean))].slice(0, 20) : [],
     meta: o.meta && typeof o.meta === "object" ? o.meta : {},
+    // content hash of the source bytes ("sha256:…"; audit m1 — two files with one name + length are two projects)
+    ...(o.hash ? { hash: String(o.hash).slice(0, 80) } : {}),
   };
 }
 function isProjectRecord(x) {

@@ -347,10 +347,19 @@ import {
   chordFromWritten,
   ocrReviewItems,
 } from "./engine.tsx";
+import { createSessionStore } from "./session-store.js";
+
+/* SECURITY (audit 2026-11-18 C1, CVE-2024-4367 / GHSA-wgrm-67xf-hhpq): every PDF this app opens is
+ * untrusted (Scan reads PDFs from anywhere), and PDF.js < 4.2.67 with `isEvalSupported` at its default
+ * `true` runs script from a crafted font — in the shared quantumq1981.github.io origin. ALL document
+ * loads go through this one function, which turns eval off (it only speeds up glyph drawing). Never
+ * call pdfjsLib.getDocument directly: `npm test` fails if any call site skips this. */
+function openPdfDocument(data) {
+  return window.pdfjsLib.getDocument({ data, isEvalSupported: false, enableXfa: false }).promise;
+}
 
 async function extractTokens(buf) {
-  const pdfjsLib = window.pdfjsLib;
-  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  const pdf = await openPdfDocument(buf);
   const tokens = [];
   for (let p = 1; p <= pdf.numPages; p++) {
     const page = await pdf.getPage(p);
@@ -370,11 +379,11 @@ async function extractTokens(buf) {
 }
 
 /* ==========================================================================
- *  SESSION PERSISTENCE (Roadmap Wave 1 #2) — OPFS + localStorage fallback
+ *  SESSION PERSISTENCE (Roadmap Wave 1 #2) — OPFS → IndexedDB → localStorage
  *
  *  Turns the app from a one-shot decoder into a persistent workspace: the
- *  uploaded file's RAW BYTES are cached (OPFS — quota-free — when available,
- *  else a base64 localStorage fallback for small files) and a small JSON of
+ *  uploaded file's RAW BYTES are cached (OPFS where the main thread can write it,
+ *  else IndexedDB, else base64 localStorage for small files) and a small JSON of
  *  UI state (mode, filename, spelling, part, chord overrides) rides in
  *  localStorage. On re-open we re-run the SAME validated parser paths the file
  *  inputs use (no separate restore path to drift), then re-apply the saved
@@ -389,64 +398,22 @@ async function extractTokens(buf) {
  *  Everything here is browser-only (OPFS API + base64) — like extractTokens /
  *  playScore it's smoke-tested on hardware; `npm test` statically guards the
  *  contract (feature-detect, try/catch, localStorage fallback, one-shot). */
-const SESS_META = "ttp:session:v1";   // localStorage: small UI-state JSON
-const SESS_BIN_LS = "ttp:session:bin:v1"; // localStorage: base64 bytes (fallback only)
-const SESS_BIN_OPFS = "session.bin";  // OPFS: raw file bytes (preferred)
-const SESS_LS_MAX = 3_000_000;        // don't base64 huge files into localStorage
-
-async function _opfsDir() {
-  try {
-    if (!navigator.storage || !navigator.storage.getDirectory) return null;
-    return await navigator.storage.getDirectory();
-  } catch (_) { return null; }
-}
-// OPFS write needs main-thread createWritable (Chrome; Safari 16.4+). Where it's
-// missing (older Safari) we fall back to localStorage, so persistence still works.
-async function _opfsWrite(bytes) {
-  const dir = await _opfsDir(); if (!dir) return false;
-  try {
-    const fh = await dir.getFileHandle(SESS_BIN_OPFS, { create: true });
-    if (typeof fh.createWritable !== "function") return false;
-    const w = await fh.createWritable();
-    await w.write(bytes); await w.close();
-    return true;
-  } catch (_) { return false; }
-}
-async function _opfsRead() {
-  const dir = await _opfsDir(); if (!dir) return null;
-  try {
-    const fh = await dir.getFileHandle(SESS_BIN_OPFS);
-    const f = await fh.getFile();
-    return new Uint8Array(await f.arrayBuffer());
-  } catch (_) { return null; }
-}
-async function _opfsRemove() {
-  const dir = await _opfsDir(); if (!dir) return;
-  try { await dir.removeEntry(SESS_BIN_OPFS); } catch (_) {}
-}
-const _bytesToB64 = (bytes) => { let s = ""; for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]); return btoa(s); };
-const _b64ToBytes = (b64) => { const bin = atob(b64), u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u; };
-
-// Persist the source bytes once (on upload/decode); chooses OPFS, else localStorage.
-async function saveSessionFile(bytes) {
-  try {
-    const ok = await _opfsWrite(bytes);
-    if (ok) { try { localStorage.removeItem(SESS_BIN_LS); } catch (_) {} return "opfs"; }
-    if (bytes.length <= SESS_LS_MAX) { localStorage.setItem(SESS_BIN_LS, _bytesToB64(bytes)); return "ls"; }
-    return "none"; // too big for localStorage and no OPFS — meta still saved, bytes won't restore
-  } catch (err) { console.warn("session file save skipped:", err); return "none"; }
-}
-const saveSessionMeta = (meta) => { try { localStorage.setItem(SESS_META, JSON.stringify(meta)); } catch (err) { console.warn("session meta save skipped:", err); } };
-const readSessionMeta = () => { try { const r = localStorage.getItem(SESS_META); return r ? JSON.parse(r) : null; } catch (_) { return null; } };
-async function readSessionFile() {
-  const fromOpfs = await _opfsRead();
-  if (fromOpfs) return fromOpfs;
-  try { const b = localStorage.getItem(SESS_BIN_LS); return b ? _b64ToBytes(b) : null; } catch (_) { return null; }
-}
-async function clearSession() {
-  try { localStorage.removeItem(SESS_META); localStorage.removeItem(SESS_BIN_LS); } catch (_) {}
-  await _opfsRemove();
-}
+/* The byte-storage rules (OPFS → IndexedDB → localStorage, the { size, hash } binding between the
+ * metadata and the bytes, empty-file handling) live in session-store.js, where tests/session-store.mjs
+ * runs them against Safari-18, Safari-26 and failing-OPFS mocks (audit 2026-11-18 C2 / M1). The
+ * IndexedDB backend is the library's "files" store (defined further down; called only at run time). */
+const _idbFiles = {
+  put: (k, v) => _ptx("files", "readwrite", (st) => st.put(v, k)),
+  get: (k) => _ptx("files", "readonly", (st) => st.get(k)),
+  del: (k) => _ptx("files", "readwrite", (st) => st.delete(k)),
+};
+const sessionStore = createSessionStore({ files: _idbFiles });
+const saveSessionMeta = (meta) => { if (!sessionStore.saveSessionMeta(meta)) console.warn("session meta save skipped"); };
+const readSessionMeta = () => sessionStore.readSessionMeta();
+const clearSession = () => sessionStore.clearSession();
+// once per launch: remove the zero-length files Safari < 26 left in OPFS (they hid the real copies)
+let _swept = false;
+const sweepEmptyFiles = () => { if (_swept) return; _swept = true; sessionStore.removeEmptyFiles().catch(() => {}); };
 
 /* ==========================================================================
  *  PARSE WEB WORKER (Roadmap Wave 1 #3) — non-blocking binary parsing
@@ -475,6 +442,7 @@ function _getEngineWorker() {
     if (!engineUrl || typeof Worker === "undefined") { _engineWorkerDead = true; return null; }
     const code =
       "import * as E from " + JSON.stringify(engineUrl) + ";\n" +
+      "self.postMessage({ ready: true });\n" +
       "self.onmessage = async (ev) => {\n" +
       "  const { id, fn, args } = ev.data;\n" +
       "  try { const result = await E[fn](...args); self.postMessage({ id, ok: true, result }, result && ArrayBuffer.isView(result) ? [result.buffer] : []); }\n" +
@@ -482,12 +450,25 @@ function _getEngineWorker() {
       "};";
     const w = new Worker(URL.createObjectURL(new Blob([code], { type: "text/javascript" })), { type: "module" });
     w.onmessage = (ev) => {
+      if (ev.data && ev.data.ready) { w._ready = true; return; }
       const { id, ok, result, error } = ev.data || {};
       const p = _rpcPending.get(id); if (!p) return;
       _rpcPending.delete(id);
       ok ? p.resolve(result) : p.reject(new Error(error || "worker error"));
     };
-    w.onerror = () => { _engineWorkerDead = true; _engineWorker = null; _rpcPending.forEach((p) => p.reject(new Error("worker crashed"))); _rpcPending.clear(); };
+    /* audit M3: an error BEFORE the worker said ready = it can't start here (module workers missing, the
+     * engine import failed) → switch it off; calls fall back to the main thread. An error AFTER = a crash
+     * mid-job (usually out of memory): reported to the caller, never re-run on the page, and the next
+     * call starts a fresh worker. */
+    w.onerror = (e) => {
+      if (e && e.preventDefault) e.preventDefault();
+      const started = !!w._ready;
+      if (!started) _engineWorkerDead = true;
+      if (_engineWorker === w) _engineWorker = null;
+      try { w.terminate(); } catch (_) { /* gone */ }
+      _rpcPending.forEach((p) => p.reject(started ? _crashedErr() : _unavailableErr("engine worker could not start")));
+      _rpcPending.clear();
+    };
     _engineWorker = w;
     return w;
   } catch (_) { _engineWorkerDead = true; return null; }
@@ -507,14 +488,34 @@ function _releaseEngineWorker() {
 function _engineRPC(fn, args, transfer) {
   return new Promise((resolve, reject) => {
     const w = _getEngineWorker();
-    if (!w) { reject(new Error("no engine worker")); return; }
+    if (!w) { reject(_unavailableErr("no engine worker")); return; }
     const id = ++_rpcSeq;
     _rpcPending.set(id, { resolve, reject });
-    try { w.postMessage({ id, fn, args }, transfer || []); } catch (err) { _rpcPending.delete(id); reject(err); }
+    // a postMessage that throws (DataCloneError) never reached the worker: nothing was transferred
+    try { w.postMessage({ id, fn, args }, transfer || []); } catch (err) { _rpcPending.delete(id); err.unavailable = true; reject(err); }
   });
 }
 // a buffer handed to the worker is detached: the main-thread fallback can't use it
 const _detached = (a) => !!a && a.buffer && a.buffer.byteLength === 0 && a.length === 0;
+function _unavailableErr(msg) { const e = new Error(msg); e.unavailable = true; return e; }
+function _crashedErr() { const e = new Error("The background worker stopped (it may have run out of memory). Try a shorter clip, or reload."); e.crashed = true; return e; }
+/* --- off-thread call policy (audit 2026-11-18 M3) -----------------------------------------------
+ * Run `fn(...args)` in the engine worker. The SAME engine call runs on the main thread ONLY when no
+ * worker exists here (none could be made, or it never started) — the progressive-enhancement case.
+ * An engine error (bad input) is reported as it is: running it again would only block the page for
+ * the same answer. A worker crash (out of memory, mostly on phones) is reported too: re-running minutes
+ * of work on the page's own thread is what freezes or kills the tab. Buffers already transferred to a
+ * worker can't be re-used, so then there is no fallback either. */
+const workerUnavailable = (e) => !!(e && e.unavailable);
+async function _offThread(fn, args, onMain, transfer) {
+  try { return await _engineRPC(fn, args, transfer); }
+  catch (e) {
+    const gone = (transfer || []).some((b) => !!b && (b.byteLength === 0 || _detached(b)));
+    if (workerUnavailable(e) && !gone) return onMain();
+    throw e;
+  }
+}
+/* --- end off-thread call policy ----------------------------------------------------------------- */
 // True only for DOMParser-free formats the worker can actually parse.
 function _workerableBytes(bytes) {
   try { const head = new TextDecoder("latin1").decode(bytes.subarray(0, 32)); return head.includes("FICHIER GUITAR PRO") || head.startsWith("ptab"); }
@@ -524,26 +525,22 @@ function _workerableBytes(bytes) {
 // call on the main thread so a missing/broken worker never changes the result.
 async function parseScoreOffThread(bytes, filename, sharp) {
   if (_workerableBytes(bytes)) {
-    try { return await _engineRPC("parseGuitarProOrXML", [bytes, filename, sharp]); }
-    catch (err) { console.warn("worker parse fell back to main thread:", err && err.message); }
+    return _offThread("parseGuitarProOrXML", [bytes, filename, sharp], () => parseGuitarProOrXML(bytes, filename, sharp));
   }
   return parseGuitarProOrXML(bytes, filename, sharp);
 }
 /* PCM → song sections (intro/verse/chorus…), off-thread when possible. Pure DSP and
  * DOMParser-free, so the worker can run it; main-thread fallback as always. */
 async function detectSectionsOffThread(samples, sr, opts = {}) {
-  try { return await _engineRPC("detectSections", [samples, sr, opts]); }
-  catch (_) { return detectSections(samples, sr, opts); }
+  return _offThread("detectSections", [samples, sr, opts], () => detectSections(samples, sr, opts));
 }
 /* A drum recording → the §4 drum events (built-in NMF reader), and how drum-like a recording is —
  * off-thread when possible, main-thread fallback as always. */
 async function drumEventsOffThread(samples, sr, opts = {}) {
-  try { return await _engineRPC("transcribeDrumEvents", [samples, sr, opts]); }
-  catch (_) { return transcribeDrumEvents(samples, sr, opts); }
+  return _offThread("transcribeDrumEvents", [samples, sr, opts], () => transcribeDrumEvents(samples, sr, opts));
 }
 async function drumLikenessOffThread(samples, sr) {
-  try { return await _engineRPC("drumLikeness", [samples, sr]); }
-  catch (_) { return drumLikeness(samples, sr); }
+  return _offThread("drumLikeness", [samples, sr], () => drumLikeness(samples, sr));
 }
 /* Read a drum recording: the drum model (drum-model.js) when it is on and loads, else the built-in
  * reader. `pcm` is mono at its own rate (full rate: hi-hats live above 8 kHz). → { hits, method, flags,
@@ -564,20 +561,17 @@ async function readDrumAudio(pcm, sr, { useModel = true, beats, bpm, onProgress 
  * the identical main-thread engine call so correctness never depends on the worker. */
 async function analyzeAudioOffThread(samples, sr, kind, opts = {}) {
   const fn = kind === "notes" ? "transcribeMonophonic" : "transcribeChords";
-  try { return await _engineRPC(fn, [samples, sr, opts]); }
-  catch (_) { return (kind === "notes" ? transcribeMonophonic : transcribeChords)(samples, sr, opts); }
+  return _offThread(fn, [samples, sr, opts], () => (kind === "notes" ? transcribeMonophonic : transcribeChords)(samples, sr, opts));
 }
 /* Beat tracking + beat-synchronous Viterbi chord decoding off-thread (heaviest audio
  * path: an onset FFT pass, a beat DP, then a chroma pass), main-thread fallback. */
 async function analyzeChordsOffThread(samples, sr, opts = {}) {
-  try { return await _engineRPC("analyzeAudioChords", [samples, sr, opts]); }
-  catch (_) { return analyzeAudioChords(samples, sr, opts); }
+  return _offThread("analyzeAudioChords", [samples, sr, opts], () => analyzeAudioChords(samples, sr, opts));
 }
 /* A recording read WITH its score (link + score-informed chords) off-thread, main-thread
  * fallback. partScores are plain score objects (the parser's re-parse buffers stripped). */
 async function analyzeWithScoreOffThread(samples, sr, partScores, opts = {}) {
-  try { return await _engineRPC("analyzeAudioWithScore", [samples, sr, partScores, opts]); }
-  catch (_) { return analyzeAudioWithScore(samples, sr, partScores, opts); }
+  return _offThread("analyzeAudioWithScore", [samples, sr, partScores, opts], () => analyzeAudioWithScore(samples, sr, partScores, opts));
 }
 /* Every part of a score file, parsed once each — what a recording is linked against. MusicXML
  * needs DOMParser (main thread); the engine's one parser handles every format. */
@@ -599,8 +593,7 @@ async function scorePartsFromBytes(bytes, name, sharp) {
  * decode used to box-average down to the analysis rate, which lets cymbal/hat energy
  * above the new Nyquist fold straight into the chroma band. */
 async function resampleOffThread(samples, srIn, srOut, { transfer = false } = {}) {
-  try { return await _engineRPC("resampleTo", [samples, srIn, srOut], transfer ? [samples.buffer] : undefined); }
-  catch (e) { if (_detached(samples)) throw e; return resampleTo(samples, srIn, srOut); }
+  return _offThread("resampleTo", [samples, srIn, srOut], () => resampleTo(samples, srIn, srOut), transfer ? [samples.buffer] : undefined);
 }
 /* Stems → per-instrument charts off-thread (several decodes + YIN + drum NMF), main-thread fallback. */
 async function chartsFromStemsOffThread(stems, sr, opts = {}, { transfer = false } = {}) {
@@ -608,8 +601,7 @@ async function chartsFromStemsOffThread(stems, sr, opts = {}, { transfer = false
   if (transfer) {
     for (const a of [...Object.values(stems), opts.fullRate && opts.fullRate.drums]) if (a && a.buffer && !bufs.includes(a.buffer)) bufs.push(a.buffer);
   }
-  try { return await _engineRPC("chartsFromStems", [stems, sr, opts], bufs); }
-  catch (e) { if (Object.values(stems).some(_detached)) throw e; return chartsFromStems(stems, sr, opts); }
+  return _offThread("chartsFromStems", [stems, sr, opts], () => chartsFromStems(stems, sr, opts), bufs);
 }
 /* Stems arrive from the separator as 16-bit (Int16Array) channels; imported stems are the decoder's float.
  * These read either. */
@@ -631,24 +623,61 @@ function stemMono(tracks) {
 }
 /* DTW audio↔score alignment off-thread (heavy: FFTs + DP), main-thread fallback. */
 async function alignPcmToScoreOffThread(samples, sr, score, opts = {}) {
-  try { return await _engineRPC("alignPcmToScore", [samples, sr, score, opts]); }
-  catch (_) { return alignPcmToScore(samples, sr, score, opts); }
+  return _offThread("alignPcmToScore", [samples, sr, score, opts], () => alignPcmToScore(samples, sr, score, opts));
 }
 /* Center-channel (vocal) isolation off-thread (heavy: STFT/ISTFT), main-thread fallback. */
 async function extractCenterOffThread(left, right, sr, opts = {}) {
-  try { return await _engineRPC("extractCenter", [left, right, sr, opts]); }
-  catch (_) { return extractCenter(left, right, sr, opts); }
+  return _offThread("extractCenter", [left, right, sr, opts], () => extractCenter(left, right, sr, opts));
 }
 /* Harmonic-clarity metric off-thread (FFT pass), main-thread fallback. */
 async function harmonicClarityOffThread(samples, sr, opts = {}) {
-  try { return await _engineRPC("harmonicClarity", [samples, sr, opts]); }
-  catch (_) { return harmonicClarity(samples, sr, opts); }
+  return _offThread("harmonicClarity", [samples, sr, opts], () => harmonicClarity(samples, sr, opts));
+}
+
+/* ==========================================================================
+ *  TOP-LEVEL ERROR BOUNDARY (audit 2026-11-18 M2.4)
+ *  A render-time throw used to unmount the whole app to a blank page, and because the session is
+ *  restored on every launch, the same throw came back after every reload. This catches it, shows
+ *  what happened, and offers Start fresh (clears this app's saved session — nothing else on the
+ *  shared origin) or Reload. Plain React class component: no hooks may run here.
+ * ========================================================================== */
+class AppErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null, clearing: false }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  componentDidCatch(error, info) { console.error("Tab Decoder crashed:", error, info && info.componentStack); }
+  render() {
+    if (!this.state.error) return this.props.children;
+    const msg = String((this.state.error && this.state.error.message) || this.state.error);
+    const startFresh = async () => {
+      this.setState({ clearing: true });
+      try { await sessionStore.clearSession(); } catch (_) { /* best effort */ }
+      window.location.replace(window.location.pathname);
+    };
+    const btn = { font: "inherit", padding: "8px 16px", borderRadius: 8, border: "1px solid #ff6b35", background: "transparent", color: "#efe9dc", cursor: "pointer" };
+    return (
+      <div role="alert" style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 24, background: "#0b0b0f", color: "#efe9dc", font: "14px/1.6 ui-monospace, 'IBM Plex Mono', monospace" }}>
+        <div style={{ maxWidth: 520, textAlign: "center" }}>
+          <div style={{ fontWeight: 700, fontSize: 20, marginBottom: 8 }}>TAB<span style={{ color: "#ff6b35" }}>·</span>DECODER hit an error</div>
+          <div style={{ color: "#9aa0a6", marginBottom: 16 }}>Something in the open chart couldn’t be shown. <b>Start fresh</b> closes the saved session (your library is kept); <b>Reload</b> tries again.</div>
+          <code style={{ display: "block", color: "#e06c75", wordBreak: "break-word", marginBottom: 20 }}>{msg.slice(0, 300)}</code>
+          <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
+            <button style={btn} disabled={this.state.clearing} onClick={startFresh}>{this.state.clearing ? "Clearing…" : "Start fresh"}</button>
+            <button style={btn} onClick={() => window.location.reload()}>Reload</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+}
+
+export default function TabDecoderPro() {
+  return <AppErrorBoundary><TabDecoderProApp /></AppErrorBoundary>;
 }
 
 /* ========================================================================== */
 /*  UI                                                                        */
 /* ========================================================================== */
-export default function TabDecoderPro() {
+function TabDecoderProApp() {
   const [mode, setMode] = useState("manual");
   const [tab, setTab] = useState(PRESETS[5].tab);
   const [tuningName, setTuningName] = useState("Standard");
@@ -691,6 +720,7 @@ export default function TabDecoderPro() {
   const [restored, setRestored] = useState(false); // showing a restored-from-cache session
   const fileRef = useRef(null);
   const xmlRef = useRef(null);
+  const pdfSeq = useRef(0), xmlSeq = useRef(0); // latest-request counters for the two upload inputs (m7)
 
   useEffect(() => {
     if (window.pdfjsLib) { setPdfReady(true); return; }
@@ -706,20 +736,22 @@ export default function TabDecoderPro() {
   const onFile = async (e) => {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
+    const seq = ++pdfSeq.current; // m7: only the LATEST pick may land
     setPdfErr(""); setPdfBusy(true); setChart(null); clearSel(); setSysShifts({}); setScoreEdit(null);
     try {
       const buf = await f.arrayBuffer();
       const bytes = new Uint8Array(buf.slice(0)); // copy for the session cache (PDF.js may detach buf)
       const { tokens, pages } = await extractTokens(buf);
+      if (seq !== pdfSeq.current) return;
       const c = buildChart(tokens);
       if (!c.measures.length) setPdfErr("No tab measures detected. Is this a digital (text) tab PDF rather than a scan?");
       setChart({ ...c, tokens, pages, fileName: f.name });
       setRestored(false);
-      saveSessionFile(bytes); // meta is written by the persist effect
+      persistSession(bytes, f.name); // bytes first; the persist effect writes meta once they are stored
       setPlaySet(null); rememberProject({ kind: "pdf", filename: f.name, bytes, bars: c.measures.length, keyLabel: keyLabelOf(buildScore(c, useSharp)) });
     } catch (err) {
-      setPdfErr("Parse failed: " + (err && err.message ? err.message : String(err)));
-    } finally { setPdfBusy(false); }
+      if (seq === pdfSeq.current) setPdfErr("Parse failed: " + (err && err.message ? err.message : String(err)));
+    } finally { if (seq === pdfSeq.current) setPdfBusy(false); }
   };
 
   /* Apply a manual string shift to ONE system and rebuild. Cheap — the PDF is already
@@ -757,24 +789,27 @@ export default function TabDecoderPro() {
   const onXml = async (e) => {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
+    const seq = ++xmlSeq.current; // m7: a slow earlier parse must not replace a later pick
     setXmlErr(""); setXmlScore(null); setTexDoc(null); setXmlBusy(true); clearSel(); setScoreEdit(null);
     try {
       const bytes = new Uint8Array(await f.arrayBuffer());
+      if (seq !== xmlSeq.current) return;
       const tex = alphaTexFromBytes(bytes);
       if (tex != null) { // a saved .alphatex: draw it — it's already a tab, not something to recognise
-        setTexDoc({ name: f.name, text: tex }); setXmlName(f.name); setRestored(false); saveSessionFile(bytes);
+        setTexDoc({ name: f.name, text: tex }); setXmlName(f.name); setRestored(false); persistSession(bytes, f.name);
         setPlaySet(null); rememberProject({ kind: "alphatex", filename: f.name, bytes });
         return;
       }
       const sc = await parseScoreOffThread(bytes, f.name, useSharp); // MusicXML / GP3-8 auto-detect (binary GP/PTB off-thread)
+      if (seq !== xmlSeq.current) return;
       if (!sc.bars.length) setXmlErr("No measures found. Is this a MusicXML score or a Guitar Pro file?");
       setXmlScore(sc); setXmlName(f.name); setScoreFile({ name: f.name, bytes });
       setRestored(false);
-      saveSessionFile(bytes); // meta is written by the persist effect
+      persistSession(bytes, f.name); // bytes first; the persist effect writes meta once they are stored
       setPlaySet(null); rememberProject({ kind: "xml", filename: f.name, bytes, bars: sc.bars.length, bpm: sc.tempo, keyLabel: keyLabelOf(sc) });
     } catch (err) {
-      setXmlErr("Parse failed: " + (err && err.message ? err.message : String(err)));
-    } finally { setXmlBusy(false); }
+      if (seq === xmlSeq.current) setXmlErr("Parse failed: " + (err && err.message ? err.message : String(err)));
+    } finally { if (seq === xmlSeq.current) setXmlBusy(false); }
   };
 
   // re-recognise symbols when the sharp/flat spelling flips (keep part)
@@ -816,7 +851,9 @@ export default function TabDecoderPro() {
     if (isPdf && !pdfReady) return; // wait for PDF.js to load
     decodeRef.current = null;
     setRestored(false);
-    saveSessionFile(new Uint8Array(d.bytes.slice(0))); // a decoded tab becomes a restorable session too
+    // audit 2026-11-18 M2.2: the bytes become the restorable session only AFTER they parse — a file that
+    // hangs or crashes the parser must never be saved for the next launch to open again.
+    const keep = () => persistSession(new Uint8Array(d.bytes.slice(0)), d.filename);
     (async () => {
       if (isPdf) {
         setMode("pdf"); setPdfErr(""); setPdfBusy(true); setChart(null); clearSel(); setSysShifts({});
@@ -825,6 +862,7 @@ export default function TabDecoderPro() {
           const c = buildChart(tokens);
           if (!c.measures.length) setPdfErr("No tab measures detected. Is this a digital (text) tab PDF rather than a scan?");
           setChart({ ...c, tokens, pages, fileName: d.filename });
+          keep();
         } catch (err) { setPdfErr("Parse failed: " + (err && err.message ? err.message : String(err))); }
         finally { setPdfBusy(false); }
       } else {
@@ -834,6 +872,7 @@ export default function TabDecoderPro() {
           if (!sc.bars.length) setXmlErr("No measures found. Is this a MusicXML score or a Guitar Pro file?");
           setXmlScore(sc); setXmlName(d.filename);
           setScoreFile({ name: d.filename, bytes: new Uint8Array(d.bytes.slice(0)) });
+          keep();
           if (d.intent === "link" && sc.bars.length) { setLinkAsk((n) => n + 1); setMode("audio"); }
         } catch (err) { setXmlErr("Parse failed: " + (err && err.message ? err.message : String(err))); }
         finally { setXmlBusy(false); }
@@ -864,10 +903,18 @@ export default function TabDecoderPro() {
   const [audioIncoming, setAudioIncoming] = useState(null);   // { bytes, name, n } → AudioImport
   const rememberProject = async ({ kind, filename, bytes, bars, bpm, keyLabel, duration }) => {
     try {
-      const recs = await projectsAll();
-      const old = recs.find((r) => r.kind === kind && r.filename === filename && r.bytes === bytes.length);
-      const rec = old ? { ...old, updatedAt: Date.now(), bars: bars || old.bars, bpm: bpm ? Math.round(bpm) : old.bpm, key: keyLabel || old.key } : makeProjectRecord({ kind, filename, bytes: bytes.length, bars, bpm, key: keyLabel, duration });
-      if (!old) await projectFilePut(rec.id, bytes);
+      if (!bytes || !bytes.length) return;
+      const recs = await projectsAll(), hash = await sessionStore.hashOf(bytes);
+      // audit m1: the same project = the same CONTENT. Records from before the hash existed are checked
+      // by hashing their stored file (only those with this name and length, so it stays cheap).
+      let old = recs.find((r) => r.kind === kind && r.hash === hash) || null;
+      if (!old) for (const r of recs) {
+        if (r.hash || r.kind !== kind || r.filename !== filename || r.bytes !== bytes.length) continue;
+        const b = await sessionStore.projectFileGet(r.id);
+        if (b && (await sessionStore.hashOf(b)) === hash) { old = r; break; }
+      }
+      const rec = old ? { ...old, hash, updatedAt: Date.now(), bars: bars || old.bars, bpm: bpm ? Math.round(bpm) : old.bpm, key: keyLabel || old.key } : makeProjectRecord({ kind, filename, bytes: bytes.length, hash, bars, bpm, key: keyLabel, duration });
+      if (!old && !(await projectFilePut(rec.id, bytes))) return; // a record whose bytes weren't stored would open empty
       await projectPut(rec); projRef.current = rec; setProjectId(rec.id);
     } catch (_) { /* the library is a convenience: never block opening a file */ }
   };
@@ -880,14 +927,26 @@ export default function TabDecoderPro() {
     return next && next.ops && next.ops.length + (next.redo ? next.redo.length : 0) ? { ...next, target } : null;
   });
 
-  /* ---- Session persistence (Wave 1 #2) -----------------------------------
-   * SAVE: the upload handlers cache the raw bytes once (saveSessionFile); this
-   * effect keeps the small UI-state meta in sync as the chart, spelling, part,
-   * or chord overrides change. RESTORE: on mount (unless an import param is
-   * present — an incoming handoff/decode wins) we re-run the SAME parser paths
-   * the file inputs use, gated on pdfReady for PDFs, then re-apply saved edits.
-   * Mirror of the decode receiver: one-shot via a ref, wrapped in try/catch so
-   * a stale/garbage cache can never wedge boot. */
+  /* ---- Session persistence (Wave 1 #2; audit 2026-11-18 C2 / M1 / M2.3) -------
+   * SAVE: an upload stores the raw bytes FIRST (persistSession → session-store.js), which returns the
+   * stored bytes' { size, hash }. Only then may this effect write the small UI-state metadata, and it
+   * writes that binding into it — so the metadata always describes the bytes that are stored.
+   * RESTORE: on mount (unless an import param is present — an incoming handoff/decode wins) we re-run
+   * the SAME parser paths the file inputs use, gated on pdfReady for PDFs, then re-apply saved edits —
+   * but only when the bytes match the metadata's binding; otherwise the file opens WITHOUT edits and
+   * says so. A marker is held while a restore parses: if the page dies there (a parser hang, a phone
+   * running out of memory), the next launch asks instead of opening the same file again. */
+  const sessRef = useRef(null), sessGen = useRef(0); // { filename, size, hash } of the stored bytes
+  const [sessTick, setSessTick] = useState(0);
+  const persistSession = async (bytes, filename) => {
+    const gen = ++sessGen.current; sessRef.current = null;
+    let r = { where: "none" };
+    try { r = await sessionStore.saveSessionFile(bytes); } catch (err) { console.warn("session file save skipped:", err); }
+    if (gen !== sessGen.current) return r;                      // a newer file is being saved (m7)
+    sessRef.current = r.where === "none" ? null : { filename, size: r.size, hash: r.hash };
+    setSessTick((n) => n + 1);
+    return r;
+  };
   const restoringRef = useRef(false); // suppress transient meta writes mid-restore
   useEffect(() => {
     if (restoringRef.current) return; // the restore effect re-affirms meta itself
@@ -896,42 +955,60 @@ export default function TabDecoderPro() {
                  : (mode === "xml" && texDoc) ? { kind: "alphatex", filename: texDoc.name } : null;
     if (!active) return;
     const meta = { v: 1, kind: active.kind, filename: active.filename, useSharp, overrides, sysShifts, keyOverride, scoreEdit, partIndex: xmlScore ? (xmlScore.partIndex || 0) : 0 };
-    saveSessionMeta(meta);
+    const bound = sessRef.current;
+    if (bound && bound.filename === active.filename) saveSessionMeta({ ...meta, file: { size: bound.size, hash: bound.hash } });
     // the open project follows the same meta (debounced; IndexedDB writes are async)
     const pr = projRef.current;
     if (pr && pr.filename === active.filename) {
       clearTimeout(projTimer.current);
       projTimer.current = setTimeout(() => { const rec = { ...projRef.current, meta, updatedAt: Date.now(), key: keyOverride || projRef.current.key }; projRef.current = rec; projectPut(rec); }, 600);
     }
-  }, [mode, chart, xmlScore, xmlName, texDoc, overrides, useSharp, keyOverride, scoreEdit]);
+  }, [mode, chart, xmlScore, xmlName, texDoc, overrides, useSharp, keyOverride, scoreEdit, sessTick]);
 
-  const restoreRef = useRef(null);
+  const restoreRef = useRef(null);           // { meta, bytes? } — bytes given when a library project opens
   const [restoreReq, setRestoreReq] = useState(0);
+  const [restoreAsk, setRestoreAsk] = useState(null); // the last restore never finished: { meta, filename }
   useEffect(() => {
+    sweepEmptyFiles();
     try {
       const p = new URLSearchParams(window.location.search);
       if (p.get("import") === "decode" || p.get("import") === "handoff") return; // incoming import wins
       const meta = readSessionMeta();
-      if (!meta || (meta.kind !== "pdf" && meta.kind !== "xml" && meta.kind !== "alphatex")) return;
-      restoreRef.current = meta;
+      if (!meta || (meta.kind !== "pdf" && meta.kind !== "xml" && meta.kind !== "alphatex")) { sessionStore.clearRestoreMark(); return; }
+      const mark = sessionStore.restoreMark();
+      if (mark) { setRestoreAsk({ meta, filename: mark.filename || meta.filename || "" }); return; } // M2.3: ask, don't loop
+      restoreRef.current = { meta };
       setRestoreReq((n) => n + 1);
     } catch (err) { console.warn("session restore skipped:", err); }
   }, []);
+  const restoreAnyway = () => { const a = restoreAsk; setRestoreAsk(null); sessionStore.clearRestoreMark(); if (a) { restoreRef.current = { meta: a.meta }; setRestoreReq((n) => n + 1); } };
   useEffect(() => {
-    const meta = restoreRef.current; if (!meta) return;
-    if (meta.kind === "pdf" && !pdfReady) return; // wait for PDF.js
+    const req = restoreRef.current; if (!req) return;
+    const meta0 = req.meta;
+    if (meta0.kind === "pdf" && !pdfReady) return; // wait for PDF.js
     restoreRef.current = null;
     restoringRef.current = true;
     (async () => {
+      let marked = false;
       try {
-        const bytes = await readSessionFile();
-        if (!bytes) { restoringRef.current = false; return; } // bytes evicted / too big — nothing to restore
+        let bytes = req.bytes || null, verified = true;
+        if (!bytes) {
+          const got = await sessionStore.readSessionFile(meta0.file);
+          if (!got) return;                                     // bytes evicted / too big — nothing to restore
+          bytes = got.bytes; verified = got.verified !== false;
+        }
+        if (!bytes || !bytes.length) return;                   // C2: never open (or re-save) an empty file
+        // bytes that don't match the metadata (an older build, a tab killed mid-save): open the FILE, drop the edits
+        const isPdf = bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46;
+        const meta = verified ? meta0 : { v: 1, kind: isPdf ? "pdf" : alphaTexFromBytes(bytes) != null ? "alphatex" : "xml", filename: "restored file", useSharp: meta0.useSharp };
+        if (meta.kind === "pdf" && !pdfReady) { restoreRef.current = { meta, bytes }; restoringRef.current = false; setRestoreReq((n) => n + 1); return; }
+        sessionStore.markRestore(meta.filename); marked = true;
         const sharp = meta.useSharp !== false;
         setUseSharp(sharp);
         if (meta.kind === "pdf") {
           setMode("pdf"); setPdfErr(""); setPdfBusy(true); setChart(null); clearSel(); setSysShifts({});
           try {
-            const { tokens, pages } = await extractTokens(bytes.buffer);
+            const { tokens, pages } = await extractTokens(bytes.slice(0).buffer);
             // re-apply saved per-system string shifts so a corrected chart restores corrected
             const sh = meta.sysShifts && typeof meta.sysShifts === "object" ? meta.sysShifts : {};
             setSysShifts(sh);
@@ -949,20 +1026,24 @@ export default function TabDecoderPro() {
             setXmlScore(sc); setXmlName(meta.filename || "restored");
           } finally { setXmlBusy(false); }
         }
-        if (meta.overrides && Object.keys(meta.overrides).length) setOverrides(meta.overrides);
-        if (meta.keyOverride) setKeyOverride(meta.keyOverride);
+        setOverrides(meta.overrides && Object.keys(meta.overrides).length ? meta.overrides : {});
+        setKeyOverride(meta.keyOverride || "");
         if (meta.scoreEdit && isScoreEdit(meta.scoreEdit) && typeof meta.scoreEdit.target === "string") setScoreEdit(meta.scoreEdit); else setScoreEdit(null);
-        if (!meta.fromLibrary) setRestored(true);
-        // one-shot migration: the restored session becomes a library project (dedup by name + size)
+        if (!verified) setRestored("mismatch"); else if (!meta.fromLibrary) setRestored(true);
+        // one-shot migration: the restored session becomes a library project (dedup by content)
         if (!projRef.current || projRef.current.filename !== meta.filename) rememberProject({ kind: meta.kind, filename: meta.filename || "restored", bytes });
-        { const { fromLibrary: _fl, ...clean } = meta; saveSessionMeta(clean); } // re-affirm the restored state in one clean write
+        // re-affirm the restored state in one clean write, bound to the bytes that were opened
+        const hash = await sessionStore.hashOf(bytes);
+        sessRef.current = { filename: meta.filename, size: bytes.length, hash };
+        { const { fromLibrary: _fl, file: _f, ...clean } = meta; saveSessionMeta({ ...clean, file: { size: bytes.length, hash } }); }
       } catch (err) { console.warn("session restore failed:", err); }
-      finally { restoringRef.current = false; }
+      finally { if (marked) sessionStore.clearRestoreMark(); restoringRef.current = false; }
     })();
   }, [restoreReq, pdfReady]);
 
   const startFresh = async () => {
     try { await clearSession(); } catch (_) {}
+    sessGen.current++; sessRef.current = null; setRestoreAsk(null);
     setChart(null); setXmlScore(null); setTexDoc(null); setXmlName(""); setMode("manual"); clearSel(); setRestored(false); setKeyOverride(""); setScoreEdit(null); setProjectId(null); projRef.current = null; setPlaySet(null);
   };
 
@@ -970,15 +1051,15 @@ export default function TabDecoderPro() {
    * through the restore path (same parsers, same edit re-application). opts.setlist starts a set. */
   const openProject = async (rec, opts = {}) => {
     if (!rec) return;
-    const bytes = await projectFileGet(rec.id);
-    if (!bytes) { window.alert("This project's file is no longer on this device."); return; }
+    const bytes = await projectFileGet(rec.id, rec);
+    if (!bytes || !bytes.length) { window.alert("This project's file is no longer on this device."); return; }
     projRef.current = rec; setProjectId(rec.id);
     if (opts.setlist) setPlaySet({ setlist: opts.setlist, index: opts.index || 0 });
     const item = opts.setlist ? opts.setlist.items[opts.index || 0] : null;
     setSemisReq({ n: Date.now(), value: item ? item.transpose : 0 });
     if (rec.kind === "audio") { setMode("audio"); setAudioIncoming({ bytes, name: rec.filename || rec.title, n: Date.now() }); return; }
-    await saveSessionFile(bytes);
-    restoreRef.current = { ...(rec.meta || {}), v: 1, kind: rec.kind, filename: rec.filename, fromLibrary: true };
+    await persistSession(bytes, rec.filename);
+    restoreRef.current = { meta: { ...(rec.meta || {}), v: 1, kind: rec.kind, filename: rec.filename, fromLibrary: true }, bytes };
     setOverrides({}); setKeyOverride("");
     setRestoreReq((n) => n + 1);
   };
@@ -1092,9 +1173,18 @@ export default function TabDecoderPro() {
           </div>
         </header>
 
+        {restoreAsk && (
+          <div className="panel-rise" role="alert" style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", marginBottom: 14, padding: "8px 12px", background: C.panel, border: `1px solid ${C.amber}`, borderRadius: 8, fontSize: 12, color: C.dim }}>
+            <span>⚠ Last time, “{restoreAsk.filename || "your last file"}” didn’t finish opening — the page may have frozen or run out of memory on it.</span>
+            <span style={{ display: "flex", gap: 6 }}>
+              <button onClick={restoreAnyway} style={{ ...toggle(C), padding: "4px 12px", flex: "none" }}>Restore anyway</button>
+              <button onClick={startFresh} style={{ ...toggle(C), padding: "4px 12px", flex: "none" }}>Start fresh</button>
+            </span>
+          </div>
+        )}
         {restored && (
           <div className="panel-rise" style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", marginBottom: 14, padding: "8px 12px", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 12, color: C.dim }}>
-            <span>↺ Restored your last session — your chart and edits are back. Upload a new file or</span>
+            <span>{restored === "mismatch" ? "↺ Reopened your last file, but its saved edits belonged to a different file, so they were left off. Upload a new file or" : "↺ Restored your last session — your chart and edits are back. Upload a new file or"}</span>
             <button onClick={startFresh} style={{ ...toggle(C), padding: "4px 12px", flex: "none" }}>Start fresh</button>
           </div>
         )}
@@ -1466,9 +1556,7 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
     setRefErr(""); setAlignSegs(null); stopRef();
     try {
       const AC = window.AudioContext || window.webkitAudioContext; if (!AC) { setRefErr("Web Audio isn't available."); return; }
-      const ab = await f.arrayBuffer(); const dctx = new AC();
-      const buf = await new Promise((res, rej) => { const p = dctx.decodeAudioData(ab, res, rej); if (p && p.then) p.then(res, rej); });
-      try { dctx.close(); } catch (_) {}
+      const buf = await decodeAudioBytes(await f.arrayBuffer());
       // downsampled mono copy for DTW alignment (16k is plenty for chroma)
       const chs = buf.numberOfChannels, n = buf.length, mono = new Float32Array(n);
       for (let c = 0; c < chs; c++) { const d = buf.getChannelData(c); for (let i = 0; i < n; i++) mono[i] += d[i] / chs; }
@@ -1773,9 +1861,9 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
  * props in, JSX out — no engine internals, no own persistent state. */
 /* ---- WO-6 · project library storage (browser glue; the record model is pure, in engine.tsx) ----
  * IndexedDB "ttp-projects": projects (records), setlists, and files (the fallback for source
- * bytes). Source bytes prefer OPFS (projects/<id>.bin — quota-free on most browsers); older Safari
- * without createWritable falls back to IndexedDB. Every call is try/catch'd: a library that can't
- * open (private mode, blocked storage) simply shows empty — it never breaks the app. */
+ * bytes, and for the session's bytes on Safari < 26). Source bytes prefer OPFS (projects/<id>.bin)
+ * where the main thread can write it; the rules live in session-store.js. Every call is try/catch'd:
+ * a library that can't open (private mode, blocked storage) simply shows empty — it never breaks the app. */
 const _PDB = "ttp-projects";
 let _pdbP = null;
 function _pdb() {
@@ -1805,20 +1893,21 @@ const projectDel = (id) => _ptx("projects", "readwrite", (s) => s.delete(id)).ca
 const setlistsAll = () => _ptx("setlists", "readonly", (s) => s.getAll()).then((a) => (a || []).filter((x) => x && Array.isArray(x.items))).catch(() => []);
 const setlistPut = (x) => _ptx("setlists", "readwrite", (s) => s.put(x)).catch(() => null);
 const setlistDel = (id) => _ptx("setlists", "readwrite", (s) => s.delete(id)).catch(() => null);
-async function _opfsProjects() {
-  try { if (!navigator.storage || !navigator.storage.getDirectory) return null; return await (await navigator.storage.getDirectory()).getDirectoryHandle("projects", { create: true }); } catch (_) { return null; }
-}
-async function projectFilePut(id, bytes) {
-  try { const d = await _opfsProjects(); if (d) { const fh = await d.getFileHandle(id + ".bin", { create: true }); if (fh.createWritable) { const w = await fh.createWritable(); await w.write(bytes); await w.close(); return "opfs"; } } } catch (_) { /* fall back */ }
-  try { await _ptx("files", "readwrite", (s) => s.put(bytes, id)); return "idb"; } catch (_) { return null; }
-}
-async function projectFileGet(id) {
-  try { const d = await _opfsProjects(); if (d) { const f = await (await d.getFileHandle(id + ".bin")).getFile(); return new Uint8Array(await f.arrayBuffer()); } } catch (_) { /* not in OPFS */ }
-  try { const v = await _ptx("files", "readonly", (s) => s.get(id)); return v ? new Uint8Array(v) : null; } catch (_) { return null; }
-}
-async function projectFileDel(id) {
-  try { const d = await _opfsProjects(); if (d) await d.removeEntry(id + ".bin"); } catch (_) { /* absent */ }
-  try { await _ptx("files", "readwrite", (s) => s.delete(id)); } catch (_) { /* absent */ }
+// library source bytes: OPFS where the main thread can write it, else IndexedDB (session-store.js)
+const projectFilePut = (id, bytes) => sessionStore.projectFilePut(id, bytes);
+const projectFileGet = (id, rec) => sessionStore.projectFileGet(id, rec && rec.bytes ? { size: rec.bytes, hash: rec.hash || "" } : undefined);
+const projectFileDel = (id) => sessionStore.projectFileDel(id);
+/* Decode audio bytes (one file, or several on one context) and ALWAYS close the AudioContext — iOS caps
+ * how many can be open, so a context leaked by a failed decode made every later decode fail until the
+ * page was reloaded (audit 2026-11-18 m4). Returns AudioBuffers; they stay usable after the close. */
+async function decodeAudioBytes(list) {
+  const AC = typeof window !== "undefined" && (window.AudioContext || window.webkitAudioContext);
+  if (!AC) throw new Error("Web Audio isn't available in this browser.");
+  const one = !Array.isArray(list), abs = one ? [list] : list, ctx = new AC(), out = [];
+  try {
+    for (const ab of abs) out.push(await new Promise((res, rej) => { const p = ctx.decodeAudioData(ab, res, rej); if (p && p.then) p.then(res, rej); }));
+  } finally { try { const c = ctx.close(); if (c && c.catch) c.catch(() => {}); } catch (_) { /* already closed */ } }
+  return one ? out[0] : out;
 }
 /* Hand a file to the share sheet (iOS / Android / desktop Safari), else download it. */
 async function shareOrDownload(data, filename, mime) {
@@ -1851,9 +1940,9 @@ function LibraryPanel({ C, onOpen, currentId }) {
   const byId = useMemo(() => new Map((recs || []).map((r) => [r.id, r])), [recs]);
   const editTags = async (r) => { const v = window.prompt("Tags (comma separated)", r.tags.join(", ")); if (v == null) return; await projectPut(makeProjectRecord({ ...r, tags: v.split(",") , createdAt: r.createdAt })); refresh(); };
   const rename = async (r) => { const v = window.prompt("Title", r.title); if (!v) return; await projectPut({ ...r, title: v.slice(0, 200), updatedAt: Date.now() }); refresh(); };
-  const dup = async (r) => { const b = await projectFileGet(r.id); const n = makeProjectRecord({ ...r, id: undefined, title: r.title + " (copy)", createdAt: undefined }); if (b) await projectFilePut(n.id, b); await projectPut(n); refresh(); };
+  const dup = async (r) => { const b = await projectFileGet(r.id, r); const n = makeProjectRecord({ ...r, id: undefined, title: r.title + " (copy)", createdAt: undefined }); if (b) await projectFilePut(n.id, b); await projectPut(n); refresh(); };
   const del = async (r) => { if (!window.confirm(`Delete “${r.title}” from the library? Its file is removed from this device.`)) return; await projectDel(r.id); await projectFileDel(r.id); for (const s of sets) if (s.items.some((it) => it.projectId === r.id)) await setlistPut(setlistPrune(s, (recs || []).filter((x) => x.id !== r.id).map((x) => x.id))); refresh(); };
-  const bundle = async (r) => { const b = await projectFileGet(r.id); const zip = exportProjectBundle(r, { source: b }); const how = await shareOrDownload(zip, `${r.title.replace(/[^\w.-]+/g, "_") || "project"}.ttp.zip`, "application/zip"); setMsg(how === "shared" ? "Bundle shared." : how === "downloaded" ? "Bundle saved." : ""); };
+  const bundle = async (r) => { const b = await projectFileGet(r.id, r); const zip = exportProjectBundle(r, { source: b }); const how = await shareOrDownload(zip, `${r.title.replace(/[^\w.-]+/g, "_") || "project"}.ttp.zip`, "application/zip"); setMsg(how === "shared" ? "Bundle shared." : how === "downloaded" ? "Bundle saved." : ""); };
   const importBundle = async (e) => {
     const f = e.target.files && e.target.files[0]; e.target.value = ""; if (!f) return;
     try { const { project, source } = await importProjectBundle(new Uint8Array(await f.arrayBuffer())); if (source) await projectFilePut(project.id, source.bytes); await projectPut(project); setMsg(`Imported “${project.title}”.`); refresh(); }
@@ -2049,7 +2138,7 @@ function LyricsSheetView({ C, score, title, overrides, playKey, getAudio, getBuf
     try {
       const ev = audio && audio.samples ? { samples: audio.samples, sampleRate: audio.sr } : null;
       const args = [parsed, score, ev, { bpm: score.tempo }];
-      let m; try { m = await _engineRPC("alignLyrics", args); } catch (_) { m = alignLyrics(...args); }
+      const m = await _offThread("alignLyrics", args, () => alignLyrics(...args));
       setMap(m); setEditing(false); setSel(-1);
       if (!m.lines.length) setErr("No lyric lines found in that text.");
     } catch (e) { setErr("Alignment failed."); }
@@ -2212,7 +2301,7 @@ function PracticePlayer({ C, score, getBuffer, bpm, onPlayKey }) {
     if (rate !== 1 || pitch) {
       setStatus(`rendering ${speed}%${pitch ? ` · ${pitch > 0 ? "+" : ""}${pitch} st` : ""}…`);
       const args = [chs, sr, rate, { pitchSemitones: pitch }];
-      try { chs = await _engineRPC("timeStretchChannels", args); } catch (_) { chs = timeStretchChannels(...args); }
+      chs = await _offThread("timeStretchChannels", args, () => timeStretchChannels(...args));
     }
     const first = region.bars[0], lead = countIn ? (countIn * first.beats * first.beatSec) / rate : 0;
     const body = chs[0].length, total = Math.round(lead * sr) + body;
@@ -2686,7 +2775,7 @@ function NoteEditorView({ score, edit, setEdit, C, useSharp, playKey, getAudio, 
     setSpec({ busy: true });
     try {
       const args = [a.samples, a.sr, score, { bpm, minMidi: lo, maxMidi: hi, colTicks: 60 }];
-      let sp; try { sp = await _engineRPC("noteRollSpectrogram", args); } catch (_) { sp = noteRollSpectrogram(...args); }
+      let sp; try { sp = await _offThread("noteRollSpectrogram", args, () => noteRollSpectrogram(...args)); } catch (_) { sp = null; }
       const url = _neSpecImage(sp);
       setSpec(url ? { url, ...sp, data: null } : { err: "Couldn't draw the spectrogram." });
     } catch (_) { setSpec({ err: "Couldn't analyse the recording." }); }
@@ -3826,7 +3915,7 @@ function _scanGrey(canvas) {
   return { data, width, height, preview: canvas.toDataURL("image/jpeg", 0.82) };
 }
 async function _scanPdfPages(bytes) {
-  const pdf = await window.pdfjsLib.getDocument({ data: bytes }).promise, out = [], vecs = [];
+  const pdf = await openPdfDocument(bytes), out = [], vecs = [];
   for (let i = 1; i <= Math.min(pdf.numPages, SCAN_MAX_PAGES); i++) {
     const pg = await pdf.getPage(i), v1 = pg.getViewport({ scale: 1 });
     const vp = pg.getViewport({ scale: Math.min(4, 1500 / v1.width) });
@@ -4828,33 +4917,35 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
     }, 30);
   };
 
-  const resetFor = (label) => { setErr(""); setName(label); setLinkRes(null); setSongKey(""); readRef.current = { ...readRef.current, songKey: "" }; setBusy(true); setRaw([]); setTracked(null); bg.reset(); setOverrides({}); setAb(null); setMlNotes(null); setGtrNotes(null); setDrumRes(null); setDrumLike(null); setVoiceIdx(0); setSections([]); ref.current.mlRaw = null; stopPlay(); };
+  const loadSeq = useRef(0); // m7: each new file/capture supersedes any decode still in flight
+  const resetFor = (label) => { ++loadSeq.current; setErr(""); setName(label); setLinkRes(null); setSongKey(""); readRef.current = { ...readRef.current, songKey: "" }; setBusy(true); setRaw([]); setTracked(null); bg.reset(); setOverrides({}); setAb(null); setMlNotes(null); setGtrNotes(null); setDrumRes(null); setDrumLike(null); setVoiceIdx(0); setSections([]); ref.current.mlRaw = null; stopPlay(); };
   const onFile = async (e) => {
     const f = e.target.files && e.target.files[0]; if (!f) return;
     resetFor(f.name);
+    const seq = loadSeq.current;
     try {
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) { setErr("Web Audio isn't available in this browser."); setBusy(false); return; }
       const ab = await f.arrayBuffer();
       const kept = new Uint8Array(ab.slice(0));                        // decodeAudioData may detach `ab`
-      const dctx = new AC();
-      const audioBuf = await new Promise((res, rej) => { const p = dctx.decodeAudioData(ab, res, rej); if (p && p.then) p.then(res, rej); });
-      try { dctx.close(); } catch (_) {}
+      const audioBuf = await decodeAudioBytes(ab);
+      if (seq !== loadSeq.current) return;                             // a later file was picked meanwhile
       if (onLoaded) { try { onLoaded(f, kept, audioBuf.duration); } catch (_) {} }
       // a file named like a drum stem ("Song - Drums.mp3", Demucs' "drums.wav") opens in 🥁 Drums
       const asDrums = stemRoleFromName(f.name) === "drums";
       if (asDrums) setKind("drums");
-      await loadBuffer(audioBuf, asDrums ? "drums" : null);
-    } catch (_) { setErr("Couldn't decode audio from that file — try an audio file, or a video that has an audio track."); setBusy(false); }
+      await loadBuffer(audioBuf, asDrums ? "drums" : null, seq);
+    } catch (_) { if (seq === loadSeq.current) { setErr("Couldn't decode audio from that file — try an audio file, or a video that has an audio track."); setBusy(false); } }
   };
   // a library project (WO-6) handed in: the same path as a picked file
   useEffect(() => { if (incoming && incoming.bytes && typeof File !== "undefined") onFile({ target: { files: [new File([incoming.bytes], incoming.name || "audio")] } }); }, [incoming && incoming.n]); // eslint-disable-line
   /* Live capture → the SAME pipeline as an uploaded file (see LiveCapture). */
   const onCaptured = async (audioBuf, label) => {
     resetFor(label);
-    try { await loadBuffer(audioBuf); } catch (_) { setErr("Couldn't analyse that recording."); setBusy(false); }
+    const seq = loadSeq.current;
+    try { await loadBuffer(audioBuf, null, seq); } catch (_) { if (seq === loadSeq.current) { setErr("Couldn't analyse that recording."); setBusy(false); } }
   };
-  const loadBuffer = async (audioBuf, kOverride) => {
+  const loadBuffer = async (audioBuf, kOverride, seq) => {
     const chs = audioBuf.numberOfChannels;
     const factor = Math.max(1, Math.floor(audioBuf.sampleRate / TARGET));
     const sr = audioBuf.sampleRate / factor;
@@ -4864,6 +4955,7 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
     const l = audioBuf.getChannelData(0);
     const L16 = await resampleOffThread(l, audioBuf.sampleRate, sr);
     const R16 = chs >= 2 ? await resampleOffThread(audioBuf.getChannelData(1), audioBuf.sampleRate, sr) : L16;
+    if (seq != null && seq !== loadSeq.current) return;
     const mono = new Float32Array(L16.length);
     for (let i = 0; i < L16.length; i++) mono[i] = (L16[i] + R16[i]) / 2;
     ref.current = { audioBuf, L16, R16, mono, sr, stereo: chs >= 2 };
@@ -5001,7 +5093,7 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
     let live = true;
     (async () => {
       const args = [ref.current.mono, ref.current.sr, gtrNotes];
-      let out; try { out = await _engineRPC("detectGuitarTechniques", args); } catch (_) { try { out = detectGuitarTechniques(...args); } catch (_) { out = null; } }
+      let out; try { out = await _offThread("detectGuitarTechniques", args, () => detectGuitarTechniques(...args)); } catch (_) { out = null; }
       if (live && out) setGtrTechNotes(out);
     })();
     return () => { live = false; };
@@ -5882,14 +5974,8 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, reading
     const files = Array.from((e.target && e.target.files) || []); if (!files.length) return;
     stop(); setErr(""); setRes(null); setBusy("Decoding stems…");
     try {
-      const AC = window.AudioContext || window.webkitAudioContext; const ctx = new AC();
-      const decoded = [];
-      for (const f of files) {
-        const ab = await f.arrayBuffer();
-        const buf = await new Promise((res2, rej) => { const p = ctx.decodeAudioData(ab, res2, rej); if (p && p.then) p.then(res2, rej); });
-        decoded.push({ f, buf });
-      }
-      try { ctx.close(); } catch (_) {}
+      const abs = []; for (const f of files) abs.push(await f.arrayBuffer());
+      const decoded = (await decodeAudioBytes(abs)).map((buf, i) => ({ f: files[i], buf }));
       const sr = decoded[0].buf.sampleRate;
       const list = [];
       for (const { f, buf } of decoded) {

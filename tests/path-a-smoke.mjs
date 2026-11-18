@@ -2326,12 +2326,32 @@ for (const [name, code] of [["engine.tsx", engineSrc], ["TabDecoderPro.tsx", uiS
 }
 expect(!transpileErr, `source must transpile with the index.html Babel presets — ${transpileErr}`);
 
+/* SECURITY (audit 2026-11-18 C1, CVE-2024-4367): PDF.js < 4.2.67 runs script from a crafted font when
+ * isEvalSupported is left at its default. Every shipped source that opens a PDF must go through the one
+ * hardened opener; no other getDocument( call may exist anywhere in the app. */
+{
+  const shipped = fs.readdirSync(repo).filter((f) => /\.(tsx|js|mjs|html)$/.test(f));
+  const direct = [];
+  for (const f of shipped) {
+    const src = fs.readFileSync(path.join(repo, f), "utf8");
+    const calls = src.match(/getDocument\s*\(/g) || [];
+    for (const m of src.matchAll(/getDocument\s*\(([^)]*)\)/g)) if (!/isEvalSupported:\s*false/.test(m[1])) direct.push(`${f}: ${m[0]}`);
+    if (calls.length && f !== "TabDecoderPro.tsx") direct.push(`${f}: opens PDFs outside the hardened opener`);
+  }
+  expect(direct.length === 0, `every PDF.js getDocument call must pass isEvalSupported: false — ${direct.join("; ")}`);
+  expect((uiSrc.match(/getDocument\s*\(/g) || []).length === 1 && /function openPdfDocument\(data\)/.test(uiSrc), "the UI opens PDFs through exactly one hardened function (openPdfDocument)");
+  expect(!/pdfjsLib\.getDocument\(\{\s*data:\s*\w+\s*\}\)/.test(uiSrc), "no default-options getDocument call remains");
+}
+
 /* Session persistence (Wave 1 #2) contract — browser-only (OPFS + base64), so
  * statically guard the safety rails: OPFS is feature-detected, persistence is
  * wrapped in try/catch, there's a localStorage fallback, restore is one-shot,
  * and the engine stays free of any persistence concern (it's pure). */
-expect(/navigator\.storage/.test(uiSrc) && /getDirectory/.test(uiSrc), "UI must feature-detect OPFS (navigator.storage.getDirectory)");
-expect(/SESS_BIN_LS|localStorage/.test(uiSrc) && /_bytesToB64|btoa/.test(uiSrc), "UI must have a localStorage base64 fallback when OPFS is unavailable");
+// since the 2026-11-18 audit the byte-storage rules live in session-store.js and are tested behaviourally
+// (tests/session-store.mjs, against Safari-18 / Safari-26 / failing-OPFS mocks); these stay as cheap tripwires
+const storeSrc = fs.readFileSync(path.join(repo, "session-store.js"), "utf8");
+expect(/navigator\.storage/.test(storeSrc) && /getDirectory/.test(storeSrc) && /FileSystemFileHandle\.prototype\.createWritable/.test(storeSrc), "the session store feature-detects OPFS AND main-thread createWritable");
+expect(/SESS_BIN_LS/.test(storeSrc) && /btoa/.test(storeSrc) && /SESS_BIN_IDB/.test(storeSrc), "the session store has IndexedDB and localStorage fallbacks when OPFS can't be written");
 expect(/restoreRef/.test(uiSrc) && /catch\s*\(/.test(uiSrc), "session restore must be one-shot (ref-guarded) and wrapped in try/catch");
 expect(!/navigator\.storage/.test(engineSrc) && !/localStorage/.test(engineSrc), "engine.tsx must stay free of persistence/browser-storage concerns");
 
@@ -2708,11 +2728,11 @@ console.log(synhSummary);
 
 /* ---- UI contract guards for the two features (static, like the module split) -- */
 expect(/function KeyPicker\(/.test(uiSrc) && /<KeyPicker\b/.test(uiSrc), "the UI ships a key picker");
-expect(/keyOverride/.test(uiSrc) && (/saveSessionMeta\(\{[^}]*keyOverride/.test(uiSrc) || /const meta = \{[^}]*keyOverride[^}]*\};\s*saveSessionMeta\(meta\)/.test(uiSrc)),
+expect(/keyOverride/.test(uiSrc) && (/saveSessionMeta\(\{[^}]*keyOverride/.test(uiSrc) || /const meta = \{[^}]*keyOverride[^}]*\};[\s\S]{0,200}saveSessionMeta\(\{ \.\.\.meta, file:/.test(uiSrc)),
   "a manual key correction is persisted in the session meta (a corrected chart must restore corrected)");
 expect(/function SectionEditor\(/.test(uiSrc) && /<SectionEditor\b/.test(uiSrc), "the UI ships an editable section list");
-expect(/detectSectionsOffThread/.test(uiSrc) && /catch \(_\) \{ return detectSections\(samples, sr, opts\); \}/.test(uiSrc),
-  "section detection runs off-thread with a main-thread fallback (correctness never depends on the worker)");
+expect(/detectSectionsOffThread/.test(uiSrc) && /_offThread\("detectSections", \[samples, sr, opts\], \(\) => detectSections\(samples, sr, opts\)\)/.test(uiSrc),
+  "section detection runs off-thread with a main-thread fallback when no worker exists (correctness never depends on the worker)");
 expect(/applySectionsToScore\(sc, sections/.test(uiSrc), "the edited section list is stamped onto the chart, so exports carry it");
 expect(/src\.start\(0, at\)/.test(uiSrc), "the stem player can seek, so a section row can jump to its start");
 
@@ -2733,7 +2753,7 @@ expect(/mode === "lyrics" \? <LyricsPanel\b/.test(uiSrc), "the Lyrics mode rende
 
 /* SynHarmonics v2 UI glue — the decoder is the pure engine (tested above); the UI only
  * resamples properly, routes to the default (v2) entry point, and surfaces uncertainty. */
-expect(/resampleOffThread/.test(uiSrc) && /catch \(e\) \{ if \(_detached\(samples\)\) throw e; return resampleTo\(samples, srIn, srOut\); \}/.test(uiSrc),
+expect(/resampleOffThread/.test(uiSrc) && /_offThread\("resampleTo", \[samples, srIn, srOut\], \(\) => resampleTo\(samples, srIn, srOut\), transfer \? \[samples\.buffer\] : undefined\)/.test(uiSrc),
   "the decode resamples with the anti-aliased resampleTo (off-thread, main-thread fallback)");
 expect(!/const dsChan = \(d\) =>/.test(uiSrc), "the box-average decimator (aliasing) is gone from the decode path");
 expect(/function ChordReview\(/.test(uiSrc) && /<ChordReview\b/.test(uiSrc), "the Audio panel ships the uncertain-chord review strip (v2 §7 overlay)");
@@ -2765,7 +2785,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   expect(/<script type="module" src="\.\/stem-model\.js"><\/script>/.test(html), "index.html loads stem-model.js");
   expect(/cp stem-model\.js stem-model-core\.js stem-worker\.js _site\//.test(pages) && /cp vendor\/neural-separate\.mjs vendor\/NOTICE-neural-separate\.txt _site\/vendor\//.test(pages), "Pages ships the separator files");
   const sp = uiSrc.slice(uiSrc.indexOf("function StemsPanel("), uiSrc.indexOf("function ChordReview("));
-  expect(/<StemsPanel\b/.test(uiSrc) && /chartsFromStemsOffThread/.test(sp) && /if \(Object\.values\(stems\)\.some\(_detached\)\) throw e; return chartsFromStems\(stems, sr, opts\); \}/.test(uiSrc), "the Stems panel charts off-thread with a main-thread fallback (unless its buffers were already handed over)");
+  expect(/<StemsPanel\b/.test(uiSrc) && /chartsFromStemsOffThread/.test(sp) && /_offThread\("chartsFromStems", \[stems, sr, opts\], \(\) => chartsFromStems\(stems, sr, opts\), bufs\)/.test(uiSrc), "the Stems panel charts off-thread with a main-thread fallback (unless its buffers were already handed over)");
   expect(/<input type="file" multiple onChange=\{importStems\}/.test(sp) && !/<input type="file" multiple[^>]*accept=/.test(sp), "stem import takes several files and has NO accept filter (iOS UTI lesson)");
   expect(/stemRoleFromName\(f\.name\)/.test(sp) && /encodeWav16\(/.test(sp) && /drumHitsToMidi\(/.test(sp), "roles come from file names; every stem downloads as WAV; drums as MIDI");
   expect(/fullRate: drumsFull \? \{ drums: drumsFull, sampleRate: sr \}/.test(sp), "drums are transcribed from the FULL-rate stem (hats live above the analysis Nyquist)");
@@ -2779,7 +2799,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   expect(/<LiveCapture\b/.test(uiSrc) && /md\.getDisplayMedia/.test(lc) && /md\.getUserMedia/.test(lc), "live capture offers tab audio (getDisplayMedia) and the microphone");
   expect(/const canTab = !!\(md && md\.getDisplayMedia\)/.test(lc) && /if \(!canTab && !canMic\) return null;/.test(lc), "capture is feature-detected (hidden where the browser can't do it)");
   expect(/echoCancellation: false, noiseSuppression: false, autoGainControl: false/.test(lc), "capture asks for RAW audio (no voice-call processing on music)");
-  expect(/onCaptured\(buf,/.test(lc) && /const onCaptured = async \(audioBuf, label\)/.test(uiSrc) && /await loadBuffer\(audioBuf\)/.test(uiSrc), "a capture enters the same pipeline as an uploaded file");
+  expect(/onCaptured\(buf,/.test(lc) && /const onCaptured = async \(audioBuf, label\)/.test(uiSrc) && /await loadBuffer\(audioBuf, null, seq\)/.test(uiSrc), "a capture enters the same pipeline as an uploaded file");
   expect(/DRM-protected/.test(lc) && /MAX_SEC/.test(lc), "a silent (DRM) take is explained, and capture stops itself at a limit");
   expect(!/youtube\.com\/watch|ytdl|yt-dlp|googlevideo/i.test(uiSrc + sm + core), "no stream-ripping code: links are not downloaded, playback is captured");
 }

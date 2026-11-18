@@ -630,7 +630,7 @@ section("WO-6 library");
 
 { /* WO-6 UI contracts */
   expect(/function LibraryPanel\(/.test(uiSrc) && /\["library", "Library/.test(uiSrc) && /indexedDB/.test(uiSrc), "UI ships a Library mode on IndexedDB");
-  expect(/navigator\.storage/.test(uiSrc) && /projectFilePut/.test(uiSrc), "project bytes go to OPFS (IndexedDB fallback)");
+  expect(/sessionStore\.projectFilePut/.test(uiSrc) && /async function projectFilePut[\s\S]{0,400}opfsWrite\("projects"[\s\S]{0,200}files\.put\(id, bytes\)/.test(fs.readFileSync(path.join(repo, "session-store.js"), "utf8")), "project bytes go to OPFS (IndexedDB fallback), via session-store.js");
   expect(/function PrintSheet\(/.test(uiSrc) && /window\.print\(\)/.test(uiSrc) && /@page/.test(uiSrc), "a print view (window.print, @page setup)");
   expect(/navigator\.share/.test(uiSrc) && /canShare/.test(uiSrc), "exports can go to the share sheet");
   expect(/exportProjectBundle\(/.test(uiSrc) && /importProjectBundle\(/.test(uiSrc) && /setlistAdd\(/.test(uiSrc), "bundles + setlists wired");

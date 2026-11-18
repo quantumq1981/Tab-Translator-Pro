@@ -190,7 +190,7 @@ section("Audio panel — 🥁 Drums reads a drum recording without the chord dec
   expect(/if \(k === "drums"\) \{ runDrums\(\); return; \}/.test(ai), "Drums mode never runs the chord decoder");
   expect(/readDrumAudio\(monoOf\(b\), b\.sampleRate/.test(ai), "the drum reader gets the full-rate recording (not the 16 kHz analysis copy)");
   expect(/useModel && typeof model === "function"/.test(ui) && /drumEventsOffThread\(pcm, sr/.test(ui), "readDrumAudio: the drum model when on, else the built-in reader");
-  expect(/stemRoleFromName\(f\.name\) === "drums"/.test(ai) && /loadBuffer\(audioBuf, asDrums \? "drums" : null\)/.test(ai), "a file named like a drum stem opens in Drums mode");
+  expect(/stemRoleFromName\(f\.name\) === "drums"/.test(ai) && /loadBuffer\(audioBuf, asDrums \? "drums" : null, seq\)/.test(ai), "a file named like a drum stem opens in Drums mode");
   expect(/drumLike >= 0\.6/.test(ai) && /drumLikenessOffThread\(mono, sr\)/.test(ai) && /Read it as drums/.test(ai), "a drum-like file opened as chords gets the 🥁 Read it as drums suggestion (threshold 0.6)");
   expect(/kind !== "drums" && <button onClick=\{toggleIsolate\}/.test(ai) && /iso && s\.stereo && k !== "drums"/.test(ai), "vocal isolation is hidden and skipped in Drums mode");
   expect(/const sec2 = \(t\) => \{ const a = Math\.abs\(t\)/.test(ui), "Tempo & bars shows a bar line before 0:00 as −0:00.01 (it read -1:-0.01)");
