@@ -27,6 +27,28 @@ The family is **recognize → normalize → finish**:
 
 **This repo is the family's recognition front-end (the "recognize" stage).**
 
+### ⚠ Open audit findings (2026-11-18) — read `docs/AUDIT-2026-11-18.md` first
+
+Verdict at `1c84ce1`: **critical risks present**. Each item below is backed by a reproduction in the report. Until fixed,
+treat these as true, even where the sections further down say otherwise:
+- **C1 security:** PDF.js 3.11.174 is called with the default `isEvalSupported: true` (`TabDecoderPro.tsx:353`, `:3829`),
+  which is CVE-2024-4367 / GHSA-wgrm-67xf-hhpq. Scan mode renders untrusted PDFs, so a crafted PDF runs script in the
+  shared `quantumq1981.github.io` origin. Fix: `isEvalSupported: false`; later, pdfjs ≥ 4.2.67, **legacy** build (iPadOS 16.7).
+- **C2 data:** `createWritable` exists only in **Safari/iOS 26+**, and `getFileHandle(…, {create:true})` runs before that
+  check. On Safari 15.2–18.x this leaves a zero-length OPFS file, which shadows the localStorage/IndexedDB fallback. Session
+  restore and the whole project library read back **0 bytes** there. The "Session persistence" section below is wrong
+  for those devices.
+- **M1:** the saved metadata and the saved bytes can describe different files: the previous file's bytes get restored
+  with the next file's edits.
+- **M2:** `_gpxReadFS` loops forever on a backward sector pointer. The decode handoff saves bytes before parsing, and
+  the restore has no in-flight marker or error boundary, so one bad file can freeze every launch.
+- **M3:** failed worker jobs are re-run on the main thread (`guitar-model.js:42`; every `*OffThread` wrapper).
+- **M4:** no SRI on any of the 4 CDNs; Babel transpiles in the browser on every launch.
+
+Measured and clean: random mutation of all 9 parser formats (600 cases) gave no hangs or OOM, and the ChartPanel render
+chain ran on 405 parsed scores with 0 throws. **Lesson:** source-regex "contract" tests passed against the broken
+persistence code. Browser glue needs behavioural tests with mocks, not presence checks.
+
 ---
 
 -----
@@ -75,6 +97,10 @@ that purity is what lets Node import it verbatim and lets it run in a Worker.
 The app is a **persistent workspace**: close the tab, reopen, your chart + edits
 are back. Lives entirely in `TabDecoderPro.tsx` (browser-only; `engine.tsx` stays
 pure — guarded by a test).
+
+> **⚠ 2026-11-18 audit (C2, M1):** the fallback described here does not work on Safari/iOS 15.2–18.x. `createWritable`
+> exists only in Safari 26+, and the empty OPFS file created before that check shadows the fallback copy. Separately,
+> the metadata isn't tied to the bytes it describes. See `docs/AUDIT-2026-11-18.md`.
 
 - **What's cached:** the uploaded file's **raw bytes** (OPFS file `session.bin`
   via `navigator.storage.getDirectory()` — quota-free; falls back to a base64
