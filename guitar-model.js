@@ -16,6 +16,11 @@
 const BUILD_QS = (() => { try { return new URL(import.meta.url).search; } catch (_) { return ""; } })();
 const WORKER_URL = new URL("./guitar-worker.js" + BUILD_QS, import.meta.url);
 const CORE_URL = new URL("./guitar-model-core.js" + BUILD_QS, import.meta.url).href;
+const JOB_URL = new URL("./model-job.js" + BUILD_QS, import.meta.url).href;
+// one job at a time, with Cancel + a stall watch (audit 2026-11-18 m6; see model-job.js)
+let _jobs = null;
+const jobs = async () => _jobs || (_jobs = (await import(/* @vite-ignore */ JOB_URL)).createJobRunner("guitar transcription"));
+export function cancelGuitar() { return _jobs ? _jobs.cancel() : false; }
 
 async function onMainThread(pcm, engineUrl, opts) {
   const [core, engine] = await Promise.all([import(/* @vite-ignore */ CORE_URL), import(/* @vite-ignore */ engineUrl)]);
@@ -31,15 +36,13 @@ async function transcribeGuitarAudio(pcm16k, opts = {}) {
   try { w = new Worker(WORKER_URL, { type: "module" }); } catch (_) { w = null; }
   if (!w) return onMainThread(pcm, engineUrl, opts);
   try {
-    return await new Promise((resolve, reject) => {
-      w.onmessage = (ev) => {
-        const m = ev.data || {};
-        if (m.type === "progress") { if (opts.onProgress) opts.onProgress(m.done, m.total); return; }
-        if (m.type === "result") resolve(m.onset ? { notes: m.notes, onset: m.onset } : { notes: m.notes });
-        else reject(new Error(m.message || "guitar transcription failed"));
-      };
-      w.onerror = (e) => reject(new Error((e && e.message) || "guitar worker crashed"));
-      w.postMessage({ id: 1, pcm, engineUrl, keepOnset: !!opts.keepOnset }, [pcm.buffer]);
+    return await (await jobs()).run(w, { id: 1, pcm, engineUrl, keepOnset: !!opts.keepOnset }, [pcm.buffer], {
+      onStall: opts.onStall,
+      onMessage: (m) => {
+        if (m.type === "progress") { if (opts.onProgress) opts.onProgress(m.done, m.total); return null; }
+        if (m.type === "result") return { result: m.onset ? { notes: m.notes, onset: m.onset } : { notes: m.notes } };
+        return { error: new Error(m.message || "guitar transcription failed") };
+      },
     });
   } finally {
     try { w.terminate(); } catch (_) { /* gone */ }
@@ -47,5 +50,5 @@ async function transcribeGuitarAudio(pcm16k, opts = {}) {
 }
 
 try {
-  if (typeof window !== "undefined") window.TTP_GUITAR_MODEL = transcribeGuitarAudio;
+  if (typeof window !== "undefined") window.TTP_GUITAR_MODEL = transcribeGuitarAudio; transcribeGuitarAudio.cancel = cancelGuitar;
 } catch (_) { /* never wedge boot */ }

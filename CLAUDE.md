@@ -27,23 +27,37 @@ The family is **recognize → normalize → finish**:
 
 **This repo is the family's recognition front-end (the "recognize" stage).**
 
-### ⚠ Open audit findings (2026-11-18) — read `docs/AUDIT-2026-11-18.md` first
+### Audit 2026-11-18 — fixed (PR #157 + the follow-up); read `docs/AUDIT-2026-11-18.md` for the evidence
 
-Verdict at `1c84ce1`: **critical risks present**. Each item below is backed by a reproduction in the report. Until fixed,
-treat these as true, even where the sections further down say otherwise:
-- **C1 security:** PDF.js 3.11.174 is called with the default `isEvalSupported: true` (`TabDecoderPro.tsx:353`, `:3829`),
-  which is CVE-2024-4367 / GHSA-wgrm-67xf-hhpq. Scan mode renders untrusted PDFs, so a crafted PDF runs script in the
-  shared `quantumq1981.github.io` origin. Fix: `isEvalSupported: false`; later, pdfjs ≥ 4.2.67, **legacy** build (iPadOS 16.7).
-- **C2 data:** `createWritable` exists only in **Safari/iOS 26+**, and `getFileHandle(…, {create:true})` runs before that
-  check. On Safari 15.2–18.x this leaves a zero-length OPFS file, which shadows the localStorage/IndexedDB fallback. Session
-  restore and the whole project library read back **0 bytes** there. The "Session persistence" section below is wrong
-  for those devices.
-- **M1:** the saved metadata and the saved bytes can describe different files: the previous file's bytes get restored
-  with the next file's edits.
-- **M2:** `_gpxReadFS` loops forever on a backward sector pointer. The decode handoff saves bytes before parsing, and
-  the restore has no in-flight marker or error boundary, so one bad file can freeze every launch.
-- **M3:** failed worker jobs are re-run on the main thread (`guitar-model.js:42`; every `*OffThread` wrapper).
-- **M4:** no SRI on any of the 4 CDNs; Babel transpiles in the browser on every launch.
+The audit at `1c84ce1` found critical risks. All of C1–M4 and m1–m10 are fixed; these rules now hold — don't regress them:
+- **PDF.js** is **4.10.38, legacy build, same-origin** (`vendor/pdfjs-4.10.38/`, SHA-256 pinned; CVE-2024-4367 fixed,
+  runs on iPadOS 16.7). Every load goes through `openPdfDocument` (`isEvalSupported: false`, `enableXfa: false`);
+  `npm test` fails on any other `getDocument(` call. Measured before switching: all 5 repo PDFs give identical text tokens,
+  operator-list vectors, Path A chart and Scan text-layer pages under 3.11.174 and 4.10.38.
+- **Storage** lives in **`session-store.js`** (plain ES, injected backends, served by the loader like the engine):
+  `createWritable` is checked BEFORE a file handle is created; a 0-byte OPFS file counts as absent and is swept once
+  per launch; empty bytes are never saved or opened; order OPFS → IndexedDB (`__session__`) → localStorage (≤ 1.2 MB,
+  last resort). **Bytes first, then metadata** carrying `{ size, sha256 }`; a new save removes the old metadata and
+  the other stores' copies; mismatched bytes reopen WITHOUT their edits ("…edits belonged to a different file").
+  Library projects dedupe on `hash`. Tested against Safari-18 / Safari-26 / failing-OPFS / quota / kill-mid-save
+  mocks (`tests/session-store.mjs`, which first reproduces both audit failures on the OLD helpers).
+- **One bad file can't wedge launches:** `_gpxReadFS` throws on a revisited entry (byte-identical for the 7 corpus
+  `.gpx`), `.gpx` size caps 64 MB; the decode handoff keeps bytes only after they parse; `ttp:restore:inflight`
+  turns a restore that died into "Restore anyway / Start fresh"; `AppErrorBoundary` wraps the app.
+- **Off-thread policy (`_offThread`):** the main-thread fallback runs ONLY when no worker exists. Engine errors and
+  worker crashes are reported, never re-run on the page; the engine worker posts `ready` (an error before it =
+  can't start → fall back; after = crash → report, restart on the next call). No model loader retries on the page.
+- **No third-party host on the boot path:** React 18.3.1 (UMD, `vendor/react-18.3.1/`) via an ESM shim; ONNX Runtime
+  1.23.2 (`vendor/onnxruntime-web-1.23.2/`); deploys are **transpiled at deploy time** (`scripts/build_app.mjs` →
+  `build/`, `window.__TTP_BUILD__` stamped) so Babel is never downloaded; the dev path loads Babel with SRI. Test deps
+  are pinned exactly with a committed lockfile (`npm ci`). Still third-party, lazily, by design: basic-pitch/TF.js
+  (esm.sh, Voices (ML) only), the full SCNet weights (Hugging Face, pinned revision + SHA-256), ORT 1.30.0 for WebGPU
+  on non-WebKit only, Google Fonts (cosmetic).
+- **Model jobs** (guitar / beat / drum / chord reader) run through `model-job.js`: ✕ Cancel and a stall note after
+  max(3 min, 4× the longest progress gap). Model weights load through the ONE `modelBytes` (stem-model-core.js),
+  keyed and fetched as `?sha=<pin>` (a `#fragment` versioned nothing). Audio decodes close their `AudioContext`;
+  uploads carry latest-request counters; the Pro handoff (`writeProHandoff`) trims MusicXML, then `parts[]`, then
+  tells the user instead of failing silently.
 
 Measured and clean: random mutation of all 9 parser formats (600 cases) gave no hangs or OOM, and the ChartPanel render
 chain ran on 405 parsed scores with 0 throws. **Lesson:** source-regex "contract" tests passed against the broken
@@ -80,9 +94,11 @@ The app is now **two files**, split along the seam that already existed:
   `import { … } from "./engine.tsx"` — importing the *full* engine surface, so
   every call site resolves exactly as when this was one file.
 
-**`index.html` (zero-build loader):** fetches both files, Babel-transpiles each
-in-browser, publishes the engine at a Blob URL, and rewrites the UI's
-`from "./engine.tsx"` to that URL before transpiling the UI. App **boot** is the
+**`index.html` (loader, two paths since the 2026-11-18 audit):** the DEPLOYED page imports `build/app.js` (transpiled
+once by `scripts/build_app.mjs` in `pages.yml`; `window.__TTP_BUILD__` stamped). The DEVELOPMENT page (repo served as is)
+fetches the sources, loads Babel (SRI-pinned), Babel-transpiles in-browser, publishes the engine and `session-store.js`
+at Blob URLs, and rewrites EVERY `from "./engine.tsx"` / `"./session-store.js"` / `"react"` import (React = the vendored
+UMD behind an ESM shim). App **boot** is the
 one thing not headlessly testable (same category as the PDF.js worker glue) —
 smoke-test on hardware after touching the loader. `npm test` statically guards
 the contract boot depends on: every imported name is exported, the engine stays
@@ -98,9 +114,10 @@ The app is a **persistent workspace**: close the tab, reopen, your chart + edits
 are back. Lives entirely in `TabDecoderPro.tsx` (browser-only; `engine.tsx` stays
 pure — guarded by a test).
 
-> **⚠ 2026-11-18 audit (C2, M1):** the fallback described here does not work on Safari/iOS 15.2–18.x. `createWritable`
-> exists only in Safari 26+, and the empty OPFS file created before that check shadows the fallback copy. Separately,
-> the metadata isn't tied to the bytes it describes. See `docs/AUDIT-2026-11-18.md`.
+> **Since the 2026-11-18 audit** the byte storage is `session-store.js` (see the audit block at the top): OPFS only where
+> the main thread can write it, else IndexedDB, else small-file localStorage, and the metadata is bound to the bytes by
+> `{ size, sha256 }`. The bullets below describe the original design; where they say "localStorage fallback ≤ 3 MB",
+> read that rule instead.
 
 - **What's cached:** the uploaded file's **raw bytes** (OPFS file `session.bin`
   via `navigator.storage.getDirectory()` — quota-free; falls back to a base64
@@ -3901,9 +3918,9 @@ Note: the source is now **two files** — `engine.tsx` (pure engine) and
 `.txt` mirrors of each sit in the repo root. (This doc historically said `.jsx`
 and "single file"; both are superseded.)
 
-PDF.js is loaded from cdnjs (`pdf.min.js` 3.11.174 + matching worker). If you
-move to a bundler, switch to the npm `pdfjs-dist` package and set `workerSrc`
-accordingly.
+PDF.js is vendored same-origin: `vendor/pdfjs-4.10.38/` (the npm legacy build, imported as an ES module and
+published as `window.pdfjsLib`; see the audit block at the top). The headless harness still reads with npm
+`pdfjs-dist@3.11.174` as an independent reference; `tests/pdfjs-vendored.mjs` re-reads Blue Sky with the shipped file.
 
 -----
 
@@ -4128,6 +4145,13 @@ accordingly.
   chorales (soprano every time, exact round trip on the 336 on a 16th grid, the 2 with 32nds
   flagged `offGrid`). Mutation-tested (held-note rule, choir rule). The export writes added degrees with
   `print-object="no"` (the kind text already spells them; verovio 6.4.1 ignores it and prints "7sus4(b7)").
+- **Audit 2026-11-18** (`npm test`): `tests/session-store.mjs` (storage rules vs Safari-18 / Safari-26 / failing-OPFS /
+  quota / kill-mid-save mocks, after reproducing both audit failures on the old helpers), `tests/audit-2026-11-18.mjs`
+  (looping `.gpx` fails closed + corpus byte-identical, `_offThread` run with fake RPCs, decode save-after-parse, restore
+  marker, error boundary, `model-job.js` cancel/stall, `writeProHandoff` under a quota), `tests/pdfjs-vendored.mjs`
+  (the shipped PDF.js reads Blue Sky; every vendored file matches its SHA-256; no third-party host on the boot path;
+  the deploy build's imports are same-origin). Real browser: `bench/persistence-e2e.mjs`, `bench/deployed-e2e.mjs`
+  (the site exactly as `pages.yml` assembles it, every non-site request blocked), `bench/cancel-e2e.mjs`.
 - **Lyrics import (`parseLyrics`)**: `npm test` asserts the strict chord matcher accepts
   real chords and rejects note-letter lyric words (Add/Cab/Bad/Fed/Gem/Bee/Ace), the
   line-level `isChordLine` catches chord lines but spares lyric/blank lines, a full

@@ -1,0 +1,10 @@
+React 18.3.1 + ReactDOM 18.3.1 (MIT, Meta Platforms, Inc.) — npm react@18.3.1 umd/react.production.min.js
+and react-dom@18.3.1 umd/react-dom.production.min.js, unmodified. Licence: LICENSE-react.
+
+Served same-origin since the 2026-11-18 audit (docs/AUDIT-2026-11-18.md, M4) instead of esm.sh, which
+built the bundles on its own server: no CDN can stop the app from starting or run code in this origin.
+index.html loads both as classic scripts (window.React / window.ReactDOM, one instance) and gives the
+app's `import … from "react"` an ESM shim over window.React (generated in the dev loader; shipped as
+build/react-shim.js by scripts/build_app.mjs). SHA-256 (checked by npm test):
+  react.production.min.js       d949f1c3687aedadcedac85261865f29b17cd273997e7f6b2bfc53b2f9d4c4dd
+  react-dom.production.min.js   35f4f974f4b2bcd44da73963347f8952e341f83909e4498227d4e26b98f66f0d

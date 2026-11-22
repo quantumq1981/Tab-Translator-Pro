@@ -29,10 +29,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-      # tests/ has no lockfile (the app itself is zero-dependency), so use
-      # `npm install` rather than `npm ci`.
+      # tests/package-lock.json pins every test dependency (audit 2026-11-18 m8: reproducible CI).
       - name: Install test deps
-        run: npm install
+        run: npm ci
         working-directory: tests
       - name: Run tests
         run: npm test
@@ -46,6 +45,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # the deploy-time transpile (scripts/build_app.mjs) uses tests/'s pinned @babel/standalone
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install build deps
+        run: npm ci
+        working-directory: tests
 
       - name: Assemble site
         run: |
@@ -54,6 +61,12 @@ jobs:
           cp engine.tsx _site/
           cp TabDecoderPro.tsx _site/
           cp session-store.js _site/   # session/library byte store (the loader serves it to the UI)
+          # React 18.3.1, same-origin (audit 2026-11-18 M4): the npm release's UMD production files, SHA-256 pinned
+          mkdir -p _site/vendor/react-18.3.1
+          cp -r vendor/react-18.3.1/. _site/vendor/react-18.3.1/
+          # PDF.js 4.10.38 legacy build, same-origin (audit 2026-11-18 C1/M4: CVE-2024-4367 fixed, iPadOS 16.7-safe)
+          mkdir -p _site/vendor/pdfjs-4.10.38
+          cp -r vendor/pdfjs-4.10.38/. _site/vendor/pdfjs-4.10.38/
           # Optional ML note-transcription (Spotify basic-pitch). Ships the
           # browser-only inference glue + the vendored TF.js graph model.
           cp note-model.js _site/
@@ -66,6 +79,10 @@ jobs:
           cp stem-model.js stem-model-core.js stem-worker.js _site/
           mkdir -p _site/vendor
           cp vendor/neural-separate.mjs vendor/NOTICE-neural-separate.txt _site/vendor/
+          # ONNX Runtime Web 1.23.2 (plain WASM build), served same-origin (audit 2026-11-18 M4; SHA-256 pinned
+          # in vendor/onnxruntime-web-1.23.2/NOTICE.txt and checked by npm test). Every model core loads it.
+          mkdir -p _site/vendor/onnxruntime-web-1.23.2
+          cp -r vendor/onnxruntime-web-1.23.2/. _site/vendor/onnxruntime-web-1.23.2/
           # Low-memory (phone) SCNet: same network, 2.8 s window — served same-origin, SHA-256 pinned
           # in stem-model-core.js (scripts/scnet_reframe.py rebuilds it from the pinned upstream file).
           mkdir -p _site/models/scnet-compact
@@ -76,6 +93,7 @@ jobs:
           # Guitar note transcription (🎸 Guitar → Tab): glue + the weight-only int8 CRNN (MIT, SHA-256
           # pinned in guitar-model-core.js; scripts/guitar_crnn_export.py rebuilds it from the pinned weights).
           cp guitar-model.js guitar-model-core.js guitar-worker.js _site/
+          cp model-job.js _site/   # shared Cancel + stall watch for the guitar / beat / drum / chord-reader jobs
           mkdir -p _site/models/guitar-crnn
           cp models/guitar-crnn/guitar-gaps.w8.onnx models/guitar-crnn/NOTICE _site/models/guitar-crnn/
           # Drum transcription (stems → drums chart): glue + Magenta Onsets & Frames drums (Apache-2.0,
@@ -116,6 +134,11 @@ jobs:
           grep -q "src=\"./beat-model.js?v=${BUILD}\"" _site/index.html
           sed -i "s#src=\"./tab-view.js\"#src=\"./tab-view.js?v=${BUILD}\"#" _site/index.html
           grep -q "src=\"./tab-view.js?v=${BUILD}\"" _site/index.html
+          # Transpile once, here (audit 2026-11-18 M4): build/{engine,app,session-store,react-shim}.js and
+          # window.__TTP_BUILD__ stamped into index.html — the deployed page never downloads Babel.
+          node scripts/build_app.mjs _site "${BUILD}"
+          grep -q "window.__TTP_BUILD__ = \"${BUILD}\"" _site/index.html
+          test -s _site/build/app.js && test -s _site/build/engine.js
 
       # enablement: true turns Pages on (source = GitHub Actions) using the
       # workflow's `pages: write` permission, so no manual Settings toggle is

@@ -17,6 +17,11 @@
 const BUILD_QS = (() => { try { return new URL(import.meta.url).search; } catch (_) { return ""; } })();
 const WORKER_URL = new URL("./chord-ocr-worker.js" + BUILD_QS, import.meta.url);
 const CORE_URL = new URL("./chord-ocr-core.js" + BUILD_QS, import.meta.url).href;
+const JOB_URL = new URL("./model-job.js" + BUILD_QS, import.meta.url).href;
+// one job at a time, with Cancel + a stall watch (audit 2026-11-18 m6; see model-job.js)
+let _jobs = null;
+const jobs = async () => _jobs || (_jobs = (await import(/* @vite-ignore */ JOB_URL)).createJobRunner("chord reading"));
+export function cancelChordOcr() { return _jobs ? _jobs.cancel() : false; }
 
 async function onMainThread(pages, engineUrl, opts) {
   const [core, engine] = await Promise.all([import(/* @vite-ignore */ CORE_URL), import(/* @vite-ignore */ engineUrl)]);
@@ -32,15 +37,13 @@ async function readChordSheets(pages, opts = {}) {
   try { w = new Worker(WORKER_URL, { type: "module" }); } catch (_) { w = null; }
   if (!w) return onMainThread(pages, engineUrl, { onProgress, style });
   try {
-    return await new Promise((resolve, reject) => {
-      w.onmessage = (ev) => {
-        const m = ev.data || {};
-        if (m.type === "progress") { if (onProgress) { try { onProgress(m.done, m.total, m.page); } catch (_) {} } return; }
-        if (m.type === "result") resolve(m.result);
-        else reject(new Error(m.message || "chord reading failed"));
-      };
-      w.onerror = (e) => reject(new Error((e && e.message) || "chord reader crashed"));
-      w.postMessage({ id: 1, pages, engineUrl, style }, pages.map((p) => p.data.buffer));
+    return await (await jobs()).run(w, { id: 1, pages, engineUrl, style }, pages.map((p) => p.data.buffer), {
+      onStall: opts.onStall,
+      onMessage: (m) => {
+        if (m.type === "progress") { if (onProgress) { try { onProgress(m.done, m.total, m.page); } catch (_) {} } return null; }
+        if (m.type === "result") return { result: m.result };
+        return { error: new Error(m.message || "chord reading failed") };
+      },
     });
   } finally {
     try { w.terminate(); } catch (_) { /* gone */ }
@@ -48,5 +51,5 @@ async function readChordSheets(pages, opts = {}) {
 }
 
 try {
-  if (typeof window !== "undefined") window.TTP_CHORD_OCR = readChordSheets;
+  if (typeof window !== "undefined") window.TTP_CHORD_OCR = readChordSheets; readChordSheets.cancel = cancelChordOcr;
 } catch (_) { /* never wedge boot */ }
