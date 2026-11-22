@@ -6,7 +6,7 @@ import { createRequire } from "node:module";
 import * as L from "./lib.mjs";
 
 export const arg = (k, d) => { const i = process.argv.indexOf("--" + k); return i > 0 ? process.argv[i + 1] : d; };
-const MIME = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".tsx": "text/plain", ".json": "application/json", ".woff2": "font/woff2", ".onnx": "application/octet-stream" };
+const MIME = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".tsx": "text/plain", ".json": "application/json", ".woff2": "font/woff2", ".onnx": "application/octet-stream", ".wasm": "application/wasm" };
 export async function startApp({ deps = arg("deps"), width = 820, height = 1180, launchArgs = [], context = {} } = {}) {
   if (!deps) { console.error("--deps <dir> is required"); process.exit(2); }
   const require = createRequire(import.meta.url);

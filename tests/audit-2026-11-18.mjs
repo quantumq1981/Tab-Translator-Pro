@@ -166,5 +166,61 @@ section("m4 / m7 / m8 / m9");
   expect(/xmlSeq = useRef\(0\)/.test(ui) && /if \(seq !== xmlSeq\.current\) return/.test(ui) && /if \(seq !== pdfSeq\.current\) return/.test(ui) && /if \(seq !== loadSeq\.current\) return/.test(ui), "a slow earlier upload can't overwrite a later one (m7)");
 }
 
+section("m6 · model jobs can be cancelled and report a stall");
+{
+  const { createJobRunner } = await import(path.join(repo, "model-job.js"));
+  let clock = 0;
+  const mkWorker = () => { const w = { terminated: false, sent: null, onmessage: null, onerror: null, postMessage(m) { this.sent = m; }, terminate() { this.terminated = true; } }; return w; };
+  const jr = createJobRunner("test job", { stallMinMs: 50, tickMs: 5, now: () => clock });
+  // a normal run: progress, then a result
+  let w = mkWorker(), prog = 0;
+  const p1 = jr.run(w, { id: 1 }, [], { onMessage: (m) => (m.type === "progress" ? (prog++, null) : { result: m.v }) });
+  w.onmessage({ data: { type: "progress" } }); w.onmessage({ data: { type: "result", v: 42 } });
+  expect((await p1) === 42 && prog === 1 && !jr.active(), "a job resolves with its result");
+  // cancel: worker terminated, promise rejects with err.cancelled
+  w = mkWorker();
+  const p2 = jr.run(w, {}, [], { onMessage: () => null });
+  expect(jr.active() && jr.cancel() === true && w.terminated, "cancel() ends the worker");
+  let ce = null; try { await p2; } catch (e) { ce = e; }
+  expect(ce && ce.cancelled === true && !jr.active() && jr.cancel() === false, "…and the job rejects with err.cancelled (a second cancel is a no-op)");
+  // stall: no message for longer than the floor → onStall once
+  w = mkWorker(); let stalled = 0;
+  const p3 = jr.run(w, {}, [], { onMessage: (m) => (m.done ? { result: true } : null), onStall: () => stalled++ });
+  clock = 200; await new Promise((r) => setTimeout(r, 30));
+  expect(stalled === 1, `a quiet worker is reported once (${stalled})`);
+  w.onmessage({ data: { done: true } }); await p3;
+  // a worker error rejects
+  w = mkWorker();
+  const p4 = jr.run(w, {}, [], { onMessage: () => null });
+  w.onerror({ message: "boom" });
+  let we = null; try { await p4; } catch (e) { we = e; }
+  expect(we && /boom/.test(we.message) && !we.cancelled, "a worker error is reported as an error, not a cancel");
+  for (const [f, g, fn] of [["guitar-model.js", "TTP_GUITAR_MODEL", "transcribeGuitarAudio"], ["beat-model.js", "TTP_BEAT_MODEL", "trackBeatsAudio"], ["drum-model.js", "TTP_DRUM_MODEL", "transcribeDrumAudio"], ["chord-ocr-model.js", "TTP_CHORD_OCR", "readChordSheets"]]) {
+    const src = read(f);
+    expect(/createJobRunner\(/.test(src) && new RegExp(`window\\.${g} = ${fn}; ${fn}\\.cancel = `).test(src) && /onStall/.test(src) && /if \(!w\) return onMainThread/.test(src), `${f}: runs through the job runner, publishes .cancel, passes onStall, main thread only without a Worker`);
+  }
+  expect((ui.match(/<JobCancel /g) || []).length >= 4 && /isCancelled\(e\) \? "Cancelled\."/.test(ui), "the guitar, drum, beat and Scan jobs show ✕ Cancel and the stall note");
+  expect(/await resampleOffThread\(s\.cur, s\.sr, 16000\)/.test(ui) && !/resampleTo\(s\.cur, s\.sr, 16000\)/.test(ui), "Guitar → Tab resamples off the main thread");
+  expect(/if \(isCancelled\(e\)\) throw e; note =/.test(ui), "a cancelled drum model does not fall back to the built-in reading");
+  expect(/cp model-job\.js _site\//.test(read(".github/workflows/pages.yml")), "the deploy ships model-job.js");
+}
+
+section("m3 · the Pro handoff trims, then says so — never fails silently");
+{
+  const src = ui.slice(ui.indexOf("function writeProHandoff(env)"), ui.indexOf("/* Decode audio bytes (one file"));
+  const mkLS = (quota) => { const m = new Map(); return { m, setItem: (k, v) => { if (v.length > quota) { const e = new Error("quota"); e.name = "QuotaExceededError"; throw e; } m.set(k, v); } }; };
+  const run = (quota, env) => { const ls = mkLS(quota); const f = new Function("localStorage", src + "\nreturn writeProHandoff;")(ls); return { r: f(env), ls }; };
+  const env = { v: 1, formats: { csmpn: "C | G", chordpro: "[C]", musicxml: "x".repeat(5000) }, parts: [{ name: "Bass", formats: { csmpn: "y".repeat(3000) } }] };
+  let t = run(1e9, env);
+  expect(t.r.ok && t.r.dropped.length === 0 && JSON.parse(t.ls.m.get("csm:handoff:v1")).formats.musicxml, "fits: sent whole");
+  t = run(2500, env);
+  expect(t.r.ok && t.r.dropped.includes("the MusicXML copy") && t.r.dropped.includes("the separate parts") && JSON.parse(t.ls.m.get("csm:handoff:v1")).formats.csmpn === "C | G", "too big: the MusicXML fallback and the extra parts are dropped, the chart still goes");
+  t = run(4000, env);
+  expect(t.r.ok && t.r.dropped.join() === "the MusicXML copy" && JSON.parse(t.ls.m.get("csm:handoff:v1")).parts, "a bit too big: only the MusicXML fallback is dropped, the parts still go");
+  t = run(10, env);
+  expect(!t.r.ok && /too large/.test(t.r.message), "still too big: a message for the user");
+  expect((ui.match(/writeProHandoff\(env\)/g) || []).length === 3 && !/localStorage\.setItem\("csm:handoff:v1"/.test(ui.replace(src, "")), "both senders write through it");
+}
+
 console.log(`\naudit-2026-11-18: ${passes} passed, ${failures} failed`);
 if (failures) process.exit(1);

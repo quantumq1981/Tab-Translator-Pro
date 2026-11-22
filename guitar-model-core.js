@@ -33,27 +33,8 @@ const HEADS = { onset: "reg_onset_output", offset: "reg_offset_output", frame: "
 /* Weights: Cache API first, else a fetch; the bytes must match the pinned SHA-256 either way
  * (a partial download or a stale file is refused, and a bad cached copy is evicted). */
 export async function guitarModelBytes(model = GUITAR_MODEL, scope = globalThis) {
-  const { sha256Hex } = await stemCore();
-  let cache = null;
-  try { cache = scope.caches ? await scope.caches.open("ttp-models") : null; } catch (_) { cache = null; }
-  const key = `${model.url}#${model.sha256}`;
-  if (cache) {
-    try {
-      const hit = await cache.match(key);
-      if (hit) {
-        const b = new Uint8Array(await hit.arrayBuffer());
-        if (await sha256Hex(b) === model.sha256) return b;
-        await cache.delete(key);
-      }
-    } catch (_) { /* fall through to the network */ }
-  }
-  const res = await scope.fetch(model.url);
-  if (!res.ok) throw new Error(`could not download the guitar model (HTTP ${res.status})`);
-  const bytes = new Uint8Array(await res.arrayBuffer());
-  const got = await sha256Hex(bytes);
-  if (got !== model.sha256) throw new Error(`the guitar model failed its integrity check (SHA-256 ${got.slice(0, 12)}…, expected ${model.sha256.slice(0, 12)}…) — reload and try again`);
-  if (cache) { try { await cache.put(key, new Response(bytes)); } catch (_) { /* quota: fine, just not cached */ } }
-  return bytes;
+  const { modelBytes } = await stemCore();   // the one shared loader (pin-versioned cache key + URL)
+  return modelBytes(model, scope, "guitar model");
 }
 
 /* One session for the whole recording. Returns `run(segment) → { onset, offset, frame, velocity }`

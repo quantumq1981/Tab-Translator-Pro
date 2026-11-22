@@ -1,5 +1,4 @@
 node_modules/
-package-lock.json
 .engine.generated.mjs
 bench/.cache/
 bench/.engine*.mjs
@@ -12,3 +11,4 @@ bench/.cache-link/
 bench/_scratch/
 .engine.scorelink.mjs
 .engine.audit.mjs
+.engine.vendored.mjs

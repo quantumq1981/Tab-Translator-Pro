@@ -8,23 +8,20 @@
   <meta name="color-scheme" content="dark" />
 
   <!--
-    Zero-build static host. Mirrors the app's existing pattern of loading deps
-    from a CDN at runtime (PDF.js already loads this way). No bundler, no repo
-    deps: we fetch the pure recognition engine (engine.tsx) and the React UI
-    (TabDecoderPro.tsx), transpile both in-browser with Babel standalone, wire
-    the UI's `import ... from "./engine.tsx"` to the engine's Blob URL, and
-    rewrite bare `react` imports to explicit esm.sh URLs (see the loader). Keep
-    this faithful to the "zero build step" project ethos.
-
-    Why explicit URLs, not the importmap: a Blob-URL module graph (the way we
-    `import(appUrl)` the transpiled UI) does NOT inherit this document's import
-    map in WebKit / Safari < 16.4, so a bare `react` specifier there fails with
-    "Module name, 'react' does not resolve to a valid URL." (this app is
-    iOS-Safari-first). Rewriting to full esm.sh URLs — the same trick already
-    used for ./engine.tsx — makes boot independent of import-map support. The
-    importmap is kept below only as a harmless fallback for modern browsers.
+    Static host, two boot paths (audit 2026-11-18 M4 — no third-party host can stop or reach the app):
+    · DEPLOYED (GitHub Pages): pages.yml transpiles engine.tsx + TabDecoderPro.tsx ONCE at deploy time
+      (scripts/build_app.mjs, the same Babel presets) into build/, and stamps window.__TTP_BUILD__ below.
+      The page imports build/app.js; Babel is never downloaded.
+    · DEVELOPMENT (the repo served as-is): no stamp → the loader fetches the sources, downloads Babel
+      standalone (SRI-pinned) and transpiles in the browser, as before.
+    React 18.3.1 is vendored same-origin (vendor/react-18.3.1/, the npm release's UMD production files,
+    SHA-256 pinned by npm test) and exposed to the app's `import … from "react"` through a small ESM shim
+    over window.React — one React instance, no esm.sh, no import map (a Blob-URL module graph doesn't
+    inherit import maps in WebKit / Safari < 16.4 anyway).
   -->
-  <script src="https://unpkg.com/@babel/standalone@7.25.6/babel.min.js" crossorigin></script>
+  <script>window.__TTP_BUILD__ = "";</script>
+  <script src="./vendor/react-18.3.1/react.production.min.js"></script>
+  <script src="./vendor/react-18.3.1/react-dom.production.min.js"></script>
   <!--
     Optional per-voice ML note transcription (Spotify basic-pitch). Deferred +
     lazy-init: this module only downloads the model + tfjs from esm.sh the first
@@ -70,14 +67,6 @@
     Nothing is fetched until a tab is first shown. See tab-view.js.
   -->
   <script type="module" src="./tab-view.js"></script>
-  <script type="importmap">
-  {
-    "imports": {
-      "react": "https://esm.sh/react@18.3.1",
-      "react-dom/client": "https://esm.sh/react-dom@18.3.1/client?deps=react@18.3.1"
-    }
-  }
-  </script>
 
   <style>
     html, body { margin: 0; height: 100%; background: #0b0b0f; }
@@ -103,70 +92,84 @@
       splash.innerHTML =
         '<div><b>TAB·DECODER</b><br/>could not start<br/><br/>' +
         msg + (detail ? '<br/><code>' + String(detail).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])) + '</code>' : '') +
-        '<br/><br/>This page transpiles in-browser and needs network access to ' +
-        'unpkg.com / esm.sh on first load.</div>';
+        '<br/><br/>Reload to try again. (A development copy also needs unpkg.com to transpile ' +
+        'its source in the browser.)</div>';
     };
 
-    // Explicit dep URLs so boot never depends on the importmap (blob-URL module
-    // graphs don't inherit it in WebKit / Safari < 16.4). react-dom uses ?deps
-    // so esm.sh pins its internal react import to the same URL → one React
-    // instance (no bare "react" left to resolve, no duplicate-React hook bugs).
-    const REACT_URL = "https://esm.sh/react@18.3.1";
-    const REACT_DOM_CLIENT_URL = "https://esm.sh/react-dom@18.3.1/client?deps=react@18.3.1";
+    // ESM view of the vendored UMD React, for the app's `import React, { … } from "react"` (dev path;
+    // the deployed build ships the same shim as build/react-shim.js).
+    const BABEL_URL = "https://unpkg.com/@babel/standalone@7.25.6/babel.min.js";
+    const BABEL_SRI = "sha384-EIcs2MbARRLcLs7Gv2wqqhhfMlcLeW9yuJsWki1r5iveN1F5gpzHOwAKycJqSQOI";
+    const blobUrl = (src) => URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
+    const reactShim = (R) => "const R = window.React;\nexport default R;\n" +
+      Object.keys(R).filter((k) => /^[A-Za-z_$][\w$]*$/.test(k)).map((k) => "export const " + k + " = R." + k + ";").join("\n");
+    const loadBabel = () => new Promise((resolve, reject) => {
+      if (window.Babel) { resolve(); return; }
+      const s = document.createElement("script");
+      s.src = BABEL_URL; s.integrity = BABEL_SRI; s.crossOrigin = "anonymous";
+      s.onload = () => resolve(); s.onerror = () => reject(new Error("Babel standalone failed to load from unpkg.com (or did not match its pinned hash)"));
+      document.head.appendChild(s);
+    });
 
     try {
-      if (!window.Babel) throw new Error("Babel standalone failed to load from unpkg.com");
+      const React = window.React, ReactDOM = window.ReactDOM;
+      if (!React || !ReactDOM || !ReactDOM.createRoot) throw new Error("React failed to load from vendor/react-18.3.1/");
+      let TabDecoderPro;
 
-      // transpile helper: strip TS, transform JSX; keep ESM so `import` survives.
-      const transpile = (source, filename) => window.Babel.transform(source, {
-        filename,
-        presets: [
-          ["typescript", { allExtensions: true, isTSX: true, onlyRemoveTypeImports: true }],
-          ["react"],
-        ],
-      }).code;
+      if (window.__TTP_BUILD__) {
+        // DEPLOYED: prebuilt at deploy time — same-origin modules, stamped with the commit.
+        const v = "?v=" + encodeURIComponent(window.__TTP_BUILD__);
+        window.__TTP_ENGINE_URL__ = new URL("./build/engine.js" + v, location.href).href;
+        ({ default: TabDecoderPro } = await import("./build/app.js" + v));
+      } else {
+        // DEVELOPMENT: transpile in the browser.
+        await loadBabel();
+        if (!window.Babel) throw new Error("Babel standalone failed to load from unpkg.com");
+        // transpile helper: strip TS, transform JSX; keep ESM so `import` survives.
+        const transpile = (source, filename) => window.Babel.transform(source, {
+          filename,
+          presets: [
+            ["typescript", { allExtensions: true, isTSX: true, onlyRemoveTypeImports: true }],
+            ["react"],
+          ],
+        }).code;
 
-      // 1. fetch the engine module, the session store and the UI component in parallel
-      //    (no-cache, so all three always come from the same deploy).
-      const [engRes, storeRes, appRes] = await Promise.all([
-        fetch("./engine.tsx", { cache: "no-cache" }),
-        fetch("./session-store.js", { cache: "no-cache" }),
-        fetch("./TabDecoderPro.tsx", { cache: "no-cache" }),
-      ]);
-      if (!engRes.ok) throw new Error("fetch engine.tsx → HTTP " + engRes.status);
-      if (!storeRes.ok) throw new Error("fetch session-store.js → HTTP " + storeRes.status);
-      if (!appRes.ok) throw new Error("fetch TabDecoderPro.tsx → HTTP " + appRes.status);
-      const engineSrc = await engRes.text();
-      const storeSrc = await storeRes.text();
-      let appSrc = await appRes.text();
+        // 1. fetch the engine module, the session store and the UI component in parallel
+        //    (no-cache, so all three always come from the same revision).
+        const [engRes, storeRes, appRes] = await Promise.all([
+          fetch("./engine.tsx", { cache: "no-cache" }),
+          fetch("./session-store.js", { cache: "no-cache" }),
+          fetch("./TabDecoderPro.tsx", { cache: "no-cache" }),
+        ]);
+        if (!engRes.ok) throw new Error("fetch engine.tsx → HTTP " + engRes.status);
+        if (!storeRes.ok) throw new Error("fetch session-store.js → HTTP " + storeRes.status);
+        if (!appRes.ok) throw new Error("fetch TabDecoderPro.tsx → HTTP " + appRes.status);
+        const engineSrc = await engRes.text();
+        const storeSrc = await storeRes.text();
+        let appSrc = await appRes.text();
 
-      // 2. transpile the engine, publish it at a Blob URL, and repoint EVERY
-      //    `import ... from "./engine.tsx"` in the UI at that URL (no bundler needed).
-      //    session-store.js is plain ES already: published as-is at its own Blob URL.
-      const engineUrl = URL.createObjectURL(new Blob([transpile(engineSrc, "engine.tsx")], { type: "text/javascript" }));
-      const storeUrl = URL.createObjectURL(new Blob([storeSrc], { type: "text/javascript" }));
-      appSrc = appSrc.replace(/from\s*["']\.\/engine\.tsx["']/g, 'from "' + engineUrl + '"');
-      appSrc = appSrc.replace(/from\s*["']\.\/session-store\.js["']/g, 'from "' + storeUrl + '"');
-      // Rewrite the UI's bare `react` import to an explicit URL — a blob-URL
-      // module can't resolve bare specifiers via the importmap in WebKit.
-      appSrc = appSrc.replace(/from\s*["']react["']/g, 'from "' + REACT_URL + '"');
-      // Publish the transpiled-engine Blob URL so the app can spin a parse Web
-      // Worker that imports the SAME engine module (Roadmap Wave 1 #3). The worker
-      // is a progressive enhancement — the app falls back to main-thread parsing
-      // if this is absent, so boot never depends on it.
-      window.__TTP_ENGINE_URL__ = engineUrl;
+        // 2. transpile the engine, publish it at a Blob URL, and repoint EVERY
+        //    `import ... from "./engine.tsx"` in the UI at that URL (no bundler needed).
+        //    session-store.js is plain ES already: published as-is at its own Blob URL.
+        const engineUrl = blobUrl(transpile(engineSrc, "engine.tsx"));
+        const storeUrl = blobUrl(storeSrc);
+        appSrc = appSrc.replace(/from\s*["']\.\/engine\.tsx["']/g, 'from "' + engineUrl + '"');
+        appSrc = appSrc.replace(/from\s*["']\.\/session-store\.js["']/g, 'from "' + storeUrl + '"');
+        appSrc = appSrc.replace(/from\s*["']react["']/g, 'from "' + blobUrl(reactShim(React)) + '"');
+        // Publish the transpiled-engine Blob URL so the app can spin a parse Web
+        // Worker that imports the SAME engine module (Roadmap Wave 1 #3). The worker
+        // is a progressive enhancement — the app falls back to main-thread parsing
+        // if this is absent, so boot never depends on it.
+        window.__TTP_ENGINE_URL__ = engineUrl;
 
-      // 3. transpile the UI (React now resolves to an explicit URL), load, mount.
-      const appUrl = URL.createObjectURL(new Blob([transpile(appSrc, "TabDecoderPro.tsx")], { type: "text/javascript" }));
-      const [{ default: TabDecoderPro }, React, { createRoot }] = await Promise.all([
-        import(appUrl),
-        import(REACT_URL),
-        import(REACT_DOM_CLIENT_URL),
-      ]);
-      URL.revokeObjectURL(appUrl);
-      // engineUrl and storeUrl are left alive: the UI module's import bindings resolve against them.
+        // 3. transpile the UI, load it. engineUrl and storeUrl are left alive: the
+        //    UI module's import bindings resolve against them.
+        const appUrl = blobUrl(transpile(appSrc, "TabDecoderPro.tsx"));
+        ({ default: TabDecoderPro } = await import(appUrl));
+        URL.revokeObjectURL(appUrl);
+      }
 
-      createRoot(boot).render(React.createElement(TabDecoderPro));
+      ReactDOM.createRoot(boot).render(React.createElement(TabDecoderPro));
       splash.remove();
     } catch (err) {
       console.error(err);

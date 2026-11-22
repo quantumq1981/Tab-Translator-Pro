@@ -545,12 +545,12 @@ async function drumLikenessOffThread(samples, sr) {
 /* Read a drum recording: the drum model (drum-model.js) when it is on and loads, else the built-in
  * reader. `pcm` is mono at its own rate (full rate: hi-hats live above 8 kHz). → { hits, method, flags,
  * beats, bpm, note }, hits = [{ t, type, velocity, ghost, prob }] on the recording's clock. */
-async function readDrumAudio(pcm, sr, { useModel = true, beats, bpm, onProgress } = {}) {
+async function readDrumAudio(pcm, sr, { useModel = true, beats, bpm, onProgress, onStall } = {}) {
   const model = typeof window !== "undefined" ? window.TTP_DRUM_MODEL : null;
   let d = null, note = "";
   if (useModel && typeof model === "function") {
-    try { d = await model(Float32Array.from(pcm), sr, { transfer: true, beats, bpm, onProgress }); }
-    catch (e) { note = "The drum model couldn't run here (" + ((e && e.message) || e) + ") — showing the built-in reading."; }
+    try { d = await model(Float32Array.from(pcm), sr, { transfer: true, beats, bpm, onProgress, onStall }); }
+    catch (e) { if (isCancelled(e)) throw e; note = "The drum model couldn't run here (" + ((e && e.message) || e) + ") — showing the built-in reading."; }
   }
   if (!d) d = await drumEventsOffThread(pcm, sr, beats && beats.length ? { beats, bpm } : {});
   const hits = (d.events || []).map((e) => ({ t: e.t_raw, type: e.piece, velocity: e.velocity, ghost: e.is_ghost, prob: e.confidence }));
@@ -722,13 +722,19 @@ function TabDecoderProApp() {
   const xmlRef = useRef(null);
   const pdfSeq = useRef(0), xmlSeq = useRef(0); // latest-request counters for the two upload inputs (m7)
 
+  /* PDF.js 4.10.38 LEGACY build, same-origin (audit 2026-11-18 C1 + M4; see vendor/pdfjs-4.10.38/NOTICE.txt):
+   * fixed for CVE-2024-4367, runs on iPadOS 16.7, no CDN. Resolved against the PAGE's URL — this module
+   * itself may be running from a Blob URL (development loader). */
   useEffect(() => {
     if (window.pdfjsLib) { setPdfReady(true); return; }
-    const s = document.createElement("script");
-    s.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
-    s.onload = () => { window.pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"; setPdfReady(true); };
-    s.onerror = () => setPdfErr("Could not load PDF.js from CDN. Check network/connector settings.");
-    document.body.appendChild(s);
+    let live = true;
+    const base = new URL("./vendor/pdfjs-4.10.38/", window.location.href);
+    import(/* @vite-ignore */ new URL("pdf.min.mjs", base).href).then((lib) => {
+      lib.GlobalWorkerOptions.workerSrc = new URL("pdf.worker.min.mjs", base).href;
+      window.pdfjsLib = lib;
+      if (live) setPdfReady(true);
+    }).catch(() => { if (live) setPdfErr("Could not load the PDF reader (vendor/pdfjs-4.10.38). Reload to try again."); });
+    return () => { live = false; };
   }, []);
 
   const clearSel = () => { setSelFrets(null); setSelMidis(null); setSelKey(""); setOverrides({}); };
@@ -1676,10 +1682,11 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
         enharmonic: useSharp ? "sharps" : "flats",
         formats,
       };
-      localStorage.setItem("csm:handoff:v1", JSON.stringify(env));
+      const w = writeProHandoff(env);
+      if (!w.ok) { setSent(false); window.alert(w.message); return; }
       setSent(true);
       window.location.assign(`${window.location.origin}/chord-sheet-maker-pro/?import=handoff`);
-    } catch (e) { setSent(false); console.warn("Send to Pro failed:", e); }
+    } catch (e) { setSent(false); window.alert("Couldn't hand the chart to Chord Sheet Maker Pro: " + ((e && e.message) || e)); }
   };
   const bump = (d) => setSemis((s) => Math.max(-11, Math.min(11, s + d)));
   // a setlist item's transpose (WO-6): applied when the item opens
@@ -1897,6 +1904,42 @@ const setlistDel = (id) => _ptx("setlists", "readwrite", (s) => s.delete(id)).ca
 const projectFilePut = (id, bytes) => sessionStore.projectFilePut(id, bytes);
 const projectFileGet = (id, rec) => sessionStore.projectFileGet(id, rec && rec.bytes ? { size: rec.bytes, hash: rec.hash || "" } : undefined);
 const projectFileDel = (id) => sessionStore.projectFileDel(id);
+/* ✕ Cancel + "may have stalled" note for an ML model job (audit 2026-11-18 m6). `model` is the published
+ * loader function (window.TTP_GUITAR_MODEL …); its .cancel() ends the worker and the job's promise
+ * rejects with err.cancelled. `stall` is the seconds of silence the loader reported (onStall), or 0. */
+function JobCancel({ C, model, stall, label = "this job" }) {
+  const can = model && typeof model.cancel === "function";
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginLeft: 8 }}>
+      {can && <button onClick={() => { try { model.cancel(); } catch (_) { /* already finished */ } }} style={{ font: "inherit", fontSize: 11, padding: "2px 9px", borderRadius: 6, border: `1px solid ${C.red}`, background: "transparent", color: C.red, cursor: "pointer" }}>✕ Cancel</button>}
+      {stall > 0 && <span style={{ fontSize: 11, color: C.amber }}>No progress for {Math.round(stall / 60)} min — {label} may have stalled (a phone pauses work when the screen locks). Cancel and try a shorter section, or keep waiting.</span>}
+    </span>
+  );
+}
+const isCancelled = (e) => !!(e && e.cancelled);
+/* Write the csm:handoff:v1 envelope (audit 2026-11-18 m3). localStorage is ONE ~5 MB quota shared by every
+ * app on quantumq1981.github.io, and WebKit counts ~2 bytes per character, so a large chart can fail to
+ * fit. On a quota error drop what the receiver can live without — the MusicXML fallback, then the extra
+ * parts — and retry; if it still doesn't fit, return a message for the user instead of failing silently.
+ * → { ok: true, dropped: [...] } | { ok: false, message } */
+function writeProHandoff(env) {
+  const tries = [env];
+  if (env.formats && env.formats.musicxml) tries.push({ ...env, formats: { ...env.formats, musicxml: undefined } });
+  if (env.parts) tries.push({ ...tries[tries.length - 1], parts: undefined });
+  for (let i = 0; i < tries.length; i++) {
+    try {
+      localStorage.setItem("csm:handoff:v1", JSON.stringify(tries[i]));
+      const dropped = [];
+      if (env.formats && env.formats.musicxml && !tries[i].formats.musicxml) dropped.push("the MusicXML copy");
+      if (env.parts && !tries[i].parts) dropped.push("the separate parts");
+      return { ok: true, dropped };
+    } catch (e) {
+      const quota = e && (e.name === "QuotaExceededError" || e.code === 22 || /quota/i.test(String(e.message)));
+      if (!quota) return { ok: false, message: "Couldn't hand the chart to Chord Sheet Maker Pro: " + ((e && e.message) || e) };
+    }
+  }
+  return { ok: false, message: "This chart is too large for the browser storage this site shares with Chord Sheet Maker Pro. Export CSMPN (or MusicXML) and import that file in Pro instead." };
+}
 /* Decode audio bytes (one file, or several on one context) and ALWAYS close the AudioContext — iOS caps
  * how many can be open, so a context leaked by a failed decode made every later decode fail until the
  * page was reloaded (audit 2026-11-18 m4). Returns AudioBuffers; they stay usable after the close. */
@@ -3995,6 +4038,7 @@ function ScanPanel({ C, useSharp, pdfReady }) {
   const fileRef = useRef(null);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState("");
+  const [ocrStall, setOcrStall] = useState(0);    // seconds the chord reader has been silent (m6)
   const [err, setErr] = useState("");
   const [pages, setPages] = useState(null);       // [{ preview, width, height, layout, reads }]
   const [fix, setFix] = useState({});              // "page.box" → chord name, or "" = not a chord
@@ -4015,16 +4059,17 @@ function ScanPanel({ C, useSharp, pdfReady }) {
     setErr(""); setFix({}); setHist([]); setPicked({}); setSel(null); setOvr({});
     setBusy("reading chords…");
     try {
+      setOcrStall(0);
       const res = await window.TTP_CHORD_OCR(imgs.map((p) => ({ data: p.data.slice(), width: p.width, height: p.height })), {
-        style: which,
+        style: which, onStall: setOcrStall,
         onProgress: (done, total, page) => setBusy(`reading chords… page ${page + 1}/${imgs.length} · ${done}/${total} boxes`),
       });
       const out = res.pages.map((r, i) => ({ preview: imgs[i].preview, width: imgs[i].width, height: imgs[i].height, layout: r.layout, reads: r.reads }));
       if (!out.some((p) => p.layout.staves.length)) setErr("No staves found. Scan Path B reads lead sheets (chord symbols above a staff); a straight, well-lit, flat shot works best.");
       setPages(out); setReadWith(res.style || which); setDoc(null);
       setFilter("all");
-    } catch (ex) { setErr("Couldn't read it: " + (ex && ex.message ? ex.message : String(ex))); }
-    finally { setBusy(""); }
+    } catch (ex) { setErr(isCancelled(ex) ? "Cancelled." : "Couldn't read it: " + (ex && ex.message ? ex.message : String(ex))); }
+    finally { setBusy(""); setOcrStall(0); }
   };
   const onFile = async (e) => {
     const f = e.target.files && e.target.files[0]; e.target.value = "";
@@ -4113,6 +4158,7 @@ function ScanPanel({ C, useSharp, pdfReady }) {
         style={{ width: "100%", background: C.bg, border: `1px dashed ${C.border}`, color: C.amber, borderRadius: 10, padding: "22px 12px", fontSize: 14, cursor: busy ? "default" : "pointer", fontFamily: "'IBM Plex Mono', monospace" }}>
         {busy || "⬆  Upload a photo, screenshot or scanned PDF of a lead sheet"}
       </button>
+      {/^reading chords/.test(busy) && <div style={{ marginTop: 6 }}><JobCancel C={C} model={window.TTP_CHORD_OCR} stall={ocrStall} label="the chord reader" /></div>}
       <div style={{ fontSize: 11, color: C.dim, marginTop: 8, lineHeight: 1.6 }}>
         Reads the <b>chord symbols</b> above each staff and puts them in their bars (4/4 assumed). Best on a flat, straight, well-lit page
         or an exported PDF — a digital PDF (Ultimate Guitar Pro, MuseScore, Guitar Pro export) is read exactly from its text layer, with its own time signatures, sections and tempo. Every chord is listed below to review; tap any box on the page to correct it. The notes themselves are not read.
@@ -4481,6 +4527,7 @@ function useBeatGrid(tracked, firstSound) {
   const [learned, setLearned] = useState(null);          // { beats, downbeats } from beat_this
   const [useLearned, setUseLearned] = useState(true);
   const [prog, setProg] = useState(null);                // { done, total, stage } while the beat model runs
+  const [stall, setStall] = useState(0);                 // seconds the beat model has been silent (m6)
   // Crash rail (as the stem split's): a run marks itself in flight; if iOS ends the page mid-run, the next
   // load finds the mark and says where it stopped, instead of the user just seeing the page reload.
   const [err, setErr] = useState(() => {
@@ -4505,7 +4552,7 @@ function useBeatGrid(tracked, firstSound) {
     const model = typeof window !== "undefined" ? window.TTP_BEAT_MODEL : null;
     if (typeof model !== "function") { setErr("The beat model (beat-model.js) isn't loaded on this build."); return; }
     if (!mono || !mono.length) { setErr("Load audio first."); return; }
-    setErr(""); setProg({ done: 0, total: 0, stage: "start" });
+    setErr(""); setProg({ done: 0, total: 0, stage: "start" }); setStall(0);
     _releaseEngineWorker();
     const mark = { t: Date.now(), sec: mono.length / sampleRate, stage: "start", done: 0, total: 0 };
     const save = (o) => { Object.assign(mark, o); try { localStorage.setItem(BEAT_INFLIGHT, JSON.stringify(mark)); } catch (_) { /* private mode */ } };
@@ -4516,14 +4563,15 @@ function useBeatGrid(tracked, firstSound) {
         transfer: true,
         onStage: (stage) => { save({ stage }); setProg((p) => ({ ...(p || { done: 0, total: 0 }), stage })); },
         onProgress: (done, total) => { save({ done, total }); setProg((p) => ({ ...(p || {}), done, total })); },
+        onStall: setStall,
       });
       if (!r || !r.beats || r.beats.length < 8) setErr("The beat model found too few beats in this audio.");
       else { setLearned(r); setUseLearned(true); setTiming((t) => ({ ...t, firstDownbeat: null, beatScale: 1, beatsPerBar: null })); }
-    } catch (e) { setErr("Beat tracking failed: " + ((e && e.message) || e)); }
+    } catch (e) { setErr(isCancelled(e) ? "" : "Beat tracking failed: " + ((e && e.message) || e)); }
     try { localStorage.removeItem(BEAT_INFLIGHT); } catch (_) { /* private mode */ }
-    setProg(null);
+    setProg(null); setStall(0);
   };
-  return { grid, bpm: grid.bpm, meter: grid.beatsPerBar, timing, setTiming, bpb, setMeter, bumpTempo, learned, useLearned, setUseLearned, prog, err, findBars, reset };
+  return { grid, bpm: grid.bpm, meter: grid.beatsPerBar, timing, setTiming, bpb, setMeter, bumpTempo, learned, useLearned, setUseLearned, prog, stall, err, findBars, reset };
 }
 /** Mono copy of an AudioBuffer at its own rate (for the beat model). */
 function monoOf(buf) {
@@ -4591,6 +4639,7 @@ function TempoBarsPanel({ C, bg, pos, onFindBars, canFindBars, label = "TEMPO & 
             {prog ? `🥁 Finding bars… ${beatStageText(prog)}` : "🥁 Find bar 1 (ML)"}
           </button>
         )}
+        {prog && <JobCancel C={C} model={window.TTP_BEAT_MODEL} stall={bg.stall} label="the beat model" />}
         {changed && <button onClick={() => setTiming(NO_TIMING)} style={{ ...chip(C), padding: "3px 9px" }}>↺ Back to the detected grid</button>}
       </div>
       {err && <div style={{ color: C.red || C.amber, marginTop: 6 }}>{err}</div>}
@@ -4796,6 +4845,7 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
    * suggests the drum reader for a file opened as chords. */
   const [drumRes, setDrumRes] = useState(null);       // { hits, method, flags, beats, bpm, note }
   const [drumProg, setDrumProg] = useState(null);
+  const [jobStall, setJobStall] = useState(0); // seconds a guitar / drum model job has been silent (m6)
   const [drumLike, setDrumLike] = useState(null);
   const [drumML, setDrumML] = useState(() => { try { return localStorage.getItem("ttp:drumModel") !== "0"; } catch (_) { return true; } });
   const [isolate, setIsolate] = useState(false);     // center-channel (vocal) isolation before analysis
@@ -4867,14 +4917,14 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
   /* 🥁 the drum reader on the FULL-rate recording (hi-hats live above the 16 kHz analysis band) */
   const runDrums = async (useModel = drumML) => {
     const b = ref.current.audioBuf; if (!b) return;
-    setBusy(true); setErr(""); setDrumRes(null); setRaw([]); setDrumProg(null);
+    setBusy(true); setErr(""); setDrumRes(null); setRaw([]); setDrumProg(null); setJobStall(0);
     try {
-      const r = await readDrumAudio(monoOf(b), b.sampleRate, { useModel, onProgress: (done, total) => setDrumProg({ done, total }) });
+      const r = await readDrumAudio(monoOf(b), b.sampleRate, { useModel, onProgress: (done, total) => setDrumProg({ done, total }), onStall: setJobStall });
       setDrumRes(r);
       setTracked(r.beats && r.beats.length ? r.beats : null);
       ref.current.beats = r.beats && r.beats.length ? r.beats : null; ref.current.beatBpm = r.bpm || 0;
-    } catch (e) { setErr("Reading the drums failed: " + ((e && e.message) || e)); }
-    setDrumProg(null); setBusy(false);
+    } catch (e) { setErr(isCancelled(e) ? "Cancelled." : "Reading the drums failed: " + ((e && e.message) || e)); }
+    setDrumProg(null); setJobStall(0); setBusy(false);
   };
   const run = (ds, sr, k) => {
     if (k === "drums") { runDrums(); return; }
@@ -5073,15 +5123,17 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
     const s = ref.current; if (!s.cur) { setErr("Upload audio first."); return; }
     const model = typeof window !== "undefined" ? window.TTP_GUITAR_MODEL : null;
     if (typeof model !== "function") { setErr("Guitar → Tab needs the guitar note model (guitar-model.js) — not loaded on this build."); return; }
-    setBusy(true); setErr(""); setGtrNotes(null); setGtrOnset(null); setGtrProg({ done: 0, total: 0 });
-    _releaseEngineWorker();
+    setBusy(true); setErr(""); setGtrNotes(null); setGtrOnset(null); setGtrProg({ done: 0, total: 0 }); setJobStall(0);
     try {
-      const pcm = s.sr === 16000 ? s.cur : resampleTo(s.cur, s.sr, 16000);
-      const { notes, onset } = await model(pcm, { keepOnset: true, onProgress: (done, total) => setGtrProg({ done, total }) });
+      // resample in the engine worker (a whole song used to be resampled on the page), THEN end that
+      // worker so its heap isn't held while the guitar model runs
+      const pcm = s.sr === 16000 ? s.cur : await resampleOffThread(s.cur, s.sr, 16000);
+      _releaseEngineWorker();
+      const { notes, onset } = await model(pcm, { keepOnset: true, onProgress: (done, total) => setGtrProg({ done, total }), onStall: setJobStall });
       setGtrNotes(notes || []); setGtrOnset(onset || null); setGtrOvr({});
       if (!notes || !notes.length) setErr("The guitar model found no notes in this audio.");
-    } catch (e) { setErr("Guitar transcription failed: " + (e && e.message ? e.message : "unknown")); }
-    setGtrProg(null); setBusy(false);
+    } catch (e) { setErr(isCancelled(e) ? "Cancelled." : "Guitar transcription failed: " + (e && e.message ? e.message : "unknown")); }
+    setGtrProg(null); setJobStall(0); setBusy(false);
   };
   /* WO-7: playing techniques read from the audio around each transcribed note (bend, vibrato,
    * slide, hammer-on / pull-off, palm mute, ghost — single-line notes only; off-thread, pure). */
@@ -5350,7 +5402,7 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
         {name && <span style={{ fontSize: 11, color: C.dim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 180 }}>{name}{dur ? ` · ${fmt(dur)}` : ""}</span>}
       </div>
 
-      {busy && <div style={{ fontSize: 13, color: C.amber, marginBottom: 12 }}>{kind === "drums" ? `⏳ Reading the drums…${drumProg && drumProg.total ? ` ${Math.round((100 * drumProg.done) / drumProg.total)}%` : ""}` : gtrProg ? `⏳ Transcribing guitar… ${gtrProg.total ? `${gtrProg.done}/${gtrProg.total} × 10 s` : "loading the model"}` : "⏳ Analyzing… (FFT over the whole stem)"}</div>}
+      {busy && <div style={{ fontSize: 13, color: C.amber, marginBottom: 12 }}>{kind === "drums" ? `⏳ Reading the drums…${drumProg && drumProg.total ? ` ${Math.round((100 * drumProg.done) / drumProg.total)}%` : ""}` : gtrProg ? `⏳ Transcribing guitar… ${gtrProg.total ? `${gtrProg.done}/${gtrProg.total} × 10 s` : "loading the model"}` : "⏳ Analyzing… (FFT over the whole stem)"}{kind === "drums" && drumML ? <JobCancel C={C} model={window.TTP_DRUM_MODEL} stall={jobStall} label="the drum model" /> : gtrProg ? <JobCancel C={C} model={window.TTP_GUITAR_MODEL} stall={jobStall} label="the guitar model" /> : null}</div>}
       {err && <div style={{ fontSize: 12, color: C.red, marginBottom: 12 }}>{err}</div>}
 
       {/* 🥁 the recording sounds like drums: offer the drum reader (the chord decoder names drums' pitch as chords) */}
@@ -6074,7 +6126,8 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, reading
         formats: { csmpn: csm(primary) },
         parts: parts.map((p) => ({ name: p.name, role: p.role || "", formats: { csmpn: csm(p) } })),
       };
-      localStorage.setItem("csm:handoff:v1", JSON.stringify(env));
+      const w = writeProHandoff(env);
+      if (!w.ok) { setErr(w.message); return; }
       window.location.assign(`${window.location.origin}/chord-sheet-maker-pro/?import=handoff`);
     } catch (e) { setErr("Sending the parts failed: " + ((e && e.message) || e)); }
   };

@@ -131,7 +131,7 @@ section("the shipped model + glue contracts");
   const notice = read("models/oaf-drums/NOTICE");
   expect(/Apache License/.test(notice) && notice.includes(sha) && /E-GMD/.test(notice) && /CC BY 4\.0/.test(notice) && /oaf_drums_export\.py/.test(notice), "NOTICE: Apache-2.0 text, the file's SHA-256, E-GMD attribution, how it was made");
   expect(/stem-model-core\.js/.test(core) && /capWasmMemory\(\)/.test(core) && /ORT_WASM_PATHS/.test(core) && /numThreads = 1/.test(core), "core: the pinned ORT 1.23.2 plain WASM rails from stem-model-core.js, one thread, the memory cap");
-  expect(/sha256Hex\(b\) === model\.sha256/.test(core) && /cache\.delete\(key\)/.test(core) && /integrity check/.test(core), "core: SHA-256 checked, a bad cached copy evicted");
+  expect(/const \{ modelBytes \} = await stemCore\(\)/.test(core) && /return modelBytes\(model, scope,/.test(core), "core: weights through the shared SHA-256-checked loader (a bad cached copy evicted; tested in path-a-smoke)");
   expect(/engine\.transcribeDrumsWithModel/.test(core) && /sess\.release\(\)/.test(core), "core: the engine's pipeline, the session released");
   expect(/window\.TTP_DRUM_MODEL = transcribeDrumAudio/.test(glue) && /type: "module"/.test(glue) && /w\.terminate\(\)/.test(glue), "drum-model.js publishes TTP_DRUM_MODEL, runs a module worker, ends it after the job");
   expect(!/catch \(err\)[\s\S]{0,200}onMainThread/.test(glue) && /if \(!w\) return onMainThread/.test(glue), "the main thread is used only when no Worker can be made (a failed worker run is not retried there)");

@@ -2775,7 +2775,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   expect(/new URL\("\.\/stem-model-core\.js" \+ new URL\(import\.meta\.url\)\.search, import\.meta\.url\)/.test(wk) && /separateInBlocks/.test(wk), "the worker runs the shared core, imported with the worker's own build stamp");
   // WASM sessions: OUR pinned 1.23.2 (ORT 1.24+ ships Abseil 20250814, which JavaScriptCore miscompiles →
   // "Could not find OrtValue with name '…'" on device). WebGPU: the bundle's own 1.30.0, with matching wasm files.
-  expect(/ORT_WASM_VERSION = "1\.23\.2"/.test(core) && /ORT_WASM_MODULE = "ort\.wasm\.min\.mjs"/.test(core) && /onnxruntime-web@\$\{ORT_WASM_VERSION\}\/dist\//.test(core), "every WASM session runs ONNX Runtime Web 1.23.2's plain build (pinned)");
+  expect(/ORT_WASM_VERSION = "1\.23\.2"/.test(core) && /ORT_WASM_MODULE = "ort\.wasm\.min\.mjs"/.test(core) && /new URL\(`\.\/vendor\/onnxruntime-web-\$\{ORT_WASM_VERSION\}\/`, import\.meta\.url\)/.test(core) && !/cdn\.jsdelivr\.net\/npm\/onnxruntime-web@\$\{ORT_WASM_VERSION\}/.test(core), "every WASM session runs ONNX Runtime Web 1.23.2's plain build (pinned, same-origin)");
   expect(/ORT_LIB_VERSION = "1\.30\.0"/.test(core) && /onnxruntime-web@1\.30\.0\/dist\/ort\.webgpu\.min\.mjs/.test(vend) && /wasmPaths: ORT_LIB_PATHS/.test(core), "the library's own (WebGPU) loader gets wasm files from its own release (1.30.0)");
   expect(/scnet: \{ file: "scnet\.int8\.onnx", repo: "audiojs\/scnet", sha256: "98228931494151762a1c4ab1ec7899a894b1f81fd4a509921a9d2f9bacc50845"/.test(vend) && /scnet: "e71bcdb42bce1d62b7fae25ba90fcbcf90f73f46"/.test(vend),
     "the SCNet weights are pinned to a revision AND a SHA-256 the library checks before use");
@@ -2950,6 +2950,18 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
     expect(fetches === 2 && store.get(key).length === compactBytes.length, "a corrupt cached copy is evicted and re-downloaded");
     let bad = ""; try { await core.modelBytes(core.COMPACT_MODEL, { fetch: async () => new Response(compactBytes.slice(0, 5000)) }); } catch (e) { bad = e.message; }
     expect(/integrity check/.test(bad), "a partial / altered download is refused with a readable message");
+    // audit 2026-11-18 m2: the pin versions the cache key and the same-origin download URL (a fragment didn't)
+    const urls = []; const st2 = new Map();
+    const scope2 = { location: { origin: new URL(core.COMPACT_MODEL.url).origin }, caches: { open: async () => ({ match: async (k) => st2.has(k) ? new Response(st2.get(k)) : undefined, put: async (k, r) => { st2.set(k, new Uint8Array(await r.arrayBuffer())); }, delete: async (k) => st2.delete(k) }) }, fetch: async (u) => (urls.push(u), new Response(compactBytes)) };
+    await core.modelBytes(core.COMPACT_MODEL, scope2);
+    const pin = core.COMPACT_MODEL.sha256.slice(0, 16);
+    expect(urls.length === 1 && new URL(urls[0]).searchParams.get("sha") === pin && [...st2.keys()].every((k) => !k.includes("#") && k.includes("sha=" + pin)), `same-origin weights download as ?sha=<pin> and cache under it (${urls[0]})`);
+    const remote = { url: "https://huggingface.co/x/resolve/abc123/model.onnx", sha256: core.COMPACT_MODEL.sha256 };
+    expect(core.modelUrlFor(remote, scope2) === remote.url, "a pinned cross-origin URL (Hugging Face revision) is fetched as is");
+    for (const f of ["guitar-model-core.js", "beat-model-core.js", "drum-model-core.js", "chord-ocr-core.js"]) {
+      const src = fs.readFileSync(path.join(repo, f), "utf8");
+      expect(/return modelBytes\(model, scope, "[^"]+"\)/.test(src) && !/caches\.open/.test(src), `${f} uses the one shared model loader`);
+    }
   }
   // iOS: ORT's shared 4 GiB WASM memory can't be reserved on a busy iPhone ("no available backend
   // found. ERR: [wasm] RangeError: Out of memory", reported on-device). Cap it, step down if refused.
@@ -2977,6 +2989,15 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
     const coreSrc = fs.readFileSync(path.join(repo, "stem-model-core.js"), "utf8");
     expect(/if \(compact\) capWasmMemory\(\);/.test(coreSrc) && coreSrc.indexOf("if (compact) capWasmMemory();") < coreSrc.indexOf("await (opts.loadModel || modelBytes)(model)"), "low-memory mode caps the WASM reservation before ORT is imported");
   }
+  // the vendored ONNX Runtime files are the npm release's, byte for byte (audit 2026-11-18 M4: same-origin, pinned)
+  {
+    const crypto = await import("node:crypto");
+    const vdir = path.join(repo, "vendor", "onnxruntime-web-1.23.2"), notice = fs.readFileSync(path.join(vdir, "NOTICE.txt"), "utf8");
+    const files = ["ort.wasm.min.mjs", "ort-wasm-simd-threaded.mjs", "ort-wasm-simd-threaded.wasm"];
+    const bad = files.filter((f) => { const h = crypto.createHash("sha256").update(fs.readFileSync(path.join(vdir, f))).digest("hex"); return !notice.includes(`${f}`) || !new RegExp(f.replace(/\./g, "\\.") + "\\s+" + h).test(notice); });
+    expect(bad.length === 0, `vendored ONNX Runtime files match the SHA-256 pins in NOTICE.txt (${bad.join(", ") || "all"})`);
+    expect(/cp -r vendor\/onnxruntime-web-1\.23\.2\/\. _site\/vendor\/onnxruntime-web-1\.23\.2\//.test(fs.readFileSync(path.join(repo, ".github", "workflows", "pages.yml"), "utf8")), "the deploy ships the vendored ONNX Runtime");
+  }
   // one ORT session for the whole song, created lean, on the pinned WASM build
   {
     let created = null, released = 0;
@@ -2984,7 +3005,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
       InferenceSession: { create: async (bytes, so) => (created = so, { inputNames: ["mix_spec"], outputNames: ["stems_spec"], run: async (f) => ({ stems_spec: { data: f.mix_spec.data, dims: f.mix_spec.dims, type: "float32" } }), release: async () => { released++; } }) } };
     let imported = "";
     const sess = await core.wasmSession(new Uint8Array(4), { frames: FR, graphOptimizationLevel: "disabled" }, async (u) => (imported = u, fakeOrt));
-    expect(/onnxruntime-web@1\.23\.2\/dist\/ort\.wasm\.min\.mjs$/.test(imported) && fakeOrt.env.wasm.numThreads === 1 && /onnxruntime-web@1\.23\.2\/dist\/$/.test(fakeOrt.env.wasm.wasmPaths), `WASM session: pinned ORT 1.23.2 plain build, its own wasm files, single thread (imported ${imported})`);
+    expect(/vendor\/onnxruntime-web-1\.23\.2\/ort\.wasm\.min\.mjs$/.test(imported) && fakeOrt.env.wasm.numThreads === 1 && /vendor\/onnxruntime-web-1\.23\.2\/$/.test(fakeOrt.env.wasm.wasmPaths), `WASM session: pinned ORT 1.23.2 plain build, its own wasm files, single thread (imported ${imported})`);
     expect(created && created.graphOptimizationLevel === "disabled" && created.enableCpuMemArena === false && created.enableMemPattern === false && JSON.stringify(created.executionProviders) === '["wasm"]', "compact session: graph optimisation off (its weight pre-packing alone costs ~200 MB), no arena, no memory pattern");
     expect(sess.inputs[0].name === "mix_spec" && sess.inputs[0].dims[3] === FR, "the session declares the model's frame count (the library reads inputs[0].dims[3])");
     sess.free(); sess.free();
@@ -3036,7 +3057,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
       if (!out) continue;
       const want = mode === "compact" ? core.COMPACT_MODEL : pinned;
       expect(asked.length === 1 && asked[0].url === want.url && asked[0].sha256 === want.sha256, `${mode}: the pinned weights are loaded once for the whole song (${asked.length}×)`);
-      expect(imports.length === 1 && imports.every((u) => /onnxruntime-web@1\.23\.2\/dist\/ort\.wasm\.min\.mjs$/.test(u)), `${mode}: ONNX Runtime 1.23.2 (plain WASM) is the runtime — never the bundle's 1.30.0 (${imports.join(", ")})`);
+      expect(imports.length === 1 && imports.every((u) => /vendor\/onnxruntime-web-1\.23\.2\/ort\.wasm\.min\.mjs$/.test(u)), `${mode}: ONNX Runtime 1.23.2 (plain WASM) is the runtime — never the bundle's 1.30.0 (${imports.join(", ")})`);
       expect(log.created.length === 1 && log.released === 1 && log.runs >= 3, `${mode}: one session, reused for every model run (${log.runs}), released once (${log.created.length} created, ${log.released} released)`);
       expect(log.frames.size === 1 && log.frames.has(want.frames), `${mode}: the library feeds the model's own window (${[...log.frames]} frames, want ${want.frames})`);
       expect(mode === "compact" ? log.created[0].graphOptimizationLevel === "disabled" : !("graphOptimizationLevel" in log.created[0]), `${mode}: optimiser ${mode === "compact" ? "off (low memory)" : "at ORT's default (as the library ran it)"}`);
@@ -3315,7 +3336,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   expect(fs.existsSync(path.join(repo, "models", "guitar-crnn", "NOTICE")) && /MIT License/.test(rd("models/guitar-crnn/NOTICE")), "the guitar model ships with its MIT notice");
   expect(/new URL\("\.\/stem-model-core\.js" \+ BUILD_QS, import\.meta\.url\)/.test(gc) && /ORT_WASM_PATHS \+ "ort\.wasm\.min\.mjs"/.test(gc) && /capWasmMemory\(\)/.test(gc), "the guitar session uses the separator's pinned ORT 1.23.2 plain WASM build + the memory cap");
   expect(/numThreads = 1/.test(gc) && /executionProviders: \["wasm"\]/.test(gc) && !/webgpu/i.test(gc.replace(/\/\*[\s\S]*?\*\//g, "")), "single-thread WASM only (no WebGPU path on any device)");
-  expect(/caches\.open\("ttp-models"\)/.test(gc) && /sha256Hex\(bytes\)/.test(gc) && /await cache\.delete\(key\)/.test(gc), "weights are SHA-256 checked, Cache-API cached, and a bad cached copy is evicted");
+  expect(/const \{ modelBytes \} = await stemCore\(\)/.test(gc) && /return modelBytes\(model, scope, "guitar model"\)/.test(gc), "weights go through the shared loader: SHA-256 checked, Cache-API cached, a bad cached copy evicted (tested above on modelBytes)");
   expect(/new Worker\(WORKER_URL, \{ type: "module" \}\)/.test(gm) && /onMainThread/.test(gm) && /w\.terminate\(\)/.test(gm) && /window\.TTP_GUITAR_MODEL = transcribeGuitarAudio/.test(gm), "guitar-model.js: module worker, main-thread fallback, worker ended after each job, publishes TTP_GUITAR_MODEL");
   expect(/window\.__TTP_ENGINE_URL__/.test(gm) && /import\(\/\* @vite-ignore \*\/ engineUrl\)/.test(gw) && /transcribeGuitarPcm/.test(gw), "the worker runs the page's own engine (one engine, no copy)");
   expect(/<script type="module" src="\.\/guitar-model\.js"><\/script>/.test(html), "index.html loads guitar-model.js");

@@ -1,0 +1,15 @@
+PDF.js 4.10.38 — LEGACY build (Apache-2.0, Mozilla). npm pdfjs-dist@4.10.38, legacy/build/, unmodified.
+https://github.com/mozilla/pdf.js · full licence text in LICENSE next to this file.
+
+Why (docs/AUDIT-2026-11-18.md, C1 + M4): PDF.js < 4.2.67 runs script from a crafted font when
+isEvalSupported is left on (CVE-2024-4367 / GHSA-wgrm-67xf-hhpq), and Scan opens PDFs from anywhere.
+4.x fixes that (the app ALSO keeps isEvalSupported: false). The LEGACY build because plain 4.x needs
+Promise.withResolvers (Safari 17.4+) and the first-generation iPad Pro is stuck on iPadOS 16.7.
+Served same-origin instead of cdnjs, so no CDN can reach this origin through it.
+
+Measured before switching (2026-11-18): every PDF in the repo read with 3.11.174 and with this build
+gives identical text tokens, identical operator-list vectors (pdfPageVectors), the identical Path A
+chart and identical Scan text-layer pages. npm test (tests/pdfjs-vendored.mjs) re-reads Blue Sky with
+this exact file. SHA-256 (checked by npm test):
+  pdf.min.mjs          44ec6f011027ee77791386b66c14876a5fc29e20bf0433c07c6726fff7212b72
+  pdf.worker.min.mjs   bd88805178a26c729db8c0107a5b630cb900ec070f4d8c7529a3e45530afd41d

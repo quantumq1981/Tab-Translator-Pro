@@ -47,7 +47,10 @@ const BUILD_QS = (() => { try { return new URL(import.meta.url).search; } catch 
 export const BUILD = (() => { try { return new URLSearchParams(BUILD_QS).get("v") || "dev"; } catch (_) { return "dev"; } })();
 const SEPARATE_URL = new URL("./vendor/neural-separate.mjs" + BUILD_QS, import.meta.url).href;
 export const ORT_WASM_VERSION = "1.23.2";
-export const ORT_WASM_PATHS = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_WASM_VERSION}/dist/`;
+// Same-origin since the 2026-11-18 audit (M4): vendor/onnxruntime-web-1.23.2/ holds the npm release's dist
+// files unmodified (SHA-256 pinned in its NOTICE.txt, checked by npm test). No CDN can reach this origin
+// through it, and the ML features keep working when jsDelivr doesn't.
+export const ORT_WASM_PATHS = new URL(`./vendor/onnxruntime-web-${ORT_WASM_VERSION}/`, import.meta.url).href;
 const ORT_WASM_MODULE = "ort.wasm.min.mjs";    // the plain build: no JSEP / asyncify / JSPI
 // The vendored library's own loader (WebGPU on non-WebKit browsers only) imports 1.30.0 — its wasm
 // files must come from the same release as its JS.
@@ -171,14 +174,26 @@ export async function sha256Hex(bytes) {
   return Array.from(new Uint8Array(d), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-/* Model weights: Cache API first (offline after the first split), else a fetch. Either way the bytes
- * must match the pinned SHA-256 — a partial download or a stale file is refused (and evicted) instead
- * of silently separating with the wrong network. Used for both the compact model (same-origin) and the
- * full one (the library's pinned Hugging Face revision). */
-export async function modelBytes(model = COMPACT_MODEL, scope = globalThis) {
+/* Model weights — the ONE loader every model core uses (audit 2026-11-18 m2: there were five copies).
+ * Cache API first (offline after the first run), else a fetch. Either way the bytes must match the pinned
+ * SHA-256 — a partial download or a stale file is refused (and a bad cached copy evicted) instead of
+ * silently running the wrong network. The cache key AND a same-origin download URL carry `?sha=<pin>`:
+ * the old key `url#sha` didn't version anything (Cache API and HTTP-cache matching ignore the fragment),
+ * so after a model update at the same URL the 10-minute HTTP cache could hand back the OLD file, which
+ * then failed the integrity check with a "reload and try again" that couldn't help. A cross-origin URL
+ * (the full SCNet model's pinned Hugging Face revision) is already immutable, so it is fetched as is. */
+export function modelUrlFor(model, scope = globalThis) {
+  try {
+    const u = new URL(model.url), here = scope.location && scope.location.origin;
+    if (here && u.origin === here) { u.searchParams.set("sha", model.sha256.slice(0, 16)); return u.href; }
+  } catch (_) { /* not a URL: use it as given */ }
+  return model.url;
+}
+export async function modelBytes(model = COMPACT_MODEL, scope = globalThis, label = "stem model") {
   let cache = null;
   try { cache = scope.caches ? await scope.caches.open("ttp-models") : null; } catch (_) { cache = null; }
-  const key = `${model.url}#${model.sha256}`;
+  const url = modelUrlFor(model, scope);
+  const key = url === model.url ? `${model.url}?sha=${model.sha256.slice(0, 16)}` : url;
   if (cache) {
     try {
       const hit = await cache.match(key);
@@ -189,11 +204,11 @@ export async function modelBytes(model = COMPACT_MODEL, scope = globalThis) {
       }
     } catch (_) { /* fall through to the network */ }
   }
-  const res = await scope.fetch(model.url);
-  if (!res.ok) throw new Error(`could not download the stem model (HTTP ${res.status})`);
+  const res = await scope.fetch(url);
+  if (!res.ok) throw new Error(`could not download the ${label} (HTTP ${res.status})`);
   const bytes = new Uint8Array(await res.arrayBuffer());
   const got = await sha256Hex(bytes);
-  if (got !== model.sha256) throw new Error(`the stem model failed its integrity check (SHA-256 ${got.slice(0, 12)}…, expected ${model.sha256.slice(0, 12)}…) — reload and try again`);
+  if (got !== model.sha256) throw new Error(`the ${label} failed its integrity check (SHA-256 ${got.slice(0, 12)}…, expected ${model.sha256.slice(0, 12)}…) — check the connection and try again`);
   if (cache) { try { await cache.put(key, new Response(bytes)); } catch (_) { /* quota: fine, just not cached */ } }
   return bytes;
 }
