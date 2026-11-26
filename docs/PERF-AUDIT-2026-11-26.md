@@ -15,12 +15,12 @@ third-party hosts blocked (web fonts are cosmetic and excluded from both runs), 
 
 | profile | metric | before (`7b42e41`) | after | change |
 |---|---|---|---|---|
-| 4G-ish: 170 ms RTT, 9 Mbit/s (5 runs) | first paint (splash) | 520 ms | **252 ms** | −52 % |
-| | app ready (mode tabs on screen) | 1,666 ms | **1,144 ms** | −31 % |
+| 4G-ish: 170 ms RTT, 9 Mbit/s (5 runs) | first paint (splash) | 520 ms | **276 ms** | −47 % |
+| | app ready (mode tabs on screen) | 1,666 ms | **1,173 ms** | −30 % |
 | | bytes transferred at boot | 629 KB | **349 KB** | −44 % |
 | | requests at boot | 15 | 14 | −1 |
-| slow 3G: 400 ms RTT, 1.6 Mbit/s (3 runs) | first paint | 1,216 ms | **496 ms** | −59 % |
-| | app ready | 4,880 ms | **2,871 ms** | −41 % |
+| slow 3G: 400 ms RTT, 1.6 Mbit/s (3 runs) | first paint | 1,216 ms | **524 ms** | −57 % |
+| | app ready | 4,880 ms | **2,944 ms** | −40 % |
 | | PDF.js downloaded at boot | yes | **no** | |
 
 Re-run: `cd tests && node bench/load-e2e.mjs` (this checkout) or
@@ -109,14 +109,19 @@ chooses a PDF the instant the tab opens and got an unloaded PDF.js; that is why 
 - the splash `<style>` moved ahead of every script;
 - React and ReactDOM load with `defer` (deferred classic scripts and module scripts execute in
   document order, so React is in place before the boot module runs — same order as before);
-- the seven optional model-glue modules (`note-model.js`, `stem-model.js`, `guitar-model.js`,
-  `drum-model.js`, `chord-ocr-model.js`, `beat-model.js`, `tab-view.js`) are `async`.
+- five optional model-glue modules (`note-model.js`, `guitar-model.js`, `drum-model.js`,
+  `chord-ocr-model.js`, `beat-model.js`) are `async`. `stem-model.js` and `tab-view.js` stay ordered:
+  the UI reads their globals **during render** (`TTP_STEM_COMPACT_DEFAULT` / `_FAST_DEFAULT` set the
+  iPhone low-memory and Faster defaults in a `useState` initialiser; `TabView` reads `TTP_TAB_VIEW`), so
+  they must run before the app mounts. A first version made all seven async; the Codex review on PR #159
+  caught the tab-viewer case (a restored `.alphatex` session could mount before `tab-view.js` ran and stay
+  on "isn't loaded"), and the stem defaults turned out to have the same race. A test now fails if a global
+  read at render time comes from an async module.
 
 **Why:** two synchronous scripts in `<head>` (143 KB) blocked parsing, so not even the dark background
 and the "loading engine…" splash could paint until React had downloaded and run. And because non-async
-module scripts execute in document order, the boot module waited for all seven glue modules too —
-although each one only installs a `window.TTP_*` function the UI reads when a button is pressed
-(checked: none is read during render or at module top level).
+module scripts execute in document order, the boot module waited for every glue module too, although
+five of them only install a `window.TTP_*` function the UI reads when a button is pressed.
 
 ### 5. Web fonts from `<head>`, non-blocking, one weight lighter — `index.html`, `TabDecoderPro.tsx`
 
