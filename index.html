@@ -53,8 +53,11 @@
   <script defer src="./vendor/react-18.3.1/react.production.min.js"></script>
   <script defer src="./vendor/react-18.3.1/react-dom.production.min.js"></script>
   <!--
-    The optional model glue below is async (perf audit 2026-11-26): each module only installs a window.TTP_*
-    function that the UI reads when a button is pressed, so none of them may hold up the app's boot module.
+    Model glue that the UI only reads when a button is pressed is async (perf audit 2026-11-26), so it never
+    holds up the boot module: note-model, guitar-model, drum-model, chord-ocr-model, beat-model.
+    stem-model.js and tab-view.js stay ordered (no async): the UI reads their globals DURING RENDER
+    (TTP_STEM_COMPACT_DEFAULT / _FAST_DEFAULT set the iPhone defaults; TabView reads TTP_TAB_VIEW), so they
+    must have run before the app mounts — e.g. when a restored .alphatex session opens straight on the tab.
   -->
   <!--
     Optional per-voice ML note transcription (Spotify basic-pitch). Deferred +
@@ -68,7 +71,7 @@
     "✂ Split this mix into stems". Lazy: nothing downloads until the first split;
     the separation runs in a module Worker (stem-worker.js). See stem-model.js.
   -->
-  <script type="module" async src="./stem-model.js"></script>
+  <script type="module" src="./stem-model.js"></script>
   <!--
     Optional guitar note transcription (🎸 Guitar → Tab): the guitar CRNN (MIT) as a 25 MB
     same-origin ONNX model, run on the pinned ONNX Runtime Web build in a module Worker that
@@ -100,7 +103,7 @@
     vendored same-origin in vendor/alphatab-1.8.4/ so its render worker and audio worklet load.
     Nothing is fetched until a tab is first shown. See tab-view.js.
   -->
-  <script type="module" async src="./tab-view.js"></script>
+  <script type="module" src="./tab-view.js"></script>
 
 </head>
 <body>

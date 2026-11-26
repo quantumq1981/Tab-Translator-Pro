@@ -100,8 +100,13 @@ section("load-time rails (perf audit 2026-11-26)");
   expect(/<script defer src="\.\/vendor\/react-18\.3\.1\/react\.production\.min\.js"><\/script>/.test(html) && /<script defer src="\.\/vendor\/react-18\.3\.1\/react-dom\.production\.min\.js"><\/script>/.test(html), "React loads with defer (never blocks the parser / first paint)");
   expect(head.indexOf("#boot {") < head.indexOf("react.production.min.js"), "the splash CSS comes before every script");
   expect(!/<script(?![^>]*\b(?:defer|async|type="module"))[^>]*\bsrc=/.test(html), "no parser-blocking external script in index.html");
-  const glue = ["note-model.js", "stem-model.js", "guitar-model.js", "drum-model.js", "chord-ocr-model.js", "beat-model.js", "tab-view.js"];
-  expect(glue.every((f) => html.includes(`<script type="module" async src="./${f}"></script>`)), "the model glue modules are async (they never hold up the boot module)");
+  const glue = ["note-model.js", "guitar-model.js", "drum-model.js", "chord-ocr-model.js", "beat-model.js"];
+  expect(glue.every((f) => html.includes(`<script type="module" async src="./${f}"></script>`)), "click-time model glue is async (it never holds up the boot module)");
+  // stem-model.js / tab-view.js install globals the UI reads DURING RENDER, so they must run before the app mounts
+  expect(["stem-model.js", "tab-view.js"].every((f) => html.includes(`<script type="module" src="./${f}"></script>`)), "render-time glue (stem defaults, tab viewer) stays ordered before the boot module");
+  const RENDER_TIME = ["TTP_TAB_VIEW", "TTP_STEM_COMPACT_DEFAULT", "TTP_STEM_FAST_DEFAULT"]; // read during render by TabView / StemsPanel
+  const asyncGlobals = glue.flatMap((f) => [...read(f).matchAll(/window\.(TTP_[A-Z_]+)\s*=/g)].map((m) => m[1]));
+  expect(asyncGlobals.length >= 5 && RENDER_TIME.every((g) => !asyncGlobals.includes(g)) && RENDER_TIME.every((g) => ui.includes("window." + g)), `no global read at render time comes from an async module (async ones: ${asyncGlobals.join(", ")})`);
   expect(!/fonts\.googleapis\.com/.test(ui) && /<link rel="stylesheet" href="https:\/\/fonts\.googleapis\.com[^"]*" media="print" onload="this\.media='all'"/.test(html) && /rel="preconnect" href="https:\/\/fonts\.gstatic\.com" crossorigin/.test(html), "web fonts: requested from <head>, non-blocking, preconnected; none from the app's CSS");
   expect(/const \[pdfWanted, setPdfWanted\] = useState\(false\)/.test(ui) && /if \(!pdfWanted\) return;/.test(ui) && /\}, \[pdfWanted\]\);/.test(ui), "PDF.js loads on demand, not at boot");
   expect(/if \(mode === "pdf" \|\| mode === "scan"\) setPdfWanted\(true\)/.test(ui), "the PDF Chart and Scan tabs ask for PDF.js");
