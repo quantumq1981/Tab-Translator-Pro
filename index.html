@@ -19,55 +19,7 @@
     over window.React — one React instance, no esm.sh, no import map (a Blob-URL module graph doesn't
     inherit import maps in WebKit / Safari < 16.4 anyway).
   -->
-  <script>window.__TTP_BUILD__ = "";</script>
-  <script src="./vendor/react-18.3.1/react.production.min.js"></script>
-  <script src="./vendor/react-18.3.1/react-dom.production.min.js"></script>
-  <!--
-    Optional per-voice ML note transcription (Spotify basic-pitch). Deferred +
-    lazy-init: this module only downloads the model + tfjs from esm.sh the first
-    time the user taps "🎼 Voices (ML)" in the Audio panel. Load failure is
-    silent — the UI's "not configured" message stays honest. See note-model.js.
-  -->
-  <script type="module" src="./note-model.js"></script>
-  <!--
-    Optional full-mix stem separation (SCNet, MIT weights) for the Audio panel's
-    "✂ Split this mix into stems". Lazy: nothing downloads until the first split;
-    the separation runs in a module Worker (stem-worker.js). See stem-model.js.
-  -->
-  <script type="module" src="./stem-model.js"></script>
-  <!--
-    Optional guitar note transcription (🎸 Guitar → Tab): the guitar CRNN (MIT) as a 25 MB
-    same-origin ONNX model, run on the pinned ONNX Runtime Web build in a module Worker that
-    imports this page's engine. Nothing is fetched until the button is pressed. See guitar-model.js.
-  -->
-  <script type="module" src="./guitar-model.js"></script>
-  <!--
-    Optional drum transcription model (stems panel → drums chart): Magenta Onsets & Frames drums
-    (Apache-2.0, trained on E-GMD) as a 4.9 MB same-origin ONNX model on the same pinned runtime, in
-    a module Worker that imports this page's engine. Nothing is fetched until a drums stem is
-    charted with the drum model on. See drum-model.js.
-  -->
-  <script type="module" src="./drum-model.js"></script>
-  <!--
-    Optional chord-symbol reader ("Scan 📷": a photo or scanned PDF of a lead sheet → chord chart):
-    our own small CTC recogniser (~0.6 M parameters, trained on synthetic chord images) as a
-    same-origin ONNX model on the same pinned runtime, in a module Worker that imports this page's
-    engine. Nothing is fetched until a page is read. See chord-ocr-model.js.
-  -->
-  <script type="module" src="./chord-ocr-model.js"></script>
-  <!--
-    Optional learned beat + downbeat tracker ("Tempo & bars" → 🥁 Find bar 1 (ML)): beat_this
-    (CPJKU, MIT) as a 22.5 MB same-origin ONNX model on the same pinned runtime, in a module Worker
-    that imports this page's engine. Nothing is fetched until the button is pressed. See beat-model.js.
-  -->
-  <script type="module" src="./beat-model.js"></script>
-  <!--
-    Tab viewer (ChartPanel's "Tab" view + opening a saved .alphatex): alphaTab 1.8.4 (MPL-2.0),
-    vendored same-origin in vendor/alphatab-1.8.4/ so its render worker and audio worklet load.
-    Nothing is fetched until a tab is first shown. See tab-view.js.
-  -->
-  <script type="module" src="./tab-view.js"></script>
-
+  <!-- first so the dark splash paints before any script arrives (perf audit 2026-11-26) -->
   <style>
     html, body { margin: 0; height: 100%; background: #0b0b0f; }
     #root { min-height: 100%; }
@@ -80,6 +32,76 @@
     #boot b { color: #ff6b35; font-weight: 600; }
     #boot code { color: #e06c75; }
   </style>
+
+  <!--
+    Web fonts (cosmetic): requested from <head> so the font files download while the app loads, instead of
+    from an @import the app rendered (found only after ~1.4 MB of JS had run). media="print" + onload =
+    the stylesheet never blocks the first paint; display=swap shows the system monospace until it lands.
+    IBM Plex Mono 500 is gone: no text used it.
+  -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&amp;family=Space+Mono:wght@400;700&amp;display=swap" media="print" onload="this.media='all'" />
+  <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&amp;family=Space+Mono:wght@400;700&amp;display=swap" /></noscript>
+
+  <script>window.__TTP_BUILD__ = "";</script>
+  <!--
+    defer (perf audit 2026-11-26): React no longer blocks the parser, so the splash paints at once. Deferred
+    classic scripts and module scripts run in document order, so React is still in place before the boot
+    module at the end of <body> runs.
+  -->
+  <script defer src="./vendor/react-18.3.1/react.production.min.js"></script>
+  <script defer src="./vendor/react-18.3.1/react-dom.production.min.js"></script>
+  <!--
+    The optional model glue below is async (perf audit 2026-11-26): each module only installs a window.TTP_*
+    function that the UI reads when a button is pressed, so none of them may hold up the app's boot module.
+  -->
+  <!--
+    Optional per-voice ML note transcription (Spotify basic-pitch). Deferred +
+    lazy-init: this module only downloads the model + tfjs from esm.sh the first
+    time the user taps "🎼 Voices (ML)" in the Audio panel. Load failure is
+    silent — the UI's "not configured" message stays honest. See note-model.js.
+  -->
+  <script type="module" async src="./note-model.js"></script>
+  <!--
+    Optional full-mix stem separation (SCNet, MIT weights) for the Audio panel's
+    "✂ Split this mix into stems". Lazy: nothing downloads until the first split;
+    the separation runs in a module Worker (stem-worker.js). See stem-model.js.
+  -->
+  <script type="module" async src="./stem-model.js"></script>
+  <!--
+    Optional guitar note transcription (🎸 Guitar → Tab): the guitar CRNN (MIT) as a 25 MB
+    same-origin ONNX model, run on the pinned ONNX Runtime Web build in a module Worker that
+    imports this page's engine. Nothing is fetched until the button is pressed. See guitar-model.js.
+  -->
+  <script type="module" async src="./guitar-model.js"></script>
+  <!--
+    Optional drum transcription model (stems panel → drums chart): Magenta Onsets & Frames drums
+    (Apache-2.0, trained on E-GMD) as a 4.9 MB same-origin ONNX model on the same pinned runtime, in
+    a module Worker that imports this page's engine. Nothing is fetched until a drums stem is
+    charted with the drum model on. See drum-model.js.
+  -->
+  <script type="module" async src="./drum-model.js"></script>
+  <!--
+    Optional chord-symbol reader ("Scan 📷": a photo or scanned PDF of a lead sheet → chord chart):
+    our own small CTC recogniser (~0.6 M parameters, trained on synthetic chord images) as a
+    same-origin ONNX model on the same pinned runtime, in a module Worker that imports this page's
+    engine. Nothing is fetched until a page is read. See chord-ocr-model.js.
+  -->
+  <script type="module" async src="./chord-ocr-model.js"></script>
+  <!--
+    Optional learned beat + downbeat tracker ("Tempo & bars" → 🥁 Find bar 1 (ML)): beat_this
+    (CPJKU, MIT) as a 22.5 MB same-origin ONNX model on the same pinned runtime, in a module Worker
+    that imports this page's engine. Nothing is fetched until the button is pressed. See beat-model.js.
+  -->
+  <script type="module" async src="./beat-model.js"></script>
+  <!--
+    Tab viewer (ChartPanel's "Tab" view + opening a saved .alphatex): alphaTab 1.8.4 (MPL-2.0),
+    vendored same-origin in vendor/alphatab-1.8.4/ so its render worker and audio worklet load.
+    Nothing is fetched until a tab is first shown. See tab-view.js.
+  -->
+  <script type="module" async src="./tab-view.js"></script>
+
 </head>
 <body>
   <div id="root"></div>

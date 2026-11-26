@@ -403,7 +403,7 @@ expect(LR.tokens.filter((t) => t.staff === 1).length === 1 && LR.tokens.find((t)
   expect(!/catch \(err\)[\s\S]{0,200}onMainThread/.test(glue) && /if \(!w\) return onMainThread/.test(glue), "the main thread is used only when no Worker can be made");
   expect(/readChordPages/.test(worker) && /type: "progress"/.test(worker), "the worker runs the core and reports progress");
   const html = read("index.html"), pages = read(".github/workflows/pages.yml");
-  expect(/<script type="module" src="\.\/chord-ocr-model\.js"><\/script>/.test(html), "index.html loads chord-ocr-model.js");
+  expect(/<script type="module" async src="\.\/chord-ocr-model\.js"><\/script>/.test(html), "index.html loads chord-ocr-model.js");
   expect(/cp chord-ocr-model\.js chord-ocr-core\.js chord-ocr-worker\.js _site\//.test(pages) && /models\/chord-ocr\/chord-ocr\.onnx models\/chord-ocr\/chord-ocr-hand\.onnx models\/chord-ocr\/NOTICE/.test(pages) && /chord-ocr-model\.js\?v=\$\{BUILD\}/.test(pages), "pages.yml ships the glue, both readers + NOTICE, and stamps chord-ocr-model.js");
   const ui = read("TabDecoderPro.tsx"), scan = ui.slice(ui.indexOf("const SCAN_MAX_PAGES"), ui.indexOf("function LyricsPanel("));
   expect(/\["scan", "Scan 📷"\]/.test(ui) && /mode === "scan" \? <ScanPanel/.test(ui), "the Scan 📷 mode is listed and routed");

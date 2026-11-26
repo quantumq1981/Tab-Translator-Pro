@@ -21,7 +21,13 @@ if (!site || !stamp || !/^[\w.-]+$/.test(stamp)) { console.error("usage: node sc
 const require = createRequire(path.join(repo, "tests", "package.json"));
 const Babel = require("@babel/standalone");
 const PRESETS = [["typescript", { allExtensions: true, isTSX: true, onlyRemoveTypeImports: true }], ["react"]];
-const transpile = (src, filename) => Babel.transform(src, { filename, presets: PRESETS }).code;
+/* Load-time (perf audit 2026-11-26): the deployed modules carry no comments and no layout whitespace. The sources
+ * are heavily documented (≈ 40 % of engine.tsx is comments), and every launch downloaded AND parsed them:
+ * engine.js 303 → 177 KB gzipped, app.js 151 → 105 KB. Names and code are untouched (no mangling), so stack
+ * traces and the worker RPC (which calls engine exports by name) read exactly as before. A licence comment
+ * (/*! … or @license / @preserve) would be kept. */
+const KEEP_COMMENT = (c) => /^!|@license|@preserve/.test(c);
+const transpile = (src, filename) => Babel.transform(src, { filename, presets: PRESETS, compact: true, comments: false, shouldPrintComment: KEEP_COMMENT }).code;
 const read = (f) => fs.readFileSync(path.join(repo, f), "utf8");
 const v = `?v=${stamp}`;
 
@@ -52,7 +58,12 @@ fs.mkdirSync(dir, { recursive: true });
 for (const [f, src] of Object.entries(out)) fs.writeFileSync(path.join(dir, f), src);
 const htmlPath = path.join(site, "index.html");
 const html = fs.readFileSync(htmlPath, "utf8");
-const stamped = html.replace('<script>window.__TTP_BUILD__ = "";</script>', `<script>window.__TTP_BUILD__ = "${stamp}";</script>`);
+/* modulepreload (perf audit 2026-11-26): without it the browser finds app.js only when the boot module runs
+ * (after React), and engine.js / session-store.js / react-shim.js only after app.js has downloaded — two
+ * round trips in series before the largest file starts. Preloading all four starts them with the HTML. The
+ * URLs are the exact stamped ones the page imports, so the preloaded copy is the one used. */
+const preload = Object.keys(out).map((f) => `<link rel="modulepreload" href="./build/${f}${v}" />`).join("\n  ");
+const stamped = html.replace('<script>window.__TTP_BUILD__ = "";</script>', `<script>window.__TTP_BUILD__ = "${stamp}";</script>\n  ${preload}`);
 if (stamped === html) throw new Error("index.html has no __TTP_BUILD__ placeholder to stamp");
 fs.writeFileSync(htmlPath, stamped);
 console.log(`built ${Object.keys(out).map((f) => `build/${f} (${Math.round(out[f].length / 1024)} KB)`).join(", ")}; index.html stamped ${stamp}`);
