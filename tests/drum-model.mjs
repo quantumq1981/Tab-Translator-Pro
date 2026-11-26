@@ -137,7 +137,7 @@ section("the shipped model + glue contracts");
   expect(!/catch \(err\)[\s\S]{0,200}onMainThread/.test(glue) && /if \(!w\) return onMainThread/.test(glue), "the main thread is used only when no Worker can be made (a failed worker run is not retried there)");
   expect(/transcribeDrumPcm/.test(worker) && /type: "progress"/.test(worker), "the worker runs the core and reports progress");
   const html = read("index.html"), pages = read(".github/workflows/pages.yml");
-  expect(/<script type="module" src="\.\/drum-model\.js"><\/script>/.test(html), "index.html loads drum-model.js");
+  expect(/<script type="module" async src="\.\/drum-model\.js"><\/script>/.test(html), "index.html loads drum-model.js");
   expect(/cp drum-model\.js drum-model-core\.js drum-worker\.js _site\//.test(pages) && /models\/oaf-drums\/oaf-drums\.onnx models\/oaf-drums\/NOTICE/.test(pages) && /drum-model\.js\?v=\$\{BUILD\}/.test(pages), "pages.yml ships the glue, model + NOTICE, and stamps drum-model.js");
   const ui = read("TabDecoderPro.tsx");
   expect(/window\.TTP_DRUM_MODEL/.test(ui) && /ttp:drumModel/.test(ui) && /stemMono\(t\.list\.filter\(\(x\) => x\.role === "drums"\)\)/.test(ui), "the stems panel re-reads the drums stem with the model (per-device toggle)");

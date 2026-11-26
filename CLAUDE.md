@@ -27,6 +27,25 @@ The family is **recognize → normalize → finish**:
 
 **This repo is the family's recognition front-end (the "recognize" stage).**
 
+### Load-performance audit 2026-11-26 — read `docs/PERF-AUDIT-2026-11-26.md` (UX review: `docs/UX-REVIEW-2026-11-26.md`)
+
+Boot measured with `tests/bench/load-e2e.mjs` (site assembled as `pages.yml` does, gzip, 4× CPU): first paint
+520 → 276 ms, app ready 1666 → 1173 ms, 629 → 349 KB at 170 ms RTT. These rules now hold (`npm test` guards them):
+- **Deploy build strips comments + layout whitespace** (`build_app.mjs`: `compact`, `comments:false`, licence
+  comments kept; NO mangling — the worker RPC calls engine exports by name). engine.js 303 → 175 KB gz.
+- **`modulepreload`** for `build/{engine,app,session-store,react-shim}.js?v=<stamp>`, injected at stamp time.
+- **PDF.js is on demand:** `loadPdfJs()` (memoised, retries) — the PDF/Scan tabs, a decode, a restore and a library
+  open ask for it (`setPdfWanted(true)`), and `openPdfDocument` awaits it, so no read reaches an unloaded library.
+  Don't put it back on mount.
+- **`index.html`:** splash CSS before every script, React `defer`, the 5 click-time model-glue modules `async`
+  (note/guitar/drum/chord-ocr/beat). `stem-model.js` + `tab-view.js` stay ORDERED: their globals are read during
+  render (stem iPhone defaults, `TabView`). A global the UI reads at render time must never come from an async module.
+- **Web fonts from `<head>`** (preconnect + `media="print" onload` stylesheet), never an `@import` in app CSS;
+  IBM Plex Mono 500 dropped (unused). Next lever (not built): split app.js by mode (`React.lazy`).
+- **UX review (open, not fixed):** a mode-tab tap runs `clearSel()`, which also resets `overrides` → chord edits are
+  silently lost (verified, even re-tapping the current tab); Audio re-reads do the same. Fix = clear selection only.
+  Responsive shell mock: `docs/design/workbench-template.html`.
+
 ### Audit 2026-11-18 — fixed (PR #157 + the follow-up); read `docs/AUDIT-2026-11-18.md` for the evidence
 
 The audit at `1c84ce1` found critical risks. All of C1–M4 and m1–m10 are fixed; these rules now hold — don't regress them:

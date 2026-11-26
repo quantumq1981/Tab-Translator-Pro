@@ -80,12 +80,37 @@ section("deploy-time build (scripts/build_app.mjs)");
   fs.copyFileSync(path.join(repo, "index.html"), path.join(site, "index.html"));
   execFileSync(process.execPath, [path.join(repo, "scripts/build_app.mjs"), site, "t3st"], { stdio: "pipe" });
   const app = fs.readFileSync(path.join(site, "build/app.js"), "utf8"), shim = fs.readFileSync(path.join(site, "build/react-shim.js"), "utf8");
-  const imports = [...app.matchAll(/^import[^;]*?from\s*"([^"]+)"/gm)].map((m) => m[1]);
+  const imports = [...app.matchAll(/(?:^|;)import[^;]*?from\s*"([^"]+)"/gm)].map((m) => m[1]); // compact output: imports share a line
   expect(imports.length === 3 && imports.every((u) => /^\.\/(engine|session-store|react-shim)\.js\?v=t3st$/.test(u)), `app.js imports only its same-origin siblings (${imports.join(", ")})`);
   expect(/export default R;/.test(shim) && /export const useState = R\.useState;/.test(shim), "the React shim re-exports the vendored React");
   expect(fs.readFileSync(path.join(site, "index.html"), "utf8").includes('window.__TTP_BUILD__ = "t3st"'), "index.html is stamped, which switches the loader to build/");
   expect(fs.readFileSync(path.join(site, "build/session-store.js"), "utf8") === read("session-store.js"), "build/session-store.js is the source, as is");
+  // perf audit 2026-11-26: deployed modules ship without comments / layout whitespace, and are preloaded
+  const eng = fs.readFileSync(path.join(site, "build/engine.js"), "utf8"), page = fs.readFileSync(path.join(site, "index.html"), "utf8");
+  const jsComments = (t) => (t.match(/\/\*/g) || []).length; // the few left in app.js are CSS comments inside its <style> string
+  expect(jsComments(app) < 20 && jsComments(eng) < 20 && app.split("\n").length < 200 && eng.length < read("engine.tsx").length * 0.7, `build/ modules carry no comments (engine.js ${Math.round(eng.length / 1024)} KB vs ${Math.round(read("engine.tsx").length / 1024)} KB source)`);
+  for (const f of ["engine.js", "app.js", "session-store.js", "react-shim.js"]) expect(page.includes(`<link rel="modulepreload" href="./build/${f}?v=t3st" />`), `index.html preloads build/${f} at the stamped URL the page imports`);
   fs.rmSync(site, { recursive: true, force: true });
+}
+
+section("load-time rails (perf audit 2026-11-26)");
+{
+  const html = read("index.html"), ui = read("TabDecoderPro.tsx");
+  const head = html.slice(0, html.indexOf("</head>"));
+  expect(/<script defer src="\.\/vendor\/react-18\.3\.1\/react\.production\.min\.js"><\/script>/.test(html) && /<script defer src="\.\/vendor\/react-18\.3\.1\/react-dom\.production\.min\.js"><\/script>/.test(html), "React loads with defer (never blocks the parser / first paint)");
+  expect(head.indexOf("#boot {") < head.indexOf("react.production.min.js"), "the splash CSS comes before every script");
+  expect(!/<script(?![^>]*\b(?:defer|async|type="module"))[^>]*\bsrc=/.test(html), "no parser-blocking external script in index.html");
+  const glue = ["note-model.js", "guitar-model.js", "drum-model.js", "chord-ocr-model.js", "beat-model.js"];
+  expect(glue.every((f) => html.includes(`<script type="module" async src="./${f}"></script>`)), "click-time model glue is async (it never holds up the boot module)");
+  // stem-model.js / tab-view.js install globals the UI reads DURING RENDER, so they must run before the app mounts
+  expect(["stem-model.js", "tab-view.js"].every((f) => html.includes(`<script type="module" src="./${f}"></script>`)), "render-time glue (stem defaults, tab viewer) stays ordered before the boot module");
+  const RENDER_TIME = ["TTP_TAB_VIEW", "TTP_STEM_COMPACT_DEFAULT", "TTP_STEM_FAST_DEFAULT"]; // read during render by TabView / StemsPanel
+  const asyncGlobals = glue.flatMap((f) => [...read(f).matchAll(/window\.(TTP_[A-Z_]+)\s*=/g)].map((m) => m[1]));
+  expect(asyncGlobals.length >= 5 && RENDER_TIME.every((g) => !asyncGlobals.includes(g)) && RENDER_TIME.every((g) => ui.includes("window." + g)), `no global read at render time comes from an async module (async ones: ${asyncGlobals.join(", ")})`);
+  expect(!/fonts\.googleapis\.com/.test(ui) && /<link rel="stylesheet" href="https:\/\/fonts\.googleapis\.com[^"]*" media="print" onload="this\.media='all'"/.test(html) && /rel="preconnect" href="https:\/\/fonts\.gstatic\.com" crossorigin/.test(html), "web fonts: requested from <head>, non-blocking, preconnected; none from the app's CSS");
+  expect(/const \[pdfWanted, setPdfWanted\] = useState\(false\)/.test(ui) && /if \(!pdfWanted\) return;/.test(ui) && /\}, \[pdfWanted\]\);/.test(ui), "PDF.js loads on demand, not at boot");
+  expect(/if \(mode === "pdf" \|\| mode === "scan"\) setPdfWanted\(true\)/.test(ui), "the PDF Chart and Scan tabs ask for PDF.js");
+  expect((ui.match(/!pdfReady\) \{ setPdfWanted\(true\);/g) || []).length === 3, "a decode, a restore (both checks) and a library open of a PDF ask for PDF.js before they wait for it");
 }
 
 console.log(`\nvendored: ${passes} passed, ${failures} failed`);

@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Tab Decoder Workbench Shell</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Space+Mono:wght@400;700&display=swap">
+<style>
+/* Layout: one shell, three size classes chosen by the WINDOW width (container queries on the preview frame).
+   Single dark "stage" look on purpose — it is the app's own palette, so the template drops straight in. */
+:root {
+  color-scheme: dark;
+  --bg: #0b0b0f; --surface-1: #17171d; --surface-2: #22222b; --line: #33333d;
+  --text: #efe9dc; --text-dim: #9aa0a6; --brand: #ff6b35; --chord: #ffd9c7;
+  --info: #57d1d6; --ok: #98c379; --danger: #e06c75; --warn: #e9a24b; --focus: #57d1d6;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --display: "Space Mono", "IBM Plex Mono", ui-monospace, monospace;
+  --t-xs: 12px; --t-sm: 13px; --t-md: 15px; --t-lg: 18px; --t-xl: 24px;
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px;
+  --r-sm: 6px; --r-md: 10px; --r-lg: 14px; --r-pill: 999px;
+  --target: 32px;
+}
+@media (pointer: coarse) { :root { --target: 44px; } }
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--text); font: var(--t-sm)/1.55 var(--mono); }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+button { font: inherit; color: inherit; }
+
+.page { max-width: 1240px; margin: 0 auto; padding-block: 28px 56px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid; gap: var(--s5); }
+.intro h1 { font: 700 var(--t-xl)/1.2 var(--display); margin: 0 0 var(--s2); letter-spacing: .5px; text-wrap: balance; }
+.intro h1 .dot { color: var(--brand); }
+.intro p { margin: 0; color: var(--text-dim); max-width: 68ch; }
+
+.switcher { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); }
+.switcher .lbl { color: var(--text-dim); font-size: var(--t-xs); letter-spacing: 2px; text-transform: uppercase; margin-right: var(--s2); }
+.seg { display: inline-flex; flex-wrap: wrap; gap: 2px; background: var(--surface-1); border: 1px solid var(--line); border-radius: var(--r-md); padding: 3px; }
+.seg button { min-height: var(--target); padding: 0 var(--s3); border: 0; border-radius: 7px; background: transparent; color: var(--text-dim); cursor: pointer; font-size: var(--t-sm); }
+.seg button[aria-pressed="true"], .seg button[aria-selected="true"] { background: var(--surface-2); color: var(--brand); box-shadow: inset 0 0 0 1px var(--brand); }
+.hint { color: var(--text-dim); font-size: var(--t-xs); }
+
+/* ---------- the preview frame ---------- */
+.frame-wrap { overflow-x: auto; padding-bottom: var(--s2); }
+.frame { container-type: inline-size; container-name: win; position: relative; margin: 0 auto; width: 100%;
+  height: 760px; border: 1px solid var(--line); border-radius: 22px; overflow: hidden; overflow: clip; background: var(--bg); transition: width .25s ease; }
+.frame[data-size="compact"] { width: 390px; }
+.frame[data-size="regular"] { width: 820px; height: 880px; }
+.frame[data-size="wide"] { width: 1180px; }
+
+.app { height: 100%; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-areas: "bar" "tool" "main" "nav"; }
+.appbar { grid-area: bar; display: flex; align-items: center; gap: var(--s3); padding: var(--s3) var(--s4); border-bottom: 1px solid var(--line); background: var(--surface-1); }
+.brand { font: 700 15px var(--display); letter-spacing: 1px; white-space: nowrap; }
+.brand span { color: var(--brand); }
+.song { min-width: 0; flex: 1; }
+.song b { display: block; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.song small { color: var(--text-dim); font-size: var(--t-xs); }
+.btn { min-height: var(--target); min-width: var(--target); padding: 0 var(--s3); border-radius: var(--r-sm); border: 1px solid var(--line); background: var(--bg); color: var(--text); cursor: pointer; font-size: var(--t-sm); display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.btn.primary { border-color: var(--brand); color: var(--brand); }
+.btn:hover { border-color: var(--text-dim); }
+
+.toolbar { grid-area: tool; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); padding: var(--s2) var(--s4); border-bottom: 1px solid var(--line); background: var(--bg); }
+.toolbar .grow { flex: 1; }
+.stepper { display: inline-flex; align-items: center; gap: 4px; }
+.stepper output { min-width: 3ch; text-align: center; font-variant-numeric: tabular-nums; color: var(--text-dim); }
+
+.main { grid-area: main; overflow: auto; padding: var(--s4); }
+.empty-note { color: var(--text-dim); font-size: var(--t-xs); margin: 0 0 var(--s3); }
+.chart { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-left: 1px solid var(--line); }
+.bar { border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); min-height: 76px; padding: 6px 8px; display: flex; flex-direction: column; gap: 4px; }
+.bar .n { color: var(--text-dim); font-size: 11px; font-variant-numeric: tabular-nums; }
+.bar .sec { color: var(--brand); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; }
+.chord { align-self: flex-start; min-height: var(--target); padding: 0 6px; border: 0; border-radius: var(--r-sm); background: transparent; color: var(--info); font: 700 18px var(--display); cursor: pointer; }
+.chord[aria-pressed="true"] { background: var(--surface-2); color: var(--brand); box-shadow: inset 0 -2px 0 var(--brand); }
+
+.nav { grid-area: nav; display: grid; grid-template-columns: repeat(4, 1fr); border-top: 1px solid var(--line); background: var(--surface-1); padding-bottom: env(safe-area-inset-bottom, 0px); }
+.nav button { min-height: 56px; border: 0; background: transparent; color: var(--text-dim); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; font-size: 11px; cursor: pointer; }
+.nav button svg { width: 22px; height: 22px; }
+.nav button[aria-selected="true"] { color: var(--brand); }
+.nav button[aria-disabled="true"] { opacity: .4; }
+
+.inspector { display: none; grid-area: insp; border-left: 1px solid var(--line); background: var(--surface-1); overflow: auto; padding: var(--s4); }
+
+/* sheets: bottom on Compact, right-hand on Regular, inline inspector on Wide */
+.scrim { position: absolute; inset: 0; background: rgba(0,0,0,.55); opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 4; }
+.scrim.on { opacity: 1; pointer-events: auto; }
+.sheet { position: absolute; left: 0; right: 0; bottom: 0; max-height: 78%; overflow: auto; z-index: 5; background: var(--surface-1);
+  border-top: 1px solid var(--line); border-radius: var(--r-lg) var(--r-lg) 0 0; padding: var(--s2) var(--s4) calc(var(--s4) + env(safe-area-inset-bottom, 0px));
+  transform: translateY(105%); transition: transform .25s cubic-bezier(.2,.7,.2,1); }
+.sheet.on { transform: none; }
+.sheet .grab { width: 40px; height: 4px; border-radius: 4px; background: var(--line); margin: 4px auto var(--s3); }
+.sheet header { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); margin-bottom: var(--s3); }
+.sheet h2, .inspector h2 { margin: 0; font-size: var(--t-xs); letter-spacing: 2px; text-transform: uppercase; color: var(--text-dim); font-weight: 600; }
+
+@container win (min-width: 600px) {
+  .sheet { left: auto; top: 0; width: 360px; max-height: none; border-top: 0; border-left: 1px solid var(--line); border-radius: 0; transform: translateX(105%); }
+  .sheet .grab { display: none; }
+}
+@container win (min-width: 1024px) {
+  .app { grid-template-columns: 76px minmax(0, 1fr) 320px; grid-template-rows: auto auto minmax(0, 1fr);
+    grid-template-areas: "nav bar bar" "nav tool insp" "nav main insp"; }
+  .nav { grid-template-columns: 1fr; grid-auto-rows: 72px; align-content: start; border-top: 0; border-right: 1px solid var(--line); padding-top: var(--s3); }
+  .inspector { display: block; }
+  .sheet[data-kind="inspector"] { display: none; }
+  .chart { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .chord { font-size: 20px; }
+}
+@container win (max-width: 420px) { .chart { grid-template-columns: repeat(2, minmax(0, 1fr)); } .brand { display: none; } }
+
+/* inspector / readout content */
+.big { font: 700 56px/1 var(--display); color: var(--chord); margin: var(--s3) 0 var(--s2); }
+.pcs { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 3px; margin: var(--s2) 0 var(--s4); }
+.pcs div { height: 26px; border-radius: 4px; border: 1px solid var(--line); background: var(--bg); }
+.pcs div.on { background: var(--info); border-color: var(--info); }
+.pcs span { display: block; text-align: center; font-size: 10px; color: var(--text-dim); margin-top: 3px; }
+.empty { border: 1px dashed var(--line); border-radius: var(--r-md); padding: var(--s5) var(--s4); color: var(--text-dim); text-align: center; }
+.empty b { display: block; color: var(--text); margin-bottom: 4px; font-weight: 600; }
+.fret { width: 100%; max-width: 180px; height: auto; display: block; }
+
+.group { display: grid; gap: var(--s2); margin-bottom: var(--s4); }
+.group > .lbl { font-size: var(--t-xs); color: var(--text-dim); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { min-height: var(--target); padding: 0 var(--s3); border-radius: var(--r-pill); border: 1px solid var(--line); background: var(--bg); color: var(--text-dim); cursor: pointer; font-size: var(--t-sm); }
+.chip[aria-pressed="true"] { border-color: var(--brand); color: var(--brand); }
+.chip[aria-pressed="true"]::before { content: "✓ "; }
+.menu { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.menu h3 { margin: var(--s3) 0 var(--s1); font-size: 11px; letter-spacing: 2px; text-transform: uppercase; color: var(--text-dim); font-weight: 600; }
+.menu button { width: 100%; text-align: left; min-height: 48px; padding: var(--s2) var(--s3); border: 1px solid transparent; border-radius: var(--r-md); background: transparent; cursor: pointer; display: grid; gap: 2px; }
+.menu button:hover { border-color: var(--line); background: var(--bg); }
+.menu button b { font-weight: 600; }
+.menu button small { color: var(--text-dim); font-size: var(--t-xs); }
+.menu button.lead { border-color: var(--brand); }
+.menu button.lead b { color: var(--brand); }
+
+.toast { position: absolute; left: 50%; bottom: 76px; transform: translate(-50%, 20px); opacity: 0; z-index: 6; pointer-events: none;
+  display: flex; align-items: center; gap: var(--s3); padding: var(--s2) var(--s2) var(--s2) var(--s4); border-radius: var(--r-md); background: var(--surface-2); border: 1px solid var(--line); transition: .2s; white-space: nowrap; }
+.toast.on { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
+@container win (min-width: 1024px) { .toast { bottom: var(--s5); } }
+
+/* ---------- spec ---------- */
+.spec { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: var(--s4); }
+.card { background: var(--surface-1); border: 1px solid var(--line); border-radius: var(--r-lg); padding: var(--s4); min-width: 0; }
+.card h2 { margin: 0 0 var(--s3); font-size: var(--t-xs); letter-spacing: 2px; text-transform: uppercase; color: var(--text-dim); font-weight: 600; }
+.card table { width: 100%; border-collapse: collapse; font-size: var(--t-xs); }
+.card td, .card th { text-align: left; padding: 6px 8px 6px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+.card th { color: var(--text-dim); font-weight: 600; }
+.swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: var(--s2); }
+.sw { display: flex; align-items: center; gap: var(--s2); font-size: var(--t-xs); }
+.sw i { width: 22px; height: 22px; border-radius: 6px; border: 1px solid var(--line); flex: none; }
+.card ul { margin: 0; padding-left: 1.1em; display: grid; gap: 6px; font-size: var(--t-xs); color: var(--text-dim); }
+.card ul b { color: var(--text); font-weight: 600; }
+.tablewrap { overflow-x: auto; }
+</style>
+</head>
+<body>
+
+<main class="page">
+  <section class="intro">
+    <h1>TAB<span class="dot">·</span>DECODER workbench shell</h1>
+    <p>A responsive frame for TabTranslator Pro on phone, iPad and tablet: four destinations, a four-control chart toolbar, and the chord readout in a sheet or a side panel. Layout follows the window width, so iPad Split View gets the phone layout when it is narrow. Tap a chord, open ⋯ Settings or Share, and switch sizes below. The chart is the opening of <i>Blue Sky</i>, the repo's validation file.</p>
+  </section>
+
+  <div class="switcher">
+    <span class="lbl" id="sz-lbl">Window</span>
+    <div class="seg" role="group" aria-labelledby="sz-lbl" id="sizes">
+      <button type="button" data-size="compact" aria-pressed="false">Compact · 390</button>
+      <button type="button" data-size="regular" aria-pressed="false">Regular · 820</button>
+      <button type="button" data-size="wide" aria-pressed="false">Wide · 1180</button>
+      <button type="button" data-size="fit" aria-pressed="true">Fit this window</button>
+    </div>
+  </div>
+
+  <div class="frame-wrap">
+    <div class="frame" id="frame" data-size="fit">
+      <div class="app">
+        <header class="appbar">
+          <div class="brand">TAB<span>·</span>DECODER</div>
+          <div class="song"><b>Blue Sky — The Allman Brothers Band</b><small id="meta">key E · ♩=100 · 165 bars · Rhythm guitar</small></div>
+          <button class="btn primary" type="button" data-open="share">Share</button>
+        </header>
+
+        <div class="toolbar">
+          <div class="seg" role="tablist" aria-label="View">
+            <button type="button" role="tab" aria-selected="true">Chart</button>
+            <button type="button" role="tab" aria-selected="false">Grid</button>
+            <button type="button" role="tab" aria-selected="false">Tab</button>
+            <button type="button" role="tab" aria-selected="false">Lyrics</button>
+          </div>
+          <div class="stepper" aria-label="Transpose">
+            <button class="btn" type="button" id="down" aria-label="Transpose down a semitone">−</button>
+            <output id="semis" aria-live="polite">0</output>
+            <button class="btn" type="button" id="up" aria-label="Transpose up a semitone">+</button>
+          </div>
+          <span class="grow"></span>
+          <button class="btn" type="button" id="play" aria-pressed="false">▶ Play</button>
+          <button class="btn" type="button" data-open="settings" aria-label="Chart settings">⋯</button>
+        </div>
+
+        <section class="main" aria-label="Chart">
+          <p class="empty-note">Tap a chord to see its notes and voicings.</p>
+          <div class="chart" id="chart"></div>
+        </section>
+
+        <aside class="inspector" id="inspector" aria-label="Chord readout"></aside>
+
+        <nav class="nav" role="tablist" aria-label="Destinations">
+          <button type="button" role="tab" aria-selected="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 7h6l2 2h8v9a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z"/></svg>Open</button>
+          <button type="button" role="tab" aria-selected="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 5h16M4 10h16M4 15h16M4 20h16M9 5v15M15 5v15"/></svg>Chart</button>
+          <button type="button" role="tab" aria-selected="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 4v10M8 8v4a4 4 0 0 0 8 0V8M12 18v2"/></svg>Listen</button>
+          <button type="button" role="tab" aria-selected="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M5 4h4v16H5zM10 4h4v16h-4zM15 5l3.5-1 2.5 15.5-3.5 1z"/></svg>Library</button>
+        </nav>
+
+        <div class="scrim" id="scrim"></div>
+        <section class="sheet" id="sheet-inspector" data-kind="inspector" role="dialog" aria-modal="true" aria-label="Chord readout">
+          <div class="grab"></div>
+          <header><h2>Chord</h2><button class="btn" type="button" data-close>Done</button></header>
+          <div id="sheet-insp-body"></div>
+        </section>
+        <section class="sheet" id="sheet-settings" data-kind="settings" role="dialog" aria-modal="true" aria-label="Chart settings">
+          <div class="grab"></div>
+          <header><h2>Chart settings</h2><button class="btn" type="button" data-close>Done</button></header>
+          <div class="group"><span class="lbl">Chord names</span><div class="chips" data-single>
+            <button class="chip" type="button" aria-pressed="true">Pro</button><button class="chip" type="button" aria-pressed="false">Basic</button><button class="chip" type="button" aria-pressed="false">Lite</button><button class="chip" type="button" aria-pressed="false">Full</button></div></div>
+          <div class="group"><span class="lbl">Numerals over chords</span><div class="chips" data-single>
+            <button class="chip" type="button" aria-pressed="true">Off</button><button class="chip" type="button" aria-pressed="false">I · V · vi</button><button class="chip" type="button" aria-pressed="false">1 · 5 · 6m</button></div></div>
+          <div class="group"><span class="lbl">Arrangement</span><div class="chips">
+            <button class="chip" type="button" aria-pressed="false">One chord per bar</button><button class="chip" type="button" aria-pressed="false">Strum: quarters</button></div></div>
+          <div class="group"><span class="lbl">Spelling</span><div class="chips" data-single>
+            <button class="chip" type="button" aria-pressed="true">For the key</button><button class="chip" type="button" aria-pressed="false">Family default</button><button class="chip" type="button" aria-pressed="false">Flats</button></div></div>
+        </section>
+        <section class="sheet" id="sheet-share" data-kind="share" role="dialog" aria-modal="true" aria-label="Share">
+          <div class="grab"></div>
+          <header><h2>Share</h2><button class="btn" type="button" data-close>Done</button></header>
+          <div class="menu">
+            <button type="button" class="lead" data-toast="Sent to Chord Sheet Maker Pro"><b>Send to Chord Sheet Maker Pro</b><small>Fake-book layout, slash rhythm, print and setlists</small></button>
+            <button type="button" data-toast="Print view opened"><b>Print or save as PDF</b><small>Chart, chord diagrams and lyrics on white paper</small></button>
+            <button type="button" data-toast="Image copied"><b>Copy as image</b><small>A PNG of the chord grid for messages</small></button>
+            <h3>For notation apps</h3>
+            <button type="button" data-toast="MusicXML saved"><b>MusicXML</b><small>MuseScore, Guitar Pro, Dorico, Sibelius</small></button>
+            <button type="button" data-toast="MIDI saved"><b>MIDI</b><small>DAWs and practice apps</small></button>
+            <button type="button" data-toast="Tab saved"><b>Tab (AlphaTex)</b><small>Open in any alphaTab viewer</small></button>
+            <h3>Text</h3>
+            <button type="button" data-toast="ChordPro saved"><b>ChordPro</b><small>OnSong, SongbookPro, most chord apps</small></button>
+            <button type="button" data-toast="ABC saved"><b>ABC notation</b><small>abcjs and folk-tune tools</small></button>
+            <h3>Advanced</h3>
+            <button type="button" data-toast="CSMPN saved"><b>CSMPN · ChordSlashML</b><small>Chord Sheet Maker Pro source files</small></button>
+          </div>
+        </section>
+        <div class="toast" id="toast" role="status"><span id="toast-text"></span><button class="btn" type="button" id="undo">Undo</button></div>
+      </div>
+    </div>
+  </div>
+  <p class="hint" id="cls"></p>
+
+  <section class="spec">
+    <div class="card">
+      <h2>Size classes</h2>
+      <div class="tablewrap"><table>
+        <tr><th>Class</th><th>Window</th><th>Layout</th></tr>
+        <tr><td>Compact</td><td>&lt; 600 px</td><td>Bottom tab bar, readout / settings / share as bottom sheets, 2-column chart under 420 px</td></tr>
+        <tr><td>Regular</td><td>600–1023 px</td><td>Bottom tab bar, sheets slide in from the right (360 px)</td></tr>
+        <tr><td>Wide</td><td>≥ 1024 px</td><td>Left rail (76 px), persistent readout panel (320 px)</td></tr>
+      </table></div>
+    </div>
+    <div class="card">
+      <h2>Tokens</h2>
+      <div class="swatches">
+        <div class="sw"><i style="background:#0b0b0f"></i>--bg</div><div class="sw"><i style="background:#17171d"></i>--surface-1</div>
+        <div class="sw"><i style="background:#22222b"></i>--surface-2</div><div class="sw"><i style="background:#33333d"></i>--line</div>
+        <div class="sw"><i style="background:#efe9dc"></i>--text</div><div class="sw"><i style="background:#ff6b35"></i>--brand</div>
+        <div class="sw"><i style="background:#ffd9c7"></i>--chord</div><div class="sw"><i style="background:#57d1d6"></i>--info · focus</div>
+        <div class="sw"><i style="background:#98c379"></i>--ok</div><div class="sw"><i style="background:#e06c75"></i>--danger</div>
+      </div>
+      <p class="hint" style="margin:12px 0 0">Type 12 · 13 · 15 · 18 · 24, chord 40–64. Space on a 4-pt grid. Targets 32 px for mouse, 44 px for touch (<code>pointer: coarse</code>).</p>
+    </div>
+    <div class="card">
+      <h2>Rules the shell enforces</h2>
+      <ul>
+        <li><b>Selected = shape, not just colour:</b> ✓ on chips, fill on tabs, <code>aria-pressed</code> / <code>aria-selected</code>.</li>
+        <li><b>Four actions in the toolbar,</b> everything else in Settings or Share.</li>
+        <li><b>The chart scrolls with the page;</b> only the toolbar sticks.</li>
+        <li><b>Destructive actions act at once and offer Undo</b> (toast), never <code>confirm()</code>.</li>
+        <li><b>Empty states say what to do next.</b> The readout is empty until a chord is tapped.</li>
+        <li><b>Diagnostics stay behind "Details".</b></li>
+      </ul>
+    </div>
+  </section>
+</main>
+
+<script>
+(() => {
+  const NOTES = ["C","C#","D","Eb","E","F","F#","G","Ab","A","Bb","B"];
+  const PC = { C:0,"C#":1,Db:1,D:2,"D#":3,Eb:3,E:4,F:5,"F#":6,Gb:6,G:7,"G#":8,Ab:8,A:9,"A#":10,Bb:10,B:11 };
+  // Blue Sky verse + the V and vi of the section turn (repo validation file)
+  const BARS = [["E"],["A"],["A"],["E"],["E"],["A"],["A"],["E"],["E"],["A"],["A"],["E"],["B"],["C#m"],["A"],["E"]];
+  const SHAPES = { "": [0,4,7], m: [0,3,7] };
+  const GRIPS = { E: [0,2,2,1,0,0], A: [null,0,2,2,2,0], B: [null,2,4,4,4,2], "C#m": [null,4,6,6,5,4] };
+  let semis = 0, sel = null, last = null;
+  const $ = (q) => document.querySelector(q);
+  const parse = (s) => { const m = s.match(/^([A-G][#b]?)(.*)$/); return { pc: PC[m[1]], q: m[2] }; };
+  const tr = (s) => { const p = parse(s); return NOTES[(p.pc + semis + 120) % 12] + p.q; };
+
+  function drawChart() {
+    $("#chart").innerHTML = BARS.map((cs, i) => `<div class="bar"><span class="n">${i + 1}</span>${i === 0 ? '<span class="sec">Verse</span>' : ""}${cs.map((c, j) =>
+      `<button type="button" class="chord" data-k="${i}.${j}" aria-pressed="${sel === i + "." + j}">${tr(c)}</button>`).join("")}</div>`).join("");
+  }
+  function readout() {
+    if (!sel) return `<h2>Chord readout</h2><div class="empty" style="margin-top:12px"><b>No chord selected</b>Tap any chord in the chart to see its notes and voicings.</div>`;
+    const [i, j] = sel.split(".").map(Number), raw = BARS[i][j], p = parse(raw), root = (p.pc + semis + 120) % 12;
+    const pcs = (SHAPES[p.q] || SHAPES[""]).map((x) => (root + x) % 12);
+    const grip = semis === 0 ? GRIPS[raw] : null;
+    const base = grip ? Math.max(1, Math.min(...grip.filter((v) => v))) : 1;
+    const fret = grip ? `<svg class="fret" viewBox="0 0 120 130" role="img" aria-label="Voicing ${grip.map((f) => f == null ? "x" : f).join(" ")}">
+      <rect x="15" y="20" width="90" height="100" fill="none" stroke="#33333d"/>${[1,2,3,4].map((k) => `<line x1="15" x2="105" y1="${20 + k * 20}" y2="${20 + k * 20}" stroke="#33333d"/>`).join("")}
+      ${[1,2,3,4].map((k) => `<line y1="20" y2="120" x1="${15 + k * 18}" x2="${15 + k * 18}" stroke="#33333d"/>`).join("")}
+      ${base === 1 ? '<rect x="15" y="17" width="90" height="4" fill="#efe9dc"/>' : `<text x="2" y="34" fill="#9aa0a6" font-size="10">${base}fr</text>`}
+      ${grip.map((f, s) => { const x = 15 + s * 18; if (f == null) return `<text x="${x}" y="12" fill="#9aa0a6" font-size="10" text-anchor="middle">×</text>`;
+        if (f === 0) return `<circle cx="${x}" cy="8" r="4" fill="none" stroke="#9aa0a6"/>`; return `<circle cx="${x}" cy="${20 + (f - base + 0.5) * 20}" r="7" fill="#57d1d6"/>`; }).join("")}</svg>` : `<p class="hint">Voicings are listed for the chord as written; transposed shapes appear here too.</p>`;
+    return `<h2>Chord readout · bar ${i + 1}</h2><div class="big">${tr(raw)}</div>
+      <div class="hint">${p.q === "m" ? "Minor" : "Major"} triad · 100 % match</div>
+      <div class="pcs">${NOTES.map((n, k) => `<div class="${pcs.includes(k) ? "on" : ""}" title="${n}"></div>`).join("")}</div>
+      <div class="pcs" style="margin-top:-14px" aria-hidden="true">${NOTES.map((n) => `<span>${n}</span>`).join("")}</div>
+      <h2 style="margin-bottom:8px">Voicing from the file</h2>${fret}`;
+  }
+  const isWide = () => $("#frame").getBoundingClientRect().width >= 1024;
+  function render() {
+    drawChart();
+    const html = readout(); $("#inspector").innerHTML = html; $("#sheet-insp-body").innerHTML = html;
+    $("#semis").textContent = (semis > 0 ? "+" : "") + semis;
+    $("#meta").textContent = `key ${tr("E")} · ♩=100 · 165 bars · Rhythm guitar`;
+  }
+  let openSheet = null;
+  function open(kind) {
+    close(); if (kind === "inspector" && isWide()) return;
+    openSheet = $("#sheet-" + kind); openSheet.classList.add("on"); $("#scrim").classList.add("on");
+    const b = openSheet.querySelector("[data-close]"); b && b.focus({ preventScroll: true });
+  }
+  function close() { if (openSheet) openSheet.classList.remove("on"); openSheet = null; $("#scrim").classList.remove("on"); }
+  let tt;
+  function toast(text, undo) { last = undo || null; $("#toast-text").textContent = text; $("#undo").hidden = !undo; $("#toast").classList.add("on"); clearTimeout(tt); tt = setTimeout(() => $("#toast").classList.remove("on"), 4000); }
+
+  $("#chart").addEventListener("click", (e) => { const b = e.target.closest(".chord"); if (!b) return; sel = sel === b.dataset.k ? null : b.dataset.k; render(); if (sel) open("inspector"); });
+  document.querySelectorAll("[data-open]").forEach((b) => b.addEventListener("click", () => open(b.dataset.open)));
+  document.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", close));
+  $("#scrim").addEventListener("click", close);
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") close(); });
+  $("#up").addEventListener("click", () => { const p = semis; semis = Math.min(11, semis + 1); render(); toast(`Transposed to ${tr("E")}`, () => { semis = p; render(); }); });
+  $("#down").addEventListener("click", () => { const p = semis; semis = Math.max(-11, semis - 1); render(); toast(`Transposed to ${tr("E")}`, () => { semis = p; render(); }); });
+  $("#undo").addEventListener("click", () => { if (last) last(); last = null; $("#toast").classList.remove("on"); });
+  $("#play").addEventListener("click", (e) => { const on = e.currentTarget.getAttribute("aria-pressed") !== "true"; e.currentTarget.setAttribute("aria-pressed", on); e.currentTarget.textContent = on ? "⏸ Pause" : "▶ Play"; });
+  document.querySelectorAll('[role="tablist"]').forEach((list) => list.addEventListener("click", (e) => { const t = e.target.closest('[role="tab"]'); if (!t) return; list.querySelectorAll('[role="tab"]').forEach((x) => x.setAttribute("aria-selected", x === t)); }));
+  document.querySelectorAll(".chips").forEach((g) => g.addEventListener("click", (e) => { const c = e.target.closest(".chip"); if (!c) return;
+    if (g.hasAttribute("data-single")) g.querySelectorAll(".chip").forEach((x) => x.setAttribute("aria-pressed", x === c)); else c.setAttribute("aria-pressed", c.getAttribute("aria-pressed") !== "true"); }));
+  document.querySelectorAll(".menu button").forEach((b) => b.addEventListener("click", () => { close(); toast(b.dataset.toast); }));
+
+  const label = () => { const w = Math.round($("#frame").getBoundingClientRect().width); $("#cls").textContent = `Preview window ${w} px → ${w >= 1024 ? "Wide" : w >= 600 ? "Regular" : "Compact"} layout.`; };
+  $("#sizes").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return;
+    $("#sizes").querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", x === b)); $("#frame").dataset.size = b.dataset.size; close(); setTimeout(label, 300); });
+  new ResizeObserver(label).observe($("#frame"));
+  render(); label();
+})();
+</script>
+</body>
+</html>

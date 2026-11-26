@@ -2401,7 +2401,7 @@ expect(/typeof window !==\s*["']undefined["']/.test(noteModelSrc),
 expect(/frameRate:\s*BP_FRAME_RATE|frameRate:\s*22050\s*\/\s*256/.test(noteModelSrc)
   && /minMidi:\s*BP_MIN_MIDI|minMidi:\s*21/.test(noteModelSrc),
   "TTP_NOTE_MODEL must return the basic-pitch contract (86.13 fps, minMidi 21) engine.tsx notesFromActivations expects");
-expect(/<script type="module" src="\.\/note-model\.js"/.test(htmlSrc),
+expect(/<script type="module" async src="\.\/note-model\.js"/.test(htmlSrc),
   "index.html must load note-model.js as a module so window.TTP_NOTE_MODEL is installed at boot");
 expect(/cp\s+note-model\.js\s+_site/.test(pagesYml),
   "Pages deploy must ship note-model.js");
@@ -3339,7 +3339,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   expect(/const \{ modelBytes \} = await stemCore\(\)/.test(gc) && /return modelBytes\(model, scope, "guitar model"\)/.test(gc), "weights go through the shared loader: SHA-256 checked, Cache-API cached, a bad cached copy evicted (tested above on modelBytes)");
   expect(/new Worker\(WORKER_URL, \{ type: "module" \}\)/.test(gm) && /onMainThread/.test(gm) && /w\.terminate\(\)/.test(gm) && /window\.TTP_GUITAR_MODEL = transcribeGuitarAudio/.test(gm), "guitar-model.js: module worker, main-thread fallback, worker ended after each job, publishes TTP_GUITAR_MODEL");
   expect(/window\.__TTP_ENGINE_URL__/.test(gm) && /import\(\/\* @vite-ignore \*\/ engineUrl\)/.test(gw) && /transcribeGuitarPcm/.test(gw), "the worker runs the page's own engine (one engine, no copy)");
-  expect(/<script type="module" src="\.\/guitar-model\.js"><\/script>/.test(html), "index.html loads guitar-model.js");
+  expect(/<script type="module" async src="\.\/guitar-model\.js"><\/script>/.test(html), "index.html loads guitar-model.js");
   expect(/cp guitar-model\.js guitar-model-core\.js guitar-worker\.js _site\//.test(pages) && /cp models\/guitar-crnn\/guitar-gaps\.w8\.onnx models\/guitar-crnn\/NOTICE _site\/models\/guitar-crnn\//.test(pages) && /guitar-model\.js\?v=\$\{BUILD\}/.test(pages), "Pages ships the guitar glue + model, deploy-stamped");
   expect(/window\.TTP_GUITAR_MODEL/.test(ui) && /polyNotesToScore\(gtrLine, noteGridOpts/.test(ui) && /const gtrLine = gtrTechOn && gtrTechNotes \? gtrTechNotes : gtrNotes/.test(ui) && /fingerScore\(gtrPoly, /.test(ui) && /🎸 Guitar → Tab \(ML\)/.test(ui), "the Audio panel's 🎸 Guitar → Tab button runs the model and fingers the notes");
   expect(/\["alphatex", "AlphaTex \(tab\)"\]/.test(ui) && /scoreToAlphaTex\(tabScore/.test(ui) && /alphatex: "alphatex"/.test(ui), "ChartPanel exports AlphaTex (tab)");
@@ -3774,7 +3774,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   expect(/window\.TTP_BEAT_MODEL = trackBeatsAudio/.test(glue) && /new Worker\(WORKER_URL, \{ type: "module" \}\)/.test(glue) && /w\.terminate\(\)/.test(glue) && /self\.onmessage/.test(wk) && /trackBeatsJob\(job, engine/.test(wk) && !/\{[^}]*\bpcm\b[^}]*\} = ev\.data/.test(wk),
     "beat-model.js publishes TTP_BEAT_MODEL, runs a module worker, ends it after each job");
   const html = fs.readFileSync(path.join(repoRoot, "index.html"), "utf8"), pages = fs.readFileSync(path.join(repoRoot, ".github/workflows/pages.yml"), "utf8");
-  expect(/<script type="module" src="\.\/beat-model\.js"><\/script>/.test(html) && /cp beat-model\.js beat-model-core\.js beat-worker\.js _site\//.test(pages) && /beat_this_final0\.w8\.onnx models\/beat-this\/NOTICE/.test(pages) && /beat-model\.js\?v=\$\{BUILD\}/.test(pages),
+  expect(/<script type="module" async src="\.\/beat-model\.js"><\/script>/.test(html) && /cp beat-model\.js beat-model-core\.js beat-worker\.js _site\//.test(pages) && /beat_this_final0\.w8\.onnx models\/beat-this\/NOTICE/.test(pages) && /beat-model\.js\?v=\$\{BUILD\}/.test(pages),
     "index.html loads beat-model.js; pages.yml ships the glue + model + NOTICE and stamps it");
   const uiSrc2 = fs.readFileSync(UI, "utf8");
   expect(/function useBeatGrid\(/.test(uiSrc2) && /function TempoBarsPanel\(/.test(uiSrc2) && /function CheckByEar\(/.test(uiSrc2) && /audioBeatTimeline\(src && src\.beats, timing/.test(uiSrc2)

@@ -354,8 +354,26 @@ import { createSessionStore } from "./session-store.js";
  * `true` runs script from a crafted font — in the shared quantumq1981.github.io origin. ALL document
  * loads go through this one function, which turns eval off (it only speeds up glyph drawing). Never
  * call pdfjsLib.getDocument directly: `npm test` fails if any call site skips this. */
-function openPdfDocument(data) {
+async function openPdfDocument(data) {
+  await loadPdfJs(); // perf audit 2026-11-26: PDF.js is on demand, so a read can start before it has arrived
   return window.pdfjsLib.getDocument({ data, isEvalSupported: false, enableXfa: false }).promise;
+}
+/* PDF.js 4.10.38 LEGACY build, same-origin (audit 2026-11-18 C1 + M4; see vendor/pdfjs-4.10.38/NOTICE.txt):
+ * fixed for CVE-2024-4367, runs on iPadOS 16.7, no CDN. Resolved against the PAGE's URL — this module may be
+ * running from a Blob URL (development loader). Loaded once, on first need; a failed load clears the promise
+ * so the next attempt retries. */
+let _pdfjsLoad = null;
+function loadPdfJs() {
+  if (typeof window !== "undefined" && window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+  if (!_pdfjsLoad) {
+    const base = new URL("./vendor/pdfjs-4.10.38/", window.location.href);
+    _pdfjsLoad = import(/* @vite-ignore */ new URL("pdf.min.mjs", base).href).then((lib) => {
+      lib.GlobalWorkerOptions.workerSrc = new URL("pdf.worker.min.mjs", base).href;
+      window.pdfjsLib = lib;
+      return lib;
+    }).catch((e) => { _pdfjsLoad = null; throw e; });
+  }
+  return _pdfjsLoad;
 }
 
 async function extractTokens(buf) {
@@ -687,6 +705,9 @@ function TabDecoderProApp() {
 
   const [pdfReady, setPdfReady] = useState(false);
   const [pdfErr, setPdfErr] = useState("");
+  /* Load-time (perf audit 2026-11-26): PDF.js (398 KB + its parse) loads ON DEMAND — when the PDF Chart or Scan tab
+   * opens, or a decode / restore / library open needs to read a PDF — instead of on every launch. */
+  const [pdfWanted, setPdfWanted] = useState(false);
   const [pdfBusy, setPdfBusy] = useState(false);
   const [chart, setChart] = useState(null);
   // Manual per-system string-shift overrides (Wave 2 #7). `topY` anchors to the
@@ -722,20 +743,16 @@ function TabDecoderProApp() {
   const xmlRef = useRef(null);
   const pdfSeq = useRef(0), xmlSeq = useRef(0); // latest-request counters for the two upload inputs (m7)
 
-  /* PDF.js 4.10.38 LEGACY build, same-origin (audit 2026-11-18 C1 + M4; see vendor/pdfjs-4.10.38/NOTICE.txt):
-   * fixed for CVE-2024-4367, runs on iPadOS 16.7, no CDN. Resolved against the PAGE's URL — this module
-   * itself may be running from a Blob URL (development loader). */
+  /* PDF.js (loadPdfJs, above) is fetched when something here needs it — see pdfWanted. */
+  useEffect(() => { if (mode === "pdf" || mode === "scan") setPdfWanted(true); }, [mode]);
   useEffect(() => {
     if (window.pdfjsLib) { setPdfReady(true); return; }
+    if (!pdfWanted) return;
     let live = true;
-    const base = new URL("./vendor/pdfjs-4.10.38/", window.location.href);
-    import(/* @vite-ignore */ new URL("pdf.min.mjs", base).href).then((lib) => {
-      lib.GlobalWorkerOptions.workerSrc = new URL("pdf.worker.min.mjs", base).href;
-      window.pdfjsLib = lib;
-      if (live) setPdfReady(true);
-    }).catch(() => { if (live) setPdfErr("Could not load the PDF reader (vendor/pdfjs-4.10.38). Reload to try again."); });
+    loadPdfJs().then(() => { if (live) setPdfReady(true); })
+      .catch(() => { if (live) setPdfErr("Could not load the PDF reader (vendor/pdfjs-4.10.38). Reload to try again."); });
     return () => { live = false; };
-  }, []);
+  }, [pdfWanted]);
 
   const clearSel = () => { setSelFrets(null); setSelMidis(null); setSelKey(""); setOverrides({}); };
 
@@ -854,7 +871,7 @@ function TabDecoderProApp() {
   useEffect(() => {
     const d = decodeRef.current; if (!d) return;
     const isPdf = d.bytes[0] === 0x25 && d.bytes[1] === 0x50 && d.bytes[2] === 0x44 && d.bytes[3] === 0x46; // %PDF
-    if (isPdf && !pdfReady) return; // wait for PDF.js to load
+    if (isPdf && !pdfReady) { setPdfWanted(true); return; } // wait for PDF.js to load (asks for it)
     decodeRef.current = null;
     setRestored(false);
     // audit 2026-11-18 M2.2: the bytes become the restorable session only AFTER they parse — a file that
@@ -991,7 +1008,7 @@ function TabDecoderProApp() {
   useEffect(() => {
     const req = restoreRef.current; if (!req) return;
     const meta0 = req.meta;
-    if (meta0.kind === "pdf" && !pdfReady) return; // wait for PDF.js
+    if (meta0.kind === "pdf" && !pdfReady) { setPdfWanted(true); return; } // wait for PDF.js (asks for it)
     restoreRef.current = null;
     restoringRef.current = true;
     (async () => {
@@ -1007,7 +1024,7 @@ function TabDecoderProApp() {
         // bytes that don't match the metadata (an older build, a tab killed mid-save): open the FILE, drop the edits
         const isPdf = bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46;
         const meta = verified ? meta0 : { v: 1, kind: isPdf ? "pdf" : alphaTexFromBytes(bytes) != null ? "alphatex" : "xml", filename: "restored file", useSharp: meta0.useSharp };
-        if (meta.kind === "pdf" && !pdfReady) { restoreRef.current = { meta, bytes }; restoringRef.current = false; setRestoreReq((n) => n + 1); return; }
+        if (meta.kind === "pdf" && !pdfReady) { setPdfWanted(true); restoreRef.current = { meta, bytes }; restoringRef.current = false; setRestoreReq((n) => n + 1); return; }
         sessionStore.markRestore(meta.filename); marked = true;
         const sharp = meta.useSharp !== false;
         setUseSharp(sharp);
@@ -1127,7 +1144,7 @@ function TabDecoderProApp() {
   return (
     <div className="tdp-app" style={{ background: C.bg, color: C.text, minHeight: "100%", fontFamily: "'IBM Plex Mono', ui-monospace, monospace" }}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap');
+        /* web fonts load from index.html's <head> (perf audit 2026-11-26: an @import here was found only after the app rendered) */
         @keyframes glowpulse {0%{transform:scale(.97);opacity:0;}100%{transform:scale(1);opacity:1;}}
         @keyframes rise {from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
         @keyframes pulse {0%,100%{opacity:1;}50%{opacity:.25;}}
