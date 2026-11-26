@@ -41,6 +41,9 @@ Boot measured with `tests/bench/load-e2e.mjs` (site assembled as `pages.yml` doe
   install `window.TTP_*`, read on button press — keep it that way: nothing may read them during render/boot).
 - **Web fonts from `<head>`** (preconnect + `media="print" onload` stylesheet), never an `@import` in app CSS;
   IBM Plex Mono 500 dropped (unused). Next lever (not built): split app.js by mode (`React.lazy`).
+- **UX review (open, not fixed):** a mode-tab tap runs `clearSel()`, which also resets `overrides` → chord edits are
+  silently lost (verified, even re-tapping the current tab); Audio re-reads do the same. Fix = clear selection only.
+  Responsive shell mock: `docs/design/workbench-template.html`.
 
 ### Audit 2026-11-18 — fixed (PR #157 + the follow-up); read `docs/AUDIT-2026-11-18.md` for the evidence
 
