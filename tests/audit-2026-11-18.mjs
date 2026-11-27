@@ -148,7 +148,8 @@ section("M2.2 / M2.3 / M2.4 · the app can't be wedged by one bad file");
   const pdfPart = dec.slice(dec.indexOf("if (isPdf) {"), dec.indexOf("} else {", dec.indexOf("if (isPdf) {")));
   const xmlPart = dec.slice(dec.indexOf("} else {", dec.indexOf("if (isPdf) {")));
   expect(pdfPart.indexOf("extractTokens(") > 0 && pdfPart.indexOf("keep();") > pdfPart.indexOf("setChart("), "PDF: kept only after it was read and charted");
-  expect(xmlPart.indexOf("parseScoreOffThread(") > 0 && xmlPart.indexOf("keep();") > xmlPart.indexOf("setXmlScore(sc)"), "score: kept only after it parsed");
+  const parseAt = Math.max(xmlPart.indexOf("parseScoreOffThread("), xmlPart.indexOf("parseOpenedScore(")); // parseOpenedScore = parseScoreOffThread + the Harmony default
+  expect(parseAt > 0 && xmlPart.indexOf("keep();") > xmlPart.indexOf("setXmlScore(sc)"), "score: kept only after it parsed");
   expect(/sessionStore\.markRestore\(/.test(ui) && /finally \{ if \(marked\) sessionStore\.clearRestoreMark\(\)/.test(ui), "a restore holds the in-flight marker while it parses and clears it after");
   expect(/const mark = sessionStore\.restoreMark\(\);\s*\n?\s*if \(mark\) \{ setRestoreAsk/.test(ui) && /Restore anyway/.test(ui), "a marker left at launch asks (Restore anyway / Start fresh) instead of restoring");
   expect(/class AppErrorBoundary extends React\.Component/.test(ui) && /getDerivedStateFromError/.test(ui) && /<AppErrorBoundary><TabDecoderProApp \/><\/AppErrorBoundary>/.test(ui), "a top-level error boundary wraps the app");

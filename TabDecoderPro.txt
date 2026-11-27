@@ -541,11 +541,24 @@ function _workerableBytes(bytes) {
 }
 // bytes -> score, off-thread when possible; ALWAYS falls back to the same engine
 // call on the main thread so a missing/broken worker never changes the result.
-async function parseScoreOffThread(bytes, filename, sharp) {
+async function parseScoreOffThread(bytes, filename, sharp, partIndex) {
   if (_workerableBytes(bytes)) {
-    return _offThread("parseGuitarProOrXML", [bytes, filename, sharp], () => parseGuitarProOrXML(bytes, filename, sharp));
+    return _offThread("parseGuitarProOrXML", [bytes, filename, sharp, partIndex], () => parseGuitarProOrXML(bytes, filename, sharp, partIndex));
   }
-  return parseGuitarProOrXML(bytes, filename, sharp);
+  return parseGuitarProOrXML(bytes, filename, sharp, partIndex);
+}
+/* A file the user just OPENED (upload / decode handoff): a multi-part score lands on Harmony — every pitched part
+ * read together — when that really merges two or more parts (UX review 2026-11-26 #4: Peg opened on its first track,
+ * "Lead vocal", and bars 1–7 were blank). A single pitched part (guitar + drums) keeps its own part and its written
+ * frets. The engine's own default stays part 0, so the validated corpus is unchanged; a restore keeps the saved part. */
+async function parseOpenedScore(bytes, filename, sharp) {
+  const sc = await parseScoreOffThread(bytes, filename, sharp);
+  if (!sc || sc.partIndex === HARMONY_PART || !sc.parts || sc.parts.length < 2) return sc;
+  try {
+    const h = await parseScoreOffThread(bytes, filename, sharp, HARMONY_PART);
+    if (h && h.merged && (h.mergedParts || []).length >= 2 && h.bars && h.bars.length) return h;
+  } catch (_) { /* Harmony is a convenience: the first part is still a complete chart */ }
+  return sc;
 }
 /* PCM → song sections (intro/verse/chorus…), off-thread when possible. Pure DSP and
  * DOMParser-free, so the worker can run it; main-thread fallback as always. */
@@ -718,7 +731,14 @@ function TabDecoderProApp() {
   const [selFrets, setSelFrets] = useState(null);
   const [selMidis, setSelMidis] = useState(null);
   const [selKey, setSelKey] = useState("");
-  const [overrides, setOverrides] = useState({}); // "<bar>.<beat>" -> user-edited symbol
+  /* Chord edits, "<bar>.<beat>" -> user-edited symbol, kept PER CHART: the PDF chart and the MusicXML / GP chart can
+   * both be loaded, and an edit keyed by bar.beat means nothing on the other one (UX review 2026-11-26 #1 — switching
+   * tabs used to wipe them). `overrides` / `setOverrides` are the current tab's; loaders clear only their own kind. */
+  const [ovStore, setOvStore] = useState({ pdf: {}, xml: {} });
+  const ovKindOf = (m) => (m === "pdf" ? "pdf" : "xml");
+  const overrides = ovStore[ovKindOf(mode)];
+  const setOverridesFor = (k, upd) => setOvStore((st) => ({ ...st, [k]: (typeof upd === "function" ? upd(st[k]) : upd) || {} }));
+  const setOverrides = (upd) => setOverridesFor(ovKindOf(mode), upd);
   const [xmlScore, setXmlScore] = useState(null);
   const [xmlErr, setXmlErr] = useState("");
   const [xmlName, setXmlName] = useState("");
@@ -754,13 +774,15 @@ function TabDecoderProApp() {
     return () => { live = false; };
   }, [pdfWanted]);
 
-  const clearSel = () => { setSelFrets(null); setSelMidis(null); setSelKey(""); setOverrides({}); };
+  // clearPick: the tapped chord only. clearSel(kind): also that chart's edits (a new file / a re-read chart).
+  const clearPick = () => { setSelFrets(null); setSelMidis(null); setSelKey(""); };
+  const clearSel = (kind) => { clearPick(); if (kind === "all") setOvStore({ pdf: {}, xml: {} }); else setOverridesFor(kind, {}); };
 
   const onFile = async (e) => {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
     const seq = ++pdfSeq.current; // m7: only the LATEST pick may land
-    setPdfErr(""); setPdfBusy(true); setChart(null); clearSel(); setSysShifts({}); setScoreEdit(null);
+    setPdfErr(""); setPdfBusy(true); setChart(null); clearSel("pdf"); setSysShifts({}); setScoreEdit(null);
     try {
       const buf = await f.arrayBuffer();
       const bytes = new Uint8Array(buf.slice(0)); // copy for the session cache (PDF.js may detach buf)
@@ -788,7 +810,7 @@ function TabDecoderProApp() {
     try {
       const c = buildChart(chart.tokens, { systemShifts: next });
       setChart((prev) => ({ ...prev, ...c }));
-      clearSel();
+      clearSel("pdf");
     } catch (_) { /* a bad shift must never wedge the panel */ }
   };
 
@@ -813,7 +835,7 @@ function TabDecoderProApp() {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
     const seq = ++xmlSeq.current; // m7: a slow earlier parse must not replace a later pick
-    setXmlErr(""); setXmlScore(null); setTexDoc(null); setXmlBusy(true); clearSel(); setScoreEdit(null);
+    setXmlErr(""); setXmlScore(null); setTexDoc(null); setXmlBusy(true); clearSel("xml"); setScoreEdit(null);
     try {
       const bytes = new Uint8Array(await f.arrayBuffer());
       if (seq !== xmlSeq.current) return;
@@ -823,7 +845,7 @@ function TabDecoderProApp() {
         setPlaySet(null); rememberProject({ kind: "alphatex", filename: f.name, bytes });
         return;
       }
-      const sc = await parseScoreOffThread(bytes, f.name, useSharp); // MusicXML / GP3-8 auto-detect (binary GP/PTB off-thread)
+      const sc = await parseOpenedScore(bytes, f.name, useSharp); // MusicXML / GP3-8 auto-detect (binary GP/PTB off-thread); multi-part → Harmony
       if (seq !== xmlSeq.current) return;
       if (!sc.bars.length) setXmlErr("No measures found. Is this a MusicXML score or a Guitar Pro file?");
       setXmlScore(sc); setXmlName(f.name); setScoreFile({ name: f.name, bytes });
@@ -879,7 +901,7 @@ function TabDecoderProApp() {
     const keep = () => persistSession(new Uint8Array(d.bytes.slice(0)), d.filename);
     (async () => {
       if (isPdf) {
-        setMode("pdf"); setPdfErr(""); setPdfBusy(true); setChart(null); clearSel(); setSysShifts({});
+        setMode("pdf"); setPdfErr(""); setPdfBusy(true); setChart(null); clearSel("pdf"); setSysShifts({});
         try {
           const { tokens, pages } = await extractTokens(d.bytes.buffer);
           const c = buildChart(tokens);
@@ -889,9 +911,9 @@ function TabDecoderProApp() {
         } catch (err) { setPdfErr("Parse failed: " + (err && err.message ? err.message : String(err))); }
         finally { setPdfBusy(false); }
       } else {
-        setMode("xml"); setXmlErr(""); setXmlScore(null); setXmlBusy(true); clearSel();
+        setMode("xml"); setXmlErr(""); setXmlScore(null); setXmlBusy(true); clearSel("xml");
         try {
-          const sc = await parseScoreOffThread(d.bytes, d.filename, useSharp);
+          const sc = await parseOpenedScore(d.bytes, d.filename, useSharp);
           if (!sc.bars.length) setXmlErr("No measures found. Is this a MusicXML score or a Guitar Pro file?");
           setXmlScore(sc); setXmlName(d.filename);
           setScoreFile({ name: d.filename, bytes: new Uint8Array(d.bytes.slice(0)) });
@@ -905,7 +927,7 @@ function TabDecoderProApp() {
 
   const selectPart = (idx) => {
     setXmlScore((prev) => _reparseScore(prev, useSharp, idx));
-    clearSel();
+    clearSel("xml");
   };
 
   /* Manual key correction (see ChartPanel's KeyPicker): a key NAME ("" = auto). It
@@ -961,7 +983,12 @@ function TabDecoderProApp() {
    * running out of memory), the next launch asks instead of opening the same file again. */
   const sessRef = useRef(null), sessGen = useRef(0); // { filename, size, hash } of the stored bytes
   const [sessTick, setSessTick] = useState(0);
+  const freshRef = useRef(null);                    // a pending "Start fresh": { snap, gen, timer } (see startFresh)
+  const [freshUndo, setFreshUndo] = useState(false);
   const persistSession = async (bytes, filename) => {
+    // a new file supersedes a pending Start fresh: its save replaces the old session, so the delayed clear (and the
+    // launch-time flag behind it) must go — otherwise a reload inside the Undo window would delete THIS file's session
+    if (freshRef.current) { clearTimeout(freshRef.current.timer); freshRef.current = null; setFreshUndo(false); _lsSet(FRESH_PENDING_KEY, null); }
     const gen = ++sessGen.current; sessRef.current = null;
     let r = { where: "none" };
     try { r = await sessionStore.saveSessionFile(bytes); } catch (err) { console.warn("session file save skipped:", err); }
@@ -994,6 +1021,8 @@ function TabDecoderProApp() {
   useEffect(() => {
     sweepEmptyFiles();
     try {
+      // "Start fresh" whose Undo window the page didn't outlive: finish it now instead of restoring that session
+      if (_lsGet(FRESH_PENDING_KEY)) { _lsSet(FRESH_PENDING_KEY, null); clearSession().catch(() => {}); sessionStore.clearRestoreMark(); return; }
       const p = new URLSearchParams(window.location.search);
       if (p.get("import") === "decode" || p.get("import") === "handoff") return; // incoming import wins
       const meta = readSessionMeta();
@@ -1029,7 +1058,7 @@ function TabDecoderProApp() {
         const sharp = meta.useSharp !== false;
         setUseSharp(sharp);
         if (meta.kind === "pdf") {
-          setMode("pdf"); setPdfErr(""); setPdfBusy(true); setChart(null); clearSel(); setSysShifts({});
+          setMode("pdf"); setPdfErr(""); setPdfBusy(true); setChart(null); clearSel("pdf"); setSysShifts({});
           try {
             const { tokens, pages } = await extractTokens(bytes.slice(0).buffer);
             // re-apply saved per-system string shifts so a corrected chart restores corrected
@@ -1042,14 +1071,14 @@ function TabDecoderProApp() {
           const tex = alphaTexFromBytes(bytes);
           if (tex != null) { setMode("xml"); setXmlScore(null); setXmlErr(""); setTexDoc({ name: meta.filename || "restored.alphatex", text: tex }); setXmlName(meta.filename || ""); }
         } else {
-          setMode("xml"); setXmlErr(""); setXmlScore(null); setXmlBusy(true); clearSel();
+          setMode("xml"); setXmlErr(""); setXmlScore(null); setXmlBusy(true); clearSel("xml");
           try {
             let sc = await parseScoreOffThread(bytes, meta.filename || "restored", sharp);
             if (meta.partIndex != null && meta.partIndex !== sc.partIndex) sc = _reparseScore(sc, sharp, meta.partIndex);
             setXmlScore(sc); setXmlName(meta.filename || "restored");
           } finally { setXmlBusy(false); }
         }
-        setOverrides(meta.overrides && Object.keys(meta.overrides).length ? meta.overrides : {});
+        setOverridesFor(ovKindOf(meta.kind), meta.overrides && Object.keys(meta.overrides).length ? meta.overrides : {});
         setKeyOverride(meta.keyOverride || "");
         if (meta.scoreEdit && isScoreEdit(meta.scoreEdit) && typeof meta.scoreEdit.target === "string") setScoreEdit(meta.scoreEdit); else setScoreEdit(null);
         if (!verified) setRestored("mismatch"); else if (!meta.fromLibrary) setRestored(true);
@@ -1064,11 +1093,39 @@ function TabDecoderProApp() {
     })();
   }, [restoreReq, pdfReady]);
 
-  const startFresh = async () => {
-    try { await clearSession(); } catch (_) {}
-    sessGen.current++; sessRef.current = null; setRestoreAsk(null);
-    setChart(null); setXmlScore(null); setTexDoc(null); setXmlName(""); setMode("manual"); clearSel(); setRestored(false); setKeyOverride(""); setScoreEdit(null); setProjectId(null); projRef.current = null; setPlaySet(null);
+  /* "Start fresh" with Undo (UX review 2026-11-26 #14 — it used to delete the saved session, chart and every edit
+   * in one tap). The screen resets at once; the stored session is only cleared when the Undo window ends, so Undo
+   * puts everything back exactly. Safety rails: a file opened meanwhile bumps sessGen, and the delayed clear then
+   * leaves the new session alone; a sync localStorage flag finishes the clear on the next launch if the page is
+   * closed first (an async IndexedDB delete in pagehide can't be relied on). */
+  const commitFresh = () => {
+    const f = freshRef.current; if (!f) return;
+    freshRef.current = null; clearTimeout(f.timer); setFreshUndo(false);
+    if (f.gen === sessGen.current) clearSession().catch(() => {}).finally(() => _lsSet(FRESH_PENDING_KEY, null));
+    else _lsSet(FRESH_PENDING_KEY, null);
   };
+  const startFresh = () => {
+    commitFresh();
+    const snap = { chart, xmlScore, texDoc, xmlName, mode, ovStore, keyOverride, scoreEdit, projectId, proj: projRef.current,
+      playSet, sess: sessRef.current, restored, restoreAsk, sysShifts };
+    const gen = ++sessGen.current; sessRef.current = null; setRestoreAsk(null);
+    _lsSet(FRESH_PENDING_KEY, "1");
+    setChart(null); setXmlScore(null); setTexDoc(null); setXmlName(""); setMode("manual"); clearSel("all"); setRestored(false); setKeyOverride(""); setScoreEdit(null); setProjectId(null); projRef.current = null; setPlaySet(null);
+    freshRef.current = { snap, gen, timer: setTimeout(commitFresh, FRESH_UNDO_MS) };
+    setFreshUndo(true);
+  };
+  const undoFresh = () => {
+    const f = freshRef.current; if (!f) return;
+    clearTimeout(f.timer); freshRef.current = null; setFreshUndo(false); _lsSet(FRESH_PENDING_KEY, null);
+    if (f.gen !== sessGen.current) return;          // another file was opened since: nothing left to put back
+    const s0 = f.snap;
+    sessRef.current = s0.sess; projRef.current = s0.proj;
+    setChart(s0.chart); setXmlScore(s0.xmlScore); setTexDoc(s0.texDoc); setXmlName(s0.xmlName); setMode(s0.mode);
+    setOvStore(s0.ovStore); setKeyOverride(s0.keyOverride); setScoreEdit(s0.scoreEdit); setProjectId(s0.projectId);
+    setPlaySet(s0.playSet); setRestored(s0.restored); setRestoreAsk(s0.restoreAsk); setSysShifts(s0.sysShifts);
+    setSessTick((n) => n + 1);
+  };
+  useEffect(() => () => { const f = freshRef.current; if (f) clearTimeout(f.timer); }, []);
 
   /* Open a library project: audio → the Audio panel loads its bytes; a chart → its bytes + meta go
    * through the restore path (same parsers, same edit re-application). opts.setlist starts a set. */
@@ -1083,7 +1140,7 @@ function TabDecoderProApp() {
     if (rec.kind === "audio") { setMode("audio"); setAudioIncoming({ bytes, name: rec.filename || rec.title, n: Date.now() }); return; }
     await persistSession(bytes, rec.filename);
     restoreRef.current = { meta: { ...(rec.meta || {}), v: 1, kind: rec.kind, filename: rec.filename, fromLibrary: true }, bytes };
-    setOverrides({}); setKeyOverride("");
+    setOverridesFor(ovKindOf(rec.kind), {}); setKeyOverride("");
     setRestoreReq((n) => n + 1);
   };
   const stepSet = async (d) => {
@@ -1189,7 +1246,7 @@ function TabDecoderProApp() {
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6, maxWidth: "100%" }}>
             {[["manual", "Manual"], ["pdf", "PDF Chart"], ["scan", "Scan 📷"], ["xml", "MusicXML / GP"], ["audio", "Audio 🎵"], ["lyrics", "Lyrics 🎙️"], ["live", "Live chords 🎶"], ["tuner", "Tuner 🎤"], ["library", "Library 📚"]].map(([m, lbl]) => (
-              <button key={m} onClick={() => { setMode(m); clearSel(); }} style={{ ...toggle(C), padding: "6px 14px", flex: "none", ...(mode === m ? activeToggle(C) : {}) }}>
+              <button key={m} onClick={() => { setMode(m); clearPick(); }} style={{ ...toggle(C), padding: "6px 14px", flex: "none", ...(mode === m ? activeToggle(C) : {}) }}>
                 {lbl}
               </button>
             ))}
@@ -1212,6 +1269,12 @@ function TabDecoderProApp() {
           </div>
         )}
 
+        {freshUndo && (
+          <div className="no-print" role="status" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", marginBottom: 14, padding: "8px 12px", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 12, color: C.dim }}>
+            <span>Started fresh — your last chart and its edits are cleared.</span>
+            <button onClick={undoFresh} style={{ ...toggle(C), padding: "4px 12px", flex: "none", ...activeToggle(C) }}>Undo</button>
+          </div>
+        )}
         {playSet && (
           <div className="no-print" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, marginBottom: 12, padding: "8px 12px", background: C.panel, border: `1px solid ${C.green}`, borderRadius: 8, fontSize: 12, color: C.dim }}>
             <span style={{ color: C.green }}>▶ {playSet.setlist.name}</span>
@@ -1352,7 +1415,15 @@ function TabDecoderProApp() {
           </section>
 
           <section className="panel-rise" style={{ animationDelay: ".1s", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
-            <SectionLabel C={C}>{mode !== "manual" && (selFrets || selMidis) ? "CHORD READOUT" : "LIVE READOUT"}</SectionLabel>
+            <SectionLabel C={C}>{mode !== "manual" ? "CHORD READOUT" : "LIVE READOUT"}</SectionLabel>
+            {/* UX review 2026-11-26 #3: outside Manual the readout used to show the Manual tab's chord (the C/E preset)
+                next to an unrelated file, at 100 %. It is empty until a chord of THIS chart is tapped. */}
+            {mode !== "manual" && !(selFrets || selMidis) ? (
+              <div data-readout-empty style={{ background: C.bg, border: `1px dashed ${C.border}`, borderRadius: 10, padding: "22px 16px", textAlign: "center", color: C.dim, fontSize: 13, lineHeight: 1.6 }}>
+                <div style={{ color: C.text, fontWeight: 600, marginBottom: 4 }}>No chord selected</div>
+                Tap any chord in the chart to see its notes, bass and confidence here.
+              </div>
+            ) : (<>
             <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: "22px 16px", textAlign: "center", marginBottom: 14 }}>
               <div key={symbol} className="chord-pop" style={{ fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: 54, lineHeight: 1, color: C.chord }}>{symbol}</div>
               {result && result.isSlash && <div style={{ marginTop: 8, fontSize: 11, letterSpacing: 2, color: C.red }}>SLASH CHORD · BASS ≠ ROOT</div>}
@@ -1412,6 +1483,7 @@ function TabDecoderProApp() {
                 </div>
               </>
             )}
+            </>)}
           </section>
         </div>
         )}
@@ -2143,6 +2215,8 @@ function PrintSheet({ score, title, keyLabel, bpm, view, overrides, musicKey, se
  * Lyrics handoff to Chord Sheet Maker Pro. Text + timing are remembered per chart title. */
 const _lyrKey = (title, k) => `ttp:${k}:${String(title || "chart").slice(0, 120)}`;
 const _lsGet = (k) => { try { return localStorage.getItem(k); } catch (_) { return null; } };
+const FRESH_PENDING_KEY = "ttp:fresh:pending"; // "Start fresh" chosen, its Undo window not yet over (see startFresh)
+const FRESH_UNDO_MS = 10000;
 const _lsSet = (k, v) => { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (_) {} };
 function _saveText(name, text, mime) {
   try {
@@ -4887,6 +4961,12 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
   const [abcExt, setAbcExt] = useAbcExt();               // .abc vs .abc.txt (Apple reads .abc as Alembic 3D — see useAbcExt)
   const [abcCopied, setAbcCopied] = useState(false);
   const [raw, setRaw] = useState([]);                // raw engine events (chords: {symbol,midis,…}; notes: {note,…})
+  /* UX review 2026-11-26 #2: a re-read (other settings, another score link, Chords/Notes/Drums, Isolate) replaces the
+   * reading, and with it every chord edit — typed overrides, review-list choices, deleted/merged chords. With edits
+   * on the chart nothing re-reads silently: an action asks first; a changed setting waits, and the bar says the chart
+   * still shows the previous reading. `cuts` counts deletions/merges (they leave no flag on the events). */
+  const [cuts, setCuts] = useState(0);
+  const [pendingRead, setPendingRead] = useState(null);   // { label, go, stale }
   const [tracked, setTracked] = useState(null);      // the built-in tracker's beats (from the chord analysis)
   const [beatInfo, setBeatInfo] = useState(null);   // detected tempo readout
   const [sections, setSections] = useState([]);      // song structure (intro/verse/chorus…), editable
@@ -4911,6 +4991,10 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
   const [autoPick, setAutoPick] = useState(() => { try { return localStorage.getItem("ttp:autoPick") === "1"; } catch (_) { return false; } });
   const autoPickRef = useRef(autoPick);
   const [overrides, setOverrides] = useState({});
+  // (declared after `overrides`: reading it earlier is a temporal-dead-zone crash — the e2e caught one)
+  const chordEdits = Object.keys(overrides || {}).length + raw.filter((e) => e && e.reviewed).length + cuts;
+  const guardRead = (label, go) => { if (!chordEdits) { go(); return; } setPendingRead({ label, go, stale: false }); };
+  const holdRead = (label, go) => { if (!chordEdits) { go(); return; } setPendingRead({ label, go, stale: true }); };
   const [dur, setDur] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [pos, setPos] = useState(0);
@@ -4944,6 +5028,7 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
     setDrumProg(null); setJobStall(0); setBusy(false);
   };
   const run = (ds, sr, k) => {
+    setPendingRead(null); setCuts(0);
     if (k === "drums") { runDrums(); return; }
     setBusy(true); setErr("");
     // recoverGaps: re-read the spans the main pass left unlabelled at a lower threshold
@@ -5048,20 +5133,23 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
     try {
       const parsed = await scorePartsFromBytes(bytes, fname, useSharp);
       if (!parsed.parts.length) { setErr("That score has no parts with notes to link."); return; }
-      linkRef.current = { ...linkRef.current, file: { name: fname, ...parsed }, force: false };
-      setLinkFile({ name: fname, ...parsed }); setLinkRes(null);
-      relink();
+      guardRead("Linking this score", () => {
+        linkRef.current = { ...linkRef.current, file: { name: fname, ...parsed }, force: false };
+        setLinkFile({ name: fname, ...parsed }); setLinkRes(null);
+        relink();
+      });
     } catch (e) { setErr("Couldn't read that score: " + (e && e.message ? e.message : "unknown")); }
   };
   const onLinkPick = async (e) => { const f = e.target.files && e.target.files[0]; if (!f) return; e.target.value = ""; await linkBytes(f.name, new Uint8Array(await f.arrayBuffer())); };
   const useOpenScore = () => { if (scoreFile && scoreFile.bytes) linkBytes(scoreFile.name, scoreFile.bytes); };
-  const unlinkScore = () => { linkRef.current = { ...linkRef.current, file: null, force: false }; setLinkFile(null); setLinkRes(null); relink(); };
-  const forceLink = () => { linkRef.current = { ...linkRef.current, force: true }; relink(); };
+  const unlinkScore = () => guardRead("Unlinking the score", () => { linkRef.current = { ...linkRef.current, file: null, force: false }; setLinkFile(null); setLinkRes(null); relink(); });
+  const forceLink = () => guardRead("Linking anyway", () => { linkRef.current = { ...linkRef.current, force: true }; relink(); });
   const followRef = useRef(linkFollow);
-  useEffect(() => { if (followRef.current !== linkFollow) { followRef.current = linkFollow; if (linkFile) relink(); } }, [linkFollow]); // eslint-disable-line
+  useEffect(() => { if (followRef.current !== linkFollow) { followRef.current = linkFollow; if (linkFile) holdRead("The score weight changed", relink); } }, [linkFollow]); // eslint-disable-line
   // "🎧 Link a recording →" in the score panel: link the open score as soon as this panel opens
   useEffect(() => { if (linkAsk && linkAsk !== _linkAskSeen && scoreFile) { _linkAskSeen = linkAsk; useOpenScore(); } }, [linkAsk]); // eslint-disable-line
-  const switchKind = (k) => { setKind(k); setOverrides({}); const s = ref.current; if (s.cur) run(s.cur, s.sr, k); };
+  const switchKind = (k) => guardRead(k === "drums" ? "Reading it as drums" : k === "notes" ? "Switching to notes" : "Switching to chords",
+    () => { setKind(k); setOverrides({}); const s = ref.current; if (s.cur) run(s.cur, s.sr, k); });
   // Review: batch-commit choices on the SOURCE events (pure engine commitChordChoices), so
   // the chart re-quantises and every export carries them. ⚡ Auto resolves every uncertain
   // chord with the decoder's best match (autoResolveChords); off puts them back in review.
@@ -5074,19 +5162,19 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
   });
   // Re-analyse when the chord vocabulary / 6/9 convention changes — `run` reads the fresh values.
   const vocabRef = useRef(vocab + "|" + sixNine);
-  useEffect(() => { const k = vocab + "|" + sixNine; if (vocabRef.current !== k) { vocabRef.current = k; const s = ref.current; if (s.cur) run(s.cur, s.sr, kind); } }, [vocab, sixNine]);
+  useEffect(() => { const k = vocab + "|" + sixNine; if (vocabRef.current !== k) { vocabRef.current = k; const s = ref.current; if (s.cur) holdRead("Chord names changed", () => { setOverrides({}); run(s.cur, s.sr, kind); }); } }, [vocab, sixNine]);
   // …and when the song key, how it is used, or the chord-change length changes (a key choice
   // re-reads the chords IN that key — the chart, the review list and every export follow)
   const readSeen = useRef("");
   useEffect(() => {
     const k = songKey + "|" + keyUse + "|" + changes;
     if (!readSeen.current) { readSeen.current = k; return; }
-    if (readSeen.current !== k) { readSeen.current = k; const s = ref.current; if (s.cur && kind === "chords") { setOverrides({}); run(s.cur, s.sr, kind); } }
+    if (readSeen.current !== k) { readSeen.current = k; const s = ref.current; if (s.cur && kind === "chords") holdRead("Reading settings changed", () => { setOverrides({}); run(s.cur, s.sr, kind); }); }
   }, [songKey, keyUse, changes]);
   // Review list: delete chords (the one before rings on) / merge every chord shorter than a beat
-  const removeChords = (idx) => setRaw((evs) => removeChordEvents(evs, idx));
-  const mergeShort = () => setRaw((evs) => mergeShortChords(evs, 60 / Math.max(30, bpm || 120) * 0.95));
-  const toggleIsolate = () => { const v = !isolate; setIsolate(v); setOverrides({}); prepare(v, kind); };
+  const removeChords = (idx) => { setCuts((n) => n + ((idx && idx.length) || 1)); setRaw((evs) => removeChordEvents(evs, idx)); };
+  const mergeShort = () => { setCuts((n) => n + 1); setRaw((evs) => mergeShortChords(evs, 60 / Math.max(30, bpm || 120) * 0.95)); };
+  const toggleIsolate = () => guardRead(isolate ? "Turning vocal isolation off" : "Isolating the vocals", () => { const v = !isolate; setIsolate(v); setOverrides({}); prepare(v, kind); });
   /* Per-voice ML note transcription (basic-pitch). Pure-JS multi-F0 can't do dense vocal
    * harmony, so this runs a PLUGGABLE, hosted model — `window.TTP_NOTE_MODEL(pcm, sr)` →
    * { onsets, frames, frameRate, minMidi } — then the pure engine decoder turns it into a
@@ -5408,7 +5496,16 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
         </span>
         {kind !== "drums" && <button onClick={toggleIsolate} disabled={busy} title="isolate the center channel (where vocals usually sit) before analysing — for scoring sung harmony from a full mix"
           style={{ ...chip(C), padding: "5px 10px", borderColor: isolate ? C.green : C.border, color: isolate ? C.green : C.dim }}>{isolate ? "🎤 Vocals isolated ✓" : "🎤 Isolate vocals"}</button>}
-        {kind === "chords" && <ChordVocabPicker C={C} value={vocab} onChange={(v) => { setVocab(v); setOverrides({}); }} sixNine={sixNine} onSixNine={(v) => { setSixNine(v); setOverrides({}); }} disabled={busy} />}
+        {kind === "chords" && <ChordVocabPicker C={C} value={vocab} onChange={(v) => setVocab(v)} sixNine={sixNine} onSixNine={(v) => setSixNine(v)} disabled={busy} />}
+        {pendingRead && (
+          <div role="alert" data-pending-read style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", margin: "8px 0 12px", padding: "8px 12px", background: C.panel, border: `1px solid ${C.amber}`, borderRadius: 8, fontSize: 12, color: C.dim }}>
+            <span>{pendingRead.label}: reading the recording again replaces the chart and removes your {chordEdits} chord edit{chordEdits === 1 ? "" : "s"}.{pendingRead.stale ? " Until then the chart shows the previous reading." : ""}</span>
+            <span style={{ display: "flex", gap: 6 }}>
+              <button onClick={() => { const g = pendingRead.go; setPendingRead(null); g(); }} style={{ ...toggle(C), padding: "4px 12px", flex: "none" }}>Read again</button>
+              <button onClick={() => setPendingRead(null)} style={{ ...toggle(C), padding: "4px 12px", flex: "none", ...activeToggle(C) }}>Keep my edits</button>
+            </span>
+          </div>
+        )}
         {kind === "chords" && <ChordReadingControls C={C} songKey={songKey} onSongKey={setSongKey} detectedKey={beatInfo && !songKey ? beatInfo.key : null} keyUse={keyUse} onKeyUse={setKeyUse} changes={changes} onChanges={setChanges} disabled={busy} useSharp={useSharp} />}
         {kind === "chords" && <button onClick={voices} disabled={busy} title="per-VOICE note transcription (the actual sung notes, not just a chord) via a pluggable ML model — for dense vocal harmony"
           style={{ ...chip(C), padding: "5px 10px", borderColor: mlScore ? C.green : C.border, color: mlScore ? C.green : C.dim }}>🎼 Voices (ML)</button>}
