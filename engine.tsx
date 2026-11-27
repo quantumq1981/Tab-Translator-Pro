@@ -14810,7 +14810,96 @@ function waveformPeaks(samples, n = 200) {
   return out;
 }
 
+/* ==== OPEN ROUTER (redesign step 5, 2026-11-27) ===============================
+ * One Open: a dropped / picked file is routed by its CONTENT, never by its extension (iOS often hides or mangles it,
+ * and `accept` filters grey out Guitar Pro files there — see "iOS upload note"). Pure; the UI reads the bytes.
+ *
+ * sniffFile(bytes, name) → { kind, format, label }
+ *   kind: "score" (Guitar Pro 3–8, MusicXML/.mxl, MIDI, Power Tab, a Muscriptor zip, AlphaTex) · "pdf" · "image" ·
+ *         "audio" (audio and video containers) · "tab" (ASCII tab text) · "lyrics" (ChordPro / chords over lyrics /
+ *         plain lyrics) · "unknown". `name` only breaks a tie for a binary file no magic matched (a raw AAC/MP3 frame,
+ *         a HEIC variant), and never overrides a magic match.
+ * classifyPdfText(strings) → { route: "tab" | "chords" | "scan" | "ask", ints, chords, tokens }
+ *   strings = the PDF's text items (first pages). No text layer → "scan" (the page is a picture: OCR). Many fret
+ *   numbers and no chord symbols → "tab" (PDF Chart, Path A). Chord symbols and few numbers → "chords" (Scan reads the
+ *   text layer). Both, or too little to tell → "ask" ("read the tab, or the chord symbols?"). */
+const _AUDIO_EXT = /^(mp3|m4a|aac|wav|wave|aif|aiff|aifc|flac|ogg|oga|opus|caf|mp4|m4v|mov|webm|mkv|3gp|wma)$/;
+const _IMAGE_EXT = /^(jpg|jpeg|png|gif|webp|heic|heif|avif|bmp|tif|tiff)$/;
+function sniffFile(bytes, name = "") {
+  const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
+  const n = b.length;
+  const ext = ((/\.([a-z0-9]+)$/i.exec(String(name || "")) || [])[1] || "").toLowerCase();
+  const at = (o, s) => { if (o + s.length > n) return false; for (let i = 0; i < s.length; i++) if (b[o + i] !== s.charCodeAt(i)) return false; return true; };
+  const r = (kind, format, label) => ({ kind, format, label });
+  if (!n) return r("unknown", "empty", "an empty file");
+  // ---- binary magics
+  if (at(0, "%PDF")) return r("pdf", "pdf", "a PDF");
+  if (at(0, "PK\x03\x04") || at(0, "PK\x05\x06")) return r("score", "zip", "a Guitar Pro 7/8 file, a compressed MusicXML or a zip of parts");
+  if (at(0, "BCFZ") || at(0, "BCFS")) return r("score", "gpx", "a Guitar Pro 6 file");
+  if (at(1, "FICHIER GUITAR PRO")) return r("score", "gp", "a Guitar Pro 3–5 file");
+  if (at(0, "ptab")) return r("score", "ptb", "a Power Tab file");
+  if (at(0, "MThd")) return r("score", "midi", "a MIDI file");
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return r("image", "jpeg", "a photo (JPEG)");
+  if (at(0, "\x89PNG")) return r("image", "png", "an image (PNG)");
+  if (at(0, "GIF8")) return r("image", "gif", "an image (GIF)");
+  if (at(0, "BM") && n > 26 && ext === "bmp") return r("image", "bmp", "an image (BMP)");
+  if (at(0, "RIFF") && at(8, "WEBP")) return r("image", "webp", "an image (WebP)");
+  if (at(0, "RIFF") && at(8, "WAVE")) return r("audio", "wav", "a recording (WAV)");
+  if (at(0, "FORM") && (at(8, "AIFF") || at(8, "AIFC"))) return r("audio", "aiff", "a recording (AIFF)");
+  if (at(0, "ID3")) return r("audio", "mp3", "a recording (MP3)");
+  if (at(0, "OggS")) return r("audio", "ogg", "a recording (Ogg)");
+  if (at(0, "fLaC")) return r("audio", "flac", "a recording (FLAC)");
+  if (at(0, "caff")) return r("audio", "caf", "a recording (CAF)");
+  if (b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3) return r("audio", "webm", "a recording or video (WebM)");
+  if (at(4, "ftyp")) {
+    const brand = String.fromCharCode(b[8] || 0, b[9] || 0, b[10] || 0, b[11] || 0);
+    if (/^(heic|heix|hevc|hevx|mif1|msf1|avif|avis)$/.test(brand)) return r("image", "heic", "a photo (HEIC)");
+    return r("audio", "mp4", "a recording or video (M4A / MP4 / MOV)");
+  }
+  if (b[0] === 0xff && (b[1] & 0xe0) === 0xe0 && (b[1] & 0x06) !== 0) return r("audio", "mpeg", "a recording (MP3 / AAC)");
+  // ---- text
+  const head = b.subarray(0, Math.min(n, 65536));
+  let zeros = 0; for (let i = 0; i < Math.min(head.length, 4096); i++) if (head[i] === 0) zeros++;
+  if (zeros > 4) {
+    if (_AUDIO_EXT.test(ext)) return r("audio", ext, "a recording");
+    if (_IMAGE_EXT.test(ext)) return r("image", ext, "an image");
+    return r("unknown", "binary", "a file this app doesn't read");
+  }
+  let text = "";
+  try { text = new TextDecoder("utf-8").decode(head); } catch (_) { text = String.fromCharCode.apply(null, Array.from(head.subarray(0, 8192))); }
+  text = text.replace(/^﻿/, "");
+  const t = text.replace(/^\s+/, "");
+  if (/^<\?xml|^<!DOCTYPE\s+score-|^<score-(partwise|timewise)/i.test(t)) {
+    return /<score-(partwise|timewise)[\s>]/.test(text) ? r("score", "musicxml", "a MusicXML file") : r("unknown", "xml", "an XML file that isn't MusicXML");
+  }
+  if (isAlphaTexText(text)) return r("score", "alphatex", "an AlphaTex file");
+  const lines = text.split(/\r?\n/);
+  // a string row: an optional string name, a bar, then ONLY tab characters with at least one dash (a one-chord
+  // diagram row "e|-0-|" counts). Four or more such rows IN A ROW = tab; prose never forms that run (review on #167).
+  const tabLine = /^\s*[A-Ga-g]?[#b]?\s*[|:][-–—0-9xXhpbr\/\\|~()<>.^*sv ]*[-–—][-–—0-9xXhpbr\/\\|~()<>.^*sv ]*\s*$/;
+  let run = 0, bestRun = 0;
+  for (const l of lines) { if (tabLine.test(l) && /[|:].*[-–—]/.test(l)) { run++; if (run > bestRun) bestRun = run; } else if (l.trim()) run = 0; }
+  if (bestRun >= 4) return r("tab", "ascii-tab", "guitar tab (text)");
+  const words = lines.filter((l) => /[A-Za-z]{2,}/.test(l)).length;
+  if (words >= 2 || /\{(title|t|start_of_chorus|soc|c|comment):?/i.test(text)) return r("lyrics", "text", /\{[a-z_]+[:}]/i.test(text) ? "a ChordPro file" : lines.some((l) => l.trim() && isChordLine(l)) ? "chords over lyrics" : "lyrics (text)");
+  if (_AUDIO_EXT.test(ext)) return r("audio", ext, "a recording");
+  if (_IMAGE_EXT.test(ext)) return r("image", ext, "an image");
+  return r("unknown", "text", "a text file this app can't place");
+}
+function classifyPdfText(strings) {
+  const toks = [];
+  for (const s of strings || []) for (const w of String(s == null ? "" : s).split(/\s+/)) if (w) toks.push(w);
+  let ints = 0, chords = 0;
+  for (const w of toks) {
+    if (/^\d{1,2}$/.test(w) && +w <= 24) ints++;
+    else if (/^\(?[A-G]/.test(w) && isChordToken(w.replace(/^\(|\)$/g, "")) && (w.length > 1 || /^[A-G]$/.test(w))) chords++;
+  }
+  const route = toks.length < 5 ? "scan" : chords >= 6 && ints >= 40 ? "ask" : ints >= 40 ? "tab" : chords >= 6 ? "chords" : "ask";
+  return { route, ints, chords, tokens: toks.length };
+}
+
 export {
+  sniffFile, classifyPdfText,
   readChord, SECTION_KINDS, sectionKind, waveformPeaks,
   chordOcrSplitRead,
   PDF_TEXT, pdfPageVectors, pdfScoreLayout, pdfChordPages, _pdfBoxed, _pdfMeasureAt,

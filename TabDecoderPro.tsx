@@ -349,6 +349,8 @@ import {
   readChord,
   sectionKind,
   waveformPeaks,
+  sniffFile,
+  classifyPdfText,
 } from "./engine.tsx";
 import { createSessionStore } from "./session-store.js";
 
@@ -846,6 +848,7 @@ function TabDecoderProApp() {
   const clearPick = () => { setSelFrets(null); setSelMidis(null); setSelKey(""); };
   // the bar / rail: Chart returns to the last way in, Listen to the last microphone tool
   const go = (d) => {
+    if (d !== "open") routeSeq.current++;   // leaving Open by hand supersedes a file still being looked at
     if (d === "open") { setOpenView(true); return; }
     setOpenView(false);
     const to = d === "chart" ? (WORK_MODES.includes(mode) ? null : lastWork.current)
@@ -853,7 +856,50 @@ function TabDecoderProApp() {
       : mode === "library" ? null : "library";
     if (to) { navSwitch.current = true; setMode(to); clearPick(); }
   };
-  const pickWayIn = (m) => { setWorkChosen(true); if (m === mode) { setOpenView(false); return; } setMode(m); clearPick(); };
+  // leave Open in the SAME update as the pick (not only via the [mode] effect, which runs a frame later: in that gap
+  // Open's own file input was still on screen, and a file given to it was lost when it unmounted — open-e2e / polish-e2e)
+  const pickWayIn = (m) => { routeSeq.current++; setWorkChosen(true); setOpenView(false); if (m !== mode) { setMode(m); clearPick(); } };
+  /* step 5 — one Open: route a dropped / picked file by its BYTES (sniffFile), never its extension, into the panel that
+   * reads it. The panels' own loaders run unchanged (onXml / onFile take the same { target: { files } } shape). A PDF is
+   * looked inside first: fret numbers → PDF Chart, chord symbols or no text layer → Scan, both / unclear → ask. */
+  const goTo = (m) => { setOpenMsg(null); setPdfAsk(null); setWorkChosen(true); setOpenView(false); if (m !== mode) { setMode(m); clearPick(); } };
+  const openAsTab = (f) => { goTo("pdf"); onFile({ target: { files: [f], value: "" } }); };
+  const openAsScan = (f) => { goTo("scan"); setScanIncoming({ file: f, n: Date.now() }); };
+  // only the LATEST file / choice may route: a slow read or PDF look of an earlier file is dropped (review on #167)
+  const routeSeq = useRef(0);
+  const routeFile = async (f) => {
+    if (!f) return;
+    const seq = ++routeSeq.current, live = () => seq === routeSeq.current;
+    setPdfAsk(null); setOpenMsg({ text: `Reading ${f.name}…` });
+    let bytes;
+    try { bytes = new Uint8Array(await f.arrayBuffer()); } catch (_) { if (live()) setOpenMsg({ tone: "error", text: `Couldn't read ${f.name}.` }); return; }
+    if (!live()) return;
+    const kind = sniffFile(bytes, f.name);
+    const textOf = () => { try { return new TextDecoder("utf-8").decode(bytes).replace(/^\uFEFF/, ""); } catch (_) { return ""; } };
+    if (kind.kind === "score") { goTo("xml"); onXml({ target: { files: [f], value: "" } }); return; }
+    if (kind.kind === "audio") { goTo("audio"); setAudioIncoming({ bytes, name: f.name, n: Date.now(), fresh: true }); return; }
+    if (kind.kind === "image") { openAsScan(f); return; }
+    if (kind.kind === "tab") { goTo("manual"); setTab(textOf()); setBlockIdx(0); return; }
+    if (kind.kind === "lyrics") { goTo("lyrics"); setLyricsIncoming({ text: textOf(), name: f.name, n: Date.now() }); return; }
+    if (kind.kind === "pdf") {
+      setOpenMsg({ text: `Looking inside ${f.name}…` });
+      let c = { route: "ask" };
+      try {
+        setPdfWanted(true);
+        const doc = await openPdfDocument(bytes.slice());
+        const strs = [];
+        for (let i = 1; i <= Math.min(2, doc.numPages); i++) { const tc = await (await doc.getPage(i)).getTextContent(); for (const it of tc.items) strs.push(it.str); }
+        try { doc.destroy(); } catch (_) {}
+        c = classifyPdfText(strs);
+      } catch (_) {}
+      if (!live()) return;
+      if (c.route === "tab") openAsTab(f);
+      else if (c.route === "chords" || c.route === "scan") openAsScan(f);
+      else { setOpenMsg(null); setPdfAsk({ file: f, c }); }
+      return;
+    }
+    setOpenMsg({ tone: "error", text: kind.format === "empty" ? `${f.name} is empty.` : kind.format === "xml" ? `${f.name} is XML but not MusicXML. If it is a chart, choose what it is below.` : `${f.name} doesn't look like a score, a PDF, a photo, a recording or text. If it is one, choose what it is below.` });
+  };
   const clearSel = (kind) => { clearPick(); if (kind === "all") setOvStore({ pdf: {}, xml: {} }); else setOverridesFor(kind, {}); };
 
   const onFile = async (e) => {
@@ -1023,7 +1069,12 @@ function TabDecoderProApp() {
   const projRef = useRef(null), projTimer = useRef(null);
   const [playSet, setPlaySet] = useState(null);               // { setlist, index } while a set plays
   const [semisReq, setSemisReq] = useState(null);
-  const [audioIncoming, setAudioIncoming] = useState(null);   // { bytes, name, n } → AudioImport
+  const [audioIncoming, setAudioIncoming] = useState(null);   // { bytes, name, n, fresh? } → AudioImport (fresh = a new file, not a library re-open)
+  // step 5: files dropped / picked on Open, handed to the panel their CONTENT belongs to
+  const [scanIncoming, setScanIncoming] = useState(null);     // { file, n } → ScanPanel
+  const [lyricsIncoming, setLyricsIncoming] = useState(null); // { text, name, n } → LyricsImport
+  const [openMsg, setOpenMsg] = useState(null);               // { tone?: "error", text } under the drop zone
+  const [pdfAsk, setPdfAsk] = useState(null);                 // { file, c } — a PDF that could be read either way
   const rememberProject = async ({ kind, filename, bytes, bars, bpm, keyLabel, duration }) => {
     try {
       if (!bytes || !bytes.length) return;
@@ -1419,11 +1470,12 @@ function TabDecoderProApp() {
             <button onClick={() => setPlaySet(null)} style={{ ...toggle(C), flex: "none", padding: "3px 10px" }}>✕</button>
           </div>
         )}
-        {dest === "open" ? <OpenView C={C} mode={workMode} hasWork={workChosen} songTitle={songTitle} onPick={pickWayIn} onContinue={() => go("chart")} />
+        {dest === "open" ? <OpenView C={C} mode={workMode} hasWork={workChosen} songTitle={songTitle} onPick={pickWayIn} onContinue={() => go("chart")}
+            onFile={routeFile} msg={openMsg} ask={pdfAsk} onAskTab={() => openAsTab(pdfAsk.file)} onAskChords={() => openAsScan(pdfAsk.file)} onAskCancel={() => setPdfAsk(null)} />
         : dest === "chart" && !workChosen ? <ChartEmpty C={C} onOpen={() => go("open")} />
         : <>
         {dest === "listen" && <SubTabs C={C} label="Listen" items={LISTEN_TOOLS} value={mode} onPick={(m) => { if (m !== mode) { setMode(m); clearPick(); } }} />}
-        {mode === "library" ? <LibraryPanel C={C} onOpen={openProject} currentId={projectId} /> : mode === "scan" ? <ScanPanel C={C} useSharp={useSharp} pdfReady={pdfReady} /> : mode === "tuner" ? <LiveTuner C={C} useSharp={useSharp} /> : mode === "live" ? <LiveChords C={C} useSharp={useSharp} /> : mode === "lyrics" ? <LyricsPanel C={C} /> : mode === "audio" ? <AudioImport C={C} useSharp={useSharp} incoming={audioIncoming} scoreFile={scoreFile} linkAsk={linkAsk} onLoaded={(f, bytes, dur) => { if (!audioIncoming || audioIncoming.name !== f.name) rememberProject({ kind: "audio", filename: f.name, bytes, duration: dur }); }} /> : (
+        {mode === "library" ? <LibraryPanel C={C} onOpen={openProject} currentId={projectId} /> : mode === "scan" ? <ScanPanel C={C} useSharp={useSharp} pdfReady={pdfReady} incoming={scanIncoming} /> : mode === "tuner" ? <LiveTuner C={C} useSharp={useSharp} /> : mode === "live" ? <LiveChords C={C} useSharp={useSharp} /> : mode === "lyrics" ? <LyricsPanel C={C} incoming={lyricsIncoming} /> : mode === "audio" ? <AudioImport C={C} useSharp={useSharp} incoming={audioIncoming} scoreFile={scoreFile} linkAsk={linkAsk} onLoaded={(f, bytes, dur) => { if (!audioIncoming || audioIncoming.fresh || audioIncoming.name !== f.name) rememberProject({ kind: "audio", filename: f.name, bytes, duration: dur }); }} /> : (
         <div className={"tdp-cols" + (mode === "manual" ? " manual" : " solo")} style={{ position: "relative" }}>
           <section className="panel-rise" style={{ animationDelay: ".05s", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
             {mode === "manual" ? (
@@ -1658,17 +1710,46 @@ function TabDecoderProApp() {
  * OpenView — every way in, one card each, with what it is for (step 5 replaces it with one drop zone routed by the
  * file's bytes). The cards keep the old mode names as their accessible names, so links, docs and tests still find them.
  * SubTabs — the Listen tools. ChartEmpty — Chart before anything is open. */
-function OpenView({ C, mode, hasWork, songTitle, onPick, onContinue }) {
+/* Step 5: ONE drop zone + one picker. The file's bytes decide where it goes (`sniffFile` / `classifyPdfText` in the
+ * engine); the cards below stay for what isn't a file (paste tab, live lyrics) and as a manual override.
+ * No `accept` on the input: iOS maps it to UTIs and greys out Guitar Pro / Power Tab files (see the iOS upload note). */
+function OpenView({ C, mode, hasWork, songTitle, onPick, onContinue, onFile, msg, ask, onAskTab, onAskChords, onAskCancel }) {
+  const pick = useRef(null);
+  const [over, setOver] = useState(false);
+  const take = (files) => { const f = files && files[0]; if (f && onFile) onFile(f); };
   return (
     <section className="panel-rise" aria-labelledby="tdp-open-h" style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
       <h2 id="tdp-open-h" style={{ margin: "0 0 4px", fontSize: 18, fontWeight: 700 }}>Open</h2>
-      <div style={{ fontSize: 13, color: C.dim, marginBottom: 14, lineHeight: 1.5 }}>Pick what you have. Everything stays on this device.</div>
+      <div style={{ fontSize: 13, color: C.dim, marginBottom: 14, lineHeight: 1.5 }}>Drop any file — the app works out what it is. Everything stays on this device.</div>
+      <div data-drop-zone onDragOver={(e) => { e.preventDefault(); if (!over) setOver(true); }} onDragEnter={(e) => { e.preventDefault(); setOver(true); }}
+        onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setOver(false); }} onDrop={(e) => { e.preventDefault(); setOver(false); take(e.dataTransfer && e.dataTransfer.files); }}
+        style={{ border: `2px dashed ${over ? C.amber : C.border}`, background: over ? `${C.amber}12` : C.bg, borderRadius: 14, padding: "26px 16px", textAlign: "center", marginBottom: 14, transition: "background .15s, border-color .15s" }}>
+        <input ref={pick} type="file" data-open-input onChange={(e) => { take(e.target.files); e.target.value = ""; }} style={{ display: "none" }} />
+        <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 10 }}>{over ? "Drop it" : "Drop a file here"}</div>
+        <button onClick={() => pick.current && pick.current.click()} style={{ ...toggle(C), flex: "none", padding: "10px 22px", ...activeToggle(C) }}>Choose a file</button>
+        <div style={{ fontSize: 12, color: C.dim, marginTop: 12, lineHeight: 1.5 }}>Guitar Pro · MusicXML · MIDI · Power Tab · a tab or lead-sheet PDF · a photo of a chart · a recording or video · tab or lyrics as text</div>
+        <div role="status" aria-live="polite" data-open-msg style={{ minHeight: 18, marginTop: 10, fontSize: 13, color: msg && msg.tone === "error" ? C.red : C.cyan }}>{msg ? msg.text : ""}</div>
+      </div>
+      {ask && (
+        <div data-pdf-ask role="group" aria-label="How should this PDF be read?" style={{ border: `1.5px solid ${C.amber}`, borderRadius: 12, padding: "12px 14px", marginBottom: 14, background: `${C.amber}0d` }}>
+          <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>How should “{ask.file.name}” be read?</div>
+          <div style={{ fontSize: 12.5, color: C.dim, lineHeight: 1.5, marginBottom: 10 }}>
+            {ask.c && ask.c.ints >= 40 && ask.c.chords >= 6 ? `It has fret numbers (${ask.c.ints}) and chord symbols (${ask.c.chords}).` : "It doesn't look clearly like either."} Tab reads the chords from the fret numbers; chord symbols reads the printed names.
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={onAskTab} style={{ ...toggle(C), flex: "none", padding: "8px 14px" }}>Read the tab (fret numbers)</button>
+            <button onClick={onAskChords} style={{ ...toggle(C), flex: "none", padding: "8px 14px" }}>Read the chord symbols</button>
+            <button onClick={onAskCancel} style={{ ...toggle(C), flex: "none", padding: "8px 14px" }}>Cancel</button>
+          </div>
+        </div>
+      )}
       {hasWork && (
         <button data-continue onClick={onContinue} style={{ ...toggle(C), width: "100%", flex: "none", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "12px 14px", marginBottom: 14, borderColor: C.amber, color: C.text, textAlign: "left" }}>
           <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Back to <b>{songTitle || (WAYS_IN.find((w) => w[0] === mode) || [, "your chart"])[1]}</b></span>
           <span style={{ color: C.amber }}>Chart →</span>
         </button>
       )}
+      <div style={{ fontSize: 12, color: C.dim, letterSpacing: 1.5, textTransform: "uppercase", margin: "4px 0 8px" }}>Or choose what it is</div>
       <div role="tablist" aria-label="Ways in" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 10 }}>
         {WAYS_IN.map(([m, label, desc]) => {
           const on = hasWork && mode === m;
@@ -4600,7 +4681,7 @@ function ScanReviewRow({ C, it, pg, tok, checked, onCheck, onApprove, onReject, 
   );
 }
 
-function ScanPanel({ C, useSharp, pdfReady }) {
+function ScanPanel({ C, useSharp, pdfReady, incoming }) {
   const fileRef = useRef(null);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState("");
@@ -4716,6 +4797,10 @@ function ScanPanel({ C, useSharp, pdfReady }) {
   );
   const fbtn = (id, label) => <button onClick={() => setFilter(id)} style={{ ...chip(C), ...(filter === id ? { borderColor: C.amber, color: C.amber } : {}) }}>{label}</button>;
 
+  // step 5: a photo / PDF dropped on Open arrives here (the same path as this panel's own picker)
+  const onFileRef = useRef(null); onFileRef.current = onFile;
+  useEffect(() => { if (incoming && incoming.file) onFileRef.current({ target: { files: [incoming.file], value: "" } }); }, [incoming && incoming.n]); // eslint-disable-line
+
   return (
     <div style={{ maxWidth: 820, margin: "0 auto" }}>
       <SectionLabel C={C}>SCAN A LEAD SHEET · photo or PDF</SectionLabel>
@@ -4806,15 +4891,16 @@ function ScanPanel({ C, useSharp, pdfReady }) {
   );
 }
 
-function LyricsPanel({ C }) {
+function LyricsPanel({ C, incoming }) {
   const [sub, setSub] = useState("import"); // default to the new, deterministic tool
+  useEffect(() => { if (incoming) setSub("import"); }, [incoming && incoming.n]); // eslint-disable-line
   return (
     <div style={{ maxWidth: 620, margin: "0 auto" }}>
       <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
         <button role="tab" aria-selected={sub === "import"} onClick={() => setSub("import")} style={{ ...toggle(C), ...(sub === "import" ? activeToggle(C) : inactiveToggle(C)) }}>📄 Import chords / ChordPro</button>
         <button role="tab" aria-selected={sub === "live"} onClick={() => setSub("live")} style={{ ...toggle(C), ...(sub === "live" ? activeToggle(C) : inactiveToggle(C)) }}>🎙️ Live capture</button>
       </div>
-      {sub === "live" ? <LyricsCapture C={C} /> : <LyricsImport C={C} />}
+      {sub === "live" ? <LyricsCapture C={C} /> : <LyricsImport C={C} incoming={incoming} />}
     </div>
   );
 }
@@ -4865,9 +4951,11 @@ function readFileText(file) {
   });
 }
 
-function LyricsImport({ C }) {
+function LyricsImport({ C, incoming }) {
   const [raw, setRaw] = useState("");
   const [fileName, setFileName] = useState("");
+  // step 5: a sheet dropped on Open arrives here already read
+  useEffect(() => { if (incoming && typeof incoming.text === "string") { setRaw(incoming.text); setFileName(incoming.name || ""); } }, [incoming && incoming.n]); // eslint-disable-line
   const [copied, setCopied] = useState(false);
   const [sentPerf, setSentPerf] = useState(false);
   const [err, setErr] = useState("");
