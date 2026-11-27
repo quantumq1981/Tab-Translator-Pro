@@ -67,7 +67,7 @@ t = await chartText(); R.restored = { banner: /Restored/.test(t), harmonySelecte
 // the zip's MIDI on its own
 const mid = path.join(OUT, "score.mid");
 { const eng = await L.loadEngine(); const z = new Uint8Array(fs.readFileSync(ZIP)); fs.writeFileSync(mid, await eng._zipRead(z, eng._zipEntries(z).find((e) => e.name === "score.mid"))); }
-await page.getByRole("tab", { name: "MusicXML / GP" }).click().catch(() => {});
+await page.locator('.tdp-nav button[data-dest="open"]').click().catch(() => {}); await page.getByRole("tab", { name: "MusicXML / GP" }).click().catch(() => {});
 await page.locator('input[type="file"]').first().setInputFiles(mid);
 await page.waitForTimeout(1500);
 t = await chartText(); R.midi = { harmonySelected: (await harmony().count()) ? await isOn(harmony()) : false, key: (t.match(/key (\S+) \(/) || [])[1], hasFm9: /Fm9/.test(t) };

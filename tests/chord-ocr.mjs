@@ -406,7 +406,7 @@ expect(LR.tokens.filter((t) => t.staff === 1).length === 1 && LR.tokens.find((t)
   expect(/<script type="module" async src="\.\/chord-ocr-model\.js"><\/script>/.test(html), "index.html loads chord-ocr-model.js");
   expect(/cp chord-ocr-model\.js chord-ocr-core\.js chord-ocr-worker\.js _site\//.test(pages) && /models\/chord-ocr\/chord-ocr\.onnx models\/chord-ocr\/chord-ocr-hand\.onnx models\/chord-ocr\/NOTICE/.test(pages) && /chord-ocr-model\.js\?v=\$\{BUILD\}/.test(pages), "pages.yml ships the glue, both readers + NOTICE, and stamps chord-ocr-model.js");
   const ui = read("TabDecoderPro.tsx"), scan = ui.slice(ui.indexOf("const SCAN_MAX_PAGES"), ui.indexOf("function LyricsPanel("));
-  expect(/\["scan", "Scan 📷"\]/.test(ui) && /mode === "scan" \? <ScanPanel/.test(ui), "the Scan 📷 mode is listed and routed");
+  expect(/\["scan", "Scan 📷"[,\]]/.test(ui) && /mode === "scan" \? <ScanPanel/.test(ui), "the Scan 📷 mode is listed and routed");
   expect(/window\.TTP_CHORD_OCR\(/.test(scan) && /chordPageScore\(/.test(scan) && /chordFromWritten\(/.test(scan) && /<ChartPanel/.test(scan), "ScanPanel reads pages in the worker, builds the chart with the engine, corrections go through the chord grammar, the chart is a ChartPanel");
   expect(/<input ref=\{fileRef\} type="file" onChange=\{onFile\}/.test(scan) && !/accept=/.test(scan), "the file input has no accept (iOS)");
   expect(/openPdfDocument\(bytes\)/.test(scan) && /createImageBitmap/.test(scan), "PDF pages via pdf.js (the hardened opener), images via createImageBitmap");

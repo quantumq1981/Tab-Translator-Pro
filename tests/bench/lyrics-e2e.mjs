@@ -35,6 +35,7 @@ ok("⬇ LRC saves one [mm:ss.xx] stamp per line", (lrc.match(/^\[\d\d:\d\d\.\d\d
 await page.screenshot({ path: path.join(OUT, "lyrics-gp.png") });
 
 // 2) audio: the real vocal stem
+await page.locator('.tdp-nav button[data-dest="open"]').click();
 await page.getByRole("tab", { name: "Audio 🎵" }).click();
 await page.locator('input[type="file"]').first().setInputFiles(VOCAL);
 await page.getByText(/bars · ♩=/).first().waitFor({ timeout: 300000 });

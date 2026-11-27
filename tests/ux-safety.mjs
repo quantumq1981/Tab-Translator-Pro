@@ -10,7 +10,7 @@ const between = (a, b) => { const i = ui.indexOf(a); return i < 0 ? "" : ui.slic
 
 // #1 chord edits are per chart; a tab tap clears only the selection
 expect(/const \[ovStore, setOvStore\] = useState\(\{ pdf: \{\}, xml: \{\} \}\)/.test(ui) && /const overrides = ovStore\[ovKindOf\(mode\)\]/.test(ui), "#1 edits are kept per chart (pdf / xml)");
-expect(/onClick=\{\(\) => \{ setMode\(m\); clearPick\(\); \}\}/.test(ui) && !/setMode\(m\); clearSel\(/.test(ui), "#1 a mode-tab tap clears the selection only, never the edits");
+expect(/const pickWayIn = \(m\) => \{ setWorkChosen\(true\); if \(m === mode\) \{ setOpenView\(false\); return; \} setMode\(m\); clearPick\(\); \};/.test(ui) && /if \(to\) \{ navSwitch\.current = true; setMode\(to\); clearPick\(\); \}/.test(ui) && !/setMode\([a-z]+\); clearSel\(/.test(ui), "#1 picking a way in / switching destination clears the selection only, never the edits (step 4)");
 expect(/const clearPick = \(\) => \{ setSelFrets\(null\); setSelMidis\(null\); setSelKey\(""\); \};/.test(ui), "#1 clearPick touches no edits");
 expect(!/\bclearSel\(\)/.test(ui), "#1 every clearSel names the chart it clears");
 expect(/setOverridesFor\(ovKindOf\(meta\.kind\)/.test(ui), "#1 a restore puts the saved edits on the chart they belong to");
@@ -51,7 +51,7 @@ expect(/setList\(\(l\) => l\.filter/.test(host) && !/setList\(\(l\) => \{[^}]*on
 expect(/onCommit: \(\) => _libSerial\(async \(\) => \{\s*await projectDel\(r\.id\)/.test(ui) && /action: \{ label: "Undo", fn: \(\) => hide\(r\.id, false\) \}/.test(ui), "#13 a library delete hides now and deletes only when the Undo toast ends");
 expect(/onCommit: \(\) => _libSerial\(async \(\) => \{/.test(ui) && /const alive = \(await projectsAll\(\)\)/.test(ui) && /for \(const s of await setlistsAll\(\)\)/.test(ui) && !/sets0/.test(ui), "#13 a delete commit reads the current stores and runs serialized (no snapshot written back)");
 expect(/if \(opts && opts\.ifEmpty && prev\) return prev;/.test(ui) && /setEdit\(\(cur\) => cur \|\| prev, \{ ifEmpty: true \}\)/.test(ui), "#13 Clear-edits Undo never overwrites edits made since (any chart)");
-expect(/role="tablist" aria-label="Mode"/.test(ui) && /role="tab" aria-selected=\{mode === m\}/.test(ui), "#12 the mode row is a tablist");
+expect(/role="tablist" aria-label="Ways in"/.test(ui) && /role="tab" aria-selected=\{on\} aria-label=\{label\}/.test(ui) && /role="tablist" aria-label=\{label\}/.test(ui) && /aria-current=\{dest === d \? "page" : undefined\}/.test(ui), "#12 ways in + Listen tools are tablists; the bar marks the current destination (aria-current)");
 expect(/role="tablist" aria-label="View"/.test(ui) && /role="tab" aria-selected=\{view === v\}/.test(ui), "#12 the chart view switch is a tablist");
 expect(/button\[aria-pressed="true"\],\.tdp-app \[role="tab"\]\[aria-selected="true"\]\{text-decoration:underline/.test(ui), "#12 selected toggles and tabs are underlined, not marked by colour alone");
 expect(/const inactiveToggle = \(C\) => \(\{ borderColor: C\.border/.test(ui) && !/\? activeToggle\(C\) : \{\}\)/.test(ui), "#16 a deselected toggle keeps its borderColor key (no white 'visited' border)");

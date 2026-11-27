@@ -79,6 +79,16 @@ Boot measured with `tests/bench/load-e2e.mjs` (site assembled as `pages.yml` doe
   `CHORD_FONT` (Space Mono) for chords/logo, `MONO_FONT` for text whose columns must align — never IBM Plex (no longer
   requested). A keystroke that closes the sheet must `preventDefault` (focus returns to the chord; its keypress would
   click it). `bench/sheet-e2e.mjs`, `tests/ui-polish.mjs`.
+- **Step 4 built (2026-11-27):** navigation — see the review's Status. `mode` still names the panel that renders (every
+  loader / restore / handoff path is unchanged); the DESTINATION is a view over it:
+  `dest = openView ? "open" : LISTEN_MODES ∋ mode ? "listen" : mode === "library" ? "library" : "chart"`. Any mode
+  change by a way in leaves Open (the `[mode]` effect); a switch made by the bar sets `navSwitch` so it doesn't count
+  as a pick; Start fresh sets `goOpen`. `WAYS_IN` / `LISTEN_TOOLS` keep the old mode names as accessible names (benches
+  click them): a bench that switches mid-test must go through the bar first — `.tdp-nav button[data-dest="open"|
+  "listen"|"library"]`. The bar's items are BUTTONS with `aria-current="page"` (not tabs: the chart's view tablist has a
+  "Chart" tab). Bottom bar < 1024 px window, left rail ≥ 1024 px (`useWide()` for JS); `.tdp-main` pads for it. On a
+  wide window `ChordSheet` is a non-modal 360 px inspector (`html.tdp-inspecting` gives the chart its margin).
+  `bench/nav-e2e.mjs`, `tests/nav-shell.mjs`.
 
 ### Audit 2026-11-18 — fixed (PR #157 + the follow-up); read `docs/AUDIT-2026-11-18.md` for the evidence
 

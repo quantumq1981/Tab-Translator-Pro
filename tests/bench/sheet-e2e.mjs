@@ -56,8 +56,9 @@ for (const [label, opts] of [["phone", { ...devices["iPhone 13"] }], ["iPad", { 
   const L = (s) => `${label}: ${s}`;
   const modeTab = (name) => page.getByRole("tab", { name, exact: true });
   await modeTab("Manual").waitFor({ timeout: 30000 }); await page.waitForTimeout(500);
+  await modeTab("Manual").click(); await page.waitForTimeout(300);
   ok(L("Manual keeps its LIVE READOUT"), await page.getByText("LIVE READOUT", { exact: true }).isVisible());
-  await modeTab("MusicXML / GP").click();
+  await page.locator('.tdp-nav button[data-dest="open"]').click(); await modeTab("MusicXML / GP").click();
   await page.locator('input[type="file"]').first().setInputFiles(path.join(repo, "Steely Dan - Peg.gp4"));
   await page.getByText(/bars ·/).first().waitFor({ timeout: 60000 }); await page.waitForTimeout(800);
 
@@ -145,7 +146,7 @@ for (const [label, opts] of [["phone", { ...devices["iPhone 13"] }], ["iPad", { 
   if (shots) await page.screenshot({ path: path.join(shots, `${label}-sections.png`) });
 
   // ---- waveform scrubber (Audio)
-  await modeTab("Audio 🎵").click(); await page.waitForTimeout(400);
+  await page.locator('.tdp-nav button[data-dest="open"]').click(); await modeTab("Audio 🎵").click(); await page.waitForTimeout(400);
   await page.locator("label", { hasText: "Upload audio" }).locator('input[type="file"]').setInputFiles(WAV);
   await page.locator("[data-waveform]").first().waitFor({ timeout: 90000 }); await page.waitForTimeout(500);
   const wv = page.locator("[data-waveform]").first(); const wb = await wv.boundingBox();
