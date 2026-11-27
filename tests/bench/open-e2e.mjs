@@ -97,6 +97,11 @@ for (const [label, opts] of [["phone", { ...devices["iPhone 13"] }], ["iPad", { 
   await page.evaluate((t) => { const dt = new DataTransfer(); dt.items.add(new File([t], "dropped.musicxml", { type: "" })); const z = document.querySelector("[data-drop-zone]"); for (const ty of ["dragenter", "dragover", "drop"]) z.dispatchEvent(new DragEvent(ty, { bubbles: true, cancelable: true, dataTransfer: dt })); }, xmlText);
   await page.waitForTimeout(1500);
   ok(L("drag-and-drop routes the same way"), (await current()) === "chart" && /dropped/.test(await page.locator("[data-song-title]").innerText().catch(() => "")));
+  // a newer file wins over a PDF still being looked inside (review on #167)
+  await toOpen(); await page.locator("[data-open-input]").setInputFiles(FILES.tabPdf); await page.locator("[data-open-input]").setInputFiles(FILES.gp);
+  await page.getByText(/bars ·/).first().waitFor({ timeout: 60000 }); await page.waitForTimeout(6000);
+  const after = await page.locator("[data-song-title]").innerText().catch(() => "");
+  ok(L("a newer file wins over a PDF still being read"), /Peg/.test(after) && !(await page.getByText(/systems ·/).count()), after);
   const ov = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth);
   ok(L("no horizontal page scroll"), ov <= 1, ov);
   ok(L("no page errors"), !errs.length, errs.slice(0, 3));

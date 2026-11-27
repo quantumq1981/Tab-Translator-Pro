@@ -848,6 +848,7 @@ function TabDecoderProApp() {
   const clearPick = () => { setSelFrets(null); setSelMidis(null); setSelKey(""); };
   // the bar / rail: Chart returns to the last way in, Listen to the last microphone tool
   const go = (d) => {
+    if (d !== "open") routeSeq.current++;   // leaving Open by hand supersedes a file still being looked at
     if (d === "open") { setOpenView(true); return; }
     setOpenView(false);
     const to = d === "chart" ? (WORK_MODES.includes(mode) ? null : lastWork.current)
@@ -857,18 +858,22 @@ function TabDecoderProApp() {
   };
   // leave Open in the SAME update as the pick (not only via the [mode] effect, which runs a frame later: in that gap
   // Open's own file input was still on screen, and a file given to it was lost when it unmounted — open-e2e / polish-e2e)
-  const pickWayIn = (m) => { setWorkChosen(true); setOpenView(false); if (m !== mode) { setMode(m); clearPick(); } };
+  const pickWayIn = (m) => { routeSeq.current++; setWorkChosen(true); setOpenView(false); if (m !== mode) { setMode(m); clearPick(); } };
   /* step 5 — one Open: route a dropped / picked file by its BYTES (sniffFile), never its extension, into the panel that
    * reads it. The panels' own loaders run unchanged (onXml / onFile take the same { target: { files } } shape). A PDF is
    * looked inside first: fret numbers → PDF Chart, chord symbols or no text layer → Scan, both / unclear → ask. */
   const goTo = (m) => { setOpenMsg(null); setPdfAsk(null); setWorkChosen(true); setOpenView(false); if (m !== mode) { setMode(m); clearPick(); } };
   const openAsTab = (f) => { goTo("pdf"); onFile({ target: { files: [f], value: "" } }); };
   const openAsScan = (f) => { goTo("scan"); setScanIncoming({ file: f, n: Date.now() }); };
+  // only the LATEST file / choice may route: a slow read or PDF look of an earlier file is dropped (review on #167)
+  const routeSeq = useRef(0);
   const routeFile = async (f) => {
     if (!f) return;
+    const seq = ++routeSeq.current, live = () => seq === routeSeq.current;
     setPdfAsk(null); setOpenMsg({ text: `Reading ${f.name}…` });
     let bytes;
-    try { bytes = new Uint8Array(await f.arrayBuffer()); } catch (_) { setOpenMsg({ tone: "error", text: `Couldn't read ${f.name}.` }); return; }
+    try { bytes = new Uint8Array(await f.arrayBuffer()); } catch (_) { if (live()) setOpenMsg({ tone: "error", text: `Couldn't read ${f.name}.` }); return; }
+    if (!live()) return;
     const kind = sniffFile(bytes, f.name);
     const textOf = () => { try { return new TextDecoder("utf-8").decode(bytes).replace(/^\uFEFF/, ""); } catch (_) { return ""; } };
     if (kind.kind === "score") { goTo("xml"); onXml({ target: { files: [f], value: "" } }); return; }
@@ -887,6 +892,7 @@ function TabDecoderProApp() {
         try { doc.destroy(); } catch (_) {}
         c = classifyPdfText(strs);
       } catch (_) {}
+      if (!live()) return;
       if (c.route === "tab") openAsTab(f);
       else if (c.route === "chords" || c.route === "scan") openAsScan(f);
       else { setOpenMsg(null); setPdfAsk({ file: f, c }); }

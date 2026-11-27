@@ -10,7 +10,7 @@ const between = (a, b) => { const i = ui.indexOf(a); return i < 0 ? "" : ui.slic
 
 // #1 chord edits are per chart; a tab tap clears only the selection
 expect(/const \[ovStore, setOvStore\] = useState\(\{ pdf: \{\}, xml: \{\} \}\)/.test(ui) && /const overrides = ovStore\[ovKindOf\(mode\)\]/.test(ui), "#1 edits are kept per chart (pdf / xml)");
-expect(/const pickWayIn = \(m\) => \{ setWorkChosen\(true\); setOpenView\(false\); if \(m !== mode\) \{ setMode\(m\); clearPick\(\); \} \};/.test(ui) && /if \(to\) \{ navSwitch\.current = true; setMode\(to\); clearPick\(\); \}/.test(ui) && !/setMode\([a-z]+\); clearSel\(/.test(ui), "#1 picking a way in / switching destination clears the selection only, never the edits (step 4)");
+expect(/const pickWayIn = \(m\) => \{ routeSeq\.current\+\+; setWorkChosen\(true\); setOpenView\(false\); if \(m !== mode\) \{ setMode\(m\); clearPick\(\); \} \};/.test(ui) && /if \(to\) \{ navSwitch\.current = true; setMode\(to\); clearPick\(\); \}/.test(ui) && !/setMode\([a-z]+\); clearSel\(/.test(ui), "#1 picking a way in / switching destination clears the selection only, never the edits (step 4)");
 expect(/const clearPick = \(\) => \{ setSelFrets\(null\); setSelMidis\(null\); setSelKey\(""\); \};/.test(ui), "#1 clearPick touches no edits");
 expect(!/\bclearSel\(\)/.test(ui), "#1 every clearSel names the chart it clears");
 expect(/setOverridesFor\(ovKindOf\(meta\.kind\)/.test(ui), "#1 a restore puts the saved edits on the chart they belong to");

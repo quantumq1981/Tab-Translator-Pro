@@ -14874,9 +14874,12 @@ function sniffFile(bytes, name = "") {
   }
   if (isAlphaTexText(text)) return r("score", "alphatex", "an AlphaTex file");
   const lines = text.split(/\r?\n/);
-  const tabLine = /^\s*[A-Ga-g]?[#b]?\s*[|:]\S*[-–—]{2,}[-–—0-9xXhpbr\/\\|~()<>.^*]*\s*$/;
-  const tabRows = lines.filter((l) => tabLine.test(l) && (l.match(/[-–—]/g) || []).length >= 4).length;
-  if (tabRows >= 4) return r("tab", "ascii-tab", "guitar tab (text)");
+  // a string row: an optional string name, a bar, then ONLY tab characters with at least one dash (a one-chord
+  // diagram row "e|-0-|" counts). Four or more such rows IN A ROW = tab; prose never forms that run (review on #167).
+  const tabLine = /^\s*[A-Ga-g]?[#b]?\s*[|:][-–—0-9xXhpbr\/\\|~()<>.^*sv ]*[-–—][-–—0-9xXhpbr\/\\|~()<>.^*sv ]*\s*$/;
+  let run = 0, bestRun = 0;
+  for (const l of lines) { if (tabLine.test(l) && /[|:].*[-–—]/.test(l)) { run++; if (run > bestRun) bestRun = run; } else if (l.trim()) run = 0; }
+  if (bestRun >= 4) return r("tab", "ascii-tab", "guitar tab (text)");
   const words = lines.filter((l) => /[A-Za-z]{2,}/.test(l)).length;
   if (words >= 2 || /\{(title|t|start_of_chorus|soc|c|comment):?/i.test(text)) return r("lyrics", "text", /\{[a-z_]+[:}]/i.test(text) ? "a ChordPro file" : lines.some((l) => l.trim() && isChordLine(l)) ? "chords over lyrics" : "lyrics (text)");
   if (_AUDIO_EXT.test(ext)) return r("audio", ext, "a recording");

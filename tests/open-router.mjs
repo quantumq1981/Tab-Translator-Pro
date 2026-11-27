@@ -49,6 +49,9 @@ expect(sniff(new Uint8Array(0), "x").format === "empty" && sniff(null, "x").kind
 const T = (s, n = "x") => sniff(new TextEncoder().encode(s), n);
 expect(T("e|---0---3---|\nB|---1---0---|\nG|---0---0---|\nD|---2---0---|\nA|---3---2---|\nE|-------3---|").kind === "tab", "ASCII tab → tab");
 expect(T("﻿ D|--0--2--|\n A|--2--0--|\n D|--2--2--|\n G|--0--2--|\n B|--3--3--|\n e|--2--3--|").kind === "tab", "Drop-D labelled tab with a BOM → tab");
+const presetMiss = E.PRESETS.filter((pr) => T(pr.tab).kind !== "tab").map((pr) => pr.name || pr.tab.slice(0, 12));
+expect(E.PRESETS.length >= 6 && !presetMiss.length, `every built-in preset (short one-chord diagrams like e|-0-|) → tab (review on #167): ${presetMiss.join(", ")}`);
+expect(T("Notes | 1-2 | ok\nA list - of - things\nB| -- see below\nThe end").kind !== "tab" && T("a|-b\nnot a tab\nc|-d\nmore words").kind !== "tab", "prose with a few bars and dashes is not tab (the rows must be consecutive string rows)");
 expect(T("{title: X}\n[C]la [G]la").kind === "lyrics" && T("{title: X}\n[C]la [G]la").label === "a ChordPro file", "ChordPro → lyrics");
 expect(T("     C        G\nThere is a house\n   Am   F\nIn New Orleans").label === "chords over lyrics", "chords over lyrics → lyrics");
 expect(T("Amazing grace how sweet the sound\nThat saved a wretch like me").kind === "lyrics", "plain lyrics → lyrics");
@@ -76,6 +79,7 @@ expect(/sniffFile\(bytes, f\.name\)/.test(route) && /classifyPdfText\(strs\)/.te
 expect(/kind\.kind === "score"\) \{ goTo\("xml"\); onXml\(\{ target: \{ files: \[f\]/.test(route) && /goTo\("audio"\); setAudioIncoming\(\{ bytes, name: f\.name, n: Date\.now\(\), fresh: true \}\)/.test(route), "scores go through the score loader, recordings to Audio (fresh = joins the library)");
 expect(/kind\.kind === "image"\) \{ openAsScan\(f\)/.test(route) && /goTo\("manual"\); setTab\(textOf\(\)\)/.test(route) && /goTo\("lyrics"\); setLyricsIncoming/.test(route), "photos → Scan, tab text → Manual, lyrics → Lyrics");
 expect(/c\.route === "tab"\) openAsTab\(f\)/.test(route) && /c\.route === "chords" \|\| c\.route === "scan"\) openAsScan\(f\)/.test(route) && /setPdfAsk\(\{ file: f, c \}\)/.test(route), "a PDF: tab → PDF Chart, chords / picture → Scan, otherwise ask");
+expect(/const seq = \+\+routeSeq\.current, live = \(\) => seq === routeSeq\.current;/.test(route) && (route.match(/if \(!live\(\)\) return;/g) || []).length >= 2 && /const pickWayIn = \(m\) => \{ routeSeq\.current\+\+;/.test(ui) && /if \(d !== "open"\) routeSeq\.current\+\+;/.test(ui), "only the latest file / choice routes: an earlier read or PDF look is dropped (review on #167)");
 expect(/const openAsTab = \(f\) => \{ goTo\("pdf"\); onFile\(\{ target: \{ files: \[f\], value: "" \} \}\); \};/.test(ui), "PDF Chart opens it through its own loader");
 const open = between("function OpenView(", "\nfunction SubTabs(");
 expect(/<input ref=\{pick\} type="file" data-open-input onChange=/.test(open) && !/data-open-input[^>]*accept=/.test(open), "one picker, NO accept filter (iOS greys out Guitar Pro files under one)");
