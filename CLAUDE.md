@@ -99,9 +99,13 @@ Boot measured with `tests/bench/load-e2e.mjs` (site assembled as `pages.yml` doe
 - **Open items after the redesign: `docs/HANDOFF-2026-11-27-open-issues.md`.** R1 FIXED (2026-11-27): paper never uses
   system-ui — a CFF system font (Inter here) is embedded as Type 3, glyph by glyph, so the PDF's text split into letters.
   `PRINT_FONT` (TrueType: Helvetica / Arial / Liberation Sans) on the print sheet + an `@media print` rule for every inline
-  system-ui text (styles and SVG attributes); the `♩` in `PRINT_NOTE_FONT`. `library-e2e` 11/11. Still open: three
-  bench failures that predate the redesign (instruments capo hint, note-editor fret drag, tuning "Use Drop D"), the
-  Library delete/restore quirk, and the UX items left open (#8 #11 #13 #16).
+  system-ui text (styles and SVG attributes); the `♩` in `PRINT_NOTE_FONT`. `library-e2e` 11/11. P1–P3 FIXED (2026-11-27): two were
+  bench bugs (instruments: Harmony is the default part now — Anthropology reads G minor, capo 3; note-editor: wrong string
+  lines, an open string that can't move up); the tuning/capo suggestion "Apply" buttons gained accessible names `Use Drop D`
+  / `Use capo N`. Found, not fixed: the chart's shown key and the Beginner level's key differ on 14 corpus files (see the
+  handoff, P1). U1 FIXED (2026-11-27): deleting the OPEN song from the
+  Library detaches it (`onProjectDeleted`: pending project save dropped, hash in `ttp:lib:detached`, which restore honours;
+  opening the file again re-adds it) — `bench/library-delete-e2e.mjs`. Still open: the UX items #8 #11 #13 #16.
 
 ### Audit 2026-11-18 — fixed (PR #157 + the follow-up); read `docs/AUDIT-2026-11-18.md` for the evidence
 

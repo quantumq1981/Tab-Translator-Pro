@@ -47,7 +47,16 @@ await modal.getByRole("button", { name: "close" }).click();
 // arrangement level — on a B♭ tune (Anthropology), so Beginner has to move the key and give a capo
 await page.locator('input[type="file"]').first().setInputFiles(path.resolve(app.repo, "Charlie Parker - Anthropology.gp5"));
 await page.waitForTimeout(1500);
-await openChartPanel(page, "settings"); await page.locator("select").filter({ has: page.locator("option[value='beginner']") }).selectOption("beginner");
+// A multi-part file opens on Harmony (UX review #4). Harmony + the Chords part read the relative minor (G minor →
+// Em shapes, capo 3 — the same notes, so it still plays along); the melody part reads B♭. First Harmony: any capo
+// hint must match the level's own transposition. Then Track 1 for the exact B♭ → A shapes, capo 1 case.
+const levelSel = () => page.locator("select").filter({ has: page.locator("option[value='beginner']") });
+await openChartPanel(page, "settings"); await levelSel().selectOption("beginner");
+await page.waitForTimeout(500);
+ok("Harmony (opened by default): Beginner gives a capo hint to play along", (await page.getByText(/capo [1-7] to play along/i).count()) === 1, await page.getByText(/to play along/i).allInnerTexts());
+await page.getByRole("button", { name: "Track 1", exact: true }).click(); await page.waitForTimeout(800);
+if (!(await levelSel().count())) await openChartPanel(page, "settings");
+await levelSel().selectOption("beginner");
 await page.waitForTimeout(500);
 const syms = await page.locator('button[title*="guitar voicings"]').allInnerTexts();
 const clean = syms.map((s) => s.split("\n")[0].trim()).filter(Boolean);
