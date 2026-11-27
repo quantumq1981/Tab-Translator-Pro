@@ -13,3 +13,4 @@ bench/_scratch/
 .engine.audit.mjs
 .engine.vendored.mjs
 .engine.uipolish.mjs
+.engine.openrouter.mjs

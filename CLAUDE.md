@@ -89,6 +89,13 @@ Boot measured with `tests/bench/load-e2e.mjs` (site assembled as `pages.yml` doe
   "Chart" tab). Bottom bar < 1024 px window, left rail ≥ 1024 px (`useWide()` for JS); `.tdp-main` pads for it. On a
   wide window `ChordSheet` is a non-modal 360 px inspector (`html.tdp-inspecting` gives the chart its margin).
   `bench/nav-e2e.mjs`, `tests/nav-shell.mjs`.
+- **Step 5 built (2026-11-27):** one Open routed by content — see the review's Status. `sniffFile(bytes, name)` (engine)
+  decides by magic bytes / text shape; the name only breaks a tie for an unmatched binary. A PDF goes through
+  `classifyPdfText` (its first two pages' text): tab → PDF Chart, chords / no text → Scan, both / unclear → ask.
+  `routeFile` (TabDecoderPro) hands the File to the panel's OWN loader (`onXml` / `onFile` with `{ target: { files } }`,
+  `scanIncoming`, `lyricsIncoming`, `audioIncoming` with `fresh`), so no loader is duplicated. The Open picker must
+  keep NO `accept` attribute. A new file kind = a `sniffFile` branch + a `routeFile` branch + an `open-router.mjs` case.
+  `bench/open-e2e.mjs`, `tests/open-router.mjs`.
 
 ### Audit 2026-11-18 — fixed (PR #157 + the follow-up); read `docs/AUDIT-2026-11-18.md` for the evidence
 
