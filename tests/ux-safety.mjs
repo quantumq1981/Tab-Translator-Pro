@@ -39,6 +39,8 @@ const fresh = between("const startFresh = () => {", "  const undoFresh");
 expect(fresh && !/await clearSession\(\)/.test(fresh) && /setTimeout\(commitFresh, FRESH_UNDO_MS\)/.test(fresh), "#14 Start fresh clears the stored session only when the Undo window ends");
 expect(/_lsSet\(FRESH_PENDING_KEY, "1"\)/.test(fresh) && /if \(_lsGet\(FRESH_PENDING_KEY\)\)/.test(ui), "#14 a reload inside the window finishes the clear (sync flag)");
 expect(/if \(f\.gen === sessGen\.current\) clearSession\(\)/.test(ui), "#14 the delayed clear never deletes a session opened meanwhile");
+const persist = between("const persistSession = async (bytes, filename) => {", "const gen = ++sessGen.current");
+expect(/if \(freshRef\.current\) \{ clearTimeout\(freshRef\.current\.timer\); freshRef\.current = null; setFreshUndo\(false\); _lsSet\(FRESH_PENDING_KEY, null\); \}/.test(persist), "#14 saving a new file cancels a pending Start fresh and its launch flag (else a reload deletes the new file)");
 expect(/const undoFresh = \(\) =>/.test(ui) && /onClick=\{undoFresh\}/.test(ui), "#14 Undo is offered");
 
 console.log(`ux-safety: ${passes} passed, ${failures} failed`);

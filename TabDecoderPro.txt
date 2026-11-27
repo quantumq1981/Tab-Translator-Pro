@@ -983,7 +983,12 @@ function TabDecoderProApp() {
    * running out of memory), the next launch asks instead of opening the same file again. */
   const sessRef = useRef(null), sessGen = useRef(0); // { filename, size, hash } of the stored bytes
   const [sessTick, setSessTick] = useState(0);
+  const freshRef = useRef(null);                    // a pending "Start fresh": { snap, gen, timer } (see startFresh)
+  const [freshUndo, setFreshUndo] = useState(false);
   const persistSession = async (bytes, filename) => {
+    // a new file supersedes a pending Start fresh: its save replaces the old session, so the delayed clear (and the
+    // launch-time flag behind it) must go — otherwise a reload inside the Undo window would delete THIS file's session
+    if (freshRef.current) { clearTimeout(freshRef.current.timer); freshRef.current = null; setFreshUndo(false); _lsSet(FRESH_PENDING_KEY, null); }
     const gen = ++sessGen.current; sessRef.current = null;
     let r = { where: "none" };
     try { r = await sessionStore.saveSessionFile(bytes); } catch (err) { console.warn("session file save skipped:", err); }
@@ -1093,8 +1098,6 @@ function TabDecoderProApp() {
    * puts everything back exactly. Safety rails: a file opened meanwhile bumps sessGen, and the delayed clear then
    * leaves the new session alone; a sync localStorage flag finishes the clear on the next launch if the page is
    * closed first (an async IndexedDB delete in pagehide can't be relied on). */
-  const freshRef = useRef(null);                    // { snap, gen, timer }
-  const [freshUndo, setFreshUndo] = useState(false);
   const commitFresh = () => {
     const f = freshRef.current; if (!f) return;
     freshRef.current = null; clearTimeout(f.timer); setFreshUndo(false);

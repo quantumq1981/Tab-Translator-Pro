@@ -101,6 +101,20 @@ await page.waitForTimeout(11000);
 ok("#14 Undo disappears when the window ends", !(await page.getByRole("button", { name: "Undo", exact: true }).isVisible().catch(() => false)));
 await page.reload(); await boot(); await page.waitForTimeout(1500);
 ok("#14 after the window the session is gone", !(await page.getByText(/Restored your last session/).isVisible().catch(() => false)));
+// a file opened inside the window replaces the old session — a reload then must NOT delete the new one (Codex, PR #160)
+await tab("MusicXML / GP");
+await page.locator('input[type="file"]').first().setInputFiles(path.join(repo, "Steely Dan - Peg.gp4"));
+await page.getByText(/bars ·/).first().waitFor({ timeout: 60000 }); await page.waitForTimeout(1200);
+await page.reload(); await boot(); await page.getByText(/Restored your last session/).waitFor({ timeout: 30000 });
+await page.getByRole("button", { name: "Start fresh" }).click(); await page.waitForTimeout(200);
+await tab("MusicXML / GP");
+await page.locator('input[type="file"]').first().setInputFiles(path.join(repo, "Steely Dan - Black Cow.gp"));
+await page.getByText(/bars ·/).first().waitFor({ timeout: 60000 }); await page.waitForTimeout(1500);
+ok("#14 opening a file inside the window cancels the pending clear", (await page.evaluate(() => localStorage.getItem("ttp:fresh:pending"))) === null && !(await page.getByRole("button", { name: "Undo", exact: true }).isVisible().catch(() => false)));
+await page.reload(); await boot();
+await page.getByText(/Restored your last session/).waitFor({ timeout: 30000 }).catch(() => {});
+ok("#14 …and a reload restores the NEW file", await page.getByText(/Restored your last session/).isVisible().catch(() => false) && await page.getByText(/Black Cow/).first().isVisible().catch(() => false));
+await page.getByRole("button", { name: "Start fresh" }).click(); await page.waitForTimeout(11000); // leave a clean slate for #2
 
 // ---- #2 audio re-reads ask first
 await tab("Audio 🎵"); await page.waitForTimeout(500);
