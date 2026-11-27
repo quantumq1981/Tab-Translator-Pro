@@ -3257,7 +3257,7 @@ function LeadSheetView({ score, C, overrides, setOverrides, editMode, editKey, s
                   const isSel = selKey === k;
                   const isPlaying = playKey === k;
                   return (
-                    <button key={i} className={isPlaying ? "tdp-now" : undefined} onClick={() => (editMode ? (setEditKey(k), setDraft(cur)) : (onPick(k, e), onVoicings && onVoicings([{ symbol: cur, frets: e.frets, midis: e.midis, key: k, detected: e.symbol }])))} title={editMode ? "click to re-label" : `beat ${e.beat + 1} · tap for its notes and voicings`}
+                    <button key={i} className={isPlaying ? "tdp-now" : undefined} onClick={() => (editMode ? (setEditKey(k), setDraft(cur)) : (onPick(k, e), onVoicings && onVoicings([{ symbol: cur, frets: e.frets, midis: e.midis, key: k, detected: e.symbol }])))} title={editMode ? "click to re-label" : `beat ${e.beat + 1} · tap for its notes and guitar voicings`}
                       style={{ gridColumn: gridCol, justifySelf: "start", textAlign: "left", background: isPlaying ? `${C.green}22` : "transparent", borderRadius: 4, border: "none", borderBottom: isSel ? `2px solid ${C.amber}` : "2px solid transparent", padding: "0 2px", cursor: "pointer", color: isPlaying ? C.green : edited ? C.green : isSel ? C.amber : C.cyan, fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: cur.length > 4 ? 13 : 16, lineHeight: 1.2, transition: "background .1s, color .1s, transform .09s" }}>
                       <span style={{ display: "block", opacity: e.uncertain && !edited ? 0.55 : 1, borderBottom: e.uncertain && !edited ? `1px dashed ${C.amber}` : "none" }} title={e.uncertain && !edited ? "uncertain — see the review list" : undefined}>{cur}{edited ? "*" : ""}{e.uncertain && !edited ? <sup style={{ color: C.amber, fontSize: 9 }}>?</sup> : null}</span>
                       {showRoman && musicKey && <span style={{ display: "block", fontSize: 9, fontWeight: 400, color: C.dim, marginTop: 1 }}>{nashville ? nashvilleFor(cur, musicKey) : romanFor(cur, musicKey)}</span>}
@@ -3630,7 +3630,7 @@ function ChordSheet({ choices, start = 0, onClose, onRename, C, useSharp, sequen
           transform: dragY ? `translateY(${dragY}px)` : undefined, transition: dragging ? "none" : "transform .26s cubic-bezier(.2,.9,.3,1.12)" }}>
         <div data-sheet-handle aria-hidden="true" onPointerDown={onHandleDown} onPointerMove={onHandleMove} onPointerUp={onHandleUp} onPointerCancel={onHandleUp}
           style={{ flex: "none", height: 26, display: "flex", alignItems: "center", justifyContent: "center", cursor: dragging ? "grabbing" : "grab", touchAction: "none" }}>
-          <span style={{ width: 40, height: 5, borderRadius: 3, background: C.border }} />
+          <div style={{ width: 40, height: 5, borderRadius: 3, background: C.border }} />
         </div>
         <div style={{ padding: "0 16px 12px", borderBottom: `1px solid ${C.border}` }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
