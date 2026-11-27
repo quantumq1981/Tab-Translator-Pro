@@ -59,6 +59,11 @@ Boot measured with `tests/bench/load-e2e.mjs` (site assembled as `pages.yml` doe
   **system UI font** (keep Space Mono for chord symbols, drop the IBM Plex Mono download). Still-unfinished UI it
   addresses: debug output as product UI (`CHROMA BITMASK`, `PATH C/D/E/F/G`, engine footer), 3 `alert` + 3 `confirm`
   calls, format-named export row, "Generate audio ↗" (a CLI command most users can't run → under Advanced).
+- **Step 1 built (2026-11-27):** UX review #10–#13 + #16's cause — see the review's Status. Rules: no
+  `window.alert`/`confirm` (use `showToast({ text, tone, action, onCommit })`; side effects run from the host's ref, never
+  inside a state updater; a delete hides now and commits in `onCommit`); mode row + view switch are tablists (browser
+  tests use `getByRole("tab")`); a toggle that adds `activeToggle(C)` must add `inactiveToggle(C)` when off (React
+  deletes a vanished `borderColor` → white border); 44 px targets under `pointer: coarse`. `bench/polish-e2e.mjs`.
 
 ### Audit 2026-11-18 — fixed (PR #157 + the follow-up); read `docs/AUDIT-2026-11-18.md` for the evidence
 

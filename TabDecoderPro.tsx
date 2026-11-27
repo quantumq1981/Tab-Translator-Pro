@@ -1132,7 +1132,7 @@ function TabDecoderProApp() {
   const openProject = async (rec, opts = {}) => {
     if (!rec) return;
     const bytes = await projectFileGet(rec.id, rec);
-    if (!bytes || !bytes.length) { window.alert("This project's file is no longer on this device."); return; }
+    if (!bytes || !bytes.length) { showToast({ tone: "error", text: `“${rec.title}” can’t open: its file is no longer on this device. Open the original file again to add it back.` }); return; }
     projRef.current = rec; setProjectId(rec.id);
     if (opts.setlist) setPlaySet({ setlist: opts.setlist, index: opts.index || 0 });
     const item = opts.setlist ? opts.setlist.items[opts.index || 0] : null;
@@ -1212,6 +1212,19 @@ function TabDecoderProApp() {
         .tdp-scroll::-webkit-scrollbar-thumb{background:#33333d;border-radius:8px;}
         textarea::placeholder{color:#5a605d;}
         .meas:hover{border-color:#ff6b3588!important;}
+        /* UX review #11 #12 (2026-11-27): keyboard focus ring; selection never by colour alone (✓ / underline);
+           44 px touch targets on touch screens (Apple HIG 44 pt) — min-size only, so inline padding still applies */
+        .tdp-app :focus-visible{outline:2px solid #57d1d6;outline-offset:2px;}
+        /* selected = a thick underline as well as the colour; it takes no width, so narrow toggles don't wrap (a ✓ prefix did) */
+        .tdp-app button[aria-pressed="true"],.tdp-app [role="tab"][aria-selected="true"]{text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:4px;}
+        .tdp-app [role="tab"][aria-selected="true"]{font-weight:700;}
+        .tdp-app button,.tdp-app select,.tdp-app summary{touch-action:manipulation;}
+        @media (pointer:coarse){
+          .tdp-app button,.tdp-app select,.tdp-app input[type="file"]+button{min-height:44px;}
+          .tdp-app button:not([data-tight]){min-width:44px;}
+          .tdp-app summary{min-height:44px!important;}
+          .tdp-app input[type="checkbox"],.tdp-app input[type="radio"]{width:22px;height:22px;}
+        }
         .tdp-cols{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:16px;}
         .tdp-cols.manual{grid-template-columns:minmax(0,1fr) minmax(0,1fr);}
         @media (max-width:760px){.tdp-cols,.tdp-cols.manual{grid-template-columns:minmax(0,1fr);}}  /* minmax(0,…): a wide child (the note editor's roll) must scroll inside, not widen the page */
@@ -1244,9 +1257,9 @@ function TabDecoderProApp() {
             <span style={{ fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: 22, letterSpacing: 1 }}>TAB<span style={{ color: C.amber }}>·</span>DECODER</span>
             <span style={{ color: C.dim, fontSize: 12, letterSpacing: 3 }}>TABTRANSLATOR PRO</span>
           </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, maxWidth: "100%" }}>
+          <div role="tablist" aria-label="Mode" style={{ display: "flex", flexWrap: "wrap", gap: 6, maxWidth: "100%" }}>
             {[["manual", "Manual"], ["pdf", "PDF Chart"], ["scan", "Scan 📷"], ["xml", "MusicXML / GP"], ["audio", "Audio 🎵"], ["lyrics", "Lyrics 🎙️"], ["live", "Live chords 🎶"], ["tuner", "Tuner 🎤"], ["library", "Library 📚"]].map(([m, lbl]) => (
-              <button key={m} onClick={() => { setMode(m); clearPick(); }} style={{ ...toggle(C), padding: "6px 14px", flex: "none", ...(mode === m ? activeToggle(C) : {}) }}>
+              <button key={m} role="tab" aria-selected={mode === m} onClick={() => { setMode(m); clearPick(); }} style={{ ...toggle(C), padding: "6px 14px", flex: "none", ...(mode === m ? activeToggle(C) : inactiveToggle(C)) }}>
                 {lbl}
               </button>
             ))}
@@ -1302,13 +1315,13 @@ function TabDecoderProApp() {
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 14 }}>
                   <Control C={C} label="TUNING">
                     <div style={{ display: "flex", gap: 6 }}>
-                      {Object.keys(TUNINGS).map((t) => (<button key={t} onClick={() => setTuningName(t)} style={{ ...toggle(C), ...(tuningName === t ? activeToggle(C) : {}) }}>{t}</button>))}
+                      {Object.keys(TUNINGS).map((t) => (<button key={t} aria-pressed={tuningName === t} onClick={() => setTuningName(t)} style={{ ...toggle(C), ...(tuningName === t ? activeToggle(C) : inactiveToggle(C)) }}>{t}</button>))}
                     </div>
                   </Control>
                   <Control C={C} label="SPELLING">
                     <div style={{ display: "flex", gap: 6 }}>
-                      <button onClick={() => setUseSharp(true)} style={{ ...toggle(C), ...(useSharp ? activeToggle(C) : {}) }}>Default ♯♭</button>
-                      <button onClick={() => setUseSharp(false)} style={{ ...toggle(C), ...(!useSharp ? activeToggle(C) : {}) }}>Flats ♭</button>
+                      <button aria-pressed={useSharp} onClick={() => setUseSharp(true)} style={{ ...toggle(C), ...(useSharp ? activeToggle(C) : inactiveToggle(C)) }}>Default ♯♭</button>
+                      <button aria-pressed={!useSharp} onClick={() => setUseSharp(false)} style={{ ...toggle(C), ...(!useSharp ? activeToggle(C) : inactiveToggle(C)) }}>Flats ♭</button>
                     </div>
                   </Control>
                   <Control C={C} label={`CAPO · fret ${capo}`}>
@@ -1339,7 +1352,7 @@ function TabDecoderProApp() {
               </>
             ) : mode === "pdf" ? (
               <>
-                <SectionLabel C={C}>PATH A · DIGITAL TAB PDF → CHORD CHART</SectionLabel>
+                <SectionLabel C={C}>OPEN A TAB PDF · exported from Guitar Pro, MuseScore or alphaTab</SectionLabel>
                 <input ref={fileRef} type="file" accept="application/pdf" onChange={onFile} style={{ display: "none" }} />
                 <button onClick={() => fileRef.current && fileRef.current.click()} disabled={!pdfReady || pdfBusy}
                   style={{ width: "100%", background: C.bg, border: `1px dashed ${C.border}`, color: pdfReady ? C.amber : C.dim, borderRadius: 10, padding: "22px 12px", fontSize: 14, cursor: pdfReady ? "pointer" : "default", fontFamily: "'IBM Plex Mono', monospace" }}>
@@ -1362,7 +1375,7 @@ function TabDecoderProApp() {
               </>
             ) : (
               <>
-                <SectionLabel C={C}>PATH C/D/E/F/G · MUSICXML · GUITAR PRO · POWER TAB → CHORD CHART</SectionLabel>
+                <SectionLabel C={C}>OPEN A SCORE FILE · Guitar Pro · MusicXML · Power Tab · MIDI</SectionLabel>
                 {/* No `accept` filter on purpose: iOS maps `accept` extensions to UTIs, and
                     .gp/.gpx/.gp3/.gp4/.gp5/.ptb have no registered UTI, so iOS greys them out
                     (unselectable). Leaving it unset lets every file be picked on all platforms.
@@ -1454,45 +1467,53 @@ function TabDecoderProApp() {
               </div>
             )}
 
-            <SectionLabel C={C}>CHROMA BITMASK · absolute (bit i = pitch-class i)</SectionLabel>
-            <div style={{ fontSize: 13, color: C.dim, marginBottom: 6 }}>
-              <span style={{ color: C.text }}>0b{toBinary12(norm.chordMask)}</span><span style={{ marginLeft: 8 }}>= {norm.chordMask}</span><span style={{ marginLeft: 8, fontSize: 11 }}>(MSB B → LSB C)</span>
-            </div>
+            {/* UX review #10: bit strings and ranking scores are developer output — the pitch grid and the other
+                readings stay; the raw numbers sit behind "Details". */}
+            <SectionLabel C={C}>NOTES IN THIS CHORD</SectionLabel>
             <LedRow mask={norm.chordMask} labels={NOTE_SHARP} C={C} litColor={C.cyan} />
 
-            {best && (
+            {result && !result.single && result.candidates.length > 1 && (
               <>
-                <SectionLabel C={C} style={{ marginTop: 14 }}>ROOT-RELATIVE · matched intervals</SectionLabel>
-                <div style={{ fontSize: 13, color: C.dim, marginBottom: 6 }}>
-                  <span style={{ color: C.text }}>0b{toBinary12(best.transposed)}</span><span style={{ marginLeft: 8 }}>vs DB 0b{toBinary12(best.quality.mask)}</span>
-                </div>
-                <LedRow mask={best.transposed} labels={INTERVAL_LABELS} C={C} litColor={C.amber} dbMask={best.quality.mask} />
-              </>
-            )}
-
-            {result && !result.single && (
-              <>
-                <SectionLabel C={C} style={{ marginTop: 16 }}>CANDIDATES</SectionLabel>
+                <SectionLabel C={C} style={{ marginTop: 16 }}>COULD ALSO BE</SectionLabel>
                 <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                  {result.candidates.map((c, i) => (
-                    <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, background: C.bg, border: `1px solid ${i === 0 ? C.amber + "66" : C.border}`, borderRadius: 6, padding: "5px 10px" }}>
-                      <span style={{ color: i === 0 ? C.text : C.dim }}>{names[c.root]}{c.quality.suffix}  <span style={{ color: C.dim }}>· {c.quality.name}</span></span>
-                      <span style={{ color: C.dim }}>score {c.score.toFixed(2)} · {Math.round(c.confidence * 100)}%</span>
+                  {result.candidates.slice(1).map((c, i) => (
+                    <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, padding: "5px 10px" }}>
+                      <span style={{ color: C.text }}>{names[c.root]}{c.quality.suffix}  <span style={{ color: C.dim }}>· {c.quality.name}</span></span>
+                      <span style={{ color: C.dim }}>{Math.round(c.confidence * 100)}%</span>
                     </div>
                   ))}
                 </div>
               </>
             )}
+
+            <details data-readout-details style={{ marginTop: 14, fontSize: 12, color: C.dim }}>
+              <summary style={{ cursor: "pointer", minHeight: 32, display: "flex", alignItems: "center" }}>Details: bit masks and ranking scores</summary>
+              <div style={{ marginTop: 8 }}>
+                <div style={{ marginBottom: 6 }}>pitch classes <span style={{ color: C.text }}>0b{toBinary12(norm.chordMask)}</span> = {norm.chordMask} (MSB B → LSB C)</div>
+                {best && (
+                  <>
+                    <div style={{ marginBottom: 6 }}>root-relative <span style={{ color: C.text }}>0b{toBinary12(best.transposed)}</span> vs DB 0b{toBinary12(best.quality.mask)}</div>
+                    <LedRow mask={best.transposed} labels={INTERVAL_LABELS} C={C} litColor={C.amber} dbMask={best.quality.mask} />
+                  </>
+                )}
+                {result && !result.single && result.candidates.map((c, i) => (
+                  <div key={i} style={{ marginTop: 4 }}>{names[c.root]}{c.quality.suffix} · score {c.score.toFixed(2)} · {Math.round(c.confidence * 100)}%</div>
+                ))}
+              </div>
+            </details>
             </>)}
           </section>
         </div>
         )}
 
         <footer className="no-print" style={{ position: "relative", marginTop: 18, fontSize: 11, color: C.dim, lineHeight: 1.6 }}>
+          <details><summary style={{ cursor: "pointer" }}>About the engine</summary>
           Engine: pure JS · masks derived via makeMask() · rotateRight() for root candidates · ranking score (−0.8·extra, −1.2·missing), Jaccard confidence ·
           Path A: PDF.js text-position reconstruction (string / column / measure geometry) → same engine → one-chord-per-bar collapse.
+          </details>
         </footer>
       </div>
+      <ToastHost C={C} />
     </div>
   );
 }
@@ -1772,10 +1793,10 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
         formats,
       };
       const w = writeProHandoff(env);
-      if (!w.ok) { setSent(false); window.alert(w.message); return; }
+      if (!w.ok) { setSent(false); showToast({ tone: "error", text: w.message, action: { label: "Retry", fn: () => sendToPro() } }); return; }
       setSent(true);
       window.location.assign(`${window.location.origin}/chord-sheet-maker-pro/?import=handoff`);
-    } catch (e) { setSent(false); window.alert("Couldn't hand the chart to Chord Sheet Maker Pro: " + ((e && e.message) || e)); }
+    } catch (e) { setSent(false); showToast({ tone: "error", text: "Couldn't hand the chart to Chord Sheet Maker Pro: " + ((e && e.message) || e), action: { label: "Retry", fn: () => sendToPro() } }); }
   };
   const bump = (d) => setSemis((s) => Math.max(-11, Math.min(11, s + d)));
   // a setlist item's transpose (WO-6): applied when the item opens
@@ -1836,10 +1857,12 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
         </div>
       )}
       <div className="no-print" style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+        <span role="tablist" aria-label="View" style={{ display: "inline-flex", flexWrap: "wrap", gap: 6 }}>
         {[["chart", "Chart"], ["grid", "Grid"], ["tab", "Tab"], ["edit", "Notes"], ["lyrics", "Lyrics"]].map(([v, lbl]) => (
-          <button key={v} onClick={() => setView(v)} style={{ ...chip(C), padding: "3px 9px", borderColor: view === v ? C.amber : C.border, color: view === v ? C.amber : C.dim }}>{lbl}</button>
+          <button key={v} role="tab" aria-selected={view === v} onClick={() => setView(v)} style={{ ...chip(C), padding: "3px 9px", borderColor: view === v ? C.amber : C.border, color: view === v ? C.amber : C.dim }}>{lbl}</button>
         ))}
-        <button onClick={() => { setEditMode((m) => !m); setEditKey(""); }} disabled={view !== "chart"}
+        </span>
+        <button aria-pressed={editMode} onClick={() => { setEditMode((m) => !m); setEditKey(""); }} disabled={view !== "chart"}
           style={{ ...chip(C), padding: "3px 9px", opacity: view !== "chart" ? 0.4 : 1, borderColor: editMode ? C.green : C.border, color: editMode ? C.green : C.dim }}>{editMode ? "✓ Editing" : "✎ Edit"}</button>
         <button onClick={() => { if (!showRoman) { setShowRoman(true); setNashville(false); } else if (!nashville) setNashville(true); else { setShowRoman(false); setNashville(false); } }} title={key ? `key of ${kName(key)} · tap again for Nashville numbers` : "key analysis"}
           style={{ ...chip(C), padding: "3px 9px", borderColor: showRoman ? C.cyan : C.border, color: showRoman ? C.cyan : C.dim }}>{showRoman ? (nashville ? "1·5·6m ✓" : "I·V·vi ✓") : "I·V·vi"}</button>
@@ -2073,7 +2096,20 @@ function LibraryPanel({ C, onOpen, currentId }) {
   const editTags = async (r) => { const v = window.prompt("Tags (comma separated)", r.tags.join(", ")); if (v == null) return; await projectPut(makeProjectRecord({ ...r, tags: v.split(",") , createdAt: r.createdAt })); refresh(); };
   const rename = async (r) => { const v = window.prompt("Title", r.title); if (!v) return; await projectPut({ ...r, title: v.slice(0, 200), updatedAt: Date.now() }); refresh(); };
   const dup = async (r) => { const b = await projectFileGet(r.id, r); const n = makeProjectRecord({ ...r, id: undefined, title: r.title + " (copy)", createdAt: undefined }); if (b) await projectFilePut(n.id, b); await projectPut(n); refresh(); };
-  const del = async (r) => { if (!window.confirm(`Delete “${r.title}” from the library? Its file is removed from this device.`)) return; await projectDel(r.id); await projectFileDel(r.id); for (const s of sets) if (s.items.some((it) => it.projectId === r.id)) await setlistPut(setlistPrune(s, (recs || []).filter((x) => x.id !== r.id).map((x) => x.id))); refresh(); };
+  // delete = hide now, really delete when the Undo toast ends (UX review #13; the bytes stay until then)
+  const [gone, setGone] = useState(() => new Set());
+  const hide = (id, on) => setGone((g) => { const n = new Set(g); on ? n.add(id) : n.delete(id); return n; });
+  const del = (r) => {
+    hide(r.id, true);
+    const sets0 = sets, recs0 = recs || [];
+    showToast({ text: `Deleted “${r.title}”.`, action: { label: "Undo", fn: () => hide(r.id, false) },
+      onCommit: async () => { await projectDel(r.id); await projectFileDel(r.id); for (const s of sets0) if (s.items.some((it) => it.projectId === r.id)) await setlistPut(setlistPrune(s, recs0.filter((x) => x.id !== r.id).map((x) => x.id))); hide(r.id, false); refresh(); } });
+  };
+  const delSet = (s) => {
+    hide(s.id, true);
+    showToast({ text: `Deleted the setlist “${s.name}”.`, action: { label: "Undo", fn: () => hide(s.id, false) },
+      onCommit: async () => { await setlistDel(s.id); hide(s.id, false); refresh(); } });
+  };
   const bundle = async (r) => { const b = await projectFileGet(r.id, r); const zip = exportProjectBundle(r, { source: b }); const how = await shareOrDownload(zip, `${r.title.replace(/[^\w.-]+/g, "_") || "project"}.ttp.zip`, "application/zip"); setMsg(how === "shared" ? "Bundle shared." : how === "downloaded" ? "Bundle saved." : ""); };
   const importBundle = async (e) => {
     const f = e.target.files && e.target.files[0]; e.target.value = ""; if (!f) return;
@@ -2098,15 +2134,15 @@ function LibraryPanel({ C, onOpen, currentId }) {
         <input ref={bundleRef} type="file" onChange={importBundle} style={{ display: "none" }} />
       </div>
       {tags.length > 0 && <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 10 }}>
-        <button onClick={() => setTag("")} style={ch(!tag)}>all</button>
-        {tags.map((t) => <button key={t.tag} onClick={() => setTag(tag === t.tag ? "" : t.tag)} style={ch(tag === t.tag, C.cyan)}>#{t.tag} {t.count}</button>)}
+        <button onClick={() => setTag("")} aria-pressed={!!(!tag)} style={ch(!tag)}>all</button>
+        {tags.map((t) => <button key={t.tag} onClick={() => setTag(tag === t.tag ? "" : t.tag)} aria-pressed={!!(tag === t.tag)} style={ch(tag === t.tag, C.cyan)}>#{t.tag} {t.count}</button>)}
       </div>}
       {msg && <div style={{ fontSize: 11, color: C.cyan, marginBottom: 8 }}>{msg}</div>}
       {recs === null ? <div style={{ fontSize: 12, color: C.dim }}>loading…</div> : !recs.length ? (
         <div style={{ fontSize: 12, color: C.dim, lineHeight: 1.6 }}>Nothing here yet. Open a PDF, Guitar Pro, MusicXML, MIDI or audio file and it's added automatically — with its chord edits, note edits and key.</div>
       ) : (
         <div style={{ display: "grid", gap: 8 }}>
-          {list.map((r) => (
+          {list.filter((r) => !gone.has(r.id)).map((r) => (
             <div key={r.id} style={{ border: `1px solid ${r.id === currentId ? C.amber : C.border}`, borderRadius: 10, padding: "8px 10px", background: C.bg }}>
               <div style={{ display: "flex", flexWrap: "wrap", alignItems: "baseline", gap: 8 }}>
                 <b style={{ color: C.text, fontSize: 13, cursor: "pointer" }} onClick={() => onOpen(r)}>{r.title}</b>
@@ -2126,7 +2162,7 @@ function LibraryPanel({ C, onOpen, currentId }) {
               </div>
             </div>
           ))}
-          {!list.length && <div style={{ fontSize: 12, color: C.dim }}>No project matches.</div>}
+          {!list.filter((r) => !gone.has(r.id)).length && <div style={{ fontSize: 12, color: C.dim }}>No project matches.</div>}
         </div>
       )}
       <div style={{ marginTop: 18 }}>
@@ -2134,12 +2170,12 @@ function LibraryPanel({ C, onOpen, currentId }) {
           <SectionLabel C={C} style={{ margin: 0 }}>SETLISTS</SectionLabel>
           <button onClick={newSet} style={ch(false)}>＋ New setlist</button>
         </div>
-        {sets.map((s) => (
+        {sets.filter((s) => !gone.has(s.id)).map((s) => (
           <div key={s.id} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: "8px 10px", marginBottom: 8, background: C.bg }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
               <b style={{ color: C.text, fontSize: 13 }}>{s.name}</b><span style={{ fontSize: 11, color: C.dim }}>{s.items.length} songs</span>
               <button onClick={() => s.items.length && onOpen(byId.get(s.items[0].projectId), { setlist: s, index: 0 })} disabled={!s.items.length} style={{ ...ch(true, C.green), marginLeft: "auto" }}>▶ Play set</button>
-              <button onClick={async () => { if (window.confirm(`Delete the setlist “${s.name}”?`)) { await setlistDel(s.id); refresh(); } }} style={{ ...ch(false), color: C.red }}>✕</button>
+              <button aria-label={`Delete the setlist ${s.name}`} onClick={() => delSet(s)} style={{ ...ch(false), color: C.red }}>✕</button>
             </div>
             {s.items.map((it, i) => { const r = byId.get(it.projectId); return (
               <div key={i} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 5, marginTop: 6, fontSize: 11, color: C.dim }}>
@@ -2298,12 +2334,12 @@ function LyricsSheetView({ C, score, title, overrides, playKey, getAudio, getBuf
   return (
     <div>
       <div className="no-print" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginBottom: 8, fontSize: 11, color: C.dim }}>
-        <button onClick={() => setEditing((v) => !v)} style={ch(editing, C.green)}>{editing ? "✓ Done" : "✎ Lyrics text"}</button>
+        <button onClick={() => setEditing((v) => !v)} aria-pressed={!!(editing)} style={ch(editing, C.green)}>{editing ? "✓ Done" : "✎ Lyrics text"}</button>
         <button onClick={() => fileRef.current && fileRef.current.click()} style={ch(false)}>⬆ Load lyrics</button>
         <input ref={fileRef} type="file" onChange={onFile} style={{ display: "none" }} />
         {last && !text && <button onClick={() => setText(last)} style={ch(false)} title="the sheet you last imported in the Lyrics tab">use Lyrics tab sheet</button>}
         {scoreLyrics && scoreLyrics.map && scoreLyrics.map.lines.length > 0 && (
-          <button onClick={useScoreLyrics} style={ch(map && map.source === "score", C.green)} title={scoreLyrics.tip || "the lyrics written in the score file, every syllable timed"}>📄 {scoreLyrics.label || "Lyrics from the score"}</button>
+          <button onClick={useScoreLyrics} aria-pressed={!!(map && map.source === "score")} style={ch(map && map.source === "score", C.green)} title={scoreLyrics.tip || "the lyrics written in the score file, every syllable timed"}>📄 {scoreLyrics.label || "Lyrics from the score"}</button>
         )}
         <button onClick={align} disabled={!parsed || busy} style={{ ...ch(!!map && map.source !== "score", C.cyan), opacity: parsed ? 1 : 0.4 }}>{busy ? "aligning…" : `🎯 Auto-align${audio ? " to the vocal" : " to the bars"}`}</button>
         {map && <span>{map.lines.length} lines · {map.source === "score" ? `${map.syllableCount || ""} syllables timed from the score${map.refined ? ` · ${map.refined} on sung onsets` : ""}` : map.source === "vocal" ? "from the recording" : "spread over the bars"}{map.source === "score" ? "" : ` · ${Math.round(map.confidence * 100)}% sure`}</span>}
@@ -2493,11 +2529,11 @@ function PracticePlayer({ C, score, getBuffer, bpm, onPlayKey }) {
         <button onClick={() => step(setA, a, -1)} style={ch(false)}>−</button><b style={{ color: C.text, minWidth: 18, textAlign: "center" }}>{lo}</b><button onClick={() => step(setA, a, 1)} style={ch(false)}>+</button>
         <span>to</span>
         <button onClick={() => step(setB, b, -1)} style={ch(false)}>−</button><b style={{ color: C.text, minWidth: 18, textAlign: "center" }}>{hi}</b><button onClick={() => step(setB, b, 1)} style={ch(false)}>+</button>
-        <button onClick={() => setLoopOn((v) => !v)} style={ch(loopOn, C.green)}>{loopOn ? "⟲ loop" : "→ once"}</button>
+        <button onClick={() => setLoopOn((v) => !v)} aria-pressed={!!(loopOn)} style={ch(loopOn, C.green)}>{loopOn ? "⟲ loop" : "→ once"}</button>
         {region && <span>{(region.endSec - region.startSec).toFixed(1)} s</span>}
         {hasRec && <span style={{ display: "inline-flex", gap: 3 }}>
-          <button onClick={() => setSrc("rec")} style={ch(src === "rec", C.cyan)}>recording</button>
-          <button onClick={() => setSrc("synth")} style={ch(src === "synth", C.cyan)}>chart synth</button>
+          <button onClick={() => setSrc("rec")} aria-pressed={!!(src === "rec")} style={ch(src === "rec", C.cyan)}>recording</button>
+          <button onClick={() => setSrc("synth")} aria-pressed={!!(src === "synth")} style={ch(src === "synth", C.cyan)}>chart synth</button>
         </span>}
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginBottom: 8 }}>
@@ -2509,13 +2545,13 @@ function PracticePlayer({ C, score, getBuffer, bpm, onPlayKey }) {
         <button onClick={() => setPitch((p) => Math.max(-6, p - 1))} style={ch(false)}>−</button>
         <b style={{ minWidth: 26, textAlign: "center", color: pitch ? C.amber : C.dim }}>{pitch > 0 ? "+" : ""}{pitch} st</b>
         <button onClick={() => setPitch((p) => Math.min(6, p + 1))} style={ch(false)}>+</button>
-        <button onClick={() => setMetro((m) => !m)} style={ch(metro, C.green)}>♩ metronome</button>
+        <button onClick={() => setMetro((m) => !m)} aria-pressed={!!(metro)} style={ch(metro, C.green)}>♩ metronome</button>
         <span>count-in</span>
-        {[0, 1, 2].map((n) => <button key={n} onClick={() => setCountIn(n)} style={ch(countIn === n)}>{n ? `${n} bar${n > 1 ? "s" : ""}` : "off"}</button>)}
+        {[0, 1, 2].map((n) => <button key={n} onClick={() => setCountIn(n)} aria-pressed={!!(countIn === n)} style={ch(countIn === n)}>{n ? `${n} bar${n > 1 ? "s" : ""}` : "off"}</button>)}
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
         <button onClick={play} style={{ ...ch(playing, C.green), padding: "5px 14px", fontSize: 12, color: playing ? C.green : C.amber }}>{playing ? "■ Stop" : "▶ Practice"}</button>
-        <button onClick={() => { stop(); setWait((w) => !w); }} style={ch(wait, C.cyan)} title="the player waits at each note/chord until the microphone hears it">🎯 Wait for me</button>
+        <button onClick={() => { stop(); setWait((w) => !w); }} aria-pressed={!!(wait)} style={ch(wait, C.cyan)} title="the player waits at each note/chord until the microphone hears it">🎯 Wait for me</button>
         <button onClick={downloadClicks} style={ch(false)} title={useRec ? "clicks on the recording's tracked beats, from 0:00 — drop it under the recording in a DAW" : "clicks for the whole chart at the chart tempo"}>⬇ Click track (WAV)</button>
         {status && <span style={{ color: C.cyan }}>{status}</span>}
       </div>
@@ -2928,7 +2964,7 @@ function NoteEditorView({ score, edit, setEdit, C, useSharp, playKey, getAudio, 
   return (
     <div onKeyDown={onKey} tabIndex={0} style={{ outline: "none" }}>
       <div className="no-print" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 5, marginBottom: 6, fontSize: 11, color: C.dim }}>
-        {[["select", "↖ Select"], ["draw", "✎ Draw"], ["erase", "⌫ Erase"]].map(([t, l]) => <button key={t} onClick={() => setTool(t)} style={chip2(tool === t)}>{l}</button>)}
+        {[["select", "↖ Select"], ["draw", "✎ Draw"], ["erase", "⌫ Erase"]].map(([t, l]) => <button key={t} onClick={() => setTool(t)} aria-pressed={!!(tool === t)} style={chip2(tool === t)}>{l}</button>)}
         <select value={snap} onChange={(e) => setSnap(e.target.value)} title="snap" style={{ ...chip(C), padding: "3px 6px", background: C.raised, color: C.dim }}>
           {Object.keys(EDIT_SNAPS).map((k) => <option key={k} value={k}>snap {k}</option>)}
         </select>
@@ -2939,8 +2975,8 @@ function NoteEditorView({ score, edit, setEdit, C, useSharp, playKey, getAudio, 
         <button onClick={() => setEdit((p) => editRedo(p))} disabled={!editCanRedo(edit)} style={{ ...chip2(false), opacity: editCanRedo(edit) ? 1 : 0.4 }} title="redo (⇧⌘Z)">↷ Redo</button>
         <button onClick={() => setZoom((z) => Math.max(0.35, z / 1.4))} style={chip2(false)}>−</button>
         <button onClick={() => setZoom((z) => Math.min(4, z * 1.4))} style={chip2(false)}>+</button>
-        {getAudio && <button onClick={loadSpec} style={chip2(spec && spec.url, C.cyan)} title="draw the recording's spectrogram under the notes">{spec && spec.busy ? "analysing…" : "🌈 Spectrogram"}</button>}
-        {editCanUndo(edit) && <button onClick={() => { if (window.confirm("Discard every note edit on this chart?")) setEdit(null); }} style={chip2(false)}>Clear edits</button>}
+        {getAudio && <button onClick={loadSpec} aria-pressed={!!(spec && spec.url)} style={chip2(spec && spec.url, C.cyan)} title="draw the recording's spectrogram under the notes">{spec && spec.busy ? "analysing…" : "🌈 Spectrogram"}</button>}
+        {editCanUndo(edit) && <button onClick={() => { const prev = edit; setEdit(null); showToast({ text: "Note edits cleared.", action: { label: "Undo", fn: () => setEdit(prev) } }); }} style={chip2(false)}>Clear edits</button>}
       </div>
       <div style={{ fontSize: 10, color: C.dim, marginBottom: 6, lineHeight: 1.5 }}>
         {summary ? <span style={{ color: C.green }}>✓ {summary}</span> : "Drag a note to move it (pitch + time), its right edge to change its length; drag a fret number to another string. Draw adds notes, Erase removes them."}
@@ -2968,7 +3004,7 @@ function NoteEditorView({ score, edit, setEdit, C, useSharp, playKey, getAudio, 
               inputMode="numeric" aria-label="fret" style={{ width: 34, background: C.raised, color: C.text, border: `1px solid ${C.border}`, borderRadius: 6, padding: "3px 4px", fontSize: 11, fontFamily: "inherit" }} />
           </>}
           <button onClick={refinger} style={chip2(false)} title="forget the strings of this chord and let the fingering choose">🎸 auto-finger</button>
-          <button onClick={toggleLock} style={chip2(selOnset && selOnset.locked, C.green)} title="keep this chord name when its notes change">{selOnset && selOnset.locked ? "🔒 locked" : "🔓 lock chord"}</button>
+          <button onClick={toggleLock} aria-pressed={!!(selOnset && selOnset.locked)} style={chip2(selOnset && selOnset.locked, C.green)} title="keep this chord name when its notes change">{selOnset && selOnset.locked ? "🔒 locked" : "🔓 lock chord"}</button>
           <button onClick={() => push({ t: "note.remove", id: selN.id })} style={{ ...chip2(false), color: C.red }}>🗑</button>
           {posOf(selN) && <span style={{ display: "inline-flex", flexWrap: "wrap", gap: 3 }}>
             {_NE_TECH.map(([t, l]) => <button key={t} onClick={() => toggleTech(t)} style={{ ...chip2((selN.tech || []).includes(t), C.cyan), padding: "1px 6px", fontSize: 10 }}>{l}</button>)}
@@ -3781,7 +3817,7 @@ function LiveTuner({ C, useSharp }) {
       )}
 
       <div style={{ textAlign: "center" }}>
-        <button onClick={listening ? stop : start} style={{ ...toggle(C), display: "inline-block", flex: "none", padding: "10px 26px", fontSize: 14, ...(listening ? activeToggle(C) : {}), borderColor: listening ? C.green : C.border, color: listening ? C.green : C.text }}>
+        <button onClick={listening ? stop : start} style={{ ...toggle(C), display: "inline-block", flex: "none", padding: "10px 26px", fontSize: 14, ...(listening ? activeToggle(C) : inactiveToggle(C)), borderColor: listening ? C.green : C.border, color: listening ? C.green : C.text }}>
           {listening ? "■ Stop" : "🎤 Listen"}
         </button>
       </div>
@@ -3969,7 +4005,7 @@ function LyricsCapture({ C }) {
       ) : (
         <>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 14 }}>
-            <button onClick={listening ? stop : start} style={{ ...toggle(C), flex: "none", padding: "9px 22px", fontSize: 14, ...(listening ? activeToggle(C) : {}), borderColor: listening ? C.red : C.amber, color: listening ? C.red : C.amber }}>
+            <button onClick={listening ? stop : start} style={{ ...toggle(C), flex: "none", padding: "9px 22px", fontSize: 14, ...(listening ? activeToggle(C) : inactiveToggle(C)), borderColor: listening ? C.red : C.amber, color: listening ? C.red : C.amber }}>
               {listening ? "■ Stop" : "🎙️ Listen"}
             </button>
             <select value={lang} onChange={(e) => { setLang(e.target.value); if (listening) restart(); }} style={{ ...chip(C), padding: "7px 10px", cursor: "pointer" }}>
@@ -4243,7 +4279,7 @@ function ScanPanel({ C, useSharp, pdfReady }) {
 
   return (
     <div style={{ maxWidth: 820, margin: "0 auto" }}>
-      <SectionLabel C={C}>PATH B · PHOTO / SCAN OF A LEAD SHEET → CHORD CHART</SectionLabel>
+      <SectionLabel C={C}>SCAN A LEAD SHEET · photo or PDF</SectionLabel>
       <input ref={fileRef} type="file" onChange={onFile} style={{ display: "none" }} />
       <button onClick={() => fileRef.current && fileRef.current.click()} disabled={!!busy}
         style={{ width: "100%", background: C.bg, border: `1px dashed ${C.border}`, color: C.amber, borderRadius: 10, padding: "22px 12px", fontSize: 14, cursor: busy ? "default" : "pointer", fontFamily: "'IBM Plex Mono', monospace" }}>
@@ -4336,8 +4372,8 @@ function LyricsPanel({ C }) {
   return (
     <div style={{ maxWidth: 620, margin: "0 auto" }}>
       <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
-        <button onClick={() => setSub("import")} style={{ ...toggle(C), ...(sub === "import" ? activeToggle(C) : {}) }}>📄 Import chords / ChordPro</button>
-        <button onClick={() => setSub("live")} style={{ ...toggle(C), ...(sub === "live" ? activeToggle(C) : {}) }}>🎙️ Live capture</button>
+        <button role="tab" aria-selected={sub === "import"} onClick={() => setSub("import")} style={{ ...toggle(C), ...(sub === "import" ? activeToggle(C) : inactiveToggle(C)) }}>📄 Import chords / ChordPro</button>
+        <button role="tab" aria-selected={sub === "live"} onClick={() => setSub("live")} style={{ ...toggle(C), ...(sub === "live" ? activeToggle(C) : inactiveToggle(C)) }}>🎙️ Live capture</button>
       </div>
       {sub === "live" ? <LyricsCapture C={C} /> : <LyricsImport C={C} />}
     </div>
@@ -6531,6 +6567,58 @@ function SectionEditor({ C, sections, names, barOf, pos, dur, busy, sens, onSens
 }
 
 /* ---- presentational helpers ---------------------------------------------- */
+/* ---- toasts: inline messages + Undo (UX review #13, 2026-11-27) -----------------------------
+ * Replaces window.alert / window.confirm. showToast({ text, tone, action, onCommit, ms }) adds one;
+ * ToastHost (mounted once in the app root) shows them. A toast ENDS in one of two ways:
+ *  - its action is tapped (e.g. Undo)  → action.fn() runs, onCommit does NOT;
+ *  - it times out or is closed (✕)     → onCommit() runs.
+ * So a delete is "hide now, really delete in onCommit", and Undo just un-hides. If the page closes
+ * before a toast ends, onCommit never runs — the safe direction: nothing is lost. */
+const _toastSubs = new Set();
+let _toastSeq = 0;
+function showToast(t) {
+  const toast = { id: ++_toastSeq, tone: "info", ms: t && t.action ? 8000 : 6000, ...t };
+  _toastSubs.forEach((f) => f(toast));
+  return toast.id;
+}
+function ToastHost({ C }) {
+  const [list, setList] = useState([]);
+  const timers = useRef(new Map());
+  const live = useRef(new Map());   // id → toast; side effects run from here, never inside a state updater
+  const end = (id, how) => {
+    const t = live.current.get(id); if (!t) return;
+    live.current.delete(id);
+    const tm = timers.current.get(id); if (tm) clearTimeout(tm); timers.current.delete(id);
+    setList((l) => l.filter((x) => x.id !== id));
+    try { const r = how === "action" ? t.action && t.action.fn && t.action.fn() : t.onCommit && t.onCommit(); if (r && r.catch) r.catch((e) => console.error(e)); }
+    catch (e) { console.error(e); }
+  };
+  useEffect(() => {
+    const add = (t) => {
+      const ids = [...live.current.keys()]; if (ids.length >= 3) end(ids[0], "close");   // at most 3; the oldest ends (commits)
+      live.current.set(t.id, t);
+      setList((l) => [...l.filter((x) => live.current.has(x.id)), t]);
+      if (t.ms > 0) timers.current.set(t.id, setTimeout(() => end(t.id, "timeout"), t.ms));
+    };
+    _toastSubs.add(add);
+    return () => { _toastSubs.delete(add); };
+  }, []); // eslint-disable-line
+  if (!list.length) return null;
+  const col = (tone) => (tone === "error" ? C.red : tone === "ok" ? C.green : C.border);
+  return (
+    <div className="no-print tdp-toasts" aria-live="polite" style={{ position: "fixed", left: 0, right: 0, bottom: "calc(16px + env(safe-area-inset-bottom, 0px))", zIndex: 60, display: "flex", flexDirection: "column", alignItems: "center", gap: 8, padding: "0 12px", pointerEvents: "none" }}>
+      {list.map((t) => (
+        <div key={t.id} role={t.tone === "error" ? "alert" : "status"} data-toast={t.tone}
+          style={{ pointerEvents: "auto", maxWidth: 520, width: "100%", boxSizing: "border-box", display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", background: C.raised || C.panel, color: C.text, border: `1px solid ${col(t.tone)}`, borderRadius: 12, boxShadow: "0 8px 28px rgba(0,0,0,.45)", fontSize: 13, lineHeight: 1.45 }}>
+          <span style={{ flex: 1, minWidth: 0 }}>{t.text}</span>
+          {t.action && <button onClick={() => end(t.id, "action")} style={{ ...toggle(C), flex: "none", padding: "6px 14px", ...activeToggle(C) }}>{t.action.label}</button>}
+          <button aria-label="Dismiss" onClick={() => end(t.id, "close")} style={{ ...toggle(C), flex: "none", padding: "6px 10px" }}>✕</button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function SectionLabel({ children, C, style }) { return <div style={{ fontSize: 10, letterSpacing: 2.5, color: C.dim, margin: "0 0 8px", ...style }}>{children}</div>; }
 function Control({ label, children, C }) { return (<div><div style={{ fontSize: 10, letterSpacing: 2, color: C.dim, marginBottom: 5 }}>{label}</div>{children}</div>); }
 function Field({ k, v, C, color }) {
@@ -6557,4 +6645,7 @@ function LedRow({ mask, labels, C, litColor, dbMask }) {
 const chip = (C) => ({ background: C.bg, border: `1px solid ${C.border}`, color: C.dim, borderRadius: 999, padding: "4px 10px", fontSize: 11, cursor: "pointer", fontFamily: "'IBM Plex Mono', monospace" });
 const toggle = (C) => ({ flex: 1, background: C.bg, border: `1px solid ${C.border}`, color: C.dim, borderRadius: 6, padding: "7px 4px", fontSize: 12, cursor: "pointer", fontFamily: "'IBM Plex Mono', monospace" });
 const activeToggle = (C) => ({ borderColor: C.amber, color: C.amber, boxShadow: `inset 0 0 12px ${C.amber}22` });
+/* the same keys, unselected: React DELETES a style key that disappears, and deleting borderColor under the `border`
+ * shorthand drops the colour to the browser's default (white in dark mode) — the "visited tab" look (UX review #16) */
+const inactiveToggle = (C) => ({ borderColor: C.border, boxShadow: "none" });
 const stepper = (C) => ({ width: 30, background: C.bg, border: `1px solid ${C.border}`, color: C.text, borderRadius: 6, padding: "6px 0", fontSize: 14, cursor: "pointer", fontFamily: "'IBM Plex Mono', monospace" });

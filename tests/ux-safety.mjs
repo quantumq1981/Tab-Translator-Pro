@@ -43,5 +43,21 @@ const persist = between("const persistSession = async (bytes, filename) => {", "
 expect(/if \(freshRef\.current\) \{ clearTimeout\(freshRef\.current\.timer\); freshRef\.current = null; setFreshUndo\(false\); _lsSet\(FRESH_PENDING_KEY, null\); \}/.test(persist), "#14 saving a new file cancels a pending Start fresh and its launch flag (else a reload deletes the new file)");
 expect(/const undoFresh = \(\) =>/.test(ui) && /onClick=\{undoFresh\}/.test(ui), "#14 Undo is offered");
 
+// Redesign step 1 (2026-11-27): #10 #11 #12 #13 — the behaviour is checked in a real browser by bench/polish-e2e.mjs
+expect(!/window\.(alert|confirm)\(/.test(ui.replace(/\/\*[\s\S]*?\*\//g, "")), "#13 no window.alert / window.confirm left in the UI");
+expect(/function showToast\(t\)/.test(ui) && /function ToastHost\(\{ C \}\)/.test(ui) && /<ToastHost C=\{C\} \/>/.test(ui), "#13 toasts exist and the host is mounted once");
+const host = between("function ToastHost", "\nfunction SectionLabel");
+expect(/setList\(\(l\) => l\.filter/.test(host) && !/setList\(\(l\) => \{[^}]*onCommit/.test(host), "#13 a toast's side effects run outside the state updater");
+expect(/onCommit: async \(\) => \{ await projectDel\(r\.id\)/.test(ui) && /action: \{ label: "Undo", fn: \(\) => hide\(r\.id, false\) \}/.test(ui), "#13 a library delete hides now and deletes only when the Undo toast ends");
+expect(/role="tablist" aria-label="Mode"/.test(ui) && /role="tab" aria-selected=\{mode === m\}/.test(ui), "#12 the mode row is a tablist");
+expect(/role="tablist" aria-label="View"/.test(ui) && /role="tab" aria-selected=\{view === v\}/.test(ui), "#12 the chart view switch is a tablist");
+expect(/button\[aria-pressed="true"\],\.tdp-app \[role="tab"\]\[aria-selected="true"\]\{text-decoration:underline/.test(ui), "#12 selected toggles and tabs are underlined, not marked by colour alone");
+expect(/const inactiveToggle = \(C\) => \(\{ borderColor: C\.border/.test(ui) && !/\? activeToggle\(C\) : \{\}\)/.test(ui), "#16 a deselected toggle keeps its borderColor key (no white 'visited' border)");
+expect(/\.tdp-app :focus-visible\{outline:2px solid/.test(ui), "#12 visible keyboard focus");
+expect(/@media \(pointer:coarse\)\{\s*\.tdp-app button,\.tdp-app select[^{]*\{min-height:44px;\}/.test(ui), "#11 44 px touch targets on touch screens");
+expect(/NOTES IN THIS CHORD/.test(ui) && /<details data-readout-details/.test(ui) && !/>CHROMA BITMASK/.test(ui), "#10 bit masks and scores sit behind Details");
+expect(!/PATH [A-G](\/| ·)/.test(ui.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "")), "#10 no developer path names in section labels");
+expect(/<details><summary[^>]*>About the engine<\/summary>/.test(ui), "#10 the engine footer is folded");
+
 console.log(`ux-safety: ${passes} passed, ${failures} failed`);
 if (failures) process.exit(1);

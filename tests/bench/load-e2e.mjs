@@ -43,7 +43,7 @@ for (let i = 0; i < RUNS; i++) {
   cdp.on("Network.requestWillBeSent", (e) => urls.push(e.request.url.replace(origin, "")));
   const t0 = Date.now();
   await page.goto(origin + "/", { waitUntil: "commit" });
-  await page.getByRole("button", { name: "MusicXML / GP" }).waitFor({ timeout: 120000 });
+  await page.getByRole("tab", { name: "MusicXML / GP" }).waitFor({ timeout: 120000 });
   const tApp = Date.now() - t0;
   const fcp = await page.evaluate(() => (performance.getEntriesByName("first-contentful-paint")[0] || {}).startTime || null);
   await page.waitForTimeout(1500); // let idle/background loads land, then count

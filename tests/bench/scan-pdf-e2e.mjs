@@ -19,7 +19,7 @@ await page.context().route(/^https:\/\/cdnjs\.cloudflare\.com\/ajax\/libs\/pdf\.
 });
 const net = []; page.on("request", (r) => net.push(r.url()));
 await page.reload(); await page.waitForTimeout(1500);
-await page.getByRole("button", { name: "Scan 📷" }).click();
+await page.getByRole("tab", { name: "Scan 📷" }).click();
 const t0 = Date.now();
 await page.locator('input[type="file"]').first().setInputFiles(PDF);
 const stat = page.getByText(/systems · \d+ bars · \d+ chords/);

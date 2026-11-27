@@ -64,7 +64,7 @@ const result = { steps: [] };
 const ok = (name, cond, extra) => { result.steps.push({ name, ok: !!cond, ...(extra !== undefined ? { extra } : {}) }); if (!cond) console.error("FAIL:", name, extra ?? ""); };
 
 await page.goto(ORIGIN + "/"); await page.waitForTimeout(400);
-await page.getByRole("button", { name: "MusicXML / GP" }).click({ timeout: 60000 });
+await page.getByRole("tab", { name: "MusicXML / GP" }).click({ timeout: 60000 });
 await page.locator('input[type="file"]').first().setInputFiles(GP);
 await page.getByRole("button", { name: "🎯 Practice" }).click({ timeout: 60000 });
 await page.locator("select").filter({ has: page.locator("option[value='75']") }).selectOption("75");
@@ -85,7 +85,7 @@ const head = fs.readFileSync(wavPath).subarray(0, 4).toString("latin1");
 ok("⬇ Click track (WAV) downloads a WAV", head === "RIFF" && fs.statSync(wavPath).size > 100000, { head, bytes: fs.statSync(wavPath).size });
 
 // Live chords on the fake microphone
-await page.getByRole("button", { name: "Live chords 🎶" }).click();
+await page.getByRole("tab", { name: "Live chords 🎶" }).click();
 await page.getByRole("button", { name: "🎤 Listen" }).click();
 await page.waitForTimeout(9000);
 const chips = await page.locator("section span").evaluateAll((els) => els.map((e) => e.textContent.trim()).filter((t) => /^[A-G][#b]?(m|7|maj7|m7)?$/.test(t)));

@@ -15,7 +15,7 @@ const ua = arg("ua");
 const app = await startApp(ua ? { context: { userAgent: ua } } : {}); const { page, ok } = app;
 const net = []; page.on("request", (r) => net.push(r.url()));
 const upload = async (file) => page.locator('label:has-text("Upload audio") input[type="file"]').first().setInputFiles(path.join(dir, file));
-await page.getByRole("button", { name: "Audio 🎵" }).click();
+await page.getByRole("tab", { name: "Audio 🎵" }).click();
 // 1 — opened as chords
 await upload("track" + EXT);
 const banner = page.getByText("This sounds like a drum recording");
@@ -38,7 +38,7 @@ const vel = new Set(); for (let i = 0; i + 2 < mid.length; i++) if (mid[i] === 0
 ok("the MIDI is named after the file and keeps velocities", /^track-drums\.mid$/.test(dl.suggestedFilename()) && vel.size >= 20, { file: dl.suggestedFilename(), distinctVelocities: vel.size });
 // 2 — a drum-named file opens straight in Drums
 await page.reload(); await page.waitForTimeout(400);
-await page.getByRole("button", { name: "Audio 🎵" }).click();
+await page.getByRole("tab", { name: "Audio 🎵" }).click();
 await upload("Song - Drums" + EXT);
 await page.getByText(/^DRUMS · \d+ hits/).waitFor({ timeout: 300000 });
 ok("a file named like a drum stem opens in 🥁 Drums", (await page.getByText("This sounds like a drum recording").count()) === 0);

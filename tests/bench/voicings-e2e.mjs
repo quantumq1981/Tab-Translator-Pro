@@ -47,7 +47,7 @@ page.on("pageerror", (e) => logs.push(`[pageerror] ${e.message}`));
 
 const result = {};
 await page.goto(ORIGIN + "/"); await page.waitForTimeout(500);
-await page.getByRole("button", { name: "MusicXML / GP" }).click({ timeout: 60000 });
+await page.getByRole("tab", { name: "MusicXML / GP" }).click({ timeout: 60000 });
 await page.locator('input[type="file"]').first().setInputFiles(GP);
 if (arg("part")) { await page.locator('button[title^="chart the "]').nth(+arg("part")).click(); await page.waitForTimeout(800); }
 const chordBtn = page.locator('button[title*="guitar voicings"]');

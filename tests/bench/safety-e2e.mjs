@@ -33,9 +33,9 @@ await ctx.route((u) => !u.href.startsWith(origin), (r) => r.abort());
 const page = await ctx.newPage();
 const logs = []; page.on("pageerror", (e) => logs.push(e.message)); page.on("console", (m) => { if (m.type() === "error" && !/ERR_FAILED|net::/.test(m.text())) logs.push(m.text()); });
 const steps = []; const ok = (n, c, x) => { steps.push(!!c); console.log(c ? "OK  " : "FAIL", n, x !== undefined ? JSON.stringify(x).slice(0, 200) : ""); };
-const tab = (name) => page.getByRole("button", { name, exact: true }).first().click();
+const tab = (name) => page.getByRole("tab", { name, exact: true }).first().click();
 const count = (t) => page.locator("button", { hasText: t }).count();
-const boot = async () => { await page.getByRole("button", { name: "Manual", exact: true }).waitFor({ timeout: 30000 }); await page.waitForTimeout(500); };
+const boot = async () => { await page.getByRole("tab", { name: "Manual", exact: true }).waitFor({ timeout: 30000 }); await page.waitForTimeout(500); };
 const amber = "rgb(255, 107, 53)";
 
 await page.goto(origin + "/"); await boot();

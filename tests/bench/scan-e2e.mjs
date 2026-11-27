@@ -11,7 +11,7 @@ const IMG = arg("image"); if (!IMG) { console.error("--image <page> required"); 
 const want = (arg("expect", "") || "").split(",").filter(Boolean);
 const app = await startApp({ width: 430, height: 1100 }); const { page, ok } = app;
 const net = []; page.on("request", (r) => net.push(r.url()));
-await page.getByRole("button", { name: "Scan 📷" }).click();
+await page.getByRole("tab", { name: "Scan 📷" }).click();
 const t0 = Date.now();
 await page.locator('input[type="file"]').first().setInputFiles(IMG);
 const stat = page.getByText(/systems · \d+ bars · \d+ chords/);

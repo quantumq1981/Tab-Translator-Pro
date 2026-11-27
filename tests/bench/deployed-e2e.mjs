@@ -50,7 +50,7 @@ const ok = (name, cond, extra) => { steps.push(!!cond); console.log(cond ? "OK  
 await page.goto(origin + "/");
 await page.getByText("TAB").first().waitFor({ timeout: 30000 });
 await page.waitForTimeout(800);
-ok("the app starts with every third-party host blocked", await page.getByRole("button", { name: "MusicXML / GP" }).count() > 0, logs.slice(0, 2));
+ok("the app starts with every third-party host blocked", await page.getByRole("tab", { name: "MusicXML / GP" }).count() > 0, logs.slice(0, 2));
 ok("prebuilt path: build/app.js + build/engine.js served, Babel never requested", served.has("/build/app.js") && served.has("/build/engine.js") && !blocked.some((u) => /babel/.test(u)), [...served].filter((s) => s.startsWith("/build")));
 ok("React comes from vendor/react-18.3.1", served.has("/vendor/react-18.3.1/react.production.min.js") && served.has("/vendor/react-18.3.1/react-dom.production.min.js"));
 
@@ -75,7 +75,7 @@ const render = await page.evaluate(async () => {
 ok("a PDF page renders to a canvas (Scan) with PDF.js 4", render.dark > 1000, render);
 
 // Guitar Pro (worker parse: build/engine.js imported by the engine worker)
-await page.getByRole("button", { name: "MusicXML / GP" }).click();
+await page.getByRole("tab", { name: "MusicXML / GP" }).click();
 await page.locator('input[type="file"]').first().setInputFiles(path.join(L.repo, "Steely Dan - Peg.gp4"));
 await page.getByText(/bars ·/).first().waitFor({ timeout: 60000 }).catch(() => {});
 ok("a Guitar Pro file opens", /Peg/.test(await page.locator("body").innerText()));

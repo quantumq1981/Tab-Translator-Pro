@@ -53,7 +53,7 @@ const stats = (s) => ({ chords: s.length, slash: s.filter((x) => /\/[A-G]/.test(
 await page.goto(ORIGIN + "/"); await page.waitForTimeout(500);
 if (arg("gp")) {
   // a file import is named by the oracle; the ChartPanel picker re-names it (respellScore)
-  await page.getByRole("button", { name: "MusicXML / GP" }).click({ timeout: 60000 });
+  await page.getByRole("tab", { name: "MusicXML / GP" }).click({ timeout: 60000 });
   await page.locator('input[type="file"]').first().setInputFiles(path.resolve(L.repo, arg("gp")));
   if (arg("part")) { await page.locator('button[title^="chart the "]').nth(+arg("part")).click(); }
   await page.locator('button[title*="guitar voicings"]').first().waitFor({ timeout: 60000 }); await page.waitForTimeout(600);
@@ -66,7 +66,7 @@ if (arg("gp")) {
   await page.screenshot({ path: path.join(arg("out", process.cwd()), "vocab-e2e-gp.png") });
   console.log(JSON.stringify(res, null, 2)); await browser.close(); server.close(); process.exit(0);
 }
-await page.getByRole("button", { name: "Audio 🎵" }).click({ timeout: 60000 });
+await page.getByRole("tab", { name: "Audio 🎵" }).click({ timeout: 60000 });
 await page.locator('label', { hasText: 'Upload audio' }).locator('input[type="file"]').setInputFiles(AUDIO);
 const out = {};
 out.chart = stats(await settle());
@@ -83,7 +83,7 @@ out.basic = stats(await settle());
 out.stored = await page.evaluate(() => localStorage.getItem("ttp:chordVocab"));
 await page.screenshot({ path: path.join(arg("out", process.cwd()), "vocab-e2e.png"), fullPage: false });
 await page.reload(); await page.waitForTimeout(500);
-await page.getByRole("button", { name: "Audio 🎵" }).click({ timeout: 60000 });
+await page.getByRole("tab", { name: "Audio 🎵" }).click({ timeout: 60000 });
 await page.locator('label', { hasText: 'Upload audio' }).locator('input[type="file"]').setInputFiles(AUDIO);
 await settle();
 out.afterReload = (await page.getByRole("button", { name: "Basic ✓" }).first().isVisible()) ? "Basic ✓" : "lost";

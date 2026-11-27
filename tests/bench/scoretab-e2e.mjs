@@ -17,7 +17,7 @@ const { page, ok } = app;
 const t0 = Date.now();
 const text = () => page.locator("body").innerText();
 
-await page.getByRole("button", { name: "MusicXML / GP" }).click({ timeout: 60000 });
+await page.getByRole("tab", { name: "MusicXML / GP" }).click({ timeout: 60000 });
 await page.locator('input[type="file"]').first().setInputFiles(SCORE);
 await page.getByRole("button", { name: /Link a recording/ }).click({ timeout: 60000 });
 await page.getByText(/upload the recording above to link it/).waitFor({ timeout: 60000 });

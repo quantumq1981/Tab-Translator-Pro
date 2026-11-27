@@ -20,7 +20,7 @@ for (let i = 0; i < other.length; i++) { const t = i / sr, ch = [[261.6, 329.6, 
 fs.writeFileSync(path.join(dir, "song - other.wav"), eng.encodeWav16([other], sr));
 const app = await startApp(); const { page, ok } = app;
 await page.evaluate(() => localStorage.setItem("ttp:fullKit", "1"));
-await page.getByRole("button", { name: "Audio 🎵" }).click();
+await page.getByRole("tab", { name: "Audio 🎵" }).click();
 const input = page.locator('label:has-text("Import stems") input[type="file"]');
 await input.setInputFiles([path.join(dir, "song - drums.wav"), path.join(dir, "song - other.wav")]);
 await page.getByRole("button", { name: "♫ Chart these stems" }).click({ timeout: 60000 });

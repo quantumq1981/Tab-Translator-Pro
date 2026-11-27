@@ -44,7 +44,7 @@ const harmony = () => page.getByRole("button", { name: "Harmony (all pitched par
 const isOn = async (loc) => { const c = await loc.evaluate((b) => getComputedStyle(b).color); const others = await page.locator("button").filter({ hasText: /piano|bass|guitar|drums|voice|percussion/i }).evaluateAll((bs) => bs.map((b) => getComputedStyle(b).color)); const off = others.sort((a, b) => others.filter((x) => x === b).length - others.filter((x) => x === a).length)[0]; return c !== off; };
 const chartText = async () => (await page.locator("body").innerText());
 await page.goto(ORIGIN + "/"); await page.waitForTimeout(500);
-await page.getByRole("button", { name: "MusicXML / GP" }).click({ timeout: 60000 });
+await page.getByRole("tab", { name: "MusicXML / GP" }).click({ timeout: 60000 });
 const up = page.locator('input[type="file"]').first();
 await up.setInputFiles(ZIP);
 await harmony().waitFor({ timeout: 60000 });
@@ -65,7 +65,7 @@ t = await chartText(); R.restored = { banner: /Restored/.test(t), harmonySelecte
 // the zip's MIDI on its own
 const mid = path.join(OUT, "score.mid");
 { const eng = await L.loadEngine(); const z = new Uint8Array(fs.readFileSync(ZIP)); fs.writeFileSync(mid, await eng._zipRead(z, eng._zipEntries(z).find((e) => e.name === "score.mid"))); }
-await page.getByRole("button", { name: "MusicXML / GP" }).click().catch(() => {});
+await page.getByRole("tab", { name: "MusicXML / GP" }).click().catch(() => {});
 await page.locator('input[type="file"]').first().setInputFiles(mid);
 await page.waitForTimeout(1500);
 t = await chartText(); R.midi = { harmonySelected: (await harmony().count()) ? await isOn(harmony()) : false, key: (t.match(/key (\S+) \(/) || [])[1], hasFm9: /Fm9/.test(t) };

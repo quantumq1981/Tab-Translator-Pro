@@ -17,7 +17,7 @@ const t0 = Date.now();
 const waitIdle = async () => { await page.waitForTimeout(400); await page.waitForFunction(() => !/Analyzing…|linking…/.test(document.body.innerText), null, { timeout: 300000 }); await page.waitForTimeout(400); };
 const text = () => page.locator("body").innerText();
 
-await page.getByRole("button", { name: "MusicXML / GP" }).click({ timeout: 60000 });
+await page.getByRole("tab", { name: "MusicXML / GP" }).click({ timeout: 60000 });
 await page.locator('input[type="file"]').first().setInputFiles(SCORE);
 await page.getByRole("button", { name: /Link a recording/ }).waitFor({ timeout: 60000 });
 ok("score panel offers 🎧 Link a recording", true);
