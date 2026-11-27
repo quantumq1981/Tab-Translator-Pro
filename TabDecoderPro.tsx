@@ -361,6 +361,14 @@ import { createSessionStore } from "./session-store.js";
 const UI_FONT = "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif";
 const MONO_FONT = "ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace";
 const CHORD_FONT = "'Space Mono', ui-monospace, monospace";
+/* Print (R1 fix, 2026-11-27): paper must not use system-ui. Where system-ui is an OpenType-CFF font (Inter, Cantarell …)
+ * Chromium embeds it in the PDF as a Type 3 font, glyph by glyph, so a saved PDF's text reads "bl u e - s k y" and can't
+ * be searched or copied. PRINT_FONT names TrueType sans faces first (Helvetica on Apple, Arial on Windows, its metric twin
+ * Liberation Sans on Linux; Linux fontconfig may alias other names, e.g. 'Helvetica Neue' or 'Roboto', to a CFF font). No UI font has ♩, so the tempo
+ * note gets its own stack of fonts that do (PRINT_NOTE_FONT). On paper every inline system-ui text (styles and SVG
+ * attributes, see the print CSS) takes PRINT_FONT; monospace / Space Mono text is left as it is. */
+const PRINT_FONT = "Helvetica, Arial, 'Liberation Sans', 'DejaVu Sans', sans-serif";
+const PRINT_NOTE_FONT = "'Apple Symbols', 'Segoe UI Symbol', 'Noto Music', 'Noto Sans Symbols2', 'DejaVu Sans', FreeSerif, serif";
 
 /* Navigation (redesign step 4, 2026-11-27): four destinations replace the nine equal mode tabs — Open (the ways in),
  * Chart (the panel of what is open), Listen (the microphone tools) and Library. `mode` still names the panel that
@@ -1425,6 +1433,7 @@ function TabDecoderProApp() {
           body.tdp-printing .tdp-app *:has(.tdp-print-keep){display:block!important;background:none!important;border-color:transparent!important;box-shadow:none!important;padding:0!important;margin:0!important;max-width:none!important;animation:none!important;}
           body.tdp-printing [data-tab-view] > div:nth-child(1), body.tdp-printing [data-tab-view] > div:nth-child(2){display:none!important;}
           body.tdp-printing .tdp-print-line, body.tdp-printing .tdp-bar{break-inside:avoid;page-break-inside:avoid;}
+          .tdp-print, [style*="font-family: system-ui"], [font-family^="system-ui"]{font-family:${PRINT_FONT}!important;}
         }
       `}</style>
 
@@ -2561,10 +2570,10 @@ function PrintSheet({ score, title, keyLabel, bpm, view, overrides, musicKey, se
   const first = (sym) => { try { const d = instrument === "guitar" && dict ? chordVoicings(dict, sym, {}) : voicingsForInstrument(sym, instrument); return d && d.ok && d.groups[0] && d.groups[0].voicings[0]; } catch (_) { return null; } };
   const mono = { fontFamily: MONO_FONT, whiteSpace: "pre", fontSize: 12, lineHeight: 1.3 };
   return (
-    <div className="tdp-print tdp-print-keep" style={{ background: "#fff", color: "#111", padding: 0, fontFamily: UI_FONT }}>
+    <div className="tdp-print tdp-print-keep" style={{ background: "#fff", color: "#111", padding: 0, fontFamily: PRINT_FONT }}>
       <div style={{ borderBottom: "1.5px solid #111", paddingBottom: 6, marginBottom: 8 }}>
         <div style={{ fontSize: 20, fontWeight: 700 }}>{String(title || "Chart").replace(/\.[^.]+$/, "")}</div>
-        <div style={{ fontSize: 10, color: "#444" }}>{[keyLabel && `key ${keyLabel}`, bpm && `♩=${Math.round(bpm)}`, score.timeSig && score.timeSig.join("/"), semis ? `transposed ${semis > 0 ? "+" : ""}${semis}` : "", capo ? `capo ${capo}` : "", levelLabel].filter(Boolean).join(" · ")}</div>
+        <div style={{ fontSize: 10, color: "#444" }}>{[keyLabel && `key ${keyLabel}`, bpm && "\u2669", score.timeSig && score.timeSig.join("/"), semis ? `transposed ${semis > 0 ? "+" : ""}${semis}` : "", capo ? `capo ${capo}` : "", levelLabel].filter(Boolean).flatMap((t, i) => [i ? " · " : "", t === "\u2669" ? <React.Fragment key={i}><span style={{ fontFamily: PRINT_NOTE_FONT }}>♩</span>={Math.round(bpm)}</React.Fragment> : t])}</div>
       </div>
       {used.length > 0 && view !== "tab" && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(78px, 1fr))", gap: 6, marginBottom: 10, breakInside: "avoid" }}>

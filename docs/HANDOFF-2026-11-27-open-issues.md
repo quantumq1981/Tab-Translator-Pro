@@ -8,7 +8,7 @@ and where to start looking. Nothing here blocks merging step 5 (#167): none of t
 
 | # | Item | Kind | Introduced by | Priority |
 |---|------|------|---------------|----------|
-| R1 | Printed chart header: `♩` prints as a wrong glyph; the PDF's text is split into letters | **Regression** | Step 3 (#165): the system-font switch | **High: fix first** |
+| R1 | Printed chart header: `♩` prints as a wrong glyph; the PDF's text is split into letters | **Regression** | Step 3 (#165): the system-font switch | **Fixed 2026-11-27** (see R1) |
 | P1 | `instruments-e2e`: the Beginner "capo 1 to play along" hint | Test failure | Before the redesign | Medium |
 | P2 | `note-editor-e2e`: dragging a fret number up a string doesn't re-string the note | Test failure | Before the redesign | Medium |
 | P3 | `tuning-e2e`: the "Use Drop D" button never appears | Test failure | Before the redesign | Medium |
@@ -36,6 +36,18 @@ a step-3 regression: R1 below.
 ---
 
 ## R1 — Printed chart header: wrong `♩` glyph; PDF text split into letters  (REGRESSION, step 3)
+
+**Status: FIXED (2026-11-27).** `library-e2e` 11/11. The real cause was narrower than the guess below: the
+system-ui font here (Inter, an OpenType-CFF `.otf`) is embedded by Chromium as a **Type 3** font, which writes each glyph
+on its own — pdf.js then reads letters with gaps. That hit every system-ui text on the page (chord names and diagram
+finger numbers too, not only the header). Fix in `TabDecoderPro.tsx`: `PRINT_FONT` (`Helvetica, Arial, 'Liberation
+Sans', 'DejaVu Sans', sans-serif` — TrueType faces; `'Helvetica Neue'` / `Roboto` were tried first and fontconfig aliased
+them to Inter, so they are not listed) on the `PrintSheet` root, a print-only rule giving every inline system-ui text
+(`style` and SVG `font-family` attributes) `PRINT_FONT`, and the `♩` in its own span with `PRINT_NOTE_FONT` (fonts that
+have U+2669). The PDF now holds only CID TrueType fonts; pdf.js reads `blue-sky  key E · ♩ =100 · 2/4  Emaj9 …`
+(the space after `♩` is pdf.js marking the font change; `pdftotext` reads `♩=100`). Screen typography is unchanged
+(the rules are inside `@media print`). Guards: 4 static checks in `tests/ui-polish.mjs` (mutation-tested). Still to do:
+print to PDF on an iPhone / iPad and check search + copy of the title.
 
 **What happens.** Share → 🖨 Print / PDF. The page looks right except the header line: `key E · ♩=100 · 2/4` prints the
 `♩` as an arrow-like fallback glyph. The PDF's text layer is split into letters, so searching or copying the title
