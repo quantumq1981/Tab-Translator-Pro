@@ -96,8 +96,10 @@ Boot measured with `tests/bench/load-e2e.mjs` (site assembled as `pages.yml` doe
   `scanIncoming`, `lyricsIncoming`, `audioIncoming` with `fresh`), so no loader is duplicated. The Open picker must
   keep NO `accept` attribute. A new file kind = a `sniffFile` branch + a `routeFile` branch + an `open-router.mjs` case.
   `bench/open-e2e.mjs`, `tests/open-router.mjs`.
-- **Open items after the redesign: `docs/HANDOFF-2026-11-27-open-issues.md`.** One regression (R1: the printed chart's
-  header since step 3's system font — wrong `♩` glyph, PDF text split into letters; `library-e2e` print check), three
+- **Open items after the redesign: `docs/HANDOFF-2026-11-27-open-issues.md`.** R1 FIXED (2026-11-27): paper never uses
+  system-ui — a CFF system font (Inter here) is embedded as Type 3, glyph by glyph, so the PDF's text split into letters.
+  `PRINT_FONT` (TrueType: Helvetica / Arial / Liberation Sans) on the print sheet + an `@media print` rule for every inline
+  system-ui text (styles and SVG attributes); the `♩` in `PRINT_NOTE_FONT`. `library-e2e` 11/11. Still open: three
   bench failures that predate the redesign (instruments capo hint, note-editor fret drag, tuning "Use Drop D"), the
   Library delete/restore quirk, and the UX items left open (#8 #11 #13 #16).
 
