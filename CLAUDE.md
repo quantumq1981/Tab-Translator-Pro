@@ -51,6 +51,14 @@ Boot measured with `tests/bench/load-e2e.mjs` (site assembled as `pages.yml` doe
   when it merges ≥ 2 parts (`parseOpenedScore`; engine default unchanged). Start fresh = Undo for 10 s, clear on
   expiry, `ttp:fresh:pending` finishes it on the next launch. Headless Chromium here doesn't decode the repo's MP3s
   (main too) — browser tests feed WAV. Open UX items: #5–#13, #15, #16; shell mock `docs/design/workbench-template.html`.
+- **Redesign canvas (2026-11-27, design only, nothing built):** https://claude.ai/artifact/7j9FDiGxFMAkbxWX2kmJHE
+  (private claude.ai artifact). Four destinations Open · Chart · Listen · Library replace the 9 mode tabs; one Open drop
+  zone routed by magic bytes; chord bottom sheet (replaces the "Live readout" + bitmask panel); intent-grouped Share
+  sheet; long-job card (stages, ETA, wake lock, Cancel, skeleton results); iPad left rail + 320 px inspector; polish
+  kit limited to compositor-only CSS (playhead glow, section colours, sheet spring, press state, waveform SVG) and
+  **system UI font** (keep Space Mono for chord symbols, drop the IBM Plex Mono download). Still-unfinished UI it
+  addresses: debug output as product UI (`CHROMA BITMASK`, `PATH C/D/E/F/G`, engine footer), 3 `alert` + 3 `confirm`
+  calls, format-named export row, "Generate audio ↗" (a CLI command most users can't run → under Advanced).
 
 ### Audit 2026-11-18 — fixed (PR #157 + the follow-up); read `docs/AUDIT-2026-11-18.md` for the evidence
 
