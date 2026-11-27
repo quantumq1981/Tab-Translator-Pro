@@ -42,9 +42,15 @@ Boot measured with `tests/bench/load-e2e.mjs` (site assembled as `pages.yml` doe
   render (stem iPhone defaults, `TabView`). A global the UI reads at render time must never come from an async module.
 - **Web fonts from `<head>`** (preconnect + `media="print" onload` stylesheet), never an `@import` in app CSS;
   IBM Plex Mono 500 dropped (unused). Next lever (not built): split app.js by mode (`React.lazy`).
-- **UX review (open, not fixed):** a mode-tab tap runs `clearSel()`, which also resets `overrides` → chord edits are
-  silently lost (verified, even re-tapping the current tab); Audio re-reads do the same. Fix = clear selection only.
-  Responsive shell mock: `docs/design/workbench-template.html`.
+- **UX safety fixes (2026-11-27, UX review #1 #2 #3 #4 #14 — `tests/ux-safety.mjs` in `npm test`, real app
+  `tests/bench/safety-e2e.mjs` 28/28):** chord edits are PER CHART (`ovStore` `{pdf, xml}`; a tab tap = `clearPick`,
+  never the edits; every `clearSel(kind)` names its chart). Audio: with edits nothing re-reads silently —
+  `guardRead` (actions ask first) / `holdRead` (setting changes wait; the chart is "the previous reading");
+  `chordEdits` counts typed edits + review choices + deletions and must be declared AFTER `overrides` (TDZ crash
+  otherwise). Readout empty outside Manual until a chord is tapped. Uploads/decodes of multi-part files open on Harmony
+  when it merges ≥ 2 parts (`parseOpenedScore`; engine default unchanged). Start fresh = Undo for 10 s, clear on
+  expiry, `ttp:fresh:pending` finishes it on the next launch. Headless Chromium here doesn't decode the repo's MP3s
+  (main too) — browser tests feed WAV. Open UX items: #5–#13, #15, #16; shell mock `docs/design/workbench-template.html`.
 
 ### Audit 2026-11-18 — fixed (PR #157 + the follow-up); read `docs/AUDIT-2026-11-18.md` for the evidence
 
