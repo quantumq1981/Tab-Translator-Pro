@@ -110,6 +110,14 @@ for (const [label, opts] of [["phone", { ...devices["iPhone 13"] }], ["iPad", { 
   if (opts.viewport.width >= 600) ok(L("#5 the toolbar stays pinned while the page scrolls"), y0 > 0 && Math.abs(y1) <= 1, { y0: Math.round(y0), y1: Math.round(y1) });
   else ok(L("#5 on a phone the (4-row) toolbar scrolls with the page instead of covering it"), y1 < -100, { y0: Math.round(y0), y1: Math.round(y1) });
   if (shots) await page.screenshot({ path: path.join(shots, `${label}-scrolled.png`) });
+  if (opts.viewport.width >= 600) {   // opening a panel from the pinned toolbar, far down the chart (Codex on #163)
+    for (const [btn, reg] of [[/^⚙ Settings/, "Chart settings"], ["⇪ Share", "Share"]]) {
+      await tb.getByRole("button", { name: btn }).click(); await page.waitForTimeout(300);
+      const box = await page.getByRole("region", { name: reg }).boundingBox();
+      ok(L(`#5 ${reg} opened from the pinned toolbar shows on screen`), box && box.y >= 0 && box.y < opts.viewport.height / 2 && box.y + box.height <= opts.viewport.height + 1, box && { y: Math.round(box.y), h: Math.round(box.height) });
+      await page.keyboard.press("Escape"); await page.waitForTimeout(200);
+    }
+  }
 
   ok(L("no page errors"), !logs.length, logs);
   await ctx.close();

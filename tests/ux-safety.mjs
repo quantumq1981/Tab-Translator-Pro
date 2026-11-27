@@ -64,7 +64,7 @@ expect(/<details><summary[^>]*>About the engine<\/summary>/.test(ui), "#10 the e
 // Redesign step 2 (2026-11-27): #5 #8 #9 #15 — checked in a real browser by bench/toolbar-e2e.mjs
 const cp = between("function ChartPanel(", "\n/* ---- view layer");
 const tbar = between('role="toolbar" aria-label="Chart"', '{panel === "settings" && (');
-expect(/position: "sticky", top: 0/.test(tbar) && /@media \(max-width:599px\)\{\.tdp-app \.tdp-chart-toolbar\{position:static!important;\}\}/.test(ui), "#5 the chart toolbar is pinned from 600 px (scrolls with the page on a phone)");
+expect(/<div className="no-print tdp-chart-toolbar" style=\{\{ position: "sticky", top: 0/.test(cp) && /maxHeight: "min\(60vh, 560px\)", overflowY: "auto"/.test(cp) && /@media \(max-width:599px\)\{\.tdp-app \.tdp-chart-toolbar\{position:static!important;\}\}/.test(ui), "#5 the chart toolbar + its open panel are pinned from 600 px (scrolls with the page on a phone)");
 expect(/⇪ Share/.test(tbar) && /⚙ Settings/.test(tbar) && !/doExport\(|setSimplify|setLevel|setArrange|ChordVocabPicker|KeyPicker|copyImage|doPrint|attachRef/.test(tbar), "#5 the toolbar holds only view / edit / transpose / play / Settings / Share");
 expect(/aria-label="Chart settings"/.test(cp) && /CHORD NAMES/.test(cp) && /ARRANGEMENT/.test(cp) && /PRACTICE/.test(cp), "#5 the Settings panel groups chord names / arrangement / practice");
 expect(/const settingsChanged = \[/.test(cp) && /⚙ Settings\{settingsChanged \?/.test(cp), "#5 the ⚙ button counts settings that differ from their defaults");
