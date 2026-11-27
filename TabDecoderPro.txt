@@ -1083,10 +1083,23 @@ function TabDecoderProApp() {
   const [lyricsIncoming, setLyricsIncoming] = useState(null); // { text, name, n } → LyricsImport
   const [openMsg, setOpenMsg] = useState(null);               // { tone?: "error", text } under the drop zone
   const [pdfAsk, setPdfAsk] = useState(null);                 // { file, c } — a PDF that could be read either way
+  /* U1: deleting the song that is OPEN must not bring it back — neither the open chart's debounced project save
+   * (it re-put the record on the next edit) nor the next launch's restore (it re-added the session file). So the
+   * chart is detached: the pending save is dropped, projRef cleared, and the file's hash kept in LIB_DETACHED_KEY,
+   * which restore honours. Opening the file again (rememberProject from an upload) re-joins the library. */
+  const onProjectDeleted = (rec) => {
+    const open = projRef.current && projRef.current.id === rec.id, sess = sessRef.current;
+    if (!open && !(rec.hash && sess && sess.hash === rec.hash)) return;
+    clearTimeout(projTimer.current);
+    if (open) { projRef.current = null; setProjectId(null); }
+    const h = rec.hash || (sess && sess.hash);
+    if (h) _lsSet(LIB_DETACHED_KEY, h);
+  };
   const rememberProject = async ({ kind, filename, bytes, bars, bpm, keyLabel, duration }) => {
     try {
       if (!bytes || !bytes.length) return;
       const recs = await projectsAll(), hash = await sessionStore.hashOf(bytes);
+      if (_lsGet(LIB_DETACHED_KEY) === hash) _lsSet(LIB_DETACHED_KEY, null); // opened again on purpose → back in the library
       // audit m1: the same project = the same CONTENT. Records from before the hash existed are checked
       // by hashing their stored file (only those with this name and length, so it stays cheap).
       let old = recs.find((r) => r.kind === kind && r.hash === hash) || null;
@@ -1223,9 +1236,10 @@ function TabDecoderProApp() {
         if (meta.scoreEdit && isScoreEdit(meta.scoreEdit) && typeof meta.scoreEdit.target === "string") setScoreEdit(meta.scoreEdit); else setScoreEdit(null);
         if (!verified) setRestored("mismatch"); else if (!meta.fromLibrary) setRestored(true);
         // one-shot migration: the restored session becomes a library project (dedup by content)
-        if (!projRef.current || projRef.current.filename !== meta.filename) rememberProject({ kind: meta.kind, filename: meta.filename || "restored", bytes });
         // re-affirm the restored state in one clean write, bound to the bytes that were opened
         const hash = await sessionStore.hashOf(bytes);
+        // (not a file deleted from the library while it was open — U1)
+        if ((!projRef.current || projRef.current.filename !== meta.filename) && _lsGet(LIB_DETACHED_KEY) !== hash) rememberProject({ kind: meta.kind, filename: meta.filename || "restored", bytes });
         sessRef.current = { filename: meta.filename, size: bytes.length, hash };
         { const { fromLibrary: _fl, file: _f, ...clean } = meta; saveSessionMeta({ ...clean, file: { size: bytes.length, hash } }); }
       } catch (err) { console.warn("session restore failed:", err); }
@@ -1484,7 +1498,7 @@ function TabDecoderProApp() {
         : dest === "chart" && !workChosen ? <ChartEmpty C={C} onOpen={() => go("open")} />
         : <>
         {dest === "listen" && <SubTabs C={C} label="Listen" items={LISTEN_TOOLS} value={mode} onPick={(m) => { if (m !== mode) { setMode(m); clearPick(); } }} />}
-        {mode === "library" ? <LibraryPanel C={C} onOpen={openProject} currentId={projectId} /> : mode === "scan" ? <ScanPanel C={C} useSharp={useSharp} pdfReady={pdfReady} incoming={scanIncoming} /> : mode === "tuner" ? <LiveTuner C={C} useSharp={useSharp} /> : mode === "live" ? <LiveChords C={C} useSharp={useSharp} /> : mode === "lyrics" ? <LyricsPanel C={C} incoming={lyricsIncoming} /> : mode === "audio" ? <AudioImport C={C} useSharp={useSharp} incoming={audioIncoming} scoreFile={scoreFile} linkAsk={linkAsk} onLoaded={(f, bytes, dur) => { if (!audioIncoming || audioIncoming.fresh || audioIncoming.name !== f.name) rememberProject({ kind: "audio", filename: f.name, bytes, duration: dur }); }} /> : (
+        {mode === "library" ? <LibraryPanel C={C} onOpen={openProject} currentId={projectId} onDeleted={onProjectDeleted} /> : mode === "scan" ? <ScanPanel C={C} useSharp={useSharp} pdfReady={pdfReady} incoming={scanIncoming} /> : mode === "tuner" ? <LiveTuner C={C} useSharp={useSharp} /> : mode === "live" ? <LiveChords C={C} useSharp={useSharp} /> : mode === "lyrics" ? <LyricsPanel C={C} incoming={lyricsIncoming} /> : mode === "audio" ? <AudioImport C={C} useSharp={useSharp} incoming={audioIncoming} scoreFile={scoreFile} linkAsk={linkAsk} onLoaded={(f, bytes, dur) => { if (!audioIncoming || audioIncoming.fresh || audioIncoming.name !== f.name) rememberProject({ kind: "audio", filename: f.name, bytes, duration: dur }); }} /> : (
         <div className={"tdp-cols" + (mode === "manual" ? " manual" : " solo")} style={{ position: "relative" }}>
           <section className="panel-rise" style={{ animationDelay: ".05s", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
             {mode === "manual" ? (
@@ -2427,7 +2441,7 @@ async function shareOrDownload(data, filename, mime) {
 let _libChain = Promise.resolve();
 const _libSerial = (fn) => (_libChain = _libChain.then(() => fn()).catch((e) => console.error(e)));
 
-function LibraryPanel({ C, onOpen, currentId }) {
+function LibraryPanel({ C, onOpen, currentId, onDeleted }) {
   const [recs, setRecs] = useState(null);
   const [sets, setSets] = useState([]);
   const [q, setQ] = useState("");
@@ -2453,6 +2467,7 @@ function LibraryPanel({ C, onOpen, currentId }) {
     showToast({ text: `Deleted “${r.title}”.`, action: { label: "Undo", fn: () => hide(r.id, false) },
       onCommit: () => _libSerial(async () => {
         await projectDel(r.id); await projectFileDel(r.id);
+        if (onDeleted) onDeleted(r);
         const alive = (await projectsAll()).map((x) => x.id);
         for (const s of await setlistsAll()) if (s.items.some((it) => it.projectId === r.id)) await setlistPut(setlistPrune(s, alive));
         hide(r.id, false); refresh();
@@ -2603,6 +2618,7 @@ function PrintSheet({ score, title, keyLabel, bpm, view, overrides, musicKey, se
  * a beat. Exports LRC, ChordPro with inline chords, the text sheet, and a TIMED Perform
  * Lyrics handoff to Chord Sheet Maker Pro. Text + timing are remembered per chart title. */
 const _lyrKey = (title, k) => `ttp:${k}:${String(title || "chart").slice(0, 120)}`;
+const LIB_DETACHED_KEY = "ttp:lib:detached"; // hash of the open file deleted from the library (U1)
 const _lsGet = (k) => { try { return localStorage.getItem(k); } catch (_) { return null; } };
 const FRESH_PENDING_KEY = "ttp:fresh:pending"; // "Start fresh" chosen, its Undo window not yet over (see startFresh)
 const FRESH_UNDO_MS = 10000;

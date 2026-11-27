@@ -12,7 +12,7 @@ and where to start looking. Nothing here blocks merging step 5 (#167): none of t
 | P1 | `instruments-e2e`: the Beginner "capo 1 to play along" hint | Test failure | Before the redesign | **Fixed 2026-11-27** (bench) |
 | P2 | `note-editor-e2e`: dragging a fret number up a string doesn't re-string the note | Test failure | Before the redesign | **Fixed 2026-11-27** (bench) |
 | P3 | `tuning-e2e`: the "Use Drop D" button never appears | Test failure | Before the redesign | **Fixed 2026-11-27** (app: accessible names) |
-| U1 | Deleting the open song from the Library: it comes back on the next launch | Behaviour | Before the redesign | Low |
+| U1 | Deleting the open song from the Library: it comes back on the next launch | Behaviour | Before the redesign | **Fixed 2026-11-27** |
 | U2 | Text sizes (UX review #11) | Open UX item | — | Low |
 | U3 | `window.prompt` for rename / tags / new setlist (UX review #13) | Open UX item | — | Low |
 | U4 | Emoji in the way-in names (UX review #16) | Open UX item | — | Low |
@@ -149,6 +149,15 @@ label with the bench, or the bench with the label, then run the rest of the benc
 ---
 
 ## U1 — Deleting the open song from the Library brings it back on the next launch
+
+**Status: FIXED (2026-11-27).** Two ways back, not one: (1) any edit to the still-open chart ran its debounced project
+save, which `projectPut` the deleted record again within a second; (2) on the next launch the session restore re-added
+the file (`rememberProject`). Now the delete's commit calls `onProjectDeleted` (`LibraryPanel` → `onDeleted`): if it is
+the open song (or its session file), the pending save is dropped, `projRef` is cleared and the file's hash is kept in
+`ttp:lib:detached`; restore skips `rememberProject` for that hash. The chart stays open and keeps restoring as a session;
+opening the file again on purpose (`rememberProject` from an upload) clears the mark and it rejoins the library.
+`bench/library-delete-e2e.mjs` (new): on main it fails 3 of 8 (after an edit, after a reload, after a second launch);
+with the fix 8/8. `library-e2e` 11/11, `persistence-e2e` ALL OK. Guarded in `tests/ui-polish.mjs`.
 
 Found while testing step 1. Delete the song that is currently open → it leaves the library (verified in IndexedDB),
 but the open chart's saved session re-adds it on the next launch. Fix: deleting the open project should also clear
