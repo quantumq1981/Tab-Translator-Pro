@@ -3632,13 +3632,17 @@ function ChordSheet({ choices, start = 0, onClose, onRename, C, useSharp, sequen
           style={{ flex: "none", height: 26, display: "flex", alignItems: "center", justifyContent: "center", cursor: dragging ? "grabbing" : "grab", touchAction: "none" }}>
           <div style={{ width: 40, height: 5, borderRadius: 3, background: C.border }} />
         </div>
+        {/* ONE scroll area under the handle (review on #165): on a short screen — a phone in landscape — the reading
+            and the instrument rows no longer push the diagrams out of reach. The title row with × stays pinned. */}
+        <div ref={body} data-sheet-scroll className="tdp-scroll" style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", overscrollBehavior: "contain", WebkitOverflowScrolling: "touch" }}>
+        <div data-sheet-title style={{ position: "sticky", top: 0, zIndex: 2, background: C.panel, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", padding: "0 16px 8px" }}>
+          <span style={{ font: `700 26px ${CHORD_FONT}`, color: C.amber }}>{title}</span>
+          {stack.length > 0 && (
+            <button onClick={() => setStack((s) => s.slice(0, -1))} style={{ ...chip(C), padding: "2px 9px" }}>← {stack.length > 1 ? stack[stack.length - 2] : base.symbol}</button>
+          )}
+          <button ref={closeBtn} onClick={onClose} aria-label="close" style={{ marginLeft: "auto", background: C.bg, border: `1px solid ${C.amber}`, color: C.amber, borderRadius: 10, padding: "6px 14px", fontSize: 15, cursor: "pointer" }}>×</button>
+        </div>
         <div style={{ padding: "0 16px 12px", borderBottom: `1px solid ${C.border}` }}>
-          <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
-            <span style={{ font: `700 26px ${CHORD_FONT}`, color: C.amber }}>{title}</span>
-            {stack.length > 0 && (
-              <button onClick={() => setStack((s) => s.slice(0, -1))} style={{ ...chip(C), padding: "2px 9px" }}>← {stack.length > 1 ? stack[stack.length - 2] : base.symbol}</button>
-            )}
-          </div>
           {reading && (
             <div data-chord-reading style={{ marginTop: 10, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 12, padding: "10px 12px" }}>
               <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap", fontSize: 12, color: C.dim }}>
@@ -3724,11 +3728,10 @@ function ChordSheet({ choices, start = 0, onClose, onRename, C, useSharp, sequen
               ))}
             </div>
             <span style={{ fontSize: 12, color: C.cyan }}>{data ? `${data.total} voicing${data.total === 1 ? "" : "s"}` : "loading…"}</span>
-            <button ref={closeBtn} onClick={onClose} aria-label="close" style={{ marginLeft: "auto", background: C.bg, border: `1px solid ${C.amber}`, color: C.amber, borderRadius: 10, padding: "6px 14px", fontSize: 15, cursor: "pointer" }}>×</button>
           </div>
         </div>
 
-        <div ref={body} className="tdp-scroll" style={{ overflowY: "auto", padding: "4px 16px 18px", WebkitOverflowScrolling: "touch" }}>
+        <div style={{ padding: "4px 16px 18px" }}>
           {libErr && <div style={{ fontSize: 11, color: C.red, margin: "10px 0" }}>Chord diagrams couldn't load ({libErr}). Reload to retry.</div>}
           {dict === null && <div style={{ fontSize: 11, color: C.amber, margin: "10px 0" }}>The chord dictionary couldn't load ({dictErr}) — showing generated voicings only. Close and reopen to retry.</div>}
           {data && !data.ok && (
@@ -3780,6 +3783,7 @@ function ChordSheet({ choices, start = 0, onClose, onRename, C, useSharp, sequen
           <div style={{ fontSize: 10, color: C.dim, marginTop: 14, lineHeight: 1.5 }}>
             {instrument === "guitar" ? "Standard tuning." : instrument === "piano" ? "Each hand within a 9th; ◀ / ▶ walk the chart and rank the next chord's voicings by how little the hands move." : `${INSTRUMENTS[instrument].name} in ${INSTRUMENTS[instrument].strings.map((m) => NOTE_SHARP[m % 12]).join(" ")}${capo ? `, capo ${capo} (frets above the capo)` : ""}. Every grip fits the hand (a "stretch" adds one fret).`} Tap a diagram to hear it. Guitar library shapes: tombatossals/chords-db (MIT), checked against each chord's notes; the rest are derived from the chord's intervals.
           </div>
+        </div>
         </div>
       </div>
     </div>

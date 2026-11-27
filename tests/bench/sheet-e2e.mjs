@@ -158,6 +158,27 @@ for (const [label, opts] of [["phone", { ...devices["iPhone 13"] }], ["iPad", { 
   await ctx.close();
 }
 
+// ---- a short screen (phone in landscape, review on #165): everything in the sheet can be scrolled to, × stays visible
+{
+  const ctx = await browser.newContext({ viewport: { width: 844, height: 390 }, hasTouch: true, isMobile: true, deviceScaleFactor: 1 });
+  await ctx.route((u) => !u.href.startsWith(origin), (r) => r.abort());
+  const page = await ctx.newPage(); await page.goto(origin + "/");
+  await page.getByRole("tab", { name: "MusicXML / GP", exact: true }).click({ timeout: 30000 });
+  await page.locator('input[type="file"]').first().setInputFiles(path.join(repo, "Steely Dan - Peg.gp4"));
+  await page.getByText(/bars ·/).first().waitFor({ timeout: 60000 }); await page.waitForTimeout(500);
+  await page.locator(".tdp-bar button").first().click(); await page.waitForTimeout(900);
+  await page.locator("[data-chord-reading] summary").click(); await page.waitForTimeout(200);   // Details open = tallest header
+  const sc = await page.evaluate(() => {
+    const el = document.querySelector("[data-sheet-scroll]"); el.scrollTop = el.scrollHeight;
+    const box = el.getBoundingClientRect(), last = [...el.querySelectorAll("div")].filter((d) => /Tap a diagram to hear it/.test(d.textContent) && !d.querySelector("div")).pop();
+    const lr = last && last.getBoundingClientRect(), x = document.querySelector('[data-chord-sheet] button[aria-label="close"]').getBoundingClientRect();
+    return { scrolls: el.scrollHeight > el.clientHeight, lastVisible: !!lr && lr.top >= box.top - 1 && lr.bottom <= box.bottom + 1, closeVisible: x.top >= 0 && x.bottom <= window.innerHeight, sheetBottom: Math.round(document.querySelector("[data-chord-sheet]").getBoundingClientRect().bottom), h: window.innerHeight };
+  });
+  ok("short screen: the whole sheet scrolls to its last line; × stays on screen", sc.scrolls && sc.lastVisible && sc.closeVisible && Math.abs(sc.sheetBottom - sc.h) <= 2, sc);
+  if (shots) await page.screenshot({ path: path.join(shots, "landscape-sheet.png") });
+  await ctx.close();
+}
+
 // ---- prefers-reduced-motion
 {
   const ctx = await browser.newContext({ viewport: { width: 820, height: 1180 }, reducedMotion: "reduce" });

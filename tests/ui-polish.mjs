@@ -71,6 +71,7 @@ const between = (a, b) => { const i = ui.indexOf(a); return i < 0 ? "" : ui.slic
   expect(/showToast\(\{ text: `\$\{before\} → \$\{v\}`, action: \{ label: "Undo", fn: \(\) => onRename\(k, before, detected\) \}/.test(sheet), "a rename shows an Undo toast");
   expect(/onRename=\{\(k, sym, detected\) => setOverridesT\(/.test(ui) && /if \(!v \|\| v === detected\) delete n\[k\]/.test(ui), "renames go through the transposed overrides (an edit in the untransposed key, reverting to detected deletes it)");
   expect(/midis: e\.midis, key: k, detected: e\.symbol/.test(ui) && /midis: e\.midis, key: `\$\{bar\.number\}\.\$\{e\.beat\}`, detected: e\.symbol/.test(ui), "lead sheet + grid hand the sheet the notes and the override key");
+  expect(/<div ref=\{body\} data-sheet-scroll [^>]*minHeight: 0, overflowY: "auto"/.test(sheet) && /data-sheet-title style=\{\{ position: "sticky"/.test(sheet) && (sheet.match(/overflowY: "auto"/g) || []).length === 1, "one scroll area under the handle (reading + diagrams), the title row with × pinned (review on #165)");
   expect(/className="tdp-sheet"/.test(sheet) && /\.tdp-sheet\{animation:tdpSheetUp [^}]*backwards;\}/.test(ui), "sheet spring: entry animation, fill 'backwards' (no kept transform)");
   expect(/className=\{"tdp-cols" \+ \(mode === "manual" \? " manual" : " solo"\)\}/.test(ui) && /\.tdp-cols\.solo\{grid-template-columns:minmax\(0,1fr\);\}/.test(ui), "chart modes are one column (no side readout)");
 }
