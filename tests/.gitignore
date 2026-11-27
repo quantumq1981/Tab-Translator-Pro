@@ -12,3 +12,4 @@ bench/_scratch/
 .engine.scorelink.mjs
 .engine.audit.mjs
 .engine.vendored.mjs
+.engine.uipolish.mjs

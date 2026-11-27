@@ -346,8 +346,19 @@ import {
   pdfChordPages,
   chordFromWritten,
   ocrReviewItems,
+  readChord,
+  sectionKind,
+  waveformPeaks,
 } from "./engine.tsx";
 import { createSessionStore } from "./session-store.js";
+
+/* Type (redesign step 3, 2026-11-27): body text is the SYSTEM UI font — no download, the platform's own legibility and
+ * Dynamic Type metrics. Space Mono stays for chord symbols and the logo (CHORD_FONT); pasted tab / lyrics text and
+ * export previews keep a system monospace (MONO_FONT) because their columns must line up. IBM Plex Mono is no longer
+ * requested by index.html. */
+const UI_FONT = "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif";
+const MONO_FONT = "ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace";
+const CHORD_FONT = "'Space Mono', ui-monospace, monospace";
 
 /* SECURITY (audit 2026-11-18 C1, CVE-2024-4367 / GHSA-wgrm-67xf-hhpq): every PDF this app opens is
  * untrusted (Scan reads PDFs from anywhere), and PDF.js < 4.2.67 with `isEvalSupported` at its default
@@ -686,7 +697,7 @@ class AppErrorBoundary extends React.Component {
     };
     const btn = { font: "inherit", padding: "8px 16px", borderRadius: 8, border: "1px solid #ff6b35", background: "transparent", color: "#efe9dc", cursor: "pointer" };
     return (
-      <div role="alert" style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 24, background: "#0b0b0f", color: "#efe9dc", font: "14px/1.6 ui-monospace, 'IBM Plex Mono', monospace" }}>
+      <div role="alert" style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 24, background: "#0b0b0f", color: "#efe9dc", font: `14px/1.6 ${UI_FONT}` }}>
         <div style={{ maxWidth: 520, textAlign: "center" }}>
           <div style={{ fontWeight: 700, fontSize: 20, marginBottom: 8 }}>TAB<span style={{ color: "#ff6b35" }}>·</span>DECODER hit an error</div>
           <div style={{ color: "#9aa0a6", marginBottom: 16 }}>Something in the open chart couldn’t be shown. <b>Start fresh</b> closes the saved session (your library is kept); <b>Reload</b> tries again.</div>
@@ -1202,7 +1213,7 @@ function TabDecoderProApp() {
     // semantic status colors, not the brand.
 
   return (
-    <div className="tdp-app" style={{ background: C.bg, color: C.text, minHeight: "100%", fontFamily: "'IBM Plex Mono', ui-monospace, monospace" }}>
+    <div className="tdp-app" style={{ background: C.bg, color: C.text, minHeight: "100%", fontFamily: UI_FONT }}>
       <style>{`
         /* web fonts load from index.html's <head> (perf audit 2026-11-26: an @import here was found only after the app rendered) */
         @keyframes glowpulse {0%{transform:scale(.97);opacity:0;}100%{transform:scale(1);opacity:1;}}
@@ -1225,6 +1236,26 @@ function TabDecoderProApp() {
         .tdp-app button[aria-pressed="true"],.tdp-app [role="tab"][aria-selected="true"]{text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:4px;}
         .tdp-app [role="tab"][aria-selected="true"]{font-weight:700;}
         .tdp-app button,.tdp-app select,.tdp-app summary{touch-action:manipulation;}
+        /* ---- polish kit (redesign step 3) — transform / opacity only (compositor), all off under reduced motion ---- */
+        .tdp-app{-webkit-tap-highlight-color:transparent;}
+        .tdp-app button,.tdp-app select,.tdp-app input{font-family:inherit;}
+        .tdp-app button{transition:transform .09s ease;}
+        .tdp-app button:not(:disabled):active{transform:scale(.96);}           /* tactile press */
+        .tdp-sheet-backdrop{animation:tdpFade .2s ease-out backwards;}
+        .tdp-sheet{animation:tdpSheetUp .34s cubic-bezier(.2,.9,.3,1.08) backwards;}  /* "backwards": no kept transform after it */
+        @keyframes tdpFade{from{opacity:0;}to{opacity:1;}}
+        @keyframes tdpSheetUp{from{transform:translateY(100%);}to{transform:translateY(0);}}
+        /* playhead glow + chord-change pulse: the class moves to the sounding chord, so both re-run on every change */
+        .tdp-now{position:relative;}
+        .tdp-now::after{content:"";position:absolute;inset:-3px -4px;border-radius:7px;pointer-events:none;box-shadow:0 0 0 1px rgba(152,195,121,.6),0 0 14px 2px rgba(152,195,121,.4);animation:tdpGlow .45s ease-out backwards;}
+        .tdp-now > span:first-child{animation:tdpBeat .3s cubic-bezier(.2,1.5,.4,1) backwards;}
+        @keyframes tdpGlow{from{opacity:0;transform:scale(1.15);}to{opacity:1;transform:scale(1);}}
+        @keyframes tdpBeat{from{transform:scale(1.14);}to{transform:scale(1);}}
+        .tdp-wave-head{transition:transform .08s linear;}
+        @media (prefers-reduced-motion:reduce){
+          .tdp-app *,.tdp-app *::before,.tdp-app *::after{animation-duration:.001ms!important;animation-delay:0s!important;animation-iteration-count:1!important;transition-duration:.001ms!important;}
+          .tdp-app button:not(:disabled):active{transform:none;}
+        }
         @media (pointer:coarse){
           .tdp-app button,.tdp-app select,.tdp-app input[type="file"]+button{min-height:44px;}
           .tdp-app button:not([data-tight]){min-width:44px;}
@@ -1233,6 +1264,7 @@ function TabDecoderProApp() {
         }
         .tdp-cols{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:16px;}
         .tdp-cols.manual{grid-template-columns:minmax(0,1fr) minmax(0,1fr);}
+        .tdp-cols.solo{grid-template-columns:minmax(0,1fr);}
         @media (max-width:760px){.tdp-cols,.tdp-cols.manual{grid-template-columns:minmax(0,1fr);}}  /* minmax(0,…): a wide child (the note editor's roll) must scroll inside, not widen the page */
         @media print {
           /* scroll boxes only print their visible slice → everything below the fold
@@ -1305,7 +1337,7 @@ function TabDecoderProApp() {
           </div>
         )}
         {mode === "library" ? <LibraryPanel C={C} onOpen={openProject} currentId={projectId} /> : mode === "scan" ? <ScanPanel C={C} useSharp={useSharp} pdfReady={pdfReady} /> : mode === "tuner" ? <LiveTuner C={C} useSharp={useSharp} /> : mode === "live" ? <LiveChords C={C} useSharp={useSharp} /> : mode === "lyrics" ? <LyricsPanel C={C} /> : mode === "audio" ? <AudioImport C={C} useSharp={useSharp} incoming={audioIncoming} scoreFile={scoreFile} linkAsk={linkAsk} onLoaded={(f, bytes, dur) => { if (!audioIncoming || audioIncoming.name !== f.name) rememberProject({ kind: "audio", filename: f.name, bytes, duration: dur }); }} /> : (
-        <div className={"tdp-cols" + (mode === "manual" ? " manual" : "")} style={{ position: "relative" }}>
+        <div className={"tdp-cols" + (mode === "manual" ? " manual" : " solo")} style={{ position: "relative" }}>
           <section className="panel-rise" style={{ animationDelay: ".05s", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
             {mode === "manual" ? (
               <>
@@ -1317,7 +1349,7 @@ function TabDecoderProApp() {
                 </div>
                 <textarea value={tab} onChange={(e) => { setTab(e.target.value); setBlockIdx(0); }} spellCheck={false} className="tdp-scroll"
                   placeholder={"e|-0-|\nB|-1-|\nG|-0-|\nD|-2-|\nA|-3-|\nE|-x-|"}
-                  style={{ width: "100%", height: 150, resize: "vertical", background: C.bg, color: C.text, border: `1px solid ${C.border}`, borderRadius: 8, padding: 12, fontSize: 14, lineHeight: 1.5, fontFamily: "'IBM Plex Mono', monospace", outline: "none", boxSizing: "border-box" }} />
+                  style={{ width: "100%", height: 150, resize: "vertical", background: C.bg, color: C.text, border: `1px solid ${C.border}`, borderRadius: 8, padding: 12, fontSize: 14, lineHeight: 1.5, fontFamily: MONO_FONT, outline: "none", boxSizing: "border-box" }} />
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 14 }}>
                   <Control C={C} label="TUNING">
                     <div style={{ display: "flex", gap: 6 }}>
@@ -1361,7 +1393,7 @@ function TabDecoderProApp() {
                 <SectionLabel C={C}>OPEN A TAB PDF · exported from Guitar Pro, MuseScore or alphaTab</SectionLabel>
                 <input ref={fileRef} type="file" accept="application/pdf" onChange={onFile} style={{ display: "none" }} />
                 <button onClick={() => fileRef.current && fileRef.current.click()} disabled={!pdfReady || pdfBusy}
-                  style={{ width: "100%", background: C.bg, border: `1px dashed ${C.border}`, color: pdfReady ? C.amber : C.dim, borderRadius: 10, padding: scoreView ? "8px 12px" : "22px 12px", fontSize: scoreView ? 12 : 14, cursor: pdfReady ? "pointer" : "default", fontFamily: "'IBM Plex Mono', monospace" }}>
+                  style={{ width: "100%", background: C.bg, border: `1px dashed ${C.border}`, color: pdfReady ? C.amber : C.dim, borderRadius: 10, padding: scoreView ? "8px 12px" : "22px 12px", fontSize: scoreView ? 12 : 14, cursor: pdfReady ? "pointer" : "default", fontFamily: UI_FONT }}>
                   {!pdfReady ? "loading PDF.js…" : pdfBusy ? "parsing…" : scoreView ? "⬆  Open another tab PDF" : "⬆  Upload a tab PDF  (tap to choose)"}
                 </button>
                 <HowItWorks C={C} folded={!!scoreView}>
@@ -1388,7 +1420,7 @@ function TabDecoderProApp() {
                     Do NOT re-add an extension allowlist here — it breaks GP/Power Tab upload on iOS. */}
                 <input ref={xmlRef} type="file" onChange={onXml} style={{ display: "none" }} />
                 <button onClick={() => xmlRef.current && xmlRef.current.click()} disabled={xmlBusy}
-                  style={{ width: "100%", background: C.bg, border: `1px dashed ${C.border}`, color: C.amber, borderRadius: 10, padding: xmlScore || texDoc ? "8px 12px" : "22px 12px", fontSize: xmlScore || texDoc ? 12 : 14, cursor: xmlBusy ? "default" : "pointer", fontFamily: "'IBM Plex Mono', monospace" }}>
+                  style={{ width: "100%", background: C.bg, border: `1px dashed ${C.border}`, color: C.amber, borderRadius: 10, padding: xmlScore || texDoc ? "8px 12px" : "22px 12px", fontSize: xmlScore || texDoc ? 12 : 14, cursor: xmlBusy ? "default" : "pointer", fontFamily: UI_FONT }}>
                   {xmlBusy ? "parsing…" : xmlScore || texDoc ? "⬆  Open another file" : "⬆  Upload a MusicXML, Guitar Pro, Power Tab, MIDI, zip or AlphaTex file"}
                 </button>
                 {/* UX review #8: the explanation is for before a file is open; with a chart on screen it folds away */}
@@ -1434,16 +1466,14 @@ function TabDecoderProApp() {
             )}
           </section>
 
+          {/* Redesign step 3: the readout column is Manual's result only. On a chart (PDF / MusicXML / GP) a tapped chord
+              opens the chord SHEET instead (ChordSheet — notes, match, other readings, diagrams), so the chart has the
+              full width and the reading appears where the finger is, not a screen below it. UX review #3 still holds:
+              no chart ever shows the Manual tab's chord. */}
+          {mode === "manual" && (
           <section className="panel-rise" style={{ animationDelay: ".1s", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
-            <SectionLabel C={C}>{mode !== "manual" ? "CHORD READOUT" : "LIVE READOUT"}</SectionLabel>
-            {/* UX review 2026-11-26 #3: outside Manual the readout used to show the Manual tab's chord (the C/E preset)
-                next to an unrelated file, at 100 %. It is empty until a chord of THIS chart is tapped. */}
-            {mode !== "manual" && !(selFrets || selMidis) ? (
-              <div data-readout-empty style={{ background: C.bg, border: `1px dashed ${C.border}`, borderRadius: 10, padding: "22px 16px", textAlign: "center", color: C.dim, fontSize: 13, lineHeight: 1.6 }}>
-                <div style={{ color: C.text, fontWeight: 600, marginBottom: 4 }}>No chord selected</div>
-                Tap any chord in the chart to see its notes, bass and confidence here.
-              </div>
-            ) : (<>
+            <SectionLabel C={C}>LIVE READOUT</SectionLabel>
+            <>
             <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: "22px 16px", textAlign: "center", marginBottom: 14 }}>
               <div key={symbol} className="chord-pop" style={{ fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: 54, lineHeight: 1, color: C.chord }}>{symbol}</div>
               {result && result.isSlash && <div style={{ marginTop: 8, fontSize: 11, letterSpacing: 2, color: C.red }}>SLASH CHORD · BASS ≠ ROOT</div>}
@@ -1508,8 +1538,9 @@ function TabDecoderProApp() {
                 ))}
               </div>
             </details>
-            </>)}
+            </>
           </section>
+          )}
         </div>
         )}
 
@@ -2036,7 +2067,8 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
             editKey={editKey} setEditKey={setEditKey} draft={draft} setDraft={setDraft} selKey={selKey}
             playKey={playKey} showRoman={showRoman} nashville={nashville} musicKey={key} onPick={onPick} symOf={symOf} onVoicings={setVoicingChoices} />
         : <GridView score={tscore} C={C} symOf={symOf} selKey={selKey} onPick={onPick} onVoicings={setVoicingChoices} />}
-      {voicingChoices && <ChordVoicingModal key={voicingChoices.map((c) => c.symbol).join("|")} choices={voicingChoices} onClose={() => setVoicingChoices(null)} C={C} useSharp={useSharp} sequence={chordSeq} />}
+      {voicingChoices && <ChordSheet key={voicingChoices.map((c) => c.symbol).join("|")} choices={voicingChoices} onClose={() => setVoicingChoices(null)} C={C} useSharp={useSharp} sequence={chordSeq}
+        onRename={(k, sym, detected) => setOverridesT((o) => { const n = { ...o }; const v = (sym || "").trim(); if (!v || v === detected) delete n[k]; else n[k] = v; return n; })} />}
 
       <div ref={expRef} data-export-anchor />
       <ExportPanel exp={exp} setExp={setExp} C={C} bpm={bpm} semis={semis} score={tscore} share={share}
@@ -2299,9 +2331,9 @@ function PrintSheet({ score, title, keyLabel, bpm, view, overrides, musicKey, se
   const instrument = (() => { try { const v = localStorage.getItem("ttp:instrument"); return INSTRUMENTS[v] ? v : "guitar"; } catch (_) { return "guitar"; } })();
   const lyr = useMemo(() => { if (view !== "lyrics") return null; try { const m = JSON.parse(localStorage.getItem(_lyrKey(title, "lyricmap")) || "null"); return m && m.lines ? lyricSheetRows(score, m, { overrides, bpm: score.tempo }) : null; } catch (_) { return null; } }, [view, score, title, overrides]);
   const first = (sym) => { try { const d = instrument === "guitar" && dict ? chordVoicings(dict, sym, {}) : voicingsForInstrument(sym, instrument); return d && d.ok && d.groups[0] && d.groups[0].voicings[0]; } catch (_) { return null; } };
-  const mono = { fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "pre", fontSize: 12, lineHeight: 1.3 };
+  const mono = { fontFamily: MONO_FONT, whiteSpace: "pre", fontSize: 12, lineHeight: 1.3 };
   return (
-    <div className="tdp-print tdp-print-keep" style={{ background: "#fff", color: "#111", padding: 0, fontFamily: "'IBM Plex Mono', monospace" }}>
+    <div className="tdp-print tdp-print-keep" style={{ background: "#fff", color: "#111", padding: 0, fontFamily: UI_FONT }}>
       <div style={{ borderBottom: "1.5px solid #111", paddingBottom: 6, marginBottom: 8 }}>
         <div style={{ fontSize: 20, fontWeight: 700 }}>{String(title || "Chart").replace(/\.[^.]+$/, "")}</div>
         <div style={{ fontSize: 10, color: "#444" }}>{[keyLabel && `key ${keyLabel}`, bpm && `♩=${Math.round(bpm)}`, score.timeSig && score.timeSig.join("/"), semis ? `transposed ${semis > 0 ? "+" : ""}${semis}` : "", capo ? `capo ${capo}` : "", levelLabel].filter(Boolean).join(" · ")}</div>
@@ -2414,7 +2446,7 @@ function LyricsSheetView({ C, score, title, overrides, playKey, getAudio, getBuf
   };
   const last = (() => { try { return localStorage.getItem("ttp:lyrics:last") || ""; } catch (_) { return ""; } })();
   const ch = (on, col) => ({ ...chip(C), padding: "3px 9px", borderColor: on ? col || C.amber : C.border, color: on ? col || C.amber : C.dim });
-  const mono = { fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "pre", fontSize: 13, lineHeight: 1.35 };
+  const mono = { fontFamily: MONO_FONT, whiteSpace: "pre", fontSize: 13, lineHeight: 1.35 };
   return (
     <div>
       <div className="no-print" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginBottom: 8, fontSize: 11, color: C.dim }}>
@@ -2431,7 +2463,7 @@ function LyricsSheetView({ C, score, title, overrides, playKey, getAudio, getBuf
       </div>
       {editing && (
         <textarea value={text} onChange={(e) => setText(e.target.value)} spellCheck={false} className="tdp-scroll" placeholder={"[Verse 1]\nPaste the lyrics (chords-over-lyrics or ChordPro — the chords are stripped; the chart's chords are placed back over the words)."}
-          style={{ width: "100%", height: 160, resize: "vertical", boxSizing: "border-box", background: C.bg, color: C.text, border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, fontSize: 12, lineHeight: 1.5, fontFamily: "'IBM Plex Mono', monospace", outline: "none", marginBottom: 8 }} />
+          style={{ width: "100%", height: 160, resize: "vertical", boxSizing: "border-box", background: C.bg, color: C.text, border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, fontSize: 12, lineHeight: 1.5, fontFamily: MONO_FONT, outline: "none", marginBottom: 8 }} />
       )}
       {map && (
         <div className="no-print" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginBottom: 8, fontSize: 11, color: C.dim }}>
@@ -3186,8 +3218,14 @@ function MelodicNudge({ C, onSimplify }) {
 }
 /* Lead-sheet view: chords on their beat, barlines, inline relabel in Edit mode.
  * `musicKey` is the detected key (named to avoid clashing with React list keys). */
+/* Section colour bands (redesign step 3): a bar that starts a section carries its label, and every bar until the next
+ * section shares its colour on the barline — so verse / chorus / bridge read at a glance. Kinds from the engine's
+ * `sectionKind` (numbered repeats share a colour; rehearsal letters map A verse · B chorus · C bridge). */
+const SECTION_COLORS = { intro: "#9aa0a6", verse: "#57d1d6", pre: "#c678dd", chorus: "#ff6b35", bridge: "#98c379", solo: "#e9a24b", outro: "#9aa0a6", other: "#61afef" };
+const sectionColor = (label) => { const k = sectionKind(label); return k ? SECTION_COLORS[k] : null; };
+
 function LeadSheetView({ score, C, overrides, setOverrides, editMode, editKey, setEditKey, draft, setDraft, selKey, playKey, showRoman, nashville, musicKey, onPick, symOf, onVoicings }) {
-  let prevSig = null;
+  let prevSig = null, secCol = null;
   return (
     <>
       {/* UX review #15: the chart flows in the page (the toolbar above is pinned) — no inner scroll box to trap the finger */}
@@ -3196,9 +3234,11 @@ function LeadSheetView({ score, C, overrides, setOverrides, editMode, editKey, s
           const sig = bar.timeSig || score.timeSig;
           const sigChanged = !prevSig || prevSig[0] !== sig[0] || prevSig[1] !== sig[1];
           prevSig = sig;
+          if (bar.section) secCol = sectionColor(bar.section);
           return (
-            <div key={bar.number} className="tdp-bar" style={{ position: "relative", borderLeft: `2px solid ${C.border}`, padding: "16px 8px 6px 10px", minHeight: 44 }}>
+            <div key={bar.number} className="tdp-bar" style={{ position: "relative", borderLeft: `2px solid ${secCol ? secCol + "b0" : C.border}`, background: secCol ? `${secCol}0d` : "transparent", padding: "16px 8px 6px 10px", minHeight: 44 }}>
               <span style={{ position: "absolute", top: 2, left: 10, fontSize: 9, color: C.dim }}>{bar.number}</span>
+              {bar.section && <span data-section={sectionKind(bar.section)} title={bar.section} style={{ position: "absolute", top: 2, left: 28, right: 34, fontSize: 9, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", color: secCol || C.dim, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{bar.section}</span>}
               {sigChanged && <span style={{ position: "absolute", top: 2, right: 6, fontSize: 9, color: C.amber }}>{sig.join("/")}</span>}
               <div style={{ display: "grid", gridTemplateColumns: `repeat(${sig[0]}, 1fr)`, alignItems: "center", columnGap: 2, minHeight: 24 }}>
                 {bar.events.map((e, i) => {
@@ -3217,8 +3257,8 @@ function LeadSheetView({ score, C, overrides, setOverrides, editMode, editKey, s
                   const isSel = selKey === k;
                   const isPlaying = playKey === k;
                   return (
-                    <button key={i} onClick={() => (editMode ? (setEditKey(k), setDraft(cur)) : (onPick(k, e), onVoicings && onVoicings([{ symbol: cur, frets: e.frets }])))} title={editMode ? "click to re-label" : `beat ${e.beat + 1} · tap for guitar voicings`}
-                      style={{ gridColumn: gridCol, justifySelf: "start", textAlign: "left", background: isPlaying ? `${C.green}22` : "transparent", borderRadius: 4, border: "none", borderBottom: isSel ? `2px solid ${C.amber}` : "2px solid transparent", padding: "0 2px", cursor: "pointer", color: isPlaying ? C.green : edited ? C.green : isSel ? C.amber : C.cyan, fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: cur.length > 4 ? 13 : 16, lineHeight: 1.2, transition: "background .1s, color .1s" }}>
+                    <button key={i} className={isPlaying ? "tdp-now" : undefined} onClick={() => (editMode ? (setEditKey(k), setDraft(cur)) : (onPick(k, e), onVoicings && onVoicings([{ symbol: cur, frets: e.frets, midis: e.midis, key: k, detected: e.symbol }])))} title={editMode ? "click to re-label" : `beat ${e.beat + 1} · tap for its notes and voicings`}
+                      style={{ gridColumn: gridCol, justifySelf: "start", textAlign: "left", background: isPlaying ? `${C.green}22` : "transparent", borderRadius: 4, border: "none", borderBottom: isSel ? `2px solid ${C.amber}` : "2px solid transparent", padding: "0 2px", cursor: "pointer", color: isPlaying ? C.green : edited ? C.green : isSel ? C.amber : C.cyan, fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: cur.length > 4 ? 13 : 16, lineHeight: 1.2, transition: "background .1s, color .1s, transform .09s" }}>
                       <span style={{ display: "block", opacity: e.uncertain && !edited ? 0.55 : 1, borderBottom: e.uncertain && !edited ? `1px dashed ${C.amber}` : "none" }} title={e.uncertain && !edited ? "uncertain — see the review list" : undefined}>{cur}{edited ? "*" : ""}{e.uncertain && !edited ? <sup style={{ color: C.amber, fontSize: 9 }}>?</sup> : null}</span>
                       {showRoman && musicKey && <span style={{ display: "block", fontSize: 9, fontWeight: 400, color: C.dim, marginTop: 1 }}>{nashville ? nashvilleFor(cur, musicKey) : romanFor(cur, musicKey)}</span>}
                     </button>
@@ -3230,7 +3270,7 @@ function LeadSheetView({ score, C, overrides, setOverrides, editMode, editKey, s
         })}
       </div>
       <div style={{ fontSize: 11, color: C.dim, marginTop: 8 }}>
-        {editMode ? "Edit mode · click a chord to re-label it (blank = revert to detected). * marks edits." : "Lead sheet · chords sit on the beat they change. Tap a chord for its guitar voicings."}
+        {editMode ? "Edit mode · click a chord to re-label it (blank = revert to detected). * marks edits." : "Lead sheet · chords sit on the beat they change. Tap a chord for its notes and voicings."}
       </div>
     </>
   );
@@ -3252,7 +3292,7 @@ function StringShiftPanel({ systems, shifts, onBump, C }) {
   return (
     <div style={{ marginTop: 12, border: `1px solid ${C.border}`, borderRadius: 10, background: C.bg }}>
       <button onClick={() => setOpen(!open)}
-        style={{ width: "100%", background: "none", border: "none", color: C.dim, textAlign: "left", padding: "10px 12px", fontSize: 11, cursor: "pointer", fontFamily: "'IBM Plex Mono', monospace" }}>
+        style={{ width: "100%", background: "none", border: "none", color: C.dim, textAlign: "left", padding: "10px 12px", fontSize: 11, cursor: "pointer", fontFamily: UI_FONT }}>
         {open ? "▾" : "▸"} ⌥ Fix string alignment{nudged ? ` · ${nudged} system${nudged > 1 ? "s" : ""} adjusted` : ""}
       </button>
       {open && (
@@ -3349,6 +3389,7 @@ function TabView({ tex, title, C }) {
 }
 
 function GridView({ score, C, symOf, selKey, onPick, onVoicings }) {
+  let gridCol = null;
   return (
     <>
       <div className="tdp-scroll" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(74px, 1fr))", gap: 6, paddingRight: 4 }}>
@@ -3356,16 +3397,18 @@ function GridView({ score, C, symOf, selKey, onPick, onVoicings }) {
           const collapsed = bar.events.map((e) => symOf(bar, e));
           const k = `${bar.number}`;
           const isSel = selKey === k;
+          if (bar.section) gridCol = sectionColor(bar.section);
           return (
-            <button key={k} className="meas" onClick={() => { onPick(k, bar.events[0] || {}); if (onVoicings && bar.events.length) onVoicings(bar.events.map((e) => ({ symbol: symOf(bar, e), frets: e.frets })).filter((c, i, a) => i === 0 || c.symbol !== a[i - 1].symbol)); }}
-              style={{ position: "relative", background: C.bg, border: `1px solid ${isSel ? C.amber : C.border}`, borderRadius: 8, padding: "10px 4px 8px", cursor: "pointer", minHeight: 56, textAlign: "center" }}>
+            <button key={k} className="meas" onClick={() => { onPick(k, bar.events[0] || {}); if (onVoicings && bar.events.length) onVoicings(bar.events.map((e) => ({ symbol: symOf(bar, e), frets: e.frets, midis: e.midis, key: `${bar.number}.${e.beat}`, detected: e.symbol })).filter((c, i, a) => i === 0 || c.symbol !== a[i - 1].symbol)); }}
+              style={{ position: "relative", background: C.bg, border: `1px solid ${isSel ? C.amber : C.border}`, boxShadow: gridCol ? `inset 0 3px 0 ${gridCol}b0` : "none", borderRadius: 8, padding: "10px 4px 8px", cursor: "pointer", minHeight: 56, textAlign: "center" }}>
               <span style={{ position: "absolute", top: 3, left: 6, fontSize: 9, color: C.dim }}>{bar.number}</span>
+              {bar.section && <span data-section={sectionKind(bar.section)} style={{ position: "absolute", top: 3, right: 6, left: 22, textAlign: "right", fontSize: 8, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: gridCol || C.dim, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{bar.section}</span>}
               <div style={{ marginTop: 6, fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: collapsed.join(" ").length > 6 ? 13 : 17, color: C.cyan, lineHeight: 1.15 }}>{collapsed.join(" ")}</div>
             </button>
           );
         })}
       </div>
-      <div style={{ fontSize: 11, color: C.dim, marginTop: 8 }}>Tap any bar for its guitar voicings.</div>
+      <div style={{ fontSize: 11, color: C.dim, marginTop: 8 }}>Tap any bar for its notes and voicings.</div>
     </>
   );
 }
@@ -3421,7 +3464,7 @@ function VoicingDiagram({ v, mode, lib, C, leftHanded }) {
         strings: v.frets.length, frets: p.frets, position: p.position, noPosition: true,   // the tile's badge names the fret
         color: C.text, fingerColor: _VC_DOT, fingerTextColor: _VC_DOT_TEXT, fingerSize: 0.72, fingerTextSize: 24,
         emptyStringIndicatorSize: 0.55, strokeWidth: 2, nutWidth: 9, sidePadding: 0.18, showFretMarkers: false,
-        fontFamily: "'IBM Plex Mono', ui-monospace, monospace",
+        fontFamily: UI_FONT,
       }).chord({ fingers: p.fingers, barres: p.barres }).draw();
       const svg = el.querySelector("svg");
       if (svg) { svg.style.width = "100%"; svg.style.height = "auto"; svg.setAttribute("role", "img"); svg.setAttribute("aria-label", `frets ${v.frets.map((f) => (f < 0 ? "x" : f)).join(" ")}`); }
@@ -3454,9 +3497,28 @@ function KeyboardDiagram({ v, mode, C }) {
 }
 
 const _INST_KEY = "ttp:instrument", _LEFT_KEY = "ttp:leftHanded";
-function ChordVoicingModal({ choices, start = 0, onClose, C, useSharp, sequence }) {
+/* The chord sheet's notes: the event's own pitches, else its frets in standard tuning (a PDF chart). */
+function _choiceMidis(c) {
+  if (!c) return null;
+  if (Array.isArray(c.midis) && c.midis.length) return c.midis;
+  if (c.frets && Object.keys(c.frets).length) return Object.entries(c.frets).map(([si, f]) => TUNINGS.Standard[+si] + f).filter(Number.isFinite);
+  return null;
+}
+const _reducedMotion = () => { try { return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches); } catch (_) { return false; } };
+const _focusables = (root) => root ? [...root.querySelectorAll('button:not([disabled]),[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),summary,[tabindex]:not([tabindex="-1"])')].filter((el) => el.offsetParent !== null || el === document.activeElement) : [];
+
+/* ---- Chord sheet (redesign step 3, 2026-11-27) ------------------------------
+ * Tap a chord on the lead sheet or a bar in the grid → a sheet slides up from the bottom: the chord as the chart's
+ * NOTES read it (notes with their intervals, bass, match %, other readings, Hear it, Change chord — what the old
+ * side "Chord readout" panel showed, which sat a screen below the chart on a phone), then its diagrams (Fingers /
+ * Intervals, instruments, substitutions). Drag the handle down, tap outside, × or Escape to close; Tab stays inside
+ * while it is open and focus goes back to the chord. A choice is { symbol, frets?, midis?, key?, detected? }. */
+function ChordSheet({ choices, start = 0, onClose, onRename, C, useSharp, sequence }) {
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
+  const sheet = useRef(null), closeBtn = useRef(null), dragRef = useRef(null);
+  const [dragY, setDragY] = useState(0), [dragging, setDragging] = useState(false);
+  const [renaming, setRenaming] = useState(false), [draftName, setDraftName] = useState("");
   // choices: [{ symbol, frets? }] — the chord(s) tapped (a grid bar can hold several)
   const [idx, setIdx] = useState(start);
   const [stack, setStack] = useState([]);              // substitution taps: symbols opened from this chord
@@ -3486,11 +3548,23 @@ function ChordVoicingModal({ choices, start = 0, onClose, C, useSharp, sequence 
     let live = true;
     loadChordDictionary().then((d) => { if (live) setDict(d); }).catch((err) => { if (live) { setDict(null); setDictErr(err.message || String(err)); } });
     loadSVGuitar().then((l) => { if (live) setLib(l); }).catch((err) => { if (live) setLibErr(err.message || String(err)); });
-    const onKey = (e) => { if (e.key === "Escape") closeRef.current(); };
+    const onKey = (e) => {
+      if (e.key === "Escape") { closeRef.current(); return; }
+      if (e.key !== "Tab" || !sheet.current) return;                 // focus trap: Tab cycles inside the sheet
+      const f = _focusables(sheet.current); if (!f.length) return;
+      const first = f[0], last = f[f.length - 1], at = document.activeElement;
+      if (e.shiftKey && (at === first || !sheet.current.contains(at))) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && (at === last || !sheet.current.contains(at))) { e.preventDefault(); first.focus(); }
+    };
     window.addEventListener("keydown", onKey);
     const prevOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
-    return () => { live = false; window.removeEventListener("keydown", onKey); document.body.style.overflow = prevOverflow; if (player.current) player.current.stop(); };
+    const returnTo = document.activeElement;
+    try { if (closeBtn.current) closeBtn.current.focus({ preventScroll: true }); } catch (_) {}
+    return () => {
+      live = false; window.removeEventListener("keydown", onKey); document.body.style.overflow = prevOverflow; if (player.current) player.current.stop();
+      try { if (returnTo && returnTo.isConnected && returnTo.focus) returnTo.focus({ preventScroll: true }); } catch (_) {}
+    };
   }, []);
   useEffect(() => { if (body.current) body.current.scrollTop = 0; }, [cur.symbol]);
 
@@ -3517,18 +3591,108 @@ function ChordVoicingModal({ choices, start = 0, onClose, C, useSharp, sequence 
   };
   const badge = (v) => (v.baseFret <= 1 ? "open" : `${v.baseFret}fr`);
 
+  // the TAPPED chord's notes (not a substitution or a chord ◀ / ▶ walked to: those have no notes in the chart)
+  const tapped = !stack.length && !walked ? choices[Math.min(idx, choices.length - 1)] : null;
+  const reading = useMemo(() => (tapped ? readChord(_choiceMidis(tapped), { useSharp }) : null), [tapped, useSharp]);
+  const confCol = (c) => (c >= 0.999 ? C.green : c >= 0.7 ? C.cyan : "#e9a24b");
+  const hearChart = () => {
+    if (!reading) return;
+    if (player.current) player.current.stop();
+    const score = { timeSig: [4, 4], bars: [{ number: 1, events: [{ symbol: cur.symbol, beat: 0, durBeats: 3, qbeat: 0, qdur: 3, midis: reading.midis }] }] };
+    player.current = playScore(score, 100, { onEnd: () => setHeard("") });
+    setHeard("chart");
+  };
+  const canRename = !!(onRename && tapped && tapped.key);
+  // Enter in the name box must preventDefault: focus returns to the chord button on close, and the same keystroke's
+  // keypress would "click" it and reopen the sheet (caught by bench/sheet-e2e.mjs)
+  const rename = (sym) => {
+    const v = (sym || "").trim(); if (!canRename || !v || v === tapped.symbol) { setRenaming(false); return; }
+    const k = tapped.key, before = tapped.symbol, detected = tapped.detected;
+    onRename(k, v, detected);
+    showToast({ text: `${before} → ${v}`, action: { label: "Undo", fn: () => onRename(k, before, detected) } });
+    closeRef.current();
+  };
+  // drag the handle down to dismiss (a flick or > 110 px); otherwise it springs back
+  const onHandleDown = (e) => { dragRef.current = { y0: e.clientY, t0: performance.now(), dy: 0 }; setDragging(true); try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_) {} };
+  const onHandleMove = (e) => { const d = dragRef.current; if (!d) return; d.dy = Math.max(0, e.clientY - d.y0); setDragY(d.dy); };
+  const onHandleUp = () => {
+    const d = dragRef.current; dragRef.current = null; setDragging(false); if (!d) return;
+    const v = d.dy / Math.max(1, performance.now() - d.t0);
+    if (d.dy > 110 || (d.dy > 30 && v > 0.6)) { setDragY(window.innerHeight || 900); setTimeout(() => closeRef.current(), _reducedMotion() ? 0 : 180); }
+    else setDragY(0);
+  };
+
   return (
-    <div role="dialog" aria-modal="true" aria-label={`${title} voicings`} onClick={onClose}
-      style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(4,6,12,0.72)", display: "flex", alignItems: "center", justifyContent: "center", padding: "max(12px, env(safe-area-inset-top)) 10px max(12px, env(safe-area-inset-bottom))" }}>
-      <div onClick={(e) => e.stopPropagation()}
-        style={{ width: "100%", maxWidth: 560, maxHeight: "100%", display: "flex", flexDirection: "column", background: C.panel, border: `1.5px solid ${C.cyan}`, borderRadius: 16, overflow: "hidden", boxShadow: "0 12px 40px rgba(0,0,0,0.5)" }}>
-        <div style={{ padding: "14px 16px 12px", borderBottom: `1px solid ${C.border}` }}>
+    <div role="dialog" aria-modal="true" aria-label={`${title} — chord and voicings`} onClick={onClose} className="tdp-sheet-backdrop"
+      style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(4,6,12,0.62)", display: "flex", alignItems: "flex-end", justifyContent: "center", paddingTop: "max(12px, env(safe-area-inset-top))" }}>
+      <div ref={sheet} data-chord-sheet className="tdp-sheet" onClick={(e) => e.stopPropagation()}
+        style={{ width: "100%", maxWidth: 640, maxHeight: "100%", display: "flex", flexDirection: "column", background: C.panel, border: `1.5px solid ${C.cyan}`, borderBottom: "none", borderRadius: "18px 18px 0 0", overflow: "hidden", boxShadow: "0 -12px 40px rgba(0,0,0,0.5)", paddingBottom: "env(safe-area-inset-bottom)",
+          transform: dragY ? `translateY(${dragY}px)` : undefined, transition: dragging ? "none" : "transform .26s cubic-bezier(.2,.9,.3,1.12)" }}>
+        <div data-sheet-handle aria-hidden="true" onPointerDown={onHandleDown} onPointerMove={onHandleMove} onPointerUp={onHandleUp} onPointerCancel={onHandleUp}
+          style={{ flex: "none", height: 26, display: "flex", alignItems: "center", justifyContent: "center", cursor: dragging ? "grabbing" : "grab", touchAction: "none" }}>
+          <span style={{ width: 40, height: 5, borderRadius: 3, background: C.border }} />
+        </div>
+        <div style={{ padding: "0 16px 12px", borderBottom: `1px solid ${C.border}` }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
-            <span style={{ font: "700 26px 'Space Mono', monospace", color: C.amber }}>{title}</span>
+            <span style={{ font: `700 26px ${CHORD_FONT}`, color: C.amber }}>{title}</span>
             {stack.length > 0 && (
               <button onClick={() => setStack((s) => s.slice(0, -1))} style={{ ...chip(C), padding: "2px 9px" }}>← {stack.length > 1 ? stack[stack.length - 2] : base.symbol}</button>
             )}
           </div>
+          {reading && (
+            <div data-chord-reading style={{ marginTop: 10, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 12, padding: "10px 12px" }}>
+              <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap", fontSize: 12, color: C.dim }}>
+                <span style={{ color: C.text, fontWeight: 600 }}>Notes in this chord</span>
+                {reading.confidence != null && <span style={{ color: confCol(reading.confidence), fontWeight: 600 }}>{Math.round(reading.confidence * 100)}% match{reading.missing ? ` · missing ${reading.missing}` : ""}{reading.extra ? ` · +${reading.extra} extra` : ""}</span>}
+                {reading.symbol !== cur.symbol && <span>· the notes read as <b style={{ color: C.chord, fontFamily: CHORD_FONT }}>{reading.symbol}</b></span>}
+              </div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+                {reading.notes.map((n) => (
+                  <span key={n.pc} style={{ display: "inline-flex", alignItems: "baseline", gap: 4, background: C.raised, border: `1px solid ${n.bass ? C.amber : C.border}`, borderRadius: 999, padding: "3px 10px", fontSize: 13 }}>
+                    <b style={{ color: C.text, fontFamily: CHORD_FONT }}>{n.name}</b>
+                    {n.interval && <span style={{ color: C.cyan, fontSize: 11 }}>{n.interval}</span>}
+                    {n.bass && <span style={{ color: C.amber, fontSize: 10 }}>bass</span>}
+                  </span>
+                ))}
+              </div>
+              {reading.secondOpinion && (
+                <div style={{ fontSize: 11, color: C.dim, marginTop: 8, lineHeight: 1.5 }}>
+                  <span style={{ color: C.cyan }}>Second opinion:</span> <b style={{ color: C.text, fontFamily: CHORD_FONT }}>{reading.secondOpinion.symbol}</b> ({Math.round(reading.secondOpinion.confidence * 100)}%, model) — the engine was unsure; the chart keeps the engine's read.
+                </div>
+              )}
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginTop: 10 }}>
+                <button onClick={hearChart} style={{ ...chip(C), padding: "4px 12px", color: heard === "chart" ? C.green : C.amber, borderColor: heard === "chart" ? C.green : C.border }}>▶ Hear it</button>
+                {canRename && !renaming && <button onClick={() => { setDraftName(tapped.symbol); setRenaming(true); }} style={{ ...chip(C), padding: "4px 12px" }}>✎ Change chord</button>}
+                {canRename && renaming && (
+                  <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                    <input autoFocus value={draftName} onChange={(e) => setDraftName(e.target.value)} aria-label="new chord name"
+                      onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); rename(draftName); } if (e.key === "Escape") { e.stopPropagation(); setRenaming(false); } }}
+                      style={{ width: 110, background: C.raised, color: C.amber, border: `1px solid ${C.amber}`, borderRadius: 8, padding: "5px 8px", font: `700 14px ${CHORD_FONT}` }} />
+                    <button onClick={() => rename(draftName)} style={{ ...chip(C), padding: "4px 12px", color: C.green, borderColor: C.green }}>Save</button>
+                  </span>
+                )}
+              </div>
+              {reading.alternatives.length > 0 && (
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ fontSize: 11, color: C.dim, marginBottom: 6 }}>Could also be{canRename ? " — tap to use that name" : ""}</div>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    {reading.alternatives.map((a) => (
+                      <button key={a.symbol} onClick={() => (canRename ? rename(a.symbol) : setStack((st) => [...st, a.symbol]))} title={a.name}
+                        style={{ ...chip(C), padding: "4px 10px", color: C.text }}><b style={{ fontFamily: CHORD_FONT }}>{a.symbol}</b> <span style={{ color: C.dim }}>{Math.round(a.confidence * 100)}%</span></button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <details data-readout-details style={{ marginTop: 8, fontSize: 11, color: C.dim }}>
+                <summary style={{ cursor: "pointer", minHeight: 28, display: "flex", alignItems: "center" }}>Details: bit masks and ranking scores</summary>
+                <div style={{ marginTop: 6, lineHeight: 1.6, fontFamily: MONO_FONT }}>
+                  <div>pitch classes 0b{toBinary12(reading.masks.chord)} = {reading.masks.chord}</div>
+                  {reading.masks.transposed != null && <div>root-relative 0b{toBinary12(reading.masks.transposed)} vs DB 0b{toBinary12(reading.masks.quality)}</div>}
+                  {reading.scores.map((c) => <div key={c.symbol}>{c.symbol} · score {c.score.toFixed(2)} · {Math.round(c.confidence * 100)}%</div>)}
+                </div>
+              </details>
+            </div>
+          )}
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginTop: 8 }}>
             {INSTRUMENT_ORDER.slice(0, 5).map((id) => (
               <button key={id} onClick={() => setInstrument(id)} style={{ ...chip(C), padding: "2px 9px", borderColor: instrument === id ? C.cyan : C.border, color: instrument === id ? C.cyan : C.dim }}>{INSTRUMENTS[id].name}</button>
@@ -3556,11 +3720,11 @@ function ChordVoicingModal({ choices, start = 0, onClose, C, useSharp, sequence 
             <div style={{ display: "inline-flex", border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden" }}>
               {[["fingers", "Fingers"], ["intervals", "Intervals"]].map(([m, label]) => (
                 <button key={m} onClick={() => setMode(m)}
-                  style={{ border: "none", padding: "7px 14px", cursor: "pointer", font: "600 13px 'IBM Plex Mono', monospace", background: mode === m ? C.cyan : C.bg, color: mode === m ? C.bg : C.dim }}>{label}</button>
+                  style={{ border: "none", padding: "7px 14px", cursor: "pointer", font: `600 13px ${UI_FONT}`, background: mode === m ? C.cyan : C.bg, color: mode === m ? C.bg : C.dim }}>{label}</button>
               ))}
             </div>
             <span style={{ fontSize: 12, color: C.cyan }}>{data ? `${data.total} voicing${data.total === 1 ? "" : "s"}` : "loading…"}</span>
-            <button onClick={onClose} aria-label="close" style={{ marginLeft: "auto", background: C.bg, border: `1px solid ${C.amber}`, color: C.amber, borderRadius: 10, padding: "6px 14px", fontSize: 15, cursor: "pointer" }}>×</button>
+            <button ref={closeBtn} onClick={onClose} aria-label="close" style={{ marginLeft: "auto", background: C.bg, border: `1px solid ${C.amber}`, color: C.amber, borderRadius: 10, padding: "6px 14px", fontSize: 15, cursor: "pointer" }}>×</button>
           </div>
         </div>
 
@@ -3810,7 +3974,7 @@ function ExportPanel({ exp, setExp, C, bpm, semis, copy, download, copied, downl
         </div>
       ) : (
         <textarea readOnly value={exp.text} spellCheck={false} className="tdp-scroll"
-          style={{ width: "100%", height: 120, resize: "vertical", boxSizing: "border-box", background: C.bg, color: C.text, border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, fontSize: 12, lineHeight: 1.5, fontFamily: "'IBM Plex Mono', monospace", outline: "none" }} />
+          style={{ width: "100%", height: 120, resize: "vertical", boxSizing: "border-box", background: C.bg, color: C.text, border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, fontSize: 12, lineHeight: 1.5, fontFamily: MONO_FONT, outline: "none" }} />
       )}
       {exp.fmt === "abc" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6, lineHeight: 1.6 }}>ABC notation 2.1 (UTF-8, <code>%abc-2.1</code> header) — real, playable notes + chord symbols, pitches written against the key signature. Copy it into any ABC player (e.g. abcjs / the editor at abcnotation.com), or download.<br />{setAbcExt && <AbcExtToggle C={C} ext={abcExt} setExt={setAbcExt} />}</div>}
       {exp.fmt === "musicxml" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>Save as <b>.musicxml</b> and open in MuseScore / Guitar Pro — carries chord symbols + notes + meter. Round-trips back into this app.</div>}
@@ -4252,7 +4416,7 @@ function ScanReviewRow({ C, it, pg, tok, checked, onCheck, onApprove, onReject, 
           aria-label={`select bar ${it.bar} ${it.name}`} style={{ width: 18, height: 18, flex: "none" }} />
         <div aria-hidden style={{ flex: "none", width: Math.round(bw * k), height: Math.round(bh * k), borderRadius: 3, background: `#fff url(${pg.preview}) no-repeat`, backgroundSize: `${pg.width * k}px ${pg.height * k}px`, backgroundPosition: `${-bx0 * k}px ${-by0 * k}px` }} />
         <span style={{ fontSize: 10, color: C.dim, flex: "none", width: 42 }}>bar {it.bar}</span>
-        <span style={{ fontSize: 15, fontWeight: 700, color: col, flex: 1, minWidth: 0, fontFamily: "'IBM Plex Mono', monospace" }}>{it.name}</span>
+        <span style={{ fontSize: 15, fontWeight: 700, color: col, flex: 1, minWidth: 0, fontFamily: UI_FONT }}>{it.name}</span>
         {it.status === "check" && onPick && it.alternatives.slice(0, 2).map((a) => (
           // the reader's runner-up readings: one tap uses (and approves) it
           <button key={a} onPointerDown={(e) => e.stopPropagation()} onPointerUp={(e) => e.stopPropagation()} onClick={(e) => { e.stopPropagation(); onPick(a); }}
@@ -4371,7 +4535,7 @@ function ScanPanel({ C, useSharp, pdfReady }) {
     <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", padding: 8, borderTop: `1px solid ${C.amber}`, background: C.panel }}>
       <span style={{ fontSize: 11, color: C.dim }}>{selItem ? `bar ${selItem.bar}` : "this box"}</span>
       <input value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && draftOk) save(draft); }} placeholder="chord, e.g. Bb7"
-        style={{ width: 110, background: C.bg, border: `1px solid ${draftOk ? C.border : C.red}`, color: C.text, borderRadius: 6, padding: "4px 8px", fontSize: 13, fontFamily: "'IBM Plex Mono', monospace" }} />
+        style={{ width: 110, background: C.bg, border: `1px solid ${draftOk ? C.border : C.red}`, color: C.text, borderRadius: 6, padding: "4px 8px", fontSize: 13, fontFamily: UI_FONT }} />
       <button disabled={!draftOk} onClick={() => save(draft)} style={{ ...chip(C), color: C.green }}>✓ Use</button>
       {selRead.r && selRead.r.alternatives && selRead.r.alternatives.map((a) => <button key={a} onClick={() => save(a)} style={chip(C)}>{a}</button>)}
       <button onClick={() => save("")} style={chip(C)}>not a chord</button>
@@ -4386,7 +4550,7 @@ function ScanPanel({ C, useSharp, pdfReady }) {
       <SectionLabel C={C}>SCAN A LEAD SHEET · photo or PDF</SectionLabel>
       <input ref={fileRef} type="file" onChange={onFile} style={{ display: "none" }} />
       <button onClick={() => fileRef.current && fileRef.current.click()} disabled={!!busy}
-        style={{ width: "100%", background: C.bg, border: `1px dashed ${C.border}`, color: C.amber, borderRadius: 10, padding: "22px 12px", fontSize: 14, cursor: busy ? "default" : "pointer", fontFamily: "'IBM Plex Mono', monospace" }}>
+        style={{ width: "100%", background: C.bg, border: `1px dashed ${C.border}`, color: C.amber, borderRadius: 10, padding: "22px 12px", fontSize: 14, cursor: busy ? "default" : "pointer", fontFamily: UI_FONT }}>
         {busy || "⬆  Upload a photo, screenshot or scanned PDF of a lead sheet"}
       </button>
       {/^reading chords/.test(busy) && <div style={{ marginTop: 6 }}><JobCancel C={C} model={window.TTP_CHORD_OCR} stall={ocrStall} label="the chord reader" /></div>}
@@ -4455,7 +4619,7 @@ function ScanPanel({ C, useSharp, pdfReady }) {
               <button key={k} onClick={() => pick(k)} title={r ? `${r.name} (${Math.round(r.prob * 100)}%)` : "not read as a chord — tap to add one"}
                 style={{ position: "absolute", left: `${(100 * (t.x0 - 3)) / p.width}%`, top: `${(100 * (t.y0 - 3)) / p.height}%`, width: `${(100 * (t.x1 - t.x0 + 7)) / p.width}%`, height: `${(100 * (t.y1 - t.y0 + 7)) / p.height}%`,
                   border: `${sel === k ? 3 : 1.5}px solid ${col}`, background: r ? "transparent" : "rgba(154,160,166,0.12)", borderRadius: 3, padding: 0, cursor: "pointer" }}>
-                {r && <span style={{ position: "absolute", left: 0, top: "100%", fontSize: 10, lineHeight: 1.1, color: "#fff", background: col, padding: "0 3px", borderRadius: 2, whiteSpace: "nowrap", fontFamily: "'IBM Plex Mono', monospace" }}>{r.name}</span>}
+                {r && <span style={{ position: "absolute", left: 0, top: "100%", fontSize: 10, lineHeight: 1.1, color: "#fff", background: col, padding: "0 3px", borderRadius: 2, whiteSpace: "nowrap", fontFamily: UI_FONT }}>{r.name}</span>}
               </button>
             );
           })}
@@ -4633,7 +4797,7 @@ function LyricsImport({ C }) {
         onChange={(e) => setRaw(e.target.value)}
         placeholder={"Paste chords-over-lyrics or ChordPro here…\n\n       C            G\nThere's a bright golden haze on the meadow"}
         spellCheck={false}
-        style={{ width: "100%", boxSizing: "border-box", minHeight: 120, resize: "vertical", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: 12, fontSize: 12.5, lineHeight: 1.5, color: C.text, fontFamily: "'IBM Plex Mono', monospace", marginBottom: 14 }}
+        style={{ width: "100%", boxSizing: "border-box", minHeight: 120, resize: "vertical", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: 12, fontSize: 12.5, lineHeight: 1.5, color: C.text, fontFamily: MONO_FONT, marginBottom: 14 }}
       />
 
       {parsed && parsed.sections.length > 0 ? (
@@ -4728,7 +4892,7 @@ function StaffView({ events, activeIdx, C, useSharp }) {
                 {ledgers(n.step).map((s) => <line key={s} x1={x - 10} y1={yOf(s)} x2={x + 10} y2={yOf(s)} stroke={C.border} strokeWidth={1} />)}
                 {n.acc && <text x={x - 15} y={y} fontSize={13} fill={color} dominantBaseline="middle" textAnchor="middle">{n.acc === "#" ? "♯" : "♭"}</text>}
                 <ellipse cx={x} cy={y} rx={6.4} ry={4.7} fill={color} style={active ? { filter: `drop-shadow(0 0 5px ${C.amber})` } : undefined} />
-                <text x={x} y={height - 6} fontSize={9} fill={active ? C.amber : C.dim} textAnchor="middle" fontFamily="'IBM Plex Mono', monospace">{n.name}</text>
+                <text x={x} y={height - 6} fontSize={9} fill={active ? C.amber : C.dim} textAnchor="middle" fontFamily={UI_FONT}>{n.name}</text>
               </g>
             );
           })}
@@ -5136,6 +5300,7 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
   const guardRead = (label, go) => { if (!chordEdits) { go(); return; } setPendingRead({ label, go, stale: false }); };
   const holdRead = (label, go) => { if (!chordEdits) { go(); return; } setPendingRead({ label, go, stale: true }); };
   const [dur, setDur] = useState(0);
+  const [peaks, setPeaks] = useState(null);           // redesign step 3: ~200 peaks of the recording for the scrubber
   const [playing, setPlaying] = useState(false);
   const [pos, setPos] = useState(0);
   const ref = useRef({});                            // { audioBuf, ds, sr, ctx, src, raf, startedAt }
@@ -5252,6 +5417,7 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
     for (let i = 0; i < L16.length; i++) mono[i] = (L16[i] + R16[i]) / 2;
     ref.current = { audioBuf, L16, R16, mono, sr, stereo: chs >= 2 };
     setDur(audioBuf.duration);
+    setPeaks(waveformPeaks(mono, 200));
     prepare(isolate, kOverride || kind);
   };
 
@@ -5907,6 +6073,7 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
           <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10, marginBottom: 8, fontSize: 11, color: C.dim }}>
             <button onClick={() => play()} style={{ ...chip(C), padding: "4px 12px", borderColor: playing ? C.green : C.border, color: playing ? C.green : C.amber }}>{playing ? "■ Stop stem" : "▶ Play stem"}</button>
             <span>{fmt(pos)} / {fmt(dur)}</span>
+            <WaveformScrubber peaks={peaks} dur={dur} pos={pos} onSeek={(t) => play(t)} marks={sections.map((x) => x.startSec)} fmt={fmt} C={C} />
             <CheckByEar C={C} score={audioScore} getBuffer={() => ref.current.audioBuf} onStart={stopPlay} />
             <span style={{ color: C.dim }}>
               ♩={bg.grid.follow ? "~" + Math.round(bpm) : +bpm.toFixed(1)} · {bpb}/4 (Tempo &amp; bars above)
@@ -5938,6 +6105,7 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
           <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
             <button onClick={() => play()} style={{ ...chip(C), padding: "5px 14px", borderColor: playing ? C.green : C.border, color: playing ? C.green : C.amber }}>{playing ? "■ Stop" : "▶ Play"}</button>
             <span style={{ fontSize: 11, color: C.dim }}>{fmt(pos)} / {fmt(dur)} · {noteEvents.length} notes</span>
+            <WaveformScrubber peaks={peaks} dur={dur} pos={pos} onSeek={(t) => play(t)} marks={sections.map((x) => x.startSec)} fmt={fmt} C={C} />
           </div>
           <StaffView events={noteEvents} activeIdx={activeIdx} C={C} useSharp={useSharp} />
           <div className="tdp-scroll" style={{ display: "flex", flexWrap: "wrap", gap: 6, maxHeight: 360, overflow: "auto", paddingRight: 4 }}>
@@ -6731,6 +6899,39 @@ function HowItWorks({ C, folded, children }) {
     : <div style={style}>{children}</div>;
 }
 
+/* Waveform scrubber (redesign step 3): ~200 peaks of the recording drawn once as one SVG path; the played part is the
+ * same path clipped, the playhead a 2 px line moved by transform. Tap / click anywhere to play from there; ← / → seek
+ * 5 s. Section starts are ticks. Grows to fill its row (flex), so it wraps under the buttons on a phone. */
+function WaveformScrubber({ peaks, dur, pos, onSeek, marks, fmt, C }) {
+  const n = peaks ? peaks.length : 0;
+  const d = useMemo(() => {
+    if (!n) return "";
+    let out = "";
+    for (let i = 0; i < n; i++) { const h = Math.max(0.6, peaks[i] * 18); out += `M${i + 0.5} ${(20 - h).toFixed(2)}V${(20 + h).toFixed(2)}`; }
+    return out;
+  }, [peaks, n]);
+  const wrap = useRef(null);
+  const cid = useMemo(() => "tdpwave" + Math.random().toString(36).slice(2, 9), []);
+  if (!n || !(dur > 0)) return null;
+  const frac = Math.max(0, Math.min(1, (pos || 0) / dur));
+  const at = (clientX) => { const r = wrap.current && wrap.current.getBoundingClientRect(); if (!r || !r.width) return; onSeek(Math.max(0, Math.min(1, (clientX - r.left) / r.width)) * dur); };
+  const label = fmt ? `${fmt(pos || 0)} of ${fmt(dur)}` : `${Math.round(pos || 0)} of ${Math.round(dur)} s`;
+  return (
+    <div ref={wrap} data-waveform role="slider" tabIndex={0} aria-label="Play from here (recording position)" aria-valuemin={0} aria-valuemax={Math.round(dur)} aria-valuenow={Math.round(pos || 0)} aria-valuetext={label}
+      onClick={(e) => at(e.clientX)}
+      onKeyDown={(e) => { if (e.key === "ArrowLeft" || e.key === "ArrowRight") { e.preventDefault(); onSeek(Math.max(0, Math.min(dur - 0.05, (pos || 0) + (e.key === "ArrowLeft" ? -5 : 5)))); } }}
+      style={{ position: "relative", flex: "1 1 220px", minWidth: 160, height: 44, cursor: "pointer", touchAction: "manipulation", borderRadius: 6, background: C.bg, border: `1px solid ${C.border}`, overflow: "hidden" }}>
+      <svg viewBox={`0 0 ${n} 40`} preserveAspectRatio="none" width="100%" height="100%" aria-hidden="true" style={{ position: "absolute", inset: 0, display: "block" }}>
+        <path d={d} stroke={C.border} strokeWidth="0.62" />
+        <clipPath id={cid}><rect x="0" y="0" width={(frac * n).toFixed(2)} height="40" /></clipPath>
+        <path d={d} stroke={C.amber} strokeWidth="0.62" clipPath={`url(#${cid})`} />
+        {(marks || []).filter((t) => t > 0 && t < dur).map((t, i) => <line key={i} x1={(t / dur) * n} x2={(t / dur) * n} y1="0" y2="40" stroke={C.cyan} strokeWidth="0.4" strokeDasharray="2 2" />)}
+      </svg>
+      <div className="tdp-wave-head" aria-hidden="true" style={{ position: "absolute", top: 0, bottom: 0, left: 0, width: 2, background: C.text, opacity: 0.85, transform: `translateX(${(frac * ((wrap.current && wrap.current.clientWidth) || 0)).toFixed(1)}px)` }} />
+    </div>
+  );
+}
+
 function SectionLabel({ children, C, style }) { return <div style={{ fontSize: 10, letterSpacing: 2.5, color: C.dim, margin: "0 0 8px", ...style }}>{children}</div>; }
 function Control({ label, children, C }) { return (<div><div style={{ fontSize: 10, letterSpacing: 2, color: C.dim, marginBottom: 5 }}>{label}</div>{children}</div>); }
 function Field({ k, v, C, color }) {
@@ -6754,10 +6955,10 @@ function LedRow({ mask, labels, C, litColor, dbMask }) {
 }
 
 /* ---- inline style atoms --------------------------------------------------- */
-const chip = (C) => ({ background: C.bg, border: `1px solid ${C.border}`, color: C.dim, borderRadius: 999, padding: "4px 10px", fontSize: 11, cursor: "pointer", fontFamily: "'IBM Plex Mono', monospace" });
-const toggle = (C) => ({ flex: 1, background: C.bg, border: `1px solid ${C.border}`, color: C.dim, borderRadius: 6, padding: "7px 4px", fontSize: 12, cursor: "pointer", fontFamily: "'IBM Plex Mono', monospace" });
+const chip = (C) => ({ background: C.bg, border: `1px solid ${C.border}`, color: C.dim, borderRadius: 999, padding: "4px 10px", fontSize: 11, cursor: "pointer", fontFamily: UI_FONT });
+const toggle = (C) => ({ flex: 1, background: C.bg, border: `1px solid ${C.border}`, color: C.dim, borderRadius: 6, padding: "7px 4px", fontSize: 12, cursor: "pointer", fontFamily: UI_FONT });
 const activeToggle = (C) => ({ borderColor: C.amber, color: C.amber, boxShadow: `inset 0 0 12px ${C.amber}22` });
 /* the same keys, unselected: React DELETES a style key that disappears, and deleting borderColor under the `border`
  * shorthand drops the colour to the browser's default (white in dark mode) — the "visited tab" look (UX review #16) */
 const inactiveToggle = (C) => ({ borderColor: C.border, boxShadow: "none" });
-const stepper = (C) => ({ width: 30, background: C.bg, border: `1px solid ${C.border}`, color: C.text, borderRadius: 6, padding: "6px 0", fontSize: 14, cursor: "pointer", fontFamily: "'IBM Plex Mono', monospace" });
+const stepper = (C) => ({ width: 30, background: C.bg, border: `1px solid ${C.border}`, color: C.text, borderRadius: 6, padding: "6px 0", fontSize: 14, cursor: "pointer", fontFamily: UI_FONT });

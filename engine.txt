@@ -14734,7 +14734,84 @@ function _pdfBoxed(vec, w, d) {
   return l && r && t && b;
 }
 
+/* ==== UI READINGS (redesign step 3, 2026-11-27) ===============================
+ * Pure helpers behind the chord sheet and the polish kit. No React, no DOM.
+ *
+ * readChord(midis, { useSharp }) — the engine's reading of one sounding chord, shaped for display: the symbol, the
+ *   notes (root first) with their interval names, the bass, the match (Jaccard confidence, Invariant 3 — never the
+ *   ranking score), the other readings, and the raw masks / scores for a Details fold. The same `recognise` path the
+ *   Manual readout uses, so the sheet and the readout can never disagree. Empty / non-finite input → null.
+ * sectionKind(label) — a section label's colour band: intro / verse / pre / chorus / bridge / solo / outro / other.
+ *   Numbered repeats share a kind ("Verse 2" = verse); a bare rehearsal letter maps by letter (A verse, B chorus,
+ *   C bridge, D other) so a lead sheet's A–B–A form reads as two colours.
+ * waveformPeaks(samples, n) — n buckets of the peak |sample| (0..1) for a scrubber; robust to n > length. */
+function readChord(midis, opts = {}) {
+  const useSharp = opts.useSharp !== false;
+  const nm = useSharp ? NOTE_SHARP : NOTE_FLAT;
+  const list = (Array.isArray(midis) ? midis : []).filter((m) => Number.isFinite(m)).map((m) => Math.round(m)).sort((a, b) => a - b);
+  if (!list.length) return null;
+  const pcOf = (m) => ((m % 12) + 12) % 12;
+  const norm = normalise(list.map((m) => ({ midi: m, name: nm[pcOf(m)] })));
+  norm.bassPc = pcOf(list[0]);
+  norm.chroma = [...new Set(list.map(pcOf))].sort((a, b) => a - b);
+  norm.chordMask = makeMask(norm.chroma);
+  const result = recognise(norm.chroma, norm.chordMask, norm.bassPc);
+  if (!result) return null;
+  const best = result.single ? null : result.best;
+  const root = best ? best.root : result.roots;
+  const pcs = norm.chroma.slice().sort((a, b) => ((a - root + 12) % 12) - ((b - root + 12) % 12));
+  const notes = pcs.map((pc) => ({ pc, name: nm[pc], interval: best ? INTERVAL_LABELS[(pc - root + 12) % 12] : null, bass: pc === norm.bassPc }));
+  const nameOf = (c) => nm[c.root] + c.quality.suffix;
+  let secondOpinion = null;
+  if (best) {
+    const arb = arbitrateChord(result, Array.from({ length: 12 }, (_, i) => (norm.chordMask >> i) & 1), {});
+    if (arb && arb.source === "classifier" && arb.secondOpinion) secondOpinion = { symbol: nm[arb.secondOpinion.root] + arb.secondOpinion.quality.suffix, confidence: arb.secondOpinion.confidence };
+  }
+  return {
+    symbol: symbolOf(result, useSharp), single: !!result.single,
+    root, rootName: nm[root], quality: best ? best.quality.name : null, suffix: best ? best.quality.suffix : null,
+    bassPc: norm.bassPc, bassName: nm[norm.bassPc], isSlash: !!result.isSlash,
+    confidence: best ? best.confidence : null, missing: best ? best.missing : 0, extra: best ? best.extra : 0,
+    notes, midis: list,
+    alternatives: best ? result.candidates.slice(1).map((c) => ({ symbol: nameOf(c), name: c.quality.name, confidence: c.confidence })) : [],
+    secondOpinion,
+    masks: { chord: norm.chordMask, transposed: best ? best.transposed : null, quality: best ? best.quality.mask : null },
+    scores: best ? result.candidates.map((c) => ({ symbol: nameOf(c), score: c.score, confidence: c.confidence })) : [],
+  };
+}
+const SECTION_KINDS = ["intro", "verse", "pre", "chorus", "bridge", "solo", "outro", "other"];
+function sectionKind(label) {
+  const s = String(label == null ? "" : label).trim().toLowerCase();
+  if (!s) return null;
+  if (/^pre[\s-]?chorus|^pre\b|^build|^lift|^channel/.test(s)) return "pre";
+  if (/^intro|^opening|^count/.test(s)) return "intro";
+  if (/^verse|^vs\b|^strophe/.test(s)) return "verse";
+  if (/^chorus|^refrain|^hook|^post[\s-]?chorus|^tag\b/.test(s)) return "chorus";
+  if (/^bridge|^middle|^interlude|^breakdown/.test(s)) return "bridge";
+  if (/^solo|^instrumental|^improv|^head|^vamp|^riff/.test(s)) return "solo";
+  if (/^outro|^coda|^ending|^end\b|^fine|^fade/.test(s)) return "outro";
+  const m = /^\[?([a-h])\]?\d*'?$/.exec(s);
+  if (m) return { a: "verse", b: "chorus", c: "bridge", d: "other", e: "solo", f: "other", g: "other", h: "other" }[m[1]];
+  return "other";
+}
+function waveformPeaks(samples, n = 200) {
+  const len = samples && samples.length ? samples.length : 0;
+  const count = Math.max(1, Math.floor(n) || 1);
+  const out = new Float32Array(count);
+  if (!len) return out;
+  let top = 0;
+  for (let i = 0; i < count; i++) {
+    const a = Math.floor((i * len) / count), b = Math.max(a + 1, Math.floor(((i + 1) * len) / count));
+    let p = 0;
+    for (let j = a; j < b && j < len; j++) { const v = Math.abs(samples[j]); if (v > p) p = v; }
+    out[i] = p; if (p > top) top = p;
+  }
+  if (top > 0) for (let i = 0; i < count; i++) out[i] = Math.min(1, out[i] / top);
+  return out;
+}
+
 export {
+  readChord, SECTION_KINDS, sectionKind, waveformPeaks,
   chordOcrSplitRead,
   PDF_TEXT, pdfPageVectors, pdfScoreLayout, pdfChordPages, _pdfBoxed, _pdfMeasureAt,
   SCORE_LINK, unrollRepeatOrder, scorePartNotes, scoreLinkParts, scoreHarmonyGrid, linkBeatDTW, linkScoreToAudio, linkSecToQ, linkQToSec,

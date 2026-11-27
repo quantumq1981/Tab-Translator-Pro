@@ -86,11 +86,11 @@ for (const [label, opts] of [["phone", { ...devices["iPhone 13"] }], ["iPad", { 
   // tap the first chord of the lead sheet
   await page.locator("button").filter({ hasText: /^[A-G][#b]?(maj7|m7|m|7|6|9)?$/ }).first().click(); await page.waitForTimeout(400);
   const ro = await page.evaluate(() => {
-    const sec = [...document.querySelectorAll("section")].find((s) => /CHORD READOUT/.test(s.innerText));
+    const sec = document.querySelector("[data-chord-reading]");   // step 3: the reading lives in the chord sheet
     const det = sec && sec.querySelector("[data-readout-details]");
-    return sec ? { notes: /NOTES IN THIS CHORD/.test(sec.innerText), shownBits: /0b[01]{12}/.test(sec.innerText), detClosed: !!det && !det.open, detHasBits: !!det && /0b[01]{12}/.test(det.textContent), score: /score \d/.test(sec.innerText) } : null;
+    return sec ? { notes: /Notes in this chord/.test(sec.innerText), shownBits: /0b[01]{12}/.test(sec.innerText.replace(/Details[\s\S]*$/, "")), detClosed: !!det && !det.open, detHasBits: !!det && /0b[01]{12}/.test(det.textContent), score: /score \d/.test(sec.innerText.replace(/Details[\s\S]*$/, "")) } : null;
   });
-  ok(L("#10 readout shows NOTES IN THIS CHORD"), ro && ro.notes, ro);
+  ok(L("#10 the chord sheet shows the chord's notes"), ro && ro.notes, ro);
   ok(L("#10 bit strings and scores are hidden until Details opens"), ro && !ro.shownBits && !ro.score && ro.detClosed && ro.detHasBits, ro);
   const footer = await page.evaluate(() => { const f = document.querySelector("footer"); const d = f && f.querySelector("details"); return { folded: !!d && !d.open, visibleText: f ? f.innerText : "" }; });
   ok(L("#10 the engine footer is folded"), footer.folded && !/makeMask/.test(footer.visibleText), footer.visibleText.slice(0, 60));

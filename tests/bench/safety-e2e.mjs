@@ -51,7 +51,7 @@ const bar1 = await page.evaluate(() => { const n = [...document.querySelectorAll
 ok("#4 bar 1 is not empty", /[A-G]/.test(bar1.replace(/^1/, "")), bar1.slice(0, 60));
 
 // ---- #3 empty readout until a chord is tapped
-ok("#3 readout says no chord selected", await page.locator("[data-readout-empty]").isVisible());
+ok("#3 a chart has no readout column (step 3: a tapped chord opens the chord sheet)", !(await page.getByText("LIVE READOUT", { exact: true }).isVisible().catch(() => false)) && !(await page.locator("[data-chord-sheet]").count()));
 ok("#3 the Manual preset chord (C/E) is not shown", !(await page.getByText("SLASH CHORD · BASS ≠ ROOT").isVisible().catch(() => false)));
 
 // ---- #1 an edit survives tab changes
@@ -69,9 +69,9 @@ ok("#1 the PDF tab does not show the GP chart's edit", (await count("F#13")) ===
 await tab("MusicXML / GP"); await page.waitForTimeout(300);
 ok("#1 edit survives PDF Chart → back", (await count("F#13")) > 0);
 // the panel remounted on the tab switch, so it is out of edit mode: a tap picks the chord (and opens its voicings)
-await page.locator("button").filter({ hasText: /^[A-G][#b]?(m|maj7|m7|7)?\d?$/ }).first().click(); await page.waitForTimeout(400);
+await page.locator("button").filter({ hasText: /^[A-G][#b]?(m|maj7|m7|7)?\d?$/ }).first().click(); await page.waitForTimeout(600);
+ok("#3 tapping a chord shows THIS chart's chord in the sheet", /Notes in this chord/.test(await page.locator("[data-chord-reading]").innerText().catch(() => "")));
 await page.keyboard.press("Escape"); await page.waitForTimeout(200);
-ok("#3 tapping a chord fills the readout", !(await page.locator("[data-readout-empty]").isVisible()));
 
 // ---- #14 Start fresh with Undo
 await page.waitForTimeout(800); // the session meta write

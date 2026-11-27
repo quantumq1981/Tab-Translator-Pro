@@ -26,7 +26,7 @@ expect(/data-pending-read/.test(audio) && /Keep my edits/.test(audio) && /previo
 expect(/setCuts\(\(n\) => n \+/.test(audio), "#2 deleted / merged chords count as edits");
 
 // #3 readout empty outside Manual until a chord is tapped
-expect(/mode !== "manual" && !\(selFrets \|\| selMidis\) \? \(\s*<div data-readout-empty/.test(ui), "#3 the readout is empty outside Manual until a chord is tapped");
+expect(/\{mode === "manual" && \(\s*<section[^>]*>\s*<SectionLabel C=\{C\}>LIVE READOUT<\/SectionLabel>/.test(ui) && !/CHORD READOUT/.test(ui), "#3 the readout column is Manual's only — a chart never shows the Manual chord (step 3: a tapped chord opens the chord sheet)");
 
 // #4 a multi-part file opens on Harmony
 const opened = between("async function parseOpenedScore", "\n}\n");
