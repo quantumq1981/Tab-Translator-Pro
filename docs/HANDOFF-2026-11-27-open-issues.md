@@ -9,9 +9,9 @@ and where to start looking. Nothing here blocks merging step 5 (#167): none of t
 | # | Item | Kind | Introduced by | Priority |
 |---|------|------|---------------|----------|
 | R1 | Printed chart header: `♩` prints as a wrong glyph; the PDF's text is split into letters | **Regression** | Step 3 (#165): the system-font switch | **Fixed 2026-11-27** (see R1) |
-| P1 | `instruments-e2e`: the Beginner "capo 1 to play along" hint | Test failure | Before the redesign | Medium |
-| P2 | `note-editor-e2e`: dragging a fret number up a string doesn't re-string the note | Test failure | Before the redesign | Medium |
-| P3 | `tuning-e2e`: the "Use Drop D" button never appears | Test failure | Before the redesign | Medium |
+| P1 | `instruments-e2e`: the Beginner "capo 1 to play along" hint | Test failure | Before the redesign | **Fixed 2026-11-27** (bench) |
+| P2 | `note-editor-e2e`: dragging a fret number up a string doesn't re-string the note | Test failure | Before the redesign | **Fixed 2026-11-27** (bench) |
+| P3 | `tuning-e2e`: the "Use Drop D" button never appears | Test failure | Before the redesign | **Fixed 2026-11-27** (app: accessible names) |
 | U1 | Deleting the open song from the Library: it comes back on the next launch | Behaviour | Before the redesign | Low |
 | U2 | Text sizes (UX review #11) | Open UX item | — | Low |
 | U3 | `window.prompt` for rename / tags / new setlist (UX review #13) | Open UX item | — | Low |
@@ -75,6 +75,16 @@ visually on an iPhone / iPad too (Safari's print uses SF, which may have `♩`; 
 
 ## P1 — `instruments-e2e`: the Beginner "capo 1 to play along" hint  (before the redesign)
 
+**Status: FIXED (2026-11-27) — the bench, not the app.** The first suspect was right: since UX review #4 a multi-part
+file opens on **Harmony**. Anthropology's Harmony (and its Chords part) read **G minor** → Em shapes, **capo 3**; only the
+melody part (Track 1, which the bench used to land on) reads **B♭** → A shapes, capo 1. G minor and B♭ share their notes,
+so capo 3 plays along too. The bench now checks Harmony gives a capo hint, then picks Track 1 for the exact B♭ case (11/11).
+**Found, not fixed (a key-model question, for the owner):** the key the chart SHOWS (`analyzeKeyCandidates` on the
+Pro-named, simplified score) and the key the Beginner level uses (`analyzeKey` on the raw score, on purpose — see WO-4)
+differ on 14 corpus files (Anthropology Harmony: shown F, level Gm; Cheryl: C vs Am; Take Five: Em vs E …), so the capo
+hint can disagree with the key on screen. Options: make the level use the shown key (or the user's key, which it already
+does), or show the level's key. Not changed here.
+
 **What happens.** Peg.gp4 → ⚙ Settings → Level: **Beginner**. The chords become plain triads (that check passes),
 but the text `capo 1 to play along` is not found. The test expects the chart to move to an open-chord key with
 a capo hint (B♭ shapes → A shapes, capo 1).
@@ -95,6 +105,12 @@ Decide whether the test or the app is wrong.
 
 ## P2 — `note-editor-e2e`: dragging a fret number up a string doesn't re-string the note  (before the redesign)
 
+**Status: FIXED (2026-11-27) — the bench, not the app.** The bench took "string lines" from every `svg line[x1='0']`,
+which now includes two lines above the tab grid, so its "G or D string" index landed on the B string; the fret it grabbed
+was an open B (`0`), which no fret on the high E can play — the app correctly refused the move (the "2 notes moved" was
+the previous step's summary). The bench now uses the tab grid's last six string lines and picks a fret ≥ 5 on G/D, so the
+same pitch exists one string up. Every step passes (incl. undo/redo, the AlphaTex export, reload).
+
 **What happens.** Notes view → tab grid → drag a fret number upward by one string. Expected status: "string changed".
 Actual: `✓ 2 notes moved`, i.e. the drag was read as a time / pitch MOVE, not a string change.
 
@@ -112,6 +128,11 @@ classifier or the bench.
 ---
 
 ## P3 — `tuning-e2e`: the "Use Drop D" button never appears  (before the redesign)
+
+**Status: FIXED (2026-11-27) — in the app.** WO-7 relabelled the button "Apply", and the capo suggestion beside it is also
+"Apply" — two identical names for a screen reader. Both keep "Apply" on screen and gain accessible names: `Use Drop D`
+(`Use ${gtrSuggest.label}`) and `Use capo N`. The bench now runs to the end, every check passing (Drop D export, capo 2,
+back to 0). Guarded in `tests/ui-polish.mjs`.
 
 **What happens.** A Drop-D take through 🎸 Guitar → Tab (stubbed model). The suggestion line appears and names Drop D,
 the tab stays standard, and the export says the low Ds are unplayable (all ✓). Then the test waits for a **button named

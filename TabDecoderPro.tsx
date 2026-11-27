@@ -6292,14 +6292,14 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
           {!gtrLinked && gtrSuggest && gtrSuggest.id !== gtrTuning && (
             <div style={{ fontSize: 11, color: C.amber, border: `1px dashed ${C.amber}`, borderRadius: 6, padding: "5px 8px", marginBottom: 6, lineHeight: 1.5 }}>
               Detected: <b>{gtrSuggest.label}</b> ({Math.round((gtrSuggest.confidence || 0.6) * 100)}%) — {gtrSuggest.standard.unplayable} note{gtrSuggest.standard.unplayable === 1 ? "" : "s"} sit below standard tuning's low E.{" "}
-              <button onClick={() => { setGtrUndo({ tuning: gtrTuning, capo: gtrCapo }); setGtrTuning(gtrSuggest.id); }} style={{ ...chip(C), padding: "2px 9px", borderColor: C.amber, color: C.amber }}>Apply</button>
+              <button aria-label={`Use ${gtrSuggest.label}`} onClick={() => { setGtrUndo({ tuning: gtrTuning, capo: gtrCapo }); setGtrTuning(gtrSuggest.id); }} style={{ ...chip(C), padding: "2px 9px", borderColor: C.amber, color: C.amber }}>Apply</button>
               <span style={{ color: C.dim }}> (a full mix's bass can do this too — keep standard if the guitar is in standard)</span>
             </div>
           )}
           {!gtrLinked && gtrDetect && gtrDetect.capo && gtrDetect.capo.capo !== gtrCapo && (
             <div style={{ fontSize: 11, color: C.amber, border: `1px dashed ${C.amber}`, borderRadius: 6, padding: "5px 8px", marginBottom: 6, lineHeight: 1.5 }}>
               Sounds like <b>capo {gtrDetect.capo.capo}</b> ({Math.round(gtrDetect.capo.confidence * 100)}%) — {Math.round(gtrDetect.capo.openShare * 100)}% of the notes fall on its open strings (vs {Math.round(gtrDetect.capo.openShare0 * 100)}% without).{" "}
-              <button onClick={() => { setGtrUndo({ tuning: gtrTuning, capo: gtrCapo }); setGtrCapo(gtrDetect.capo.capo); }} style={{ ...chip(C), padding: "2px 9px", borderColor: C.amber, color: C.amber }}>Apply</button>
+              <button aria-label={`Use capo ${gtrDetect.capo.capo}`} onClick={() => { setGtrUndo({ tuning: gtrTuning, capo: gtrCapo }); setGtrCapo(gtrDetect.capo.capo); }} style={{ ...chip(C), padding: "2px 9px", borderColor: C.amber, color: C.amber }}>Apply</button>
             </div>
           )}
           {gtrUndo && (gtrUndo.tuning !== gtrTuning || gtrUndo.capo !== gtrCapo) && (

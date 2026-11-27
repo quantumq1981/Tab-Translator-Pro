@@ -101,6 +101,8 @@ const between = (a, b) => { const i = ui.indexOf(a); return i < 0 ? "" : ui.slic
   expect(/const PRINT_FONT = "Helvetica, Arial, 'Liberation Sans'/.test(ui) && !/const PRINT_FONT = "[^"]*system-ui/.test(ui), "print font: TrueType sans faces first, never system-ui");
   expect(/<div className="tdp-print tdp-print-keep" style=\{\{[^}]*fontFamily: PRINT_FONT/.test(ui), "the print sheet root is PRINT_FONT, not UI_FONT");
   expect(/@media print \{[^}]*\}[^@]*\[style\*="font-family: system-ui"\], \[font-family\^="system-ui"\]\{font-family:\$\{PRINT_FONT\}!important;\}/.test(ui), "on paper, inline system-ui text (styles + SVG attributes) prints in PRINT_FONT");
+  // P3 (2026-11-27): the tuning / capo suggestions both show "Apply"; their accessible names say what they apply
+  expect(/aria-label=\{`Use \$\{gtrSuggest\.label\}`\}/.test(ui) && /aria-label=\{`Use capo \$\{gtrDetect\.capo\.capo\}`\}/.test(ui), "the tuning and capo suggestion buttons are named Use <tuning> / Use capo N");
   expect(/<span style=\{\{ fontFamily: PRINT_NOTE_FONT \}\}>♩<\/span>/.test(ui) && /const PRINT_NOTE_FONT = "'Apple Symbols'[^"]*'DejaVu Sans'/.test(ui), "the printed ♩ comes from a font that has it");
 }
 

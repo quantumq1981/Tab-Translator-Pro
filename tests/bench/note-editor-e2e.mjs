@@ -73,11 +73,14 @@ await page.mouse.move(box.x + 25, box.y + 24, { steps: 6 }); await page.mouse.up
 await page.waitForTimeout(250);
 ok("dragging a note moves it", /2 notes moved/.test(await summary()), await summary());
 // 3) tab grid: drag a fret number one string up
-// a fret on a middle string (G or D), so "one string up" is always a real string
+// a fret on a middle string (G or D), so "one string up" is always a real string — and a fret of 5 or more, so the
+// same pitch is playable on the next string up (an open G can't move to the B string: the app rightly refuses).
+// The tab grid's string lines are the LAST six full-width lines (other `x1=0` lines sit above it in the roll).
 const frets = page.locator("svg text[font-size='11']");
-const boxes = []; for (let i = 0, n = Math.min(await frets.count(), 60); i < n; i++) { const b = await frets.nth(i).boundingBox(); if (b && b.x > 60 && b.x < 700) boxes.push({ i, b }); }
-const strLines = (await page.locator("svg line[x1='0']").evaluateAll((ls) => ls.map((l) => { const r = l.getBoundingClientRect(); return r.top; }))).sort((a, b) => a - b);
-const pick = boxes.find((x) => [2, 3].some((k) => Math.abs(x.b.y + x.b.height / 2 - 4 - strLines[k]) < 7)) || boxes[0];
+const boxes = []; for (let i = 0, n = Math.min(await frets.count(), 120); i < n; i++) { const b = await frets.nth(i).boundingBox(); if (b && b.x > 60 && b.x < 700) boxes.push({ i, b, f: Number(await frets.nth(i).textContent()) }); }
+const strLines = (await page.locator("svg line[x1='0']").evaluateAll((ls) => ls.map((l) => { const r = l.getBoundingClientRect(); return r.top; }))).sort((a, b) => a - b).slice(-6);
+const onString = (x, ks) => ks.some((k) => Math.abs(x.b.y + x.b.height / 2 - 4 - strLines[k]) < 7);
+const pick = boxes.find((x) => x.f >= 5 && onString(x, [2, 3])) || boxes.find((x) => x.f >= 5 && onString(x, [1, 2, 3, 4, 5])) || boxes[0];
 const fret = frets.nth(pick.i);
 const fb = await fret.boundingBox(), before = await fret.textContent();
 await page.mouse.move(fb.x + 3, fb.y + 5); await page.mouse.down();
