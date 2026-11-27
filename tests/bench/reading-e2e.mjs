@@ -88,7 +88,8 @@ await page.getByRole("button", { name: /^Only key chords/ }).first().click();
 out.only = stats(await settle());
 out.keyUseStored = await page.evaluate(() => localStorage.getItem("ttp:keyUse"));
 
-// the chart's own key picker drives the decode
+// the chart's own key picker drives the decode (since redesign step 2 it lives in the chart's ⚙ Settings panel)
+{ const b = page.getByRole("button", { name: /^⚙ Settings/ }).first(); if ((await b.getAttribute("aria-expanded")) !== "true") { await b.click(); await page.waitForTimeout(300); } }
 const chartKey = page.locator('select[title^="the detected key drives"]').first();
 await chartKey.selectOption("D");
 out.chartPickerD = stats(await settle());
