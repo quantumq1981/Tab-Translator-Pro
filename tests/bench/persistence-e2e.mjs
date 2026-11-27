@@ -8,6 +8,8 @@
  * library left behind by the old code (empty session.bin + bytes in localStorage) still restores;
  * a restore that never finished asks instead of looping; "Restore anyway" then opens it. */
 import { startApp } from "./e2e-app.mjs";
+/* redesign step 2: exports live in the chart's ⇪ Share menu, chord-name / arrangement / practice controls in ⚙ Settings */
+const openChartPanel = async (scope, which) => { const b = scope.getByRole("button", { name: which === "share" ? "⇪ Share" : /^⚙ Settings/ }).first(); if ((await b.getAttribute("aria-expanded")) !== "true") { await b.click(); await new Promise((r) => setTimeout(r, 200)); } };
 
 const NO_WRITABLE = `try { if (typeof FileSystemFileHandle !== "undefined") delete FileSystemFileHandle.prototype.createWritable; } catch (_) {}`;
 const opfsState = (page) => page.evaluate(async () => {
@@ -33,7 +35,7 @@ const openScore = async (page, repo, f) => {
   await page.waitForTimeout(1200);
 };
 const reload = async (page) => { await page.reload(); await page.waitForTimeout(600); };
-const setKey = async (page, k) => { const sel = page.locator("select").filter({ has: page.locator("option", { hasText: /^Key: auto/ }) }).first(); await sel.selectOption({ value: k }); await page.waitForTimeout(900); };
+const setKey = async (page, k) => { await openChartPanel(page, "settings"); const sel = page.locator("select").filter({ has: page.locator("option", { hasText: /^Key: auto/ }) }).first(); await sel.selectOption({ value: k }); await page.waitForTimeout(900); };
 
 let allOk = true;
 for (const mode of ["safari18", "chromium"]) {

@@ -12,6 +12,8 @@
 import fs from "node:fs"; import path from "node:path"; import http from "node:http"; import os from "node:os";
 import { createRequire } from "node:module";
 import * as L from "./lib.mjs";
+/* redesign step 2: exports live in the chart's ⇪ Share menu, chord-name / arrangement / practice controls in ⚙ Settings */
+const openChartPanel = async (scope, which) => { const b = scope.getByRole("button", { name: which === "share" ? "⇪ Share" : /^⚙ Settings/ }).first(); if ((await b.getAttribute("aria-expanded")) !== "true") { await b.click(); await new Promise((r) => setTimeout(r, 200)); } };
 
 const arg = (k, d) => { const i = process.argv.indexOf("--" + k); return i > 0 ? process.argv[i + 1] : d; };
 const DEPS = arg("deps"); if (!DEPS) { console.error("--deps <dir> is required"); process.exit(2); }
@@ -66,7 +68,7 @@ const ok = (name, cond, extra) => { result.steps.push({ name, ok: !!cond, ...(ex
 await page.goto(ORIGIN + "/"); await page.waitForTimeout(400);
 await page.getByRole("tab", { name: "MusicXML / GP" }).click({ timeout: 60000 });
 await page.locator('input[type="file"]').first().setInputFiles(GP);
-await page.getByRole("button", { name: "🎯 Practice" }).click({ timeout: 60000 });
+await page.getByRole("button", { name: /^⚙ Settings/ }).first().waitFor({ timeout: 60000 }); await openChartPanel(page, "settings"); await page.getByRole("button", { name: "🎯 Practice" }).click({ timeout: 60000 });
 await page.locator("select").filter({ has: page.locator("option[value='75']") }).selectOption("75");
 await page.getByRole("button", { name: "♩ metronome" }).click();
 const t0 = Date.now();

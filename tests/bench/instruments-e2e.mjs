@@ -5,6 +5,8 @@
  * Level select (Beginner = plain triads, capo hint). */
 import path from "node:path";
 import { startApp, arg } from "./e2e-app.mjs";
+/* redesign step 2: exports live in the chart's ⇪ Share menu, chord-name / arrangement / practice controls in ⚙ Settings */
+const openChartPanel = async (scope, which) => { const b = scope.getByRole("button", { name: which === "share" ? "⇪ Share" : /^⚙ Settings/ }).first(); if ((await b.getAttribute("aria-expanded")) !== "true") { await b.click(); await new Promise((r) => setTimeout(r, 200)); } };
 const OUT = arg("out", process.cwd());
 const app = await startApp();
 const { page, ok } = app;
@@ -45,12 +47,12 @@ await modal.getByRole("button", { name: "close" }).click();
 // arrangement level — on a B♭ tune (Anthropology), so Beginner has to move the key and give a capo
 await page.locator('input[type="file"]').first().setInputFiles(path.resolve(app.repo, "Charlie Parker - Anthropology.gp5"));
 await page.waitForTimeout(1500);
-await page.locator("select").filter({ has: page.locator("option[value='beginner']") }).selectOption("beginner");
+await openChartPanel(page, "settings"); await page.locator("select").filter({ has: page.locator("option[value='beginner']") }).selectOption("beginner");
 await page.waitForTimeout(500);
 const syms = await page.locator('button[title*="guitar voicings"]').allInnerTexts();
 const clean = syms.map((s) => s.split("\n")[0].trim()).filter(Boolean);
 ok("Level: Beginner shows plain triads", clean.length > 4 && clean.every((s) => /^[A-G][#b]?m?(\*)?$/.test(s)), clean.slice(0, 12));
-ok("…moved to an open-chord key with a capo hint to play along (B♭ → A shapes, capo 1)", (await page.getByText(/capo 1 to play along/).count()) === 1);
+ok("…moved to an open-chord key with a capo hint to play along (B♭ → A shapes, capo 1)", (await page.getByText(/capo 1 to play along/i).count()) === 1);
 await page.screenshot({ path: path.join(OUT, "level-beginner.png") });
 ok("no console errors", app.errors().length === 0, app.errors());
 await app.close();

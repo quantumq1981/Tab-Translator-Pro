@@ -14,6 +14,8 @@
 import fs from "node:fs"; import path from "node:path"; import http from "node:http";
 import { createRequire } from "node:module";
 import * as L from "./lib.mjs";
+/* redesign step 2: exports live in the chart's ⇪ Share menu, chord-name / arrangement / practice controls in ⚙ Settings */
+const openChartPanel = async (scope, which) => { const b = scope.getByRole("button", { name: which === "share" ? "⇪ Share" : /^⚙ Settings/ }).first(); if ((await b.getAttribute("aria-expanded")) !== "true") { await b.click(); await new Promise((r) => setTimeout(r, 200)); } };
 
 const arg = (k, d) => { const i = process.argv.indexOf("--" + k); return i > 0 ? process.argv[i + 1] : d; };
 const DEPS = arg("deps"), GS = arg("gs");
@@ -96,7 +98,7 @@ const tabView = { status: null };
 try { await panel.locator("[data-tab-view]").getByText(/bars drawn/).waitFor({ timeout: 120000 }); tabView.status = await panel.locator("[data-tab-view]").getByText(/bars drawn/).innerText(); }
 catch (e) { tabView.status = "not drawn: " + e.message.split("\n")[0]; }
 if (arg("shot")) await panel.locator("[data-tab-view]").screenshot({ path: arg("shot") }).catch(() => {});
-await panel.getByRole("button", { name: "AlphaTex (tab)" }).click();
+await openChartPanel(panel, "share"); await panel.getByRole("button", { name: "AlphaTex (tab)" }).click();
 const tex = await panel.locator("textarea").inputValue();
 if (arg("tex")) fs.writeFileSync(arg("tex"), tex);
 const imp = new alphaTab.importer.AlphaTexImporter(); imp.initFromString(tex, new alphaTab.Settings());

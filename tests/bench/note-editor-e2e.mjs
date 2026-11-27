@@ -12,6 +12,8 @@
 import fs from "node:fs"; import path from "node:path"; import http from "node:http";
 import { createRequire } from "node:module";
 import * as L from "./lib.mjs";
+/* redesign step 2: exports live in the chart's ⇪ Share menu, chord-name / arrangement / practice controls in ⚙ Settings */
+const openChartPanel = async (scope, which) => { const b = scope.getByRole("button", { name: which === "share" ? "⇪ Share" : /^⚙ Settings/ }).first(); if ((await b.getAttribute("aria-expanded")) !== "true") { await b.click(); await new Promise((r) => setTimeout(r, 200)); } };
 
 const arg = (k, d) => { const i = process.argv.indexOf("--" + k); return i > 0 ? process.argv[i + 1] : d; };
 const DEPS = arg("deps"); if (!DEPS) { console.error("--deps <dir> is required"); process.exit(2); }
@@ -91,7 +93,7 @@ ok("undo removes the last step, redo restores it", afterUndo !== (await summary(
 await page.screenshot({ path: path.join(OUT, "note-editor-edited.png") });
 
 // 5) export AlphaTex → alphaTab reads the edited score
-await page.getByRole("button", { name: "AlphaTex (tab)" }).first().click();
+await openChartPanel(page, "share"); await page.getByRole("button", { name: "AlphaTex (tab)" }).first().click();
 await page.locator("textarea[readonly]").first().waitFor({ timeout: 30000 });
 const tex = await page.locator("textarea[readonly]").first().inputValue();
 const imp = new alphaTab.importer.AlphaTexImporter(); imp.initFromString(tex, new alphaTab.Settings());
@@ -99,7 +101,7 @@ let sc; try { sc = imp.readScore(); } catch (e) { console.error(tex.slice(0, 400
 result.texHead = tex.split("\n").slice(0, 4).join(" ⏎ ");
 ok("the edited chart exports AlphaTex that alphaTab parses (165 bars)", sc.tracks[0].staves[0].bars.length === 165, sc.tracks[0].staves[0].bars.length);
 
-await page.getByRole("button", { name: "MIDI", exact: true }).first().click();
+await openChartPanel(page, "share"); await page.getByRole("button", { name: "MIDI", exact: true }).first().click();
 await page.waitForTimeout(300);
 ok("the MIDI export panel renders (ExportPanel had an undefined `score` reference)", (await page.getByText(/Standard MIDI File/).count()) === 1);
 
