@@ -1877,8 +1877,11 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
           scrolls — View, Transpose, Play, and the two doors: ⚙ Chart settings (names / arrangement / practice) and
           ⇪ Share (every export, ordered by what it is for). Everything that was in the old 40-control toolbar is still
           one tap away; nothing was removed. */}
-      <div className="no-print tdp-chart-toolbar" role="toolbar" aria-label="Chart"
-        style={{ position: "sticky", top: 0, zIndex: 6, background: C.bg, display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6, padding: "6px 0", marginBottom: panel ? 0 : 8, borderBottom: `1px solid ${C.border}` }}>
+      {/* the pinned block holds the toolbar AND its open panel, so a panel opened far down the chart opens on screen
+          (Codex on #163); the panel scrolls inside itself so it can't cover the whole screen */}
+      <div className="no-print tdp-chart-toolbar" style={{ position: "sticky", top: 0, zIndex: 6, background: C.bg, marginBottom: 8 }}>
+      <div role="toolbar" aria-label="Chart"
+        style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6, padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
         <span role="tablist" aria-label="View" style={{ display: "inline-flex", flexWrap: "wrap", gap: 4 }}>
         {[["chart", "Chart"], ["grid", "Grid"], ["tab", "Tab"], ["edit", "Notes"], ["lyrics", "Lyrics"]].map(([v, lbl]) => (
           <button key={v} role="tab" aria-selected={view === v} onClick={() => setView(v)} style={{ ...chip(C), padding: "3px 9px", borderColor: view === v ? C.amber : C.border, color: view === v ? C.amber : C.dim }}>{lbl}</button>
@@ -1910,7 +1913,7 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
 
       {panel === "settings" && (
         <div id="tdp-chart-settings" className="no-print" role="region" aria-label="Chart settings"
-          style={{ background: C.panel, border: `1px solid ${C.border}`, borderTop: "none", borderRadius: "0 0 10px 10px", padding: "10px 12px", marginBottom: 10, display: "grid", gap: 10 }}>
+          style={{ background: C.panel, border: `1px solid ${C.border}`, borderTop: "none", borderRadius: "0 0 10px 10px", padding: "10px 12px", display: "grid", gap: 10, maxHeight: "min(60vh, 560px)", overflowY: "auto", overscrollBehavior: "contain" }}>
           <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
             <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim, minWidth: 110 }}>CHORD NAMES</span>
             <button aria-pressed={showRoman} onClick={() => { if (!showRoman) { setShowRoman(true); setNashville(false); } else if (!nashville) setNashville(true); else { setShowRoman(false); setNashville(false); } }} title={key ? `key of ${kName(key)} · tap again for Nashville numbers` : "key analysis"}
@@ -1960,7 +1963,7 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
 
       {panel === "share" && (
         <div id="tdp-chart-share" className="no-print" role="region" aria-label="Share"
-          style={{ background: C.panel, border: `1px solid ${C.border}`, borderTop: "none", borderRadius: "0 0 10px 10px", padding: "10px 12px", marginBottom: 10, display: "grid", gap: 10 }}>
+          style={{ background: C.panel, border: `1px solid ${C.border}`, borderTop: "none", borderRadius: "0 0 10px 10px", padding: "10px 12px", display: "grid", gap: 10, maxHeight: "min(60vh, 560px)", overflowY: "auto", overscrollBehavior: "contain" }}>
           <button onClick={sendToPro} title="Open this chart in Chord Sheet Maker Pro (native CSMPN handoff)"
             style={{ textAlign: "left", display: "flex", alignItems: "center", gap: 12, padding: "10px 12px", borderRadius: 10, border: `1px solid ${sent ? C.green : C.amber}`, background: C.bg, color: C.text, cursor: "pointer", fontFamily: "inherit" }}>
             <span aria-hidden style={{ fontSize: 18, color: sent ? C.green : C.amber }}>→</span>
@@ -1995,6 +1998,7 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
           })}
         </div>
       )}
+      </div>
 
       {(refName || refErr) && (
         <div className="no-print" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, marginBottom: 10, fontSize: 11, color: C.dim }}>
