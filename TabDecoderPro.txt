@@ -966,7 +966,10 @@ function TabDecoderProApp() {
   const keyLabelOf = (sc) => { try { const k = sc && analyzeKey(sc); return k ? keyName(k, true) : ""; } catch (_) { return ""; } };
   const editTarget = mode === "pdf" && chart ? `pdf:${chart.fileName}` : mode === "xml" && xmlScore ? `xml:${xmlName}:${xmlScore.partIndex || 0}` : "";
   const editFor = (target) => (scoreEdit && scoreEdit.target === target ? scoreEdit : null);
-  const setEditFor = (target) => (upd) => setScoreEdit((prev) => {
+  const setEditFor = (target) => (upd, opts) => setScoreEdit((prev) => {
+    // opts.ifEmpty (the note editor's "Clear edits" Undo): restore only while the shared slot is still empty — if any
+    // chart was edited since (this one or another), that newer work wins and the Undo does nothing
+    if (opts && opts.ifEmpty && prev) return prev;
     const cur = prev && prev.target === target ? prev : null;
     const next = typeof upd === "function" ? upd(cur) : upd;
     return next && next.ops && next.ops.length + (next.redo ? next.redo.length : 0) ? { ...next, target } : null;
@@ -2080,6 +2083,10 @@ async function shareOrDownload(data, filename, mime) {
 }
 
 /* ---- WO-6 · library + setlists ---- */
+/* library writes that finish an Undo toast run one after another, each on the stores as they are when it starts */
+let _libChain = Promise.resolve();
+const _libSerial = (fn) => (_libChain = _libChain.then(() => fn()).catch((e) => console.error(e)));
+
 function LibraryPanel({ C, onOpen, currentId }) {
   const [recs, setRecs] = useState(null);
   const [sets, setSets] = useState([]);
@@ -2099,16 +2106,22 @@ function LibraryPanel({ C, onOpen, currentId }) {
   // delete = hide now, really delete when the Undo toast ends (UX review #13; the bytes stay until then)
   const [gone, setGone] = useState(() => new Set());
   const hide = (id, on) => setGone((g) => { const n = new Set(g); on ? n.add(id) : n.delete(id); return n; });
+  // commits read the CURRENT stores (never a snapshot from when the toast opened: two deletes, or a setlist edit made
+  // inside the Undo window, would be overwritten) and run one at a time (_libSerial)
   const del = (r) => {
     hide(r.id, true);
-    const sets0 = sets, recs0 = recs || [];
     showToast({ text: `Deleted “${r.title}”.`, action: { label: "Undo", fn: () => hide(r.id, false) },
-      onCommit: async () => { await projectDel(r.id); await projectFileDel(r.id); for (const s of sets0) if (s.items.some((it) => it.projectId === r.id)) await setlistPut(setlistPrune(s, recs0.filter((x) => x.id !== r.id).map((x) => x.id))); hide(r.id, false); refresh(); } });
+      onCommit: () => _libSerial(async () => {
+        await projectDel(r.id); await projectFileDel(r.id);
+        const alive = (await projectsAll()).map((x) => x.id);
+        for (const s of await setlistsAll()) if (s.items.some((it) => it.projectId === r.id)) await setlistPut(setlistPrune(s, alive));
+        hide(r.id, false); refresh();
+      }) });
   };
   const delSet = (s) => {
     hide(s.id, true);
     showToast({ text: `Deleted the setlist “${s.name}”.`, action: { label: "Undo", fn: () => hide(s.id, false) },
-      onCommit: async () => { await setlistDel(s.id); hide(s.id, false); refresh(); } });
+      onCommit: () => _libSerial(async () => { await setlistDel(s.id); hide(s.id, false); refresh(); }) });
   };
   const bundle = async (r) => { const b = await projectFileGet(r.id, r); const zip = exportProjectBundle(r, { source: b }); const how = await shareOrDownload(zip, `${r.title.replace(/[^\w.-]+/g, "_") || "project"}.ttp.zip`, "application/zip"); setMsg(how === "shared" ? "Bundle shared." : how === "downloaded" ? "Bundle saved." : ""); };
   const importBundle = async (e) => {
@@ -2976,7 +2989,7 @@ function NoteEditorView({ score, edit, setEdit, C, useSharp, playKey, getAudio, 
         <button onClick={() => setZoom((z) => Math.max(0.35, z / 1.4))} style={chip2(false)}>−</button>
         <button onClick={() => setZoom((z) => Math.min(4, z * 1.4))} style={chip2(false)}>+</button>
         {getAudio && <button onClick={loadSpec} aria-pressed={!!(spec && spec.url)} style={chip2(spec && spec.url, C.cyan)} title="draw the recording's spectrogram under the notes">{spec && spec.busy ? "analysing…" : "🌈 Spectrogram"}</button>}
-        {editCanUndo(edit) && <button onClick={() => { const prev = edit; setEdit(null); showToast({ text: "Note edits cleared.", action: { label: "Undo", fn: () => setEdit(prev) } }); }} style={chip2(false)}>Clear edits</button>}
+        {editCanUndo(edit) && <button onClick={() => { const prev = edit; setEdit(null); showToast({ text: "Note edits cleared.", action: { label: "Undo", fn: () => setEdit((cur) => cur || prev, { ifEmpty: true }) } }); }} style={chip2(false)}>Clear edits</button>}
       </div>
       <div style={{ fontSize: 10, color: C.dim, marginBottom: 6, lineHeight: 1.5 }}>
         {summary ? <span style={{ color: C.green }}>✓ {summary}</span> : "Drag a note to move it (pitch + time), its right edge to change its length; drag a fret number to another string. Draw adds notes, Erase removes them."}

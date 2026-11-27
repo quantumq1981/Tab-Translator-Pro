@@ -53,7 +53,7 @@ for (const [label, opts] of [["phone", { ...devices["iPhone 13"] }], ["iPad", { 
   const logs = [], dialogs = [];
   page.on("pageerror", (e) => logs.push(e.message));
   page.on("console", (m) => { if (m.type() === "error" && !/ERR_FAILED|net::/.test(m.text())) logs.push(m.text()); });
-  page.on("dialog", (d) => { dialogs.push(d.type() + ": " + d.message()); d.dismiss(); });
+  page.on("dialog", (d) => { if (d.type() === "prompt") { d.accept("Gig"); return; } dialogs.push(d.type() + ": " + d.message()); d.dismiss(); });   // prompts (setlist name) are still native; alert / confirm must not appear
   await page.goto(origin + "/");
   await page.getByRole("tab", { name: "Manual", exact: true }).waitFor({ timeout: 30000 }); await page.waitForTimeout(500);
   const L = (s) => `${label}: ${s}`;
@@ -118,6 +118,16 @@ for (const [label, opts] of [["phone", { ...devices["iPhone 13"] }], ["iPad", { 
   await page.reload(); await page.getByRole("tab", { name: "Manual", exact: true }).waitFor({ timeout: 30000 });
   await page.getByRole("tab", { name: "Library 📚", exact: true }).click(); await page.waitForTimeout(1200);
   console.log("     (after a reload: library rows", await rows(), "— the still-open chart's session re-adds itself)");
+  // two songs of one setlist deleted inside one Undo window: each commit prunes the CURRENT setlist (Codex P1 on #162)
+  await page.getByRole("button", { name: "duplicate", exact: true }).first().click(); await page.waitForTimeout(600);
+  await page.getByRole("button", { name: "＋ New setlist", exact: true }).click(); await page.waitForTimeout(600);
+  for (let i = 0; i < 2; i++) { await page.locator("select", { has: page.locator("option", { hasText: "+ setlist…" }) }).nth(i).selectOption({ label: "Gig" }); await page.waitForTimeout(500); }
+  const setItems = () => page.evaluate(() => new Promise((res) => { const rq = indexedDB.open("ttp-projects"); rq.onsuccess = () => { const g = rq.result.transaction("setlists", "readonly").objectStore("setlists").getAll(); g.onsuccess = () => res(g.result.map((x) => x.items.length)); }; }));
+  ok(L("#13 setup: one setlist holding two songs"), JSON.stringify(await setItems()) === "[2]", await setItems());
+  await page.getByRole("button", { name: "delete", exact: true }).first().click(); await page.waitForTimeout(300);
+  await page.getByRole("button", { name: "delete", exact: true }).first().click();
+  await page.waitForTimeout(10000);
+  ok(L("#13 both deletes commit and the setlist keeps neither song"), JSON.stringify(await setItems()) === "[0]" && (await idbCount()) === 0, { sets: await setItems(), projects: await idbCount() });
   const small2 = await smallControls(page);
   ok(L("#11 library: every control ≥ 44 px"), !small2.length, small2);
 

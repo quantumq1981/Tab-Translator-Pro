@@ -48,7 +48,9 @@ expect(!/window\.(alert|confirm)\(/.test(ui.replace(/\/\*[\s\S]*?\*\//g, "")), "
 expect(/function showToast\(t\)/.test(ui) && /function ToastHost\(\{ C \}\)/.test(ui) && /<ToastHost C=\{C\} \/>/.test(ui), "#13 toasts exist and the host is mounted once");
 const host = between("function ToastHost", "\nfunction SectionLabel");
 expect(/setList\(\(l\) => l\.filter/.test(host) && !/setList\(\(l\) => \{[^}]*onCommit/.test(host), "#13 a toast's side effects run outside the state updater");
-expect(/onCommit: async \(\) => \{ await projectDel\(r\.id\)/.test(ui) && /action: \{ label: "Undo", fn: \(\) => hide\(r\.id, false\) \}/.test(ui), "#13 a library delete hides now and deletes only when the Undo toast ends");
+expect(/onCommit: \(\) => _libSerial\(async \(\) => \{\s*await projectDel\(r\.id\)/.test(ui) && /action: \{ label: "Undo", fn: \(\) => hide\(r\.id, false\) \}/.test(ui), "#13 a library delete hides now and deletes only when the Undo toast ends");
+expect(/onCommit: \(\) => _libSerial\(async \(\) => \{/.test(ui) && /const alive = \(await projectsAll\(\)\)/.test(ui) && /for \(const s of await setlistsAll\(\)\)/.test(ui) && !/sets0/.test(ui), "#13 a delete commit reads the current stores and runs serialized (no snapshot written back)");
+expect(/if \(opts && opts\.ifEmpty && prev\) return prev;/.test(ui) && /setEdit\(\(cur\) => cur \|\| prev, \{ ifEmpty: true \}\)/.test(ui), "#13 Clear-edits Undo never overwrites edits made since (any chart)");
 expect(/role="tablist" aria-label="Mode"/.test(ui) && /role="tab" aria-selected=\{mode === m\}/.test(ui), "#12 the mode row is a tablist");
 expect(/role="tablist" aria-label="View"/.test(ui) && /role="tab" aria-selected=\{view === v\}/.test(ui), "#12 the chart view switch is a tablist");
 expect(/button\[aria-pressed="true"\],\.tdp-app \[role="tab"\]\[aria-selected="true"\]\{text-decoration:underline/.test(ui), "#12 selected toggles and tabs are underlined, not marked by colour alone");
