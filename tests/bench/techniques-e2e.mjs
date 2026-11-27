@@ -4,6 +4,8 @@
  * and the AlphaTex export.   node bench/techniques-e2e.mjs --deps <dir> [--out <dir>] */
 import fs from "node:fs"; import path from "node:path"; import os from "node:os";
 import { startApp, arg } from "./e2e-app.mjs";
+/* redesign step 2: exports live in the chart's ⇪ Share menu, chord-name / arrangement / practice controls in ⚙ Settings */
+const openChartPanel = async (scope, which) => { const b = scope.getByRole("button", { name: which === "share" ? "⇪ Share" : /^⚙ Settings/ }).first(); if ((await b.getAttribute("aria-expanded")) !== "true") { await b.click(); await new Promise((r) => setTimeout(r, 200)); } };
 const OUT = arg("out", process.cwd());
 globalThis.DOMParser = (await import("@xmldom/xmldom")).DOMParser;
 const repo = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
@@ -27,7 +29,7 @@ const notesLine = await page.getByText(/notes from the guitar model/).innerText(
 const badges = await page.locator("span").evaluateAll((els) => els.map((e) => e.textContent.trim()).filter((t) => /^\d+ (bend|vibrato|slide|hammer\/pull|palm mute|ghost)s?$/.test(t)));
 ok("the guitar model transcribes the phrase and the technique reader names what it hears", badges.length >= 3, { notes: notesLine.slice(0, 40), badges, sec: (Date.now() - t0) / 1000 });
 const panel = page.locator("div").filter({ has: page.getByText(/notes from the guitar model/) }).last();
-await page.getByRole("button", { name: "AlphaTex (tab)" }).first().click();       // the guitar tab chart renders before the chord chart
+await openChartPanel(page, "share"); await page.getByRole("button", { name: "AlphaTex (tab)" }).first().click();       // the guitar tab chart renders before the chord chart
 await page.locator("textarea[readonly]").first().waitFor({ timeout: 30000 });
 const tex = await page.locator("textarea[readonly]").first().inputValue();
 const marks = { bend: /b \(0 \d\)/.test(tex), hammer: /\{[^}]*\bh\b/.test(tex), slide: /\bsl\b/.test(tex), palmMute: /\bpm\b/.test(tex), vibrato: /\bv\b/.test(tex) };

@@ -1218,6 +1218,9 @@ function TabDecoderProApp() {
         /* UX review #11 #12 (2026-11-27): keyboard focus ring; selection never by colour alone (✓ / underline);
            44 px touch targets on touch screens (Apple HIG 44 pt) — min-size only, so inline padding still applies */
         .tdp-app :focus-visible{outline:2px solid #57d1d6;outline-offset:2px;}
+        /* step 2: the chart toolbar is pinned while the chart scrolls — from 600 px up. On a phone it wraps to ~4 rows
+           (~300 px with 44 px targets), and pinned it would cover half the screen; there it scrolls with the page. */
+        @media (max-width:599px){.tdp-app .tdp-chart-toolbar{position:static!important;}}
         /* selected = a thick underline as well as the colour; it takes no width, so narrow toggles don't wrap (a ✓ prefix did) */
         .tdp-app button[aria-pressed="true"],.tdp-app [role="tab"][aria-selected="true"]{text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:4px;}
         .tdp-app [role="tab"][aria-selected="true"]{font-weight:700;}
@@ -1358,12 +1361,12 @@ function TabDecoderProApp() {
                 <SectionLabel C={C}>OPEN A TAB PDF · exported from Guitar Pro, MuseScore or alphaTab</SectionLabel>
                 <input ref={fileRef} type="file" accept="application/pdf" onChange={onFile} style={{ display: "none" }} />
                 <button onClick={() => fileRef.current && fileRef.current.click()} disabled={!pdfReady || pdfBusy}
-                  style={{ width: "100%", background: C.bg, border: `1px dashed ${C.border}`, color: pdfReady ? C.amber : C.dim, borderRadius: 10, padding: "22px 12px", fontSize: 14, cursor: pdfReady ? "pointer" : "default", fontFamily: "'IBM Plex Mono', monospace" }}>
-                  {!pdfReady ? "loading PDF.js…" : pdfBusy ? "parsing…" : "⬆  Upload a tab PDF  (tap to choose)"}
+                  style={{ width: "100%", background: C.bg, border: `1px dashed ${C.border}`, color: pdfReady ? C.amber : C.dim, borderRadius: 10, padding: scoreView ? "8px 12px" : "22px 12px", fontSize: scoreView ? 12 : 14, cursor: pdfReady ? "pointer" : "default", fontFamily: "'IBM Plex Mono', monospace" }}>
+                  {!pdfReady ? "loading PDF.js…" : pdfBusy ? "parsing…" : scoreView ? "⬆  Open another tab PDF" : "⬆  Upload a tab PDF  (tap to choose)"}
                 </button>
-                <div style={{ fontSize: 11, color: C.dim, marginTop: 8, lineHeight: 1.6 }}>
+                <HowItWorks C={C} folded={!!scoreView}>
                   For digital tab PDFs (alphaTab / chord-sheet-maker-pro exports). Standard tuning &amp; 4/4 assumed. For exact meter &amp; tuning, use the MusicXML tab.
-                </div>
+                </HowItWorks>
                 {pdfErr && <div style={{ marginTop: 10, color: C.red, fontSize: 12 }}>{pdfErr}</div>}
                 {scoreView && (
                   <ChartPanel score={scoreView} title={chart.fileName}
@@ -1385,12 +1388,13 @@ function TabDecoderProApp() {
                     Do NOT re-add an extension allowlist here — it breaks GP/Power Tab upload on iOS. */}
                 <input ref={xmlRef} type="file" onChange={onXml} style={{ display: "none" }} />
                 <button onClick={() => xmlRef.current && xmlRef.current.click()} disabled={xmlBusy}
-                  style={{ width: "100%", background: C.bg, border: `1px dashed ${C.border}`, color: C.amber, borderRadius: 10, padding: "22px 12px", fontSize: 14, cursor: xmlBusy ? "default" : "pointer", fontFamily: "'IBM Plex Mono', monospace" }}>
-                  {xmlBusy ? "parsing…" : "⬆  Upload a MusicXML, Guitar Pro, Power Tab, MIDI, zip or AlphaTex file"}
+                  style={{ width: "100%", background: C.bg, border: `1px dashed ${C.border}`, color: C.amber, borderRadius: 10, padding: xmlScore || texDoc ? "8px 12px" : "22px 12px", fontSize: xmlScore || texDoc ? 12 : 14, cursor: xmlBusy ? "default" : "pointer", fontFamily: "'IBM Plex Mono', monospace" }}>
+                  {xmlBusy ? "parsing…" : xmlScore || texDoc ? "⬆  Open another file" : "⬆  Upload a MusicXML, Guitar Pro, Power Tab, MIDI, zip or AlphaTex file"}
                 </button>
-                <div style={{ fontSize: 11, color: C.dim, marginTop: 8, lineHeight: 1.6 }}>
+                {/* UX review #8: the explanation is for before a file is open; with a chart on screen it folds away */}
+                <HowItWorks C={C} folded={!!(xmlScore || texDoc)}>
                   Reads <b>real</b> time signature, tuning &amp; rhythm straight from the file — no geometry guessing. Native: <b>MusicXML</b>, Guitar Pro <b>.gp</b> (7/8) / <b>.gpx</b> (6) / <b>.gp3 / .gp4 / .gp5</b>, Power Tab <b>.ptb</b>, Standard MIDI <b>.mid</b>, and a <b>.zip</b> of a score (e.g. Muscriptor's <i>sheets</i> zip — every instrument is read together as <b>Harmony</b>; pick one part to chart it alone). A saved <b>.alphatex</b> tab (this app's <b>AlphaTex (tab)</b> export) opens straight in the tab viewer.
-                </div>
+                </HowItWorks>
                 {xmlErr && <div style={{ marginTop: 10, color: C.red, fontSize: 12 }}>{xmlErr}</div>}
                 {xmlScore && xmlScore.parts && xmlScore.parts.length > 1 && (
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginTop: 12 }}>
@@ -1559,6 +1563,14 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
   const [showRoman, setShowRoman] = useState(false);
   const [nashville, setNashville] = useState(false);           // the numerals toggle's 2nd state: 1·5·6m
   const [practice, setPractice] = useState(false);                // WO-2 practice player open
+  const [panel, setPanel] = useState(null);                       // step 2: null | "settings" | "share" (one open at a time)
+  useEffect(() => {                                               // Escape closes the open panel
+    if (!panel) return undefined;
+    const onKey = (e) => { if (e.key === "Escape") setPanel(null); };
+    window.addEventListener("keydown", onKey); return () => window.removeEventListener("keydown", onKey);
+  }, [panel]);
+  const expRef = useRef(null);                                    // an export chosen from the Share menu scrolls into view
+  useEffect(() => { if (exp && expRef.current && expRef.current.scrollIntoView) expRef.current.scrollIntoView({ block: "nearest", behavior: "smooth" }); }, [exp && exp.fmt]); // eslint-disable-line
   // WO-6: print / PDF (a light copy of the current view; window.print → iOS "Save as PDF")
   const [printing, setPrinting] = useState(false);
   const [paper, setPaperState] = useState(() => { try { return localStorage.getItem(_PAPER_KEY) === "letter" ? "letter" : "a4"; } catch (_) { return "a4"; } });
@@ -1842,11 +1854,13 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
     await shareOrDownload(exp.bytes || exp.text, `${base}.${ext}`, mime);
   };
 
+  // how many chart settings differ from their defaults — shown on the ⚙ button so a hidden setting is never invisible
+  const settingsChanged = [showRoman, !!keyOv, simplify !== !!(autoSimplify && (melodic || rawScore.merged)), !!level, arrange !== "off", practice].filter(Boolean).length;
   return (
     <>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, fontSize: 11, color: C.dim, margin: "14px 0 6px" }}>
         <span style={{ color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 220 }}>{title}</span>
-        <span>{meta}{semis ? ` · ${semis > 0 ? "+" : ""}${semis} st` : ""}
+        <span>{meta}{semis ? ` · ${semis > 0 ? "+" : ""}${semis} st` : ""}{simplify && !lvl ? " · 1 chord/bar" : ""}
           {key ? <> · key <b style={{ color: key.manual ? C.green : C.dim }}>{kName(key)}</b>
             {key.manual ? " (set)" : ` (${Math.round(key.confidence * 100)}%)`}</> : null}</span>
       </div>
@@ -1859,91 +1873,143 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
           ))}
         </div>
       )}
-      <div className="no-print" style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
-        <span role="tablist" aria-label="View" style={{ display: "inline-flex", flexWrap: "wrap", gap: 6 }}>
+      {/* Redesign step 2 (UX review #5 #9, 2026-11-27): four everyday controls stay in one row pinned while the chart
+          scrolls — View, Transpose, Play, and the two doors: ⚙ Chart settings (names / arrangement / practice) and
+          ⇪ Share (every export, ordered by what it is for). Everything that was in the old 40-control toolbar is still
+          one tap away; nothing was removed. */}
+      <div className="no-print tdp-chart-toolbar" role="toolbar" aria-label="Chart"
+        style={{ position: "sticky", top: 0, zIndex: 6, background: C.bg, display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6, padding: "6px 0", marginBottom: panel ? 0 : 8, borderBottom: `1px solid ${C.border}` }}>
+        <span role="tablist" aria-label="View" style={{ display: "inline-flex", flexWrap: "wrap", gap: 4 }}>
         {[["chart", "Chart"], ["grid", "Grid"], ["tab", "Tab"], ["edit", "Notes"], ["lyrics", "Lyrics"]].map(([v, lbl]) => (
           <button key={v} role="tab" aria-selected={view === v} onClick={() => setView(v)} style={{ ...chip(C), padding: "3px 9px", borderColor: view === v ? C.amber : C.border, color: view === v ? C.amber : C.dim }}>{lbl}</button>
         ))}
         </span>
-        <button aria-pressed={editMode} onClick={() => { setEditMode((m) => !m); setEditKey(""); }} disabled={view !== "chart"}
-          style={{ ...chip(C), padding: "3px 9px", opacity: view !== "chart" ? 0.4 : 1, borderColor: editMode ? C.green : C.border, color: editMode ? C.green : C.dim }}>{editMode ? "✓ Editing" : "✎ Edit"}</button>
-        <button onClick={() => { if (!showRoman) { setShowRoman(true); setNashville(false); } else if (!nashville) setNashville(true); else { setShowRoman(false); setNashville(false); } }} title={key ? `key of ${kName(key)} · tap again for Nashville numbers` : "key analysis"}
-          style={{ ...chip(C), padding: "3px 9px", borderColor: showRoman ? C.cyan : C.border, color: showRoman ? C.cyan : C.dim }}>{showRoman ? (nashville ? "1·5·6m ✓" : "I·V·vi ✓") : "I·V·vi"}</button>
-        <KeyPicker C={C} value={keyOv} onChange={setKeyOv} cands={keyCands} useSharp={useSharp} semis={semis} />
-        <button onClick={() => setSimplify((s) => !s)} title="aggregate each bar's notes into one chord (for dense transcriptions)"
-          style={{ ...chip(C), padding: "3px 9px", borderColor: simplify ? C.green : C.border, color: simplify ? C.green : C.dim }}>{simplify ? "1 chord/bar ✓" : "Simplify"}</button>
-        {vocabPicker && <ChordVocabPicker C={C} value={vocab} onChange={setVocab} sixNine={sixNine} onSixNine={setSixNine} />}
-        {useSharp && (
-          <select value={spelling} onChange={(e) => setSpelling(e.target.value)} title="for key: Dbmaj7 in F minor, G#m in E · family: always C# Eb F# Ab Bb"
-            style={{ ...chip(C), padding: "3px 9px", borderColor: C.border, color: C.dim, background: C.raised, cursor: "pointer" }}>
-            <option value="key">Spell for key</option>
-            <option value="family">Spell C# Eb F# Ab Bb</option>
-          </select>
+        {view === "chart" && (
+          <button aria-pressed={editMode} onClick={() => { setEditMode((m) => !m); setEditKey(""); }}
+            style={{ ...chip(C), padding: "3px 9px", borderColor: editMode ? C.green : C.border, color: editMode ? C.green : C.dim }}>{editMode ? "✓ Editing" : "✎ Edit"}</button>
         )}
-        <select value={level} onChange={(e) => setLevel(e.target.value)} title="a playing level: Beginner = triads, one chord per bar, quarter strums, open-chord key (+ capo) · Intermediate = 7ths + inversions, eighths · Advanced = the full Pro chart"
-          style={{ ...chip(C), padding: "3px 9px", borderColor: level ? C.amber : C.border, color: level ? C.amber : C.dim, background: C.raised, cursor: "pointer" }}>
-          <option value="">Level: as written</option>
-          {ARRANGEMENT_LEVELS.map((l) => <option key={l} value={l}>Level: {l[0].toUpperCase() + l.slice(1)}</option>)}
-        </select>
-        {lvl && lvl.capo > 0 && <span style={{ fontSize: 11, color: C.amber }} title="these are the shapes; put a capo here to sound like the record">capo {lvl.capo} to play along</span>}
-        <select value={arrange} disabled={!!lvl} onChange={(e) => setArrange(e.target.value)} title="stamp a strum/comping rhythm across each bar (exports as CSMPN/CSML slash-rhythm)"
-          style={{ ...chip(C), padding: "3px 9px", borderColor: arrange !== "off" ? C.cyan : C.border, color: arrange !== "off" ? C.cyan : C.dim, background: C.raised, cursor: "pointer" }}>
-          <option value="off">Arrange…</option>
-          <option value="block">↳ Block (sustain)</option>
-          <option value="quarters">↳ Quarters</option>
-          <option value="eighths">↳ Eighths</option>
-          <option value="shuffle">↳ Shuffle</option>
-          <option value="sixteenths">↳ Sixteenths</option>
-          <option value="skank">↳ Skank (off-beat)</option>
-        </select>
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 4, marginLeft: 2 }}>
-          <button onClick={() => bump(-1)} style={{ ...chip(C), padding: "3px 8px" }}>−</button>
-          <span style={{ fontSize: 11, minWidth: 44, textAlign: "center", color: semis ? C.amber : C.dim }}>transpose</span>
-          <button onClick={() => bump(1)} style={{ ...chip(C), padding: "3px 8px" }}>+</button>
-          {semis !== 0 && <button onClick={() => setSemis(0)} style={{ ...chip(C), padding: "3px 8px" }}>0</button>}
+        <span role="group" aria-label="Transpose" style={{ display: "inline-flex", alignItems: "center", gap: 2 }}>
+          <button onClick={() => bump(-1)} aria-label="Transpose down" style={{ ...chip(C), padding: "3px 8px" }}>−</button>
+          <button onClick={() => setSemis(0)} disabled={!semis} title={semis ? "back to the written key" : "transpose"} style={{ ...chip(C), padding: "3px 6px", minWidth: 54, border: "none", background: "transparent", color: semis ? C.amber : C.dim }}>{semis ? `${semis > 0 ? "+" : ""}${semis} st` : "key ±0"}</button>
+          <button onClick={() => bump(1)} aria-label="Transpose up" style={{ ...chip(C), padding: "3px 8px" }}>+</button>
         </span>
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 4, marginLeft: 2 }}>
+        <span role="group" aria-label="Playback" style={{ display: "inline-flex", alignItems: "center", gap: 2 }}>
           <button onClick={togglePlay} title={playing ? "stop" : "play the chart"}
-            style={{ ...chip(C), padding: "3px 10px", borderColor: playing ? C.green : C.border, color: playing ? C.green : C.amber }}>{playing ? "■ Stop" : "▶ Play"}</button>
-          <button onClick={() => bumpBpm(-5)} style={{ ...chip(C), padding: "3px 8px" }}>−</button>
+            style={{ ...chip(C), padding: "3px 12px", borderColor: playing ? C.green : C.amber, color: playing ? C.green : C.amber, fontWeight: 600 }}>{playing ? "■ Stop" : "▶ Play"}</button>
+          <button onClick={() => bumpBpm(-5)} aria-label="Slower" style={{ ...chip(C), padding: "3px 8px" }}>−</button>
           <span style={{ fontSize: 11, minWidth: 46, textAlign: "center", color: C.dim }} title={score.tempoMap ? "this chart follows the performance's tempo map; ♩= scales it" : undefined}>♩={score.tempoMap ? "~" : ""}{Math.round(bpm * 10) / 10}</span>
-          <button onClick={() => bumpBpm(5)} style={{ ...chip(C), padding: "3px 8px" }}>+</button>
+          <button onClick={() => bumpBpm(5)} aria-label="Faster" style={{ ...chip(C), padding: "3px 8px" }}>+</button>
         </span>
-        <span style={{ marginLeft: "auto", display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "flex-end", gap: 4 }}>
-          {[["chordpro", "ChordPro"], ["abc", "ABC"], ["musicxml", "MusicXML"], ["midi", "MIDI"], ["csmpn", "CSMPN"], ["csml", "ChordSlashML"], ["alphatex", "AlphaTex (tab)"]].map(([f, lbl]) => (
-            <button key={f} onClick={() => doExport(f)} style={{ ...chip(C), padding: "3px 9px", borderColor: exp && exp.fmt === f ? C.cyan : C.border, color: exp && exp.fmt === f ? C.cyan : C.dim }}>{lbl}</button>
-          ))}
-          <span style={{ width: 1, alignSelf: "stretch", background: C.border, margin: "0 2px" }} />
-          <button onClick={() => doExport("music")} title="Turn this chart into a ready-to-run `listenhub music generate` command (ListenHub / Mureka AI music CLI) — recognize → generate"
-            style={{ ...chip(C), padding: "3px 9px", borderColor: exp && exp.fmt === "music" ? C.cyan : C.border, color: exp && exp.fmt === "music" ? C.cyan : C.dim }}>🎵 Generate audio ↗</button>
-          <button onClick={sendToPro} title="Open this chart in Chord Sheet Maker Pro (native CSMPN handoff)"
-            style={{ ...chip(C), padding: "3px 10px", borderColor: sent ? C.green : C.amber, color: sent ? C.green : C.amber, fontWeight: 600 }}>{sent ? "opening Pro ✓" : "→ Chord Sheet Maker Pro"}</button>
+        <span style={{ marginLeft: "auto", display: "inline-flex", gap: 6 }}>
+          <button aria-expanded={panel === "settings"} aria-controls="tdp-chart-settings" onClick={() => setPanel((p) => (p === "settings" ? null : "settings"))}
+            style={{ ...chip(C), padding: "3px 10px", borderColor: panel === "settings" ? C.amber : C.border, color: panel === "settings" || settingsChanged ? C.amber : C.dim }}>⚙ Settings{settingsChanged ? ` · ${settingsChanged}` : ""}</button>
+          <button aria-expanded={panel === "share"} aria-controls="tdp-chart-share" onClick={() => setPanel((p) => (p === "share" ? null : "share"))}
+            style={{ ...chip(C), padding: "3px 12px", borderColor: C.amber, color: panel === "share" ? C.bg : C.amber, background: panel === "share" ? C.amber : C.bg, fontWeight: 600 }}>⇪ Share</button>
         </span>
       </div>
 
-      <div className="no-print" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, marginBottom: 10, fontSize: 11, color: C.dim }}>
-        <button onClick={copyImage} title="the chord chart as a PNG — on the clipboard where the browser allows, else the share sheet / a download" style={{ ...chip(C), padding: "4px 10px", color: imgDone ? C.green : C.dim, borderColor: imgDone ? C.green : C.border }}>{imgDone ? "image ✓" : "⧉ Image"}</button>
-        <button onClick={doPrint} title="print this view, or save it as a PDF (iOS: share sheet → Save as PDF): header, the chords used as diagrams, the chart / grid / lyrics / tab"
-          style={{ ...chip(C), padding: "4px 10px", borderColor: printing ? C.green : C.border, color: printing ? C.green : C.dim }}>🖨 Print / PDF</button>
-        <select value={paper} onChange={(e) => setPaper(e.target.value)} title="paper size" style={{ ...chip(C), padding: "3px 6px", background: C.raised, color: C.dim }}>
-          <option value="a4">A4</option><option value="letter">Letter</option>
-        </select>
-        <button onClick={() => { stopPlay(); setPractice((v) => !v); }} title="loop bars, slow down without changing pitch, metronome, count-in, wait-for-me coach"
-          style={{ ...chip(C), padding: "4px 10px", borderColor: practice ? C.green : C.border, color: practice ? C.green : C.amber }}>🎯 Practice</button>
-        <label style={{ ...chip(C), padding: "4px 10px", cursor: "pointer" }}>
-          🎵 Reference audio
-          <input type="file" onChange={attachRef} style={{ display: "none" }} />
-        </label>
-        {refName && <>
-          <button onClick={toggleRef} title="play the recording with the chart highlighting in sync"
-            style={{ ...chip(C), padding: "4px 12px", borderColor: refPlaying ? C.green : C.border, color: refPlaying ? C.green : C.amber }}>{refPlaying ? "■ Stop audio" : "▶ Play with chart"}</button>
-          <button onClick={autoAlign} disabled={aligning} title="automatically align the recording to the chart (DTW) — no ♩= needed"
-            style={{ ...chip(C), padding: "4px 12px", borderColor: alignSegs ? C.green : C.border, color: aligning ? C.dim : alignSegs ? C.green : C.cyan }}>{aligning ? "aligning…" : alignSegs ? "🎯 auto-synced ✓" : "🎯 Auto-align"}</button>
-          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 160 }}>{refName}</span>
-          <span style={{ color: C.dim }}>{alignSegs ? "· following the recording" : "· Auto-align, or nudge ♩="}</span>
-        </>}
-        {refErr && <span style={{ color: C.red }}>{refErr}</span>}
-      </div>
+      {panel === "settings" && (
+        <div id="tdp-chart-settings" className="no-print" role="region" aria-label="Chart settings"
+          style={{ background: C.panel, border: `1px solid ${C.border}`, borderTop: "none", borderRadius: "0 0 10px 10px", padding: "10px 12px", marginBottom: 10, display: "grid", gap: 10 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim, minWidth: 110 }}>CHORD NAMES</span>
+            <button aria-pressed={showRoman} onClick={() => { if (!showRoman) { setShowRoman(true); setNashville(false); } else if (!nashville) setNashville(true); else { setShowRoman(false); setNashville(false); } }} title={key ? `key of ${kName(key)} · tap again for Nashville numbers` : "key analysis"}
+              style={{ ...chip(C), padding: "3px 9px", borderColor: showRoman ? C.cyan : C.border, color: showRoman ? C.cyan : C.dim }}>{showRoman ? (nashville ? "1·5·6m" : "I·V·vi") : "I·V·vi"}</button>
+            <KeyPicker C={C} value={keyOv} onChange={setKeyOv} cands={keyCands} useSharp={useSharp} semis={semis} />
+            {vocabPicker && <ChordVocabPicker C={C} value={vocab} onChange={setVocab} sixNine={sixNine} onSixNine={setSixNine} />}
+            {useSharp && (
+              <select value={spelling} onChange={(e) => setSpelling(e.target.value)} aria-label="Spelling" title="for key: Dbmaj7 in F minor, G#m in E · family: always C# Eb F# Ab Bb"
+                style={{ ...chip(C), padding: "3px 9px", borderColor: C.border, color: C.dim, background: C.raised, cursor: "pointer" }}>
+                <option value="key">Spell for key</option>
+                <option value="family">Spell C# Eb F# Ab Bb</option>
+              </select>
+            )}
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim, minWidth: 110 }}>ARRANGEMENT</span>
+            <button aria-pressed={simplify} onClick={() => setSimplify((s) => !s)} title="aggregate each bar's notes into one chord (for dense transcriptions)"
+              style={{ ...chip(C), padding: "3px 9px", borderColor: simplify ? C.green : C.border, color: simplify ? C.green : C.dim }}>{simplify ? "1 chord/bar" : "Simplify"}</button>
+            <select value={level} onChange={(e) => setLevel(e.target.value)} aria-label="Playing level" title="a playing level: Beginner = triads, one chord per bar, quarter strums, open-chord key (+ capo) · Intermediate = 7ths + inversions, eighths · Advanced = the full Pro chart"
+              style={{ ...chip(C), padding: "3px 9px", borderColor: level ? C.amber : C.border, color: level ? C.amber : C.dim, background: C.raised, cursor: "pointer" }}>
+              <option value="">Level: as written</option>
+              {ARRANGEMENT_LEVELS.map((l) => <option key={l} value={l}>Level: {l[0].toUpperCase() + l.slice(1)}</option>)}
+            </select>
+            <select value={arrange} disabled={!!lvl} onChange={(e) => setArrange(e.target.value)} aria-label="Rhythm" title="stamp a strum/comping rhythm across each bar (exports as CSMPN/CSML slash-rhythm)"
+              style={{ ...chip(C), padding: "3px 9px", borderColor: arrange !== "off" ? C.cyan : C.border, color: arrange !== "off" ? C.cyan : C.dim, background: C.raised, cursor: "pointer" }}>
+              <option value="off">Arrange…</option>
+              <option value="block">↳ Block (sustain)</option>
+              <option value="quarters">↳ Quarters</option>
+              <option value="eighths">↳ Eighths</option>
+              <option value="shuffle">↳ Shuffle</option>
+              <option value="sixteenths">↳ Sixteenths</option>
+              <option value="skank">↳ Skank (off-beat)</option>
+            </select>
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim, minWidth: 110 }}>PRACTICE</span>
+            <button aria-pressed={practice} onClick={() => { stopPlay(); setPractice((v) => !v); }} title="loop bars, slow down without changing pitch, metronome, count-in, wait-for-me coach"
+              style={{ ...chip(C), padding: "4px 10px", borderColor: practice ? C.green : C.border, color: practice ? C.green : C.amber }}>🎯 Practice</button>
+            <label style={{ ...chip(C), padding: "4px 10px", cursor: "pointer", display: "inline-flex", alignItems: "center" }}>
+              🎵 Reference audio
+              <input type="file" onChange={attachRef} style={{ display: "none" }} />
+            </label>
+            <span style={{ fontSize: 11, color: C.dim }}>play a recording with the chart following it</span>
+          </div>
+        </div>
+      )}
+
+      {panel === "share" && (
+        <div id="tdp-chart-share" className="no-print" role="region" aria-label="Share"
+          style={{ background: C.panel, border: `1px solid ${C.border}`, borderTop: "none", borderRadius: "0 0 10px 10px", padding: "10px 12px", marginBottom: 10, display: "grid", gap: 10 }}>
+          <button onClick={sendToPro} title="Open this chart in Chord Sheet Maker Pro (native CSMPN handoff)"
+            style={{ textAlign: "left", display: "flex", alignItems: "center", gap: 12, padding: "10px 12px", borderRadius: 10, border: `1px solid ${sent ? C.green : C.amber}`, background: C.bg, color: C.text, cursor: "pointer", fontFamily: "inherit" }}>
+            <span aria-hidden style={{ fontSize: 18, color: sent ? C.green : C.amber }}>→</span>
+            <span style={{ display: "grid", gap: 2 }}>
+              <b style={{ fontSize: 13, color: sent ? C.green : C.amber }}>{sent ? "Opening Chord Sheet Maker Pro…" : "Open in Chord Sheet Maker Pro"}</b>
+              <span style={{ fontSize: 11, color: C.dim }}>fake-book layout, slash rhythm, setlists — your edits, fingerings and rhythm go with it</span>
+            </span>
+          </button>
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+            <button onClick={doPrint} title="print this view, or save it as a PDF (iOS: share sheet → Save as PDF): header, the chords used as diagrams, the chart / grid / lyrics / tab"
+              style={{ ...chip(C), padding: "4px 12px", borderColor: printing ? C.green : C.border, color: printing ? C.green : C.text }}>🖨 Print / PDF</button>
+            <select value={paper} onChange={(e) => setPaper(e.target.value)} aria-label="Paper size" style={{ ...chip(C), padding: "3px 6px", background: C.raised, color: C.dim }}>
+              <option value="a4">A4</option><option value="letter">Letter</option>
+            </select>
+            <button onClick={copyImage} title="the chord chart as a PNG — on the clipboard where the browser allows, else the share sheet / a download"
+              style={{ ...chip(C), padding: "4px 12px", color: imgDone ? C.green : C.text, borderColor: imgDone ? C.green : C.border }}>{imgDone ? "image ✓" : "⧉ Image"}</button>
+          </div>
+          {SHARE_GROUPS.map((g) => {
+            const rows = g.items.map(([f, lbl, head, desc]) => (
+              <button key={f} onClick={() => { doExport(f); setPanel(null); }} aria-label={lbl} title={desc}
+                style={{ textAlign: "left", display: "flex", alignItems: "center", gap: 10, padding: "6px 4px", border: "none", borderBottom: `1px solid ${C.raised}`, background: "transparent", color: C.text, cursor: "pointer", fontFamily: "inherit", width: "100%" }}>
+                <span style={{ flex: 1, display: "grid", gap: 1 }}>
+                  <span style={{ fontSize: 13 }}>{head}</span>
+                  <span style={{ fontSize: 11, color: C.dim }}>{desc}</span>
+                </span>
+                <span style={{ fontSize: 10, color: exp && exp.fmt === f ? C.cyan : C.dim, border: `1px solid ${exp && exp.fmt === f ? C.cyan : C.border}`, borderRadius: 6, padding: "2px 7px", whiteSpace: "nowrap" }}>{lbl}</span>
+              </button>
+            ));
+            return g.advanced
+              ? <details key={g.title}><summary style={{ cursor: "pointer", fontSize: 10, letterSpacing: 2, color: C.dim }}>{g.title}</summary><div style={{ marginTop: 4 }}>{rows}</div></details>
+              : <div key={g.title}><div style={{ fontSize: 10, letterSpacing: 2, color: C.dim, marginBottom: 2 }}>{g.title}</div>{rows}</div>;
+          })}
+        </div>
+      )}
+
+      {(refName || refErr) && (
+        <div className="no-print" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, marginBottom: 10, fontSize: 11, color: C.dim }}>
+          {refName && <>
+            <button onClick={toggleRef} title="play the recording with the chart highlighting in sync"
+              style={{ ...chip(C), padding: "4px 12px", borderColor: refPlaying ? C.green : C.border, color: refPlaying ? C.green : C.amber }}>{refPlaying ? "■ Stop audio" : "▶ Play with chart"}</button>
+            <button onClick={autoAlign} disabled={aligning} title="automatically align the recording to the chart (DTW) — no ♩= needed"
+              style={{ ...chip(C), padding: "4px 12px", borderColor: alignSegs ? C.green : C.border, color: aligning ? C.dim : alignSegs ? C.green : C.cyan }}>{aligning ? "aligning…" : alignSegs ? "🎯 auto-synced ✓" : "🎯 Auto-align"}</button>
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 160 }}>{refName}</span>
+            <span style={{ color: C.dim }}>{alignSegs ? "· following the recording" : "· Auto-align, or nudge ♩="}</span>
+          </>}
+          {refErr && <span style={{ color: C.red }}>{refErr}</span>}
+        </div>
+      )}
+      {lvl && lvl.capo > 0 && <div className="no-print" style={{ fontSize: 11, color: C.amber, marginBottom: 8 }} title="these are the shapes; put a capo here to sound like the record">Capo {lvl.capo} to play along with the record.</div>}
 
       {practice && <PracticePlayer C={C} score={tscore} getBuffer={getBuffer} bpm={bpm} onPlayKey={setPlayKey} />}
 
@@ -1968,6 +2034,7 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
         : <GridView score={tscore} C={C} symOf={symOf} selKey={selKey} onPick={onPick} onVoicings={setVoicingChoices} />}
       {voicingChoices && <ChordVoicingModal key={voicingChoices.map((c) => c.symbol).join("|")} choices={voicingChoices} onClose={() => setVoicingChoices(null)} C={C} useSharp={useSharp} sequence={chordSeq} />}
 
+      <div ref={expRef} data-export-anchor />
       <ExportPanel exp={exp} setExp={setExp} C={C} bpm={bpm} semis={semis} score={tscore} share={share}
         copy={copy} download={download} copied={copied} downloaded={downloaded} extOf={(f) => (f === "abc" ? abcExt : _EXPORT_EXT[f] || "txt")}
         abcExt={abcExt} setAbcExt={setAbcExt} />
@@ -3119,7 +3186,8 @@ function LeadSheetView({ score, C, overrides, setOverrides, editMode, editKey, s
   let prevSig = null;
   return (
     <>
-      <div className="tdp-scroll" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(146px, 1fr))", gap: "10px 0", maxHeight: 420, overflow: "auto", paddingRight: 4 }}>
+      {/* UX review #15: the chart flows in the page (the toolbar above is pinned) — no inner scroll box to trap the finger */}
+      <div className="tdp-scroll" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(146px, 1fr))", gap: "10px 0", paddingRight: 4 }}>
         {score.bars.map((bar) => {
           const sig = bar.timeSig || score.timeSig;
           const sigChanged = !prevSig || prevSig[0] !== sig[0] || prevSig[1] !== sig[1];
@@ -3279,7 +3347,7 @@ function TabView({ tex, title, C }) {
 function GridView({ score, C, symOf, selKey, onPick, onVoicings }) {
   return (
     <>
-      <div className="tdp-scroll" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(74px, 1fr))", gap: 6, maxHeight: 420, overflow: "auto", paddingRight: 4 }}>
+      <div className="tdp-scroll" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(74px, 1fr))", gap: 6, paddingRight: 4 }}>
         {score.bars.map((bar) => {
           const collapsed = bar.events.map((e) => symOf(bar, e));
           const k = `${bar.number}`;
@@ -3700,6 +3768,25 @@ function ChordVocabPicker({ C, value, onChange, sixNine, onSixNine, disabled }) 
   );
 }
 /* Export preview: the generated text (or MIDI byte summary) + copy/download. */
+/* The Share menu (redesign step 2, UX review #9): exports ordered by what they are FOR, each with a one-line
+ * description. [format, its name (also the button's accessible name), what it is for]. */
+const SHARE_GROUPS = [
+  { title: "FOR NOTATION APPS", items: [
+    ["musicxml", "MusicXML", "Notation app", "MuseScore, Sibelius, Dorico, Guitar Pro — notes, chord symbols, sections"],
+    ["midi", "MIDI", "DAW or keyboard", "the voicings on the chart's tempo"],
+    ["alphatex", "AlphaTex (tab)", "Guitar tab", "strings, frets and techniques — opens in alphaTab viewers"],
+  ] },
+  { title: "AS TEXT", items: [
+    ["chordpro", "ChordPro", "Chord chart", "for songbook apps"],
+    ["abc", "ABC", "Folk notation", "abcnotation.com, abcjs, EasyABC — playable notes and chords"],
+  ] },
+  { title: "ADVANCED", advanced: true, items: [
+    ["csmpn", "CSMPN", "Chord Sheet Maker Pro text", "its own chart format (the button above sends it for you)"],
+    ["csml", "ChordSlashML", "Slash-rhythm text", "Chord Sheet Maker Pro's slash-rhythm editor"],
+    ["music", "AI-audio prompt", "AI audio prompt", "a `listenhub music generate` command — needs the ListenHub CLI in your own terminal"],
+  ] },
+];
+
 function ExportPanel({ exp, setExp, C, bpm, semis, copy, download, copied, downloaded, extOf, abcExt, setAbcExt, score, share }) {
   if (!exp) return null;
   return (
@@ -6630,6 +6717,14 @@ function ToastHost({ C }) {
       ))}
     </div>
   );
+}
+
+/* UX review #8: a panel's "how this works" prose, shown in full before a file is open and folded once one is */
+function HowItWorks({ C, folded, children }) {
+  const style = { fontSize: 11, color: C.dim, marginTop: 8, lineHeight: 1.6 };
+  return folded
+    ? <details style={style}><summary style={{ cursor: "pointer" }}>How it works</summary>{children}</details>
+    : <div style={style}>{children}</div>;
 }
 
 function SectionLabel({ children, C, style }) { return <div style={{ fontSize: 10, letterSpacing: 2.5, color: C.dim, margin: "0 0 8px", ...style }}>{children}</div>; }

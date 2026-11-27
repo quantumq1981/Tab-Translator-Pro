@@ -64,6 +64,11 @@ Boot measured with `tests/bench/load-e2e.mjs` (site assembled as `pages.yml` doe
   inside a state updater; a delete hides now and commits in `onCommit`); mode row + view switch are tablists (browser
   tests use `getByRole("tab")`); a toggle that adds `activeToggle(C)` must add `inactiveToggle(C)` when off (React
   deletes a vanished `borderColor` → white border); 44 px targets under `pointer: coarse`. `bench/polish-e2e.mjs`.
+- **Step 2 built (2026-11-27):** UX review #5 #8 #9 #15 — see the review's Status. ChartPanel's toolbar is
+  `role="toolbar"`: view tabs, Edit, transpose, play, **⚙ Settings** (`panel === "settings"`) and **⇪ Share**
+  (`SHARE_GROUPS`: [format, accessible name, heading, what it's for]). New chart controls go in a Settings group or a
+  Share group, not the toolbar; count a new setting in `settingsChanged`. Browser tests open the panel first
+  (`openChartPanel(scope, "share" | "settings")` in the benches). `bench/toolbar-e2e.mjs`.
 
 ### Audit 2026-11-18 — fixed (PR #157 + the follow-up); read `docs/AUDIT-2026-11-18.md` for the evidence
 

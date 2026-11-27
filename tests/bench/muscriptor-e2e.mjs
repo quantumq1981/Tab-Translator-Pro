@@ -10,6 +10,8 @@
 import fs from "node:fs"; import path from "node:path"; import http from "node:http";
 import { createRequire } from "node:module";
 import * as L from "./lib.mjs";
+/* redesign step 2: exports live in the chart's ⇪ Share menu, chord-name / arrangement / practice controls in ⚙ Settings */
+const openChartPanel = async (scope, which) => { const b = scope.getByRole("button", { name: which === "share" ? "⇪ Share" : /^⚙ Settings/ }).first(); if ((await b.getAttribute("aria-expanded")) !== "true") { await b.click(); await new Promise((r) => setTimeout(r, 200)); } };
 const arg = (k, d) => { const i = process.argv.indexOf("--" + k); return i > 0 ? process.argv[i + 1] : d; };
 const DEPS = arg("deps"); if (!DEPS) { console.error("--deps <dir> is required"); process.exit(2); }
 const ZIP = path.resolve(L.repo, "tests", arg("zip", "fixtures/muscriptor-saddle-up_sheets.zip")), OUT = arg("out", process.cwd());
@@ -48,16 +50,16 @@ await page.getByRole("tab", { name: "MusicXML / GP" }).click({ timeout: 60000 })
 const up = page.locator('input[type="file"]').first();
 await up.setInputFiles(ZIP);
 await harmony().waitFor({ timeout: 60000 });
-await page.getByText(/1 chord\/bar ✓/).first().waitFor({ timeout: 30000 });
+await page.getByText(/1 chord\/bar/).first().waitFor({ timeout: 30000 });
 let t = await chartText();
-R.zip = { harmonySelected: await isOn(harmony()), key: (t.match(/key (\S+) \(/) || [])[1], simplified: /1 chord\/bar ✓/.test(t), hasFm9: /Fm9/.test(t), hasDbmaj7: /Dbmaj7|D♭maj7/.test(t), sharpRoots: (t.match(/\b[CDGA]#(?:m|maj|7|\b)/g) || []).length };
+R.zip = { harmonySelected: await isOn(harmony()), key: (t.match(/key (\S+) \(/) || [])[1], simplified: /1 chord\/bar/.test(t), hasFm9: /Fm9/.test(t), hasDbmaj7: /Dbmaj7|D♭maj7/.test(t), sharpRoots: (t.match(/\b[CDGA]#(?:m|maj|7|\b)/g) || []).length };
 await page.screenshot({ path: path.join(OUT, "muscriptor-harmony.png"), fullPage: true });
 await page.getByRole("button", { name: /piano/i }).first().click(); await page.waitForTimeout(800);
 t = await chartText(); R.piano = { harmonySelected: await isOn(harmony()), key: (t.match(/key (\S+) \(/) || [])[1] };
 await harmony().click(); await page.waitForTimeout(800);
-await page.locator("select").filter({ hasText: "Spell for key" }).first().selectOption("family"); await page.waitForTimeout(500);
+await openChartPanel(page, "settings"); await page.locator("select").filter({ hasText: "Spell for key" }).first().selectOption("family"); await page.waitForTimeout(500);
 t = await chartText(); R.familySpelling = { hasC: /C#maj7|C#\b/.test(t), hasDb: /Dbmaj7/.test(t) };
-await page.locator("select").filter({ hasText: "Spell for key" }).first().selectOption("key"); await page.waitForTimeout(500);
+await openChartPanel(page, "settings"); await page.locator("select").filter({ hasText: "Spell for key" }).first().selectOption("key"); await page.waitForTimeout(500);
 await page.reload(); await page.waitForTimeout(1500);
 await page.getByText(/Restored/).first().waitFor({ timeout: 60000 }).catch(() => {});
 await harmony().waitFor({ timeout: 60000 }).catch(() => {});

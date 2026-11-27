@@ -61,5 +61,19 @@ expect(/NOTES IN THIS CHORD/.test(ui) && /<details data-readout-details/.test(ui
 expect(!/PATH [A-G](\/| ·)/.test(ui.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "")), "#10 no developer path names in section labels");
 expect(/<details><summary[^>]*>About the engine<\/summary>/.test(ui), "#10 the engine footer is folded");
 
+// Redesign step 2 (2026-11-27): #5 #8 #9 #15 — checked in a real browser by bench/toolbar-e2e.mjs
+const cp = between("function ChartPanel(", "\n/* ---- view layer");
+const tbar = between('role="toolbar" aria-label="Chart"', '{panel === "settings" && (');
+expect(/position: "sticky", top: 0/.test(tbar) && /@media \(max-width:599px\)\{\.tdp-app \.tdp-chart-toolbar\{position:static!important;\}\}/.test(ui), "#5 the chart toolbar is pinned from 600 px (scrolls with the page on a phone)");
+expect(/⇪ Share/.test(tbar) && /⚙ Settings/.test(tbar) && !/doExport\(|setSimplify|setLevel|setArrange|ChordVocabPicker|KeyPicker|copyImage|doPrint|attachRef/.test(tbar), "#5 the toolbar holds only view / edit / transpose / play / Settings / Share");
+expect(/aria-label="Chart settings"/.test(cp) && /CHORD NAMES/.test(cp) && /ARRANGEMENT/.test(cp) && /PRACTICE/.test(cp), "#5 the Settings panel groups chord names / arrangement / practice");
+expect(/const settingsChanged = \[/.test(cp) && /⚙ Settings\{settingsChanged \?/.test(cp), "#5 the ⚙ button counts settings that differ from their defaults");
+expect(/if \(e\.key === "Escape"\) setPanel\(null\)/.test(cp), "#5 Escape closes the open panel");
+expect(/const SHARE_GROUPS = \[/.test(ui) && /"FOR NOTATION APPS"/.test(ui) && /"AS TEXT"/.test(ui) && /advanced: true/.test(ui), "#9 Share groups exports by use, Advanced collapsed");
+expect(/doExport\(f\); setPanel\(null\)/.test(cp) && /data-export-anchor/.test(cp), "#9 choosing an export closes the menu and scrolls to it");
+expect(/function HowItWorks\(\{ C, folded, children \}\)/.test(ui) && /<HowItWorks C=\{C\} folded=\{!!\(xmlScore \|\| texDoc\)\}>/.test(ui) && /<HowItWorks C=\{C\} folded=\{!!scoreView\}>/.test(ui), "#8 the panel prose folds once a chart is open");
+const lead = between("function LeadSheetView", "\nfunction "), grid = between("function GridView", "\nfunction ");
+expect(lead && grid && !/maxHeight: 420, overflow: "auto"/.test(lead + grid), "#15 the lead sheet and grid flow in the page (no inner scroll box)");
+
 console.log(`ux-safety: ${passes} passed, ${failures} failed`);
 if (failures) process.exit(1);

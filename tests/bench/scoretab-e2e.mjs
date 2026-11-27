@@ -8,6 +8,8 @@
  * Dev-only. */
 import fs from "node:fs"; import path from "node:path";
 import { startApp, arg } from "./e2e-app.mjs";
+/* redesign step 2: exports live in the chart's ⇪ Share menu, chord-name / arrangement / practice controls in ⚙ Settings */
+const openChartPanel = async (scope, which) => { const b = scope.getByRole("button", { name: which === "share" ? "⇪ Share" : /^⚙ Settings/ }).first(); if ((await b.getAttribute("aria-expanded")) !== "true") { await b.click(); await new Promise((r) => setTimeout(r, 200)); } };
 
 const SCORE = arg("score"), AUDIO = arg("audio"), STEMS = arg("stems"), OUT = arg("out", process.cwd());
 if (!SCORE || !AUDIO || !STEMS) { console.error("--score --audio --stems are required"); process.exit(2); }
@@ -36,8 +38,8 @@ ok("the tab chart's fingering comes from the score", /fingering from the score/.
 const chips = await page.getByRole("button", { name: /^▶ \d+/ }).count();
 ok("differences listed by bar (tap to listen)", chips > 0 || /not heard/.test(body), chips);
 // the tab chart's AlphaTex export (scoped to the panel that says "fingering from the score")
-const tabPanel = page.locator("div").filter({ hasText: /fingering from the score/ }).filter({ has: page.getByRole("button", { name: "AlphaTex (tab)" }) }).last();
-await tabPanel.getByRole("button", { name: "AlphaTex (tab)" }).first().click();
+const tabPanel = page.locator("div").filter({ hasText: /fingering from the score/ }).filter({ has: page.getByRole("button", { name: "⇪ Share" }) }).last();
+await openChartPanel(tabPanel, "share"); await tabPanel.getByRole("button", { name: "AlphaTex (tab)" }).first().click();
 const tex = await tabPanel.locator("textarea, pre").last().evaluate((el) => el.value || el.textContent);
 const imp = new alphaTab.importer.AlphaTexImporter(); imp.initFromString(tex, new alphaTab.Settings());
 const sc = imp.readScore(); let notes = 0; for (const mb of sc.tracks[0].staves[0].bars) for (const v of mb.voices) for (const b of v.beats) notes += b.notes.length;

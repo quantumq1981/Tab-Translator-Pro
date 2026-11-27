@@ -4,6 +4,8 @@
 import fs from "node:fs"; import path from "node:path";
 import { createRequire } from "node:module";
 import { startApp, arg } from "./e2e-app.mjs";
+/* redesign step 2: exports live in the chart's ⇪ Share menu, chord-name / arrangement / practice controls in ⚙ Settings */
+const openChartPanel = async (scope, which) => { const b = scope.getByRole("button", { name: which === "share" ? "⇪ Share" : /^⚙ Settings/ }).first(); if ((await b.getAttribute("aria-expanded")) !== "true") { await b.click(); await new Promise((r) => setTimeout(r, 200)); } };
 const OUT = arg("out", process.cwd());
 const require = createRequire(import.meta.url);
 const pdfjs = require("pdfjs-dist/legacy/build/pdf.js");
@@ -38,7 +40,7 @@ await page.getByRole("button", { name: "Next ▶" }).click(); await page.waitFor
 ok("Next ▶ opens song 2 untransposed", /2 \/ 2/.test(await page.locator("body").innerText()) && /blue-sky/.test(await page.locator("body").innerText()) && (await page.getByText(/\+2 st/).count()) === 0);
 // print the chart → PDF
 await page.evaluate(() => { window.print = () => { window.__printed = (window.__printed || 0) + 1; }; });
-await page.getByRole("button", { name: "🖨 Print / PDF" }).click(); await page.waitForTimeout(1500);
+await openChartPanel(page, "share"); await page.getByRole("button", { name: "🖨 Print / PDF" }).click(); await page.waitForTimeout(1500);
 await page.emulateMedia({ media: "print" });
 const pdf1 = await page.pdf({ format: "A4", preferCSSPageSize: true });
 const t1 = await pdfText(pdf1); fs.writeFileSync(path.join(OUT, "print-chart.pdf"), pdf1);
@@ -46,7 +48,7 @@ ok("print: the chart prints with its header and chords (no app chrome)", t1.page
 await page.emulateMedia({ media: "screen" }); await page.evaluate(() => { document.body.classList.remove("tdp-printing"); window.dispatchEvent(new Event("afterprint")); });
 await page.getByRole("tab", { name: "Tab", exact: true }).first().click();
 await page.locator("[data-tab-view]").getByText(/bars drawn/).waitFor({ timeout: 120000 });
-await page.getByRole("button", { name: "🖨 Print / PDF" }).click(); await page.waitForTimeout(1500);
+await openChartPanel(page, "share"); await page.getByRole("button", { name: "🖨 Print / PDF" }).click(); await page.waitForTimeout(1500);
 await page.emulateMedia({ media: "print" });
 const pdf2 = await page.pdf({ format: "A4", preferCSSPageSize: true }); fs.writeFileSync(path.join(OUT, "print-tab.pdf"), pdf2);
 const t2 = await pdfText(pdf2);

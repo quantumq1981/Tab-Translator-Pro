@@ -3342,7 +3342,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   expect(/<script type="module" async src="\.\/guitar-model\.js"><\/script>/.test(html), "index.html loads guitar-model.js");
   expect(/cp guitar-model\.js guitar-model-core\.js guitar-worker\.js _site\//.test(pages) && /cp models\/guitar-crnn\/guitar-gaps\.w8\.onnx models\/guitar-crnn\/NOTICE _site\/models\/guitar-crnn\//.test(pages) && /guitar-model\.js\?v=\$\{BUILD\}/.test(pages), "Pages ships the guitar glue + model, deploy-stamped");
   expect(/window\.TTP_GUITAR_MODEL/.test(ui) && /polyNotesToScore\(gtrLine, noteGridOpts/.test(ui) && /const gtrLine = gtrTechOn && gtrTechNotes \? gtrTechNotes : gtrNotes/.test(ui) && /fingerScore\(gtrPoly, /.test(ui) && /🎸 Guitar → Tab \(ML\)/.test(ui), "the Audio panel's 🎸 Guitar → Tab button runs the model and fingers the notes");
-  expect(/\["alphatex", "AlphaTex \(tab\)"\]/.test(ui) && /scoreToAlphaTex\(tabScore/.test(ui) && /alphatex: "alphatex"/.test(ui), "ChartPanel exports AlphaTex (tab)");
+  expect(/\["alphatex", "AlphaTex \(tab\)", "Guitar tab"/.test(ui) && /scoreToAlphaTex\(tabScore/.test(ui) && /alphatex: "alphatex"/.test(ui), "ChartPanel exports AlphaTex (tab)");
   // the tab chart must not auto-Simplify (a guitar line is "melodic" → one chord per bar → notes lost
   // from the AlphaTex export: the real-app run exported 87 of 117 notes before this) nor share the
   // chord chart's edits

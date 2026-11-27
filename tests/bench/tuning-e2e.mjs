@@ -12,6 +12,8 @@ import path from "node:path";
 import http from "node:http";
 import { createRequire } from "node:module";
 import * as L from "./lib.mjs";
+/* redesign step 2: exports live in the chart's ⇪ Share menu, chord-name / arrangement / practice controls in ⚙ Settings */
+const openChartPanel = async (scope, which) => { const b = scope.getByRole("button", { name: which === "share" ? "⇪ Share" : /^⚙ Settings/ }).first(); if ((await b.getAttribute("aria-expanded")) !== "true") { await b.click(); await new Promise((r) => setTimeout(r, 200)); } };
 
 const arg = (k, d) => { const i = process.argv.indexOf("--" + k); return i > 0 ? process.argv[i + 1] : d; };
 const DEPS = arg("deps");
@@ -83,9 +85,9 @@ check(await sugg.count() > 0 && /Drop D/.test(await sugg.first().innerText()), "
 const metaText = () => page.getByText(/from the guitar ML model/).first().innerText();
 check(/Standard/.test(await metaText()), "the tab starts in standard (suggested, not applied)");
 
-await panel.getByRole("button", { name: "AlphaTex (tab)" }).click();
+await openChartPanel(panel, "share"); await panel.getByRole("button", { name: "AlphaTex (tab)" }).click();
 // the export panel snapshots its text when the button is pressed (every format does), so press it again
-const texNow = async () => { await panel.getByRole("button", { name: "AlphaTex (tab)" }).click(); await page.waitForTimeout(150); return panel.locator("textarea").first().inputValue(); };
+const texNow = async () => { await openChartPanel(panel, "share"); await panel.getByRole("button", { name: "AlphaTex (tab)" }).click(); await page.waitForTimeout(150); return panel.locator("textarea").first().inputValue(); };
 let tex = await texNow();
 check(/notes? outside this instrument's range/.test(tex) && /\\tuning \(E4 B3 G3 D3 A2 E2\)/.test(tex), "in standard the low Ds are unplayable — the export says so");
 
