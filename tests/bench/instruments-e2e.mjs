@@ -9,7 +9,7 @@ const OUT = arg("out", process.cwd());
 const app = await startApp();
 const { page, ok } = app;
 const GP = path.resolve(app.repo, arg("gp", "Steely Dan - Peg.gp4"));
-await page.getByRole("button", { name: "MusicXML / GP" }).click({ timeout: 60000 });
+await page.getByRole("tab", { name: "MusicXML / GP" }).click({ timeout: 60000 });
 await page.locator('input[type="file"]').first().setInputFiles(GP);
 const chordBtn = page.locator('button[title*="guitar voicings"]');
 await chordBtn.first().waitFor({ timeout: 60000 });

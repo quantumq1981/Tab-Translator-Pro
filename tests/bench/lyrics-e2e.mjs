@@ -13,9 +13,9 @@ const { page, ok } = app;
 const GP = path.resolve(app.repo, arg("gp", "blue-sky.gp")), VOCAL = path.resolve(app.repo, arg("vocal", "Peg VOCALS ONLY - CzTvVJ.mp3"));
 const sheet = "[Verse 1]\nThe morning light is on the hill\nAnd every road is calling\nI keep a song inside me still\nWhile all the leaves are falling\n\n[Chorus]\nSing it out\nSing it out tonight\n";
 
-await page.getByRole("button", { name: "MusicXML / GP" }).click({ timeout: 60000 });
+await page.getByRole("tab", { name: "MusicXML / GP" }).click({ timeout: 60000 });
 await page.locator('input[type="file"]').first().setInputFiles(GP);
-await page.getByRole("button", { name: "Lyrics", exact: true }).first().click({ timeout: 60000 });
+await page.getByRole("tab", { name: "Lyrics", exact: true }).first().click({ timeout: 60000 });
 await page.locator("textarea").last().fill(sheet);
 await page.getByRole("button", { name: /Auto-align to the bars/ }).click();
 await page.getByText(/6 lines · spread over the bars/).waitFor({ timeout: 30000 });
@@ -35,10 +35,10 @@ ok("⬇ LRC saves one [mm:ss.xx] stamp per line", (lrc.match(/^\[\d\d:\d\d\.\d\d
 await page.screenshot({ path: path.join(OUT, "lyrics-gp.png") });
 
 // 2) audio: the real vocal stem
-await page.getByRole("button", { name: "Audio 🎵" }).click();
+await page.getByRole("tab", { name: "Audio 🎵" }).click();
 await page.locator('input[type="file"]').first().setInputFiles(VOCAL);
 await page.getByText(/bars · ♩=/).first().waitFor({ timeout: 300000 });
-await page.getByRole("button", { name: "Lyrics", exact: true }).first().click({ timeout: 60000 });
+await page.getByRole("tab", { name: "Lyrics", exact: true }).first().click({ timeout: 60000 });
 await page.locator("textarea").last().fill(sheet + "\n[Verse 2]\nA lantern burning in the rain\nA river running under\nI call your name and call again\nAnd listen for the thunder\n");
 const ta = Date.now();
 await page.getByRole("button", { name: /Auto-align to the vocal/ }).click();

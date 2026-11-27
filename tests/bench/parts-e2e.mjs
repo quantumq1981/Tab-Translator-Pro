@@ -42,7 +42,7 @@ const page = await ctx.newPage();
 const logs = []; page.on("pageerror", (e) => logs.push(`[pageerror] ${e.message}`));
 const out = {};
 await page.goto(ORIGIN + "/Tab-Translator-Pro/"); await page.waitForTimeout(500);
-await page.getByRole("button", { name: "Audio 🎵" }).click({ timeout: 60000 });
+await page.getByRole("tab", { name: "Audio 🎵" }).click({ timeout: 60000 });
 await page.locator('input[type="file"][multiple]').first().setInputFiles(STEMS);
 await page.getByRole("button", { name: "♫ Chart these stems" }).click({ timeout: 120000 });
 await page.getByText("TEMPO & BARS · shared by every stem chart").waitFor({ timeout: 600000 });

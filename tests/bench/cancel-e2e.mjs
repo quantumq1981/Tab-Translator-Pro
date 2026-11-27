@@ -25,7 +25,7 @@ await page.evaluate(() => {
   const W = window.Worker; window.__workers = [];
   window.Worker = class extends W { constructor(u, o) { super(u, o); const rec = { url: String(u), ended: false }; window.__workers.push(rec); const t = this.terminate.bind(this); this.terminate = () => { rec.ended = true; t(); }; } };
 });
-await page.getByRole("button", { name: /^Audio/ }).first().click();
+await page.getByRole("tab", { name: /^Audio/ }).first().click();
 await page.locator('input[type="file"]').first().setInputFiles(wavPath);
 await page.getByRole("button", { name: /Guitar → Tab/ }).first().waitFor({ timeout: 60000 });
 await page.waitForTimeout(2500);

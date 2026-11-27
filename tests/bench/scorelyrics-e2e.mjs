@@ -14,9 +14,9 @@ const app = await startApp({ width: +arg("width", 390), height: +arg("height", 8
 const { page, ok } = app;
 const text = () => page.locator("body").innerText();
 
-await page.getByRole("button", { name: "MusicXML / GP" }).click({ timeout: 60000 });
+await page.getByRole("tab", { name: "MusicXML / GP" }).click({ timeout: 60000 });
 await page.locator('input[type="file"]').first().setInputFiles(SCORE);
-await page.getByRole("button", { name: "Lyrics", exact: true }).first().click({ timeout: 60000 });
+await page.getByRole("tab", { name: "Lyrics", exact: true }).first().click({ timeout: 60000 });
 await page.getByRole("button", { name: /Lyrics from the score/ }).click({ timeout: 60000 });
 await page.waitForTimeout(800);
 let body = await text();
@@ -30,8 +30,8 @@ if (AUDIO) {
   await page.locator("label", { hasText: "Upload audio" }).locator('input[type="file"]').setInputFiles(AUDIO);
   await page.getByText(/linked — score bars/).waitFor({ timeout: 300000 });
   // the linked chart's view switch (not the app's "Lyrics" mode tab): the last Chart·Grid·Tab·Notes·Lyrics row
-  const n = await page.getByRole("button", { name: "Lyrics", exact: true }).count();
-  await page.getByRole("button", { name: "Lyrics", exact: true }).last().click();
+  const n = await page.getByRole("tab", { name: "Lyrics", exact: true }).count();
+  await page.getByRole("tab", { name: "Lyrics", exact: true }).last().click();
   await page.getByRole("button", { name: /Lyrics from the score/ }).last().click({ timeout: 60000 });
   await page.waitForTimeout(800);
   body = await text();

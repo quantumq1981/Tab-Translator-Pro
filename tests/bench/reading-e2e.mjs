@@ -69,7 +69,7 @@ const stats = (s) => ({ chords: s.length, outOfG: s.filter(outOfG).length, sampl
 const out = { song: meta.file, idx };
 await page.goto(ORIGIN + "/"); await page.waitForTimeout(500);
 if (arg("debug")) { await page.waitForTimeout(8000); await page.screenshot({ path: path.join(OUT, "boot.png") }); console.log(logs.join("\n")); console.log((await page.locator("body").innerText()).slice(0, 600)); process.exit(0); }
-await page.getByRole("button", { name: "Audio 🎵" }).click({ timeout: 60000 });
+await page.getByRole("tab", { name: "Audio 🎵" }).click({ timeout: 60000 });
 await page.locator("label", { hasText: "Upload audio" }).locator('input[type="file"]').setInputFiles(WAV);
 out.auto = stats(await settle());
 out.weakBanner = await page.getByText("Weak chord evidence").first().isVisible().catch(() => false);

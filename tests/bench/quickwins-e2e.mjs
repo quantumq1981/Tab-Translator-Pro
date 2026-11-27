@@ -7,7 +7,7 @@ import { startApp, arg } from "./e2e-app.mjs";
 const OUT = arg("out", process.cwd());
 const app = await startApp({ context: { permissions: ["clipboard-read", "clipboard-write"] } });
 const { page, ok } = app;
-await page.getByRole("button", { name: "MusicXML / GP" }).click({ timeout: 60000 });
+await page.getByRole("tab", { name: "MusicXML / GP" }).click({ timeout: 60000 });
 await page.locator('input[type="file"]').first().setInputFiles(path.resolve(app.repo, arg("gp", "Steely Dan - Peg.gp4")));
 const chords = page.locator('button[title*="guitar voicings"], button[title="click to re-label"]');
 await chords.first().waitFor({ timeout: 60000 });

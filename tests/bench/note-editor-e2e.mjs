@@ -48,9 +48,9 @@ const ok = (name, cond, extra) => { result.steps.push({ name, ok: !!cond, ...(ex
 const summary = () => page.locator("text=/^✓ /").first().innerText().catch(() => "");
 
 await page.goto(ORIGIN + "/"); await page.waitForTimeout(400);
-await page.getByRole("button", { name: "MusicXML / GP" }).click({ timeout: 60000 });
+await page.getByRole("tab", { name: "MusicXML / GP" }).click({ timeout: 60000 });
 await page.locator('input[type="file"]').first().setInputFiles(GP);
-await page.getByRole("button", { name: "Notes", exact: true }).first().click({ timeout: 60000 });
+await page.getByRole("tab", { name: "Notes", exact: true }).first().click({ timeout: 60000 });
 const roll = page.locator("svg rect[rx='2']");
 await roll.first().waitFor({ timeout: 60000 });
 result.notesDrawn = await roll.count();
@@ -107,7 +107,7 @@ ok("the MIDI export panel renders (ExportPanel had an undefined `score` referenc
 const sumBefore = await summary();
 await page.reload(); await page.waitForTimeout(400);
 await page.getByText(/Restored your last session/).waitFor({ timeout: 60000 });
-await page.getByRole("button", { name: "Notes", exact: true }).first().click({ timeout: 60000 });
+await page.getByRole("tab", { name: "Notes", exact: true }).first().click({ timeout: 60000 });
 await roll.first().waitFor({ timeout: 60000 });
 await page.waitForTimeout(300);
 ok("the edits restore after a reload", (await summary()) === sumBefore, { before: sumBefore, after: await summary() });

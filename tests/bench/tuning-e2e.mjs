@@ -68,7 +68,7 @@ const readTex = (tex) => {
 };
 
 await page.goto(ORIGIN + "/");
-await page.getByRole("button", { name: "Audio 🎵" }).click({ timeout: 60000 });
+await page.getByRole("tab", { name: "Audio 🎵" }).click({ timeout: 60000 });
 await page.locator('input[type="file"]:not([multiple])').first().setInputFiles(wavPath);
 const btn = page.getByRole("button", { name: "🎸 Guitar → Tab (ML)" });
 await btn.waitFor({ timeout: 120000 });

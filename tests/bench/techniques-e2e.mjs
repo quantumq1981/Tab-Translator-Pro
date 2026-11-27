@@ -14,7 +14,7 @@ const renderLine = new Function("return (" + wb.slice(wb.indexOf("function rende
 const { x } = renderLine(44100);
 const wav = path.join(os.tmpdir(), `ttp-line-${process.pid}.wav`); fs.writeFileSync(wav, eng.encodeWav16([x], 44100));
 const app = await startApp(); const { page, ok } = app;
-await page.getByRole("button", { name: "Audio 🎵" }).click();
+await page.getByRole("tab", { name: "Audio 🎵" }).click();
 await page.locator('input[type="file"]:not([multiple])').first().setInputFiles(wav);
 const btn = page.getByRole("button", { name: "🎸 Guitar → Tab (ML)" });
 await btn.waitFor({ timeout: 120000 });

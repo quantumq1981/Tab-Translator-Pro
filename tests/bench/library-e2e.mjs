@@ -11,8 +11,8 @@ const pdfText = async (buf) => { const doc = await pdfjs.getDocument({ data: new
 const app = await startApp(); const { page, ok } = app;
 const answers = [];
 page.on("dialog", (d) => { const a = answers.shift(); if (d.type() === "prompt") d.accept(a != null ? a : d.defaultValue()); else d.accept(); });
-const open = async (f) => { await page.getByRole("button", { name: "MusicXML / GP" }).click(); await page.locator('input[type="file"]').first().setInputFiles(path.resolve(app.repo, f)); await page.getByText(/bars ·/).first().waitFor({ timeout: 60000 }); await page.waitForTimeout(800); };
-const lib = async () => { await page.getByRole("button", { name: "Library 📚" }).click(); await page.waitForTimeout(600); };
+const open = async (f) => { await page.getByRole("tab", { name: "MusicXML / GP" }).click(); await page.locator('input[type="file"]').first().setInputFiles(path.resolve(app.repo, f)); await page.getByText(/bars ·/).first().waitFor({ timeout: 60000 }); await page.waitForTimeout(800); };
+const lib = async () => { await page.getByRole("tab", { name: "Library 📚" }).click(); await page.waitForTimeout(600); };
 await open("blue-sky.gp");
 await open("Steely Dan - Peg.gp4");
 // a chord override on Peg (✎ Edit → first chord → "Gmaj9")
@@ -44,7 +44,7 @@ const pdf1 = await page.pdf({ format: "A4", preferCSSPageSize: true });
 const t1 = await pdfText(pdf1); fs.writeFileSync(path.join(OUT, "print-chart.pdf"), pdf1);
 ok("print: the chart prints with its header and chords (no app chrome)", t1.pages >= 2 && /blue-sky/.test(t1.text) && /\bE\b/.test(t1.text) && !/Upload a MusicXML/.test(t1.text) && !/Practice/.test(t1.text), { pages: t1.pages, head: t1.text.slice(0, 120) });
 await page.emulateMedia({ media: "screen" }); await page.evaluate(() => { document.body.classList.remove("tdp-printing"); window.dispatchEvent(new Event("afterprint")); });
-await page.getByRole("button", { name: "Tab", exact: true }).first().click();
+await page.getByRole("tab", { name: "Tab", exact: true }).first().click();
 await page.locator("[data-tab-view]").getByText(/bars drawn/).waitFor({ timeout: 120000 });
 await page.getByRole("button", { name: "🖨 Print / PDF" }).click(); await page.waitForTimeout(1500);
 await page.emulateMedia({ media: "print" });

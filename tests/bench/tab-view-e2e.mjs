@@ -50,10 +50,10 @@ const failed = []; page.on("requestfailed", (q) => failed.push(q.url()));
 
 const result = {};
 await page.goto(ORIGIN + "/"); await page.waitForTimeout(500);
-await page.getByRole("button", { name: "MusicXML / GP" }).click({ timeout: 60000 });
+await page.getByRole("tab", { name: "MusicXML / GP" }).click({ timeout: 60000 });
 const up = page.locator('input[type="file"]').first();
 await up.setInputFiles(GP);
-await page.getByRole("button", { name: "Tab", exact: true }).first().click({ timeout: 60000 });
+await page.getByRole("tab", { name: "Tab", exact: true }).first().click({ timeout: 60000 });
 const t0 = Date.now();
 const view = page.locator("[data-tab-view]").first();
 await view.getByText(/bars drawn/).waitFor({ timeout: 120000 });
