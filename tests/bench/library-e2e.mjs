@@ -63,6 +63,10 @@ await page.emulateMedia({ media: "screen" }); await page.evaluate(() => { docume
 await lib();
 { const c = page.locator("section > div > div").filter({ has: page.locator("b", { hasText: "blue-sky" }) }).first();
   await c.getByRole("button", { name: "rename", exact: true }).click();
+  // switching to #tags mid-rename must not carry the title draft into the tags field (Codex P2 on #170)
+  await page.getByRole("textbox", { name: "Title" }).fill("DRAFT"); await c.getByRole("button", { name: /^#tags/ }).click(); await page.waitForTimeout(200);
+  ok("rename → #tags opens the tags with their own value, not the title draft", (await page.getByRole("textbox", { name: "Tags (comma separated)" }).inputValue()) === "");
+  await page.keyboard.press("Escape"); await c.getByRole("button", { name: "rename", exact: true }).click();
   await page.getByRole("textbox", { name: "Title" }).fill("Blue Sky (live)"); await page.getByRole("button", { name: "Save", exact: true }).click(); await page.waitForTimeout(500);
   ok("rename in place (no window.prompt)", (await page.locator("section b").allInnerTexts()).includes("Blue Sky (live)") && !promptSeen, await page.locator("section b").allInnerTexts()); }
 // bundle → delete → import

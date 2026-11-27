@@ -2541,7 +2541,7 @@ function LibraryPanel({ C, onOpen, currentId, onDeleted }) {
                 </select>}
                 <button onClick={() => del(r)} style={{ ...ch(false), color: C.red }}>delete</button>
               </div>
-              {ask && ask.id === r.id && <InlineField C={C} label={ask.kind === "rename" ? "Title" : "Tags (comma separated)"} initial={ask.value} onSave={saveAsk} onCancel={() => setAsk(null)} />}
+              {ask && ask.id === r.id && <InlineField key={ask.kind} C={C} label={ask.kind === "rename" ? "Title" : "Tags (comma separated)"} initial={ask.value} onSave={saveAsk} onCancel={() => setAsk(null)} />}
             </div>
           ))}
           {!list.filter((r) => !gone.has(r.id)).length && <div style={{ fontSize: 12, color: C.dim }}>No project matches.</div>}
