@@ -69,6 +69,16 @@ Boot measured with `tests/bench/load-e2e.mjs` (site assembled as `pages.yml` doe
   (`SHARE_GROUPS`: [format, accessible name, heading, what it's for]). New chart controls go in a Settings group or a
   Share group, not the toolbar; count a new setting in `settingsChanged`. Browser tests open the panel first
   (`openChartPanel(scope, "share" | "settings")` in the benches). `bench/toolbar-e2e.mjs`.
+- **Step 3 built (2026-11-27):** chord sheet + polish kit — see the review's Status. `ChordSheet` (was
+  `ChordVoicingModal`) is a bottom sheet: the tapped chord's reading (`readChord` in the engine — notes + intervals,
+  match %, other readings, Details), Hear it, Change chord (`onRename` → `setOverridesT`, Undo toast), then the
+  diagrams; drag handle / Escape / × close, focus trapped and returned. Choices carry `{ symbol, frets, midis, key,
+  detected }`. Charts have NO readout column (`.tdp-cols.solo`); Manual keeps LIVE READOUT. Polish CSS is
+  transform/opacity only and all off under `prefers-reduced-motion` (`.tdp-now` playhead glow + pulse, section bands
+  via `sectionKind`, press scale .96, `WaveformScrubber` from `waveformPeaks`). Fonts: `UI_FONT` (system) for text,
+  `CHORD_FONT` (Space Mono) for chords/logo, `MONO_FONT` for text whose columns must align — never IBM Plex (no longer
+  requested). A keystroke that closes the sheet must `preventDefault` (focus returns to the chord; its keypress would
+  click it). `bench/sheet-e2e.mjs`, `tests/ui-polish.mjs`.
 
 ### Audit 2026-11-18 — fixed (PR #157 + the follow-up); read `docs/AUDIT-2026-11-18.md` for the evidence
 
@@ -3061,7 +3071,7 @@ tuning with no capo.
 as a modal on the lead sheet (reference: the sibling **Parker-songbook-tool**, MIT, same owner),
 backed by a chord library big enough for "pretty much every voicing".
 
-- **Trigger:** tap a chord on the lead sheet (non-Edit mode) or a bar in the Grid → `ChordVoicingModal`
+- **Trigger:** tap a chord on the lead sheet (non-Edit mode) or a bar in the Grid → `ChordSheet` (was `ChordVoicingModal`; a bottom sheet since 2026-11-27, with the chord's reading above the diagrams)
   (`ChartPanel` state `voicingChoices`; a grid bar with several chords shows chips to switch).
   The old readout still updates underneath. Escape / backdrop / × closes.
 - **Engine (pure, `engine.tsx`, headless-tested):** `parseChordSymbolForVoicings` (aliases

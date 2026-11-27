@@ -26,7 +26,7 @@
     #boot {
       position: fixed; inset: 0; display: grid; place-items: center;
       color: #9aa0a6; background: #0b0b0f;
-      font: 14px/1.6 ui-monospace, "IBM Plex Mono", monospace;
+      font: 14px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
       text-align: center; padding: 24px;
     }
     #boot b { color: #ff6b35; font-weight: 600; }
@@ -37,12 +37,13 @@
     Web fonts (cosmetic): requested from <head> so the font files download while the app loads, instead of
     from an @import the app rendered (found only after ~1.4 MB of JS had run). media="print" + onload =
     the stylesheet never blocks the first paint; display=swap shows the system monospace until it lands.
-    IBM Plex Mono 500 is gone: no text used it.
+    Only Space Mono (chord symbols + the logo) is requested: body text is the system UI font since the
+    redesign's step 3 (2026-11-27), so IBM Plex Mono is no longer downloaded.
   -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&amp;family=Space+Mono:wght@400;700&amp;display=swap" media="print" onload="this.media='all'" />
-  <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&amp;family=Space+Mono:wght@400;700&amp;display=swap" /></noscript>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&amp;display=swap" media="print" onload="this.media='all'" />
+  <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&amp;display=swap" /></noscript>
 
   <script>window.__TTP_BUILD__ = "";</script>
   <!--

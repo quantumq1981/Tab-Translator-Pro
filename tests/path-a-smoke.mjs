@@ -3508,7 +3508,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   expect((await import("node:crypto")).createHash("sha256").update(svg).digest("hex") === "c73971fa9c94719b9db55380697792c8d9d2f6520b1c17f11d508691f328cf95" && /factory\(global\.svguitar = \{\}\)/.test(svg.toString()), "js/svguitar.umd.js is the pinned svguitar 2.5.1 UMD build (exposes window.svguitar)");
   expect(/MIT License/.test(fs.readFileSync(path.join(repo, "js", "NOTICE-svguitar.txt"), "utf8")) && /David Rubert/.test(fs.readFileSync(path.join(repo, "data", "NOTICE"), "utf8")), "svguitar + chords-db licences ship alongside");
   expect(/s\.src = "\.\/js\/svguitar\.umd\.js"/.test(ui) && !/cdn[^"]*svguitar/i.test(ui) && /fetch\("data\/chords\.json"\)/.test(ui) && /_chordDictPromise = null; throw err/.test(ui), "UI: SVGuitar from the bundled local UMD (no CDN), chords.json fetched once + cached, retry after a failed fetch");
-  expect(/onVoicings=\{setVoicingChoices\}/.test(ui) && /<ChordVoicingModal /.test(ui) && /chordVoicings\(dict, cur\.symbol, \{ played: cur\.frets \}\)/.test(ui) && /\["fingers", "Fingers"\], \["intervals", "Intervals"\]/.test(ui), "ChartPanel: tapping a lead-sheet chord / grid bar opens the voicing modal (Fingers / Intervals)");
+  expect(/onVoicings=\{setVoicingChoices\}/.test(ui) && /<ChordSheet /.test(ui) && /chordVoicings\(dict, cur\.symbol, \{ played: cur\.frets \}\)/.test(ui) && /\["fingers", "Fingers"\], \["intervals", "Intervals"\]/.test(ui), "ChartPanel: tapping a lead-sheet chord / grid bar opens the voicing modal (Fingers / Intervals)");
   expect(/cp -r js _site\//.test(pages) && /cp data\/chords\.json data\/NOTICE _site\/data\//.test(pages), "pages.yml ships js/ and data/chords.json");
 }
 
