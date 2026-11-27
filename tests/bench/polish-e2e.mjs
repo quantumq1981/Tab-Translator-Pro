@@ -59,12 +59,16 @@ for (const [label, opts] of [["phone", { ...devices["iPhone 13"] }], ["iPad", { 
   const L = (s) => `${label}: ${s}`;
 
   ok(L("#12 pointer is coarse"), await page.evaluate(() => matchMedia("(pointer: coarse)").matches));
-  const modeTabs = await page.evaluate(() => { const tl = document.querySelector('[role="tablist"][aria-label="Mode"]'); return tl ? [...tl.querySelectorAll('[role="tab"]')].map((t) => t.getAttribute("aria-selected")) : []; });
-  ok(L("#12 mode row is a tablist of 9 tabs, one selected"), modeTabs.length === 9 && modeTabs.filter((x) => x === "true").length === 1, modeTabs);
+  // step 4: the 9-tab mode row became Open (6 ways in, a tablist) + Listen (2 tools, a tablist) + the bar
+  const modeTabs = await page.evaluate(() => { const tl = document.querySelector('[role="tablist"][aria-label="Ways in"]'); return tl ? [...tl.querySelectorAll('[role="tab"]')].map((t) => t.getAttribute("aria-selected")) : []; });
+  ok(L("#12 the ways in are a tablist of 6 tabs, none selected before anything is open"), modeTabs.length === 6 && modeTabs.every((x) => x === "false"), modeTabs);
+  await page.locator('.tdp-nav button[data-dest="listen"]').tap(); await page.waitForTimeout(300);
   await page.getByRole("tab", { name: "Tuner 🎤", exact: true }).tap(); await page.waitForTimeout(300);
-  await page.getByRole("tab", { name: "Manual", exact: true }).tap(); await page.waitForTimeout(300);
+  await page.getByRole("tab", { name: "Live chords 🎶", exact: true }).tap(); await page.waitForTimeout(300);
   const visited = await page.getByRole("tab", { name: "Tuner 🎤", exact: true }).evaluate((t) => getComputedStyle(t).borderTopColor);
   ok(L("#16 a tab you visited keeps the normal border (no white 'visited' look)"), visited === "rgb(51, 51, 61)", visited);
+  await page.locator('.tdp-nav button[data-dest="open"]').tap(); await page.waitForTimeout(200);
+  await page.getByRole("tab", { name: "Manual", exact: true }).tap(); await page.waitForTimeout(300);
   const wraps = await page.evaluate(() => [...document.querySelectorAll('.tdp-app button[aria-pressed="true"]')].filter((b) => b.getBoundingClientRect().height > 60).map((b) => b.innerText));
   ok(L("#12 selected toggles don't wrap onto extra lines"), !wraps.length, wraps);
   const small0 = await smallControls(page);
@@ -72,7 +76,7 @@ for (const [label, opts] of [["phone", { ...devices["iPhone 13"] }], ["iPad", { 
   if (shots) await page.screenshot({ path: path.join(shots, `${label}-manual.png`), fullPage: false });
 
   // a score file: view switch, readout, details
-  await page.getByRole("tab", { name: "MusicXML / GP", exact: true }).click();
+  await page.locator('.tdp-nav button[data-dest="open"]').click(); await page.getByRole("tab", { name: "MusicXML / GP", exact: true }).click();
   await page.locator('input[type="file"]').first().setInputFiles(path.join(repo, "Steely Dan - Peg.gp4"));
   await page.getByText(/bars ·/).first().waitFor({ timeout: 60000 }); await page.waitForTimeout(800);
   const views = await page.evaluate(() => { const tl = document.querySelector('[role="tablist"][aria-label="View"]'); return tl ? [...tl.querySelectorAll('[role="tab"]')].map((t) => `${t.textContent}:${t.getAttribute("aria-selected")}`) : []; });
@@ -98,7 +102,7 @@ for (const [label, opts] of [["phone", { ...devices["iPhone 13"] }], ["iPad", { 
   await page.keyboard.press("Escape"); await page.waitForTimeout(300);   // the chord tap also opened the voicing modal
 
   // library delete → Undo → delete → commit
-  await page.getByRole("tab", { name: "Library 📚", exact: true }).click();
+  await page.locator('.tdp-nav button[data-dest="library"]').click();
   await page.getByText("Peg", { exact: false }).first().waitFor({ timeout: 15000 }); await page.waitForTimeout(400);
   const rows = () => page.locator("b", { hasText: /Peg/ }).count();
   const n0 = await rows();
@@ -115,8 +119,8 @@ for (const [label, opts] of [["phone", { ...devices["iPhone 13"] }], ["iPad", { 
   const idbCount = () => page.evaluate(() => new Promise((res) => { const rq = indexedDB.open("ttp-projects"); rq.onsuccess = () => { try { const c = rq.result.transaction("projects", "readonly").objectStore("projects").count(); c.onsuccess = () => res(c.result); c.onerror = () => res(-1); } catch (_) { res(-2); } }; rq.onerror = () => res(-3); }));
   await page.waitForTimeout(500);
   ok(L("#13 when it ends, the record is really deleted from IndexedDB"), (await idbCount()) === n0 - 1, await idbCount());
-  await page.reload(); await page.getByRole("tab", { name: "Manual", exact: true }).waitFor({ timeout: 30000 });
-  await page.getByRole("tab", { name: "Library 📚", exact: true }).click(); await page.waitForTimeout(1200);
+  await page.reload(); await page.locator('.tdp-nav button[data-dest="library"]').waitFor({ timeout: 30000 }); await page.waitForTimeout(800);
+  await page.locator('.tdp-nav button[data-dest="library"]').click(); await page.waitForTimeout(1200);
   console.log("     (after a reload: library rows", await rows(), "— the still-open chart's session re-adds itself)");
   // two songs of one setlist deleted inside one Undo window: each commit prunes the CURRENT setlist (Codex P1 on #162)
   await page.getByRole("button", { name: "duplicate", exact: true }).first().click(); await page.waitForTimeout(600);

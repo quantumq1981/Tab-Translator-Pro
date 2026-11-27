@@ -87,6 +87,7 @@ const head = fs.readFileSync(wavPath).subarray(0, 4).toString("latin1");
 ok("⬇ Click track (WAV) downloads a WAV", head === "RIFF" && fs.statSync(wavPath).size > 100000, { head, bytes: fs.statSync(wavPath).size });
 
 // Live chords on the fake microphone
+await page.locator('.tdp-nav button[data-dest="listen"]').click();
 await page.getByRole("tab", { name: "Live chords 🎶" }).click();
 await page.getByRole("button", { name: "🎤 Listen" }).click();
 await page.waitForTimeout(9000);

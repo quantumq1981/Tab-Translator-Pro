@@ -28,8 +28,9 @@ const opfsState = (page) => page.evaluate(async () => {
   });
   return out;
 });
+const way = async (page, name) => { const t = page.getByRole("tab", { name, exact: true }).first(); if (!(await t.isVisible().catch(() => false))) await page.locator(`.tdp-nav button[data-dest="${/Tuner|Live chords/.test(name) ? "listen" : "open"}"]`).click(); await t.click(); };
 const openScore = async (page, repo, f) => {
-  await page.getByRole("tab", { name: "MusicXML / GP" }).click();
+  await way(page, "MusicXML / GP");
   await page.locator('input[type="file"]').first().setInputFiles(`${repo}/${f}`);
   await page.getByText(/bars ·/).first().waitFor({ timeout: 60000 });
   await page.waitForTimeout(1200);

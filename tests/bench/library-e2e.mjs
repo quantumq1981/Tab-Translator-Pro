@@ -13,8 +13,8 @@ const pdfText = async (buf) => { const doc = await pdfjs.getDocument({ data: new
 const app = await startApp(); const { page, ok } = app;
 const answers = [];
 page.on("dialog", (d) => { const a = answers.shift(); if (d.type() === "prompt") d.accept(a != null ? a : d.defaultValue()); else d.accept(); });
-const open = async (f) => { await page.getByRole("tab", { name: "MusicXML / GP" }).click(); await page.locator('input[type="file"]').first().setInputFiles(path.resolve(app.repo, f)); await page.getByText(/bars ·/).first().waitFor({ timeout: 60000 }); await page.waitForTimeout(800); };
-const lib = async () => { await page.getByRole("tab", { name: "Library 📚" }).click(); await page.waitForTimeout(600); };
+const open = async (f) => { await page.locator('.tdp-nav button[data-dest="open"]').click(); await page.getByRole("tab", { name: "MusicXML / GP" }).click(); await page.locator('input[type="file"]').first().setInputFiles(path.resolve(app.repo, f)); await page.getByText(/bars ·/).first().waitFor({ timeout: 60000 }); await page.waitForTimeout(800); };
+const lib = async () => { await page.locator('.tdp-nav button[data-dest="library"]').click(); await page.waitForTimeout(600); };
 await open("blue-sky.gp");
 await open("Steely Dan - Peg.gp4");
 // a chord override on Peg (✎ Edit → first chord → "Gmaj9")
@@ -24,7 +24,7 @@ await lib();
 const titles = await page.locator("section b").allInnerTexts();
 ok("both opened files are in the library", titles.includes("blue-sky") && titles.includes("Steely Dan - Peg"), titles);
 await page.getByPlaceholder(/search title/).fill("peg");
-ok("search narrows to the match", (await page.getByRole("button", { name: "Open", exact: true }).count()) === 1);
+ok("search narrows to the match", (await page.locator(".tdp-main").getByRole("button", { name: "Open", exact: true }).count()) === 1);   // .tdp-main: not the bar's Open
 await page.getByPlaceholder(/search title/).fill("");
 // setlist: Friday = [Peg (+2), Blue Sky]
 answers.push("Friday"); await page.getByRole("button", { name: "＋ New setlist" }).click(); await page.waitForTimeout(400);

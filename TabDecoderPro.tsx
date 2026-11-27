@@ -360,6 +360,46 @@ const UI_FONT = "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Robot
 const MONO_FONT = "ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace";
 const CHORD_FONT = "'Space Mono', ui-monospace, monospace";
 
+/* Navigation (redesign step 4, 2026-11-27): four destinations replace the nine equal mode tabs — Open (the ways in),
+ * Chart (the panel of what is open), Listen (the microphone tools) and Library. `mode` still names the panel that
+ * renders, so every panel, loader and restore path is unchanged; Open / Listen / Library are views over it.
+ * Phone and tablet (< 1024 px window): a bottom bar. Wide (≥ 1024 px, iPad landscape): a left rail, and the chord
+ * sheet becomes a right-hand inspector. */
+const WORK_MODES = ["manual", "pdf", "scan", "xml", "audio", "lyrics"];
+const LISTEN_MODES = ["live", "tuner"];
+const WAYS_IN = [
+  ["xml", "MusicXML / GP", "Guitar Pro, MusicXML, MIDI, Power Tab, AlphaTex or a Muscriptor zip — the exact notes, parts and timing."],
+  ["audio", "Audio 🎵", "A recording or a stem (MP3, M4A, WAV, video) — chords, notes, drums, tab and stems."],
+  ["pdf", "PDF Chart", "A tab PDF from Guitar Pro, alphaTab or Chord Sheet Maker Pro — chords read from the fret numbers."],
+  ["scan", "Scan 📷", "A lead sheet as a photo, a scan or a PDF — reads the printed chord symbols."],
+  ["manual", "Manual", "Paste ASCII tab and read it one chord at a time."],
+  ["lyrics", "Lyrics 🎙️", "Strip the chords from a chords-over-lyrics sheet, or capture sung lyrics."],
+];
+const LISTEN_TOOLS = [["live", "Live chords 🎶", "Names the chords you play into the microphone."], ["tuner", "Tuner 🎤", "Tunes each string; stretch, equal and Z temperaments."]];
+const DESTINATIONS = [["open", "Open"], ["chart", "Chart"], ["listen", "Listen"], ["library", "Library"]];
+/* 24 × 24 stroke icons for the bar / rail (inline: no icon font to download) */
+function NavIcon({ name }) {
+  const p = { open: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM12 10v6M9 13h6",
+    chart: "M4 6h16M4 10h16M4 14h16M4 18h16M9 4v16M15 4v16",
+    listen: "M12 3a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3zM6 11a6 6 0 0 0 12 0M12 17v4M8 21h8",
+    library: "M5 4h3v16H5zM10 4h3v16h-3zM15.5 4.5l2.9-.8 3.6 15.6-2.9.8z" }[name];
+  return <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={p} /></svg>;
+}
+/* window ≥ 1024 px (a size class of the WINDOW, never the device: iPad Split View can be phone-narrow) */
+function useWide() {
+  const q = "(min-width: 1024px)";
+  const get = () => { try { return !!(window.matchMedia && window.matchMedia(q).matches); } catch (_) { return false; } };
+  const [wide, setWide] = useState(get);
+  useEffect(() => {
+    let mq; try { mq = window.matchMedia && window.matchMedia(q); } catch (_) { mq = null; }
+    if (!mq) return undefined;
+    const on = () => setWide(mq.matches);
+    if (mq.addEventListener) mq.addEventListener("change", on); else if (mq.addListener) mq.addListener(on);
+    return () => { if (mq.removeEventListener) mq.removeEventListener("change", on); else if (mq.removeListener) mq.removeListener(on); };
+  }, []);
+  return wide;
+}
+
 /* SECURITY (audit 2026-11-18 C1, CVE-2024-4367 / GHSA-wgrm-67xf-hhpq): every PDF this app opens is
  * untrusted (Scan reads PDFs from anywhere), and PDF.js < 4.2.67 with `isEvalSupported` at its default
  * `true` runs script from a crafted font — in the shared quantumq1981.github.io origin. ALL document
@@ -721,6 +761,23 @@ export default function TabDecoderPro() {
 /* ========================================================================== */
 function TabDecoderProApp() {
   const [mode, setMode] = useState("manual");
+  // Redesign step 4: where the user is. First launch lands on Open; any way in (a pick, a restore, a handoff, a
+  // library open) sets `mode` and so moves to Chart. `navSwitch` marks a mode change made BY the bar (it isn't a pick);
+  // `goOpen` makes the next mode change land on Open (Start fresh).
+  const [openView, setOpenView] = useState(true);
+  const [workChosen, setWorkChosen] = useState(false);
+  const lastWork = useRef("manual"), lastListen = useRef("live"), prevMode = useRef("manual"), navSwitch = useRef(false), goOpen = useRef(false);
+  useEffect(() => {
+    if (WORK_MODES.includes(mode)) lastWork.current = mode;
+    if (LISTEN_MODES.includes(mode)) lastListen.current = mode;
+    if (prevMode.current === mode) return;
+    prevMode.current = mode;
+    const byNav = navSwitch.current; navSwitch.current = false;
+    if (goOpen.current) { goOpen.current = false; setOpenView(true); return; }
+    setOpenView(false);
+    if (!byNav && WORK_MODES.includes(mode)) setWorkChosen(true);
+  }, [mode]);
+  const dest = openView ? "open" : LISTEN_MODES.includes(mode) ? "listen" : mode === "library" ? "library" : "chart";
   const [tab, setTab] = useState(PRESETS[5].tab);
   const [tuningName, setTuningName] = useState("Standard");
   const [capo, setCapo] = useState(0);
@@ -787,6 +844,16 @@ function TabDecoderProApp() {
 
   // clearPick: the tapped chord only. clearSel(kind): also that chart's edits (a new file / a re-read chart).
   const clearPick = () => { setSelFrets(null); setSelMidis(null); setSelKey(""); };
+  // the bar / rail: Chart returns to the last way in, Listen to the last microphone tool
+  const go = (d) => {
+    if (d === "open") { setOpenView(true); return; }
+    setOpenView(false);
+    const to = d === "chart" ? (WORK_MODES.includes(mode) ? null : lastWork.current)
+      : d === "listen" ? (LISTEN_MODES.includes(mode) ? null : lastListen.current)
+      : mode === "library" ? null : "library";
+    if (to) { navSwitch.current = true; setMode(to); clearPick(); }
+  };
+  const pickWayIn = (m) => { setWorkChosen(true); if (m === mode) { setOpenView(false); return; } setMode(m); clearPick(); };
   const clearSel = (kind) => { clearPick(); if (kind === "all") setOvStore({ pdf: {}, xml: {} }); else setOverridesFor(kind, {}); };
 
   const onFile = async (e) => {
@@ -1124,7 +1191,7 @@ function TabDecoderProApp() {
       playSet, sess: sessRef.current, restored, restoreAsk, sysShifts };
     const gen = ++sessGen.current; sessRef.current = null; setRestoreAsk(null);
     _lsSet(FRESH_PENDING_KEY, "1");
-    setChart(null); setXmlScore(null); setTexDoc(null); setXmlName(""); setMode("manual"); clearSel("all"); setRestored(false); setKeyOverride(""); setScoreEdit(null); setProjectId(null); projRef.current = null; setPlaySet(null);
+    setChart(null); setXmlScore(null); setTexDoc(null); setXmlName(""); if (mode !== "manual") goOpen.current = true; setOpenView(true); setWorkChosen(false); setMode("manual"); clearSel("all"); setRestored(false); setKeyOverride(""); setScoreEdit(null); setProjectId(null); projRef.current = null; setPlaySet(null);
     freshRef.current = { snap, gen, timer: setTimeout(commitFresh, FRESH_UNDO_MS) };
     setFreshUndo(true);
   };
@@ -1134,7 +1201,7 @@ function TabDecoderProApp() {
     if (f.gen !== sessGen.current) return;          // another file was opened since: nothing left to put back
     const s0 = f.snap;
     sessRef.current = s0.sess; projRef.current = s0.proj;
-    setChart(s0.chart); setXmlScore(s0.xmlScore); setTexDoc(s0.texDoc); setXmlName(s0.xmlName); setMode(s0.mode);
+    setChart(s0.chart); setXmlScore(s0.xmlScore); setTexDoc(s0.texDoc); setXmlName(s0.xmlName); setMode(s0.mode); setWorkChosen(true); setOpenView(false);
     setOvStore(s0.ovStore); setKeyOverride(s0.keyOverride); setScoreEdit(s0.scoreEdit); setProjectId(s0.projectId);
     setPlaySet(s0.playSet); setRestored(s0.restored); setRestoreAsk(s0.restoreAsk); setSysShifts(s0.sysShifts);
     setSessTick((n) => n + 1);
@@ -1205,6 +1272,11 @@ function TabDecoderProApp() {
   const confColor = conf >= 0.999 ? "#98c379" : conf >= 0.7 ? "#57d1d6" : "#e9a24b";
   const applyPreset = (p) => { setTuningName(p.tuning); setTab(p.tab); setBlockIdx(0); };
 
+  // the open song's name, for the app bar on Chart
+  // (from the last way in, so Open still knows the song when it is reached from Listen or Library)
+  const workMode = WORK_MODES.includes(mode) ? mode : lastWork.current;
+  const songTitle = workMode === "pdf" ? (chart && chart.fileName) || "" : workMode === "xml" ? xmlName || "" : "";
+
   const C = { bg: "#0b0b0f", panel: "#17171d", raised: "#22222b", border: "#33333d",
     text: "#efe9dc", dim: "#9aa0a6", amber: "#ff6b35", chord: "#ffd9c7", cyan: "#57d1d6", red: "#e06c75", green: "#98c379" };
     // Family 1 "stage" palette (dark). amber = the brand orange (#ff6b35) and
@@ -1242,6 +1314,8 @@ function TabDecoderProApp() {
         .tdp-app button{transition:transform .09s ease;}
         .tdp-app button:not(:disabled):active{transform:scale(.96);}           /* tactile press */
         .tdp-sheet-backdrop{animation:tdpFade .2s ease-out backwards;}
+        .tdp-inspector{animation:tdpSlideIn .26s cubic-bezier(.2,.9,.3,1) backwards;}
+        @keyframes tdpSlideIn{from{transform:translateX(100%);}to{transform:translateX(0);}}
         .tdp-sheet{animation:tdpSheetUp .34s cubic-bezier(.2,.9,.3,1.08) backwards;}  /* "backwards": no kept transform after it */
         @keyframes tdpFade{from{opacity:0;}to{opacity:1;}}
         @keyframes tdpSheetUp{from{transform:translateY(100%);}to{transform:translateY(0);}}
@@ -1261,6 +1335,20 @@ function TabDecoderProApp() {
           .tdp-app button:not([data-tight]){min-width:44px;}
           .tdp-app summary{min-height:44px!important;}
           .tdp-app input[type="checkbox"],.tdp-app input[type="radio"]{width:22px;height:22px;}
+        }
+        /* ---- shell (redesign step 4): bottom bar < 1024 px, left rail ≥ 1024 px; never covers content ---- */
+        .tdp-nav{position:fixed;left:0;right:0;bottom:0;z-index:50;box-sizing:border-box;display:flex;justify-content:space-around;align-items:stretch;gap:2px;background:rgba(17,17,23,.96);border-top:1px solid #33333d;padding:4px 6px calc(4px + env(safe-area-inset-bottom,0px));-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);}
+        .tdp-nav button{flex:1 1 0;max-width:132px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;background:none;border:none;border-radius:12px;color:#9aa0a6;font-size:11.5px;font-weight:600;letter-spacing:.2px;padding:6px 2px;min-height:52px;cursor:pointer;text-decoration:none;}
+        .tdp-nav .tdp-nav-icon{display:flex;align-items:center;justify-content:center;width:52px;height:30px;border-radius:999px;transition:background .15s ease;}
+        .tdp-nav button[aria-current="page"]{color:#ff6b35;}
+        .tdp-nav button[aria-current="page"] .tdp-nav-icon{background:rgba(255,107,53,.16);}   /* selected = a pill too, not colour alone */
+        .tdp-main{padding-bottom:calc(72px + env(safe-area-inset-bottom,0px));}
+        @media (max-width:1023px){.tdp-toasts{bottom:calc(80px + env(safe-area-inset-bottom,0px))!important;}}
+        @media (min-width:1024px){
+          .tdp-nav{top:0;right:auto;bottom:0;width:84px;flex-direction:column;justify-content:flex-start;gap:8px;padding:18px 6px;border-top:none;border-right:1px solid #33333d;}
+          .tdp-nav button{flex:none;max-width:none;width:72px;min-height:64px;}
+          .tdp-main{padding-bottom:0;margin-left:84px;}
+          html.tdp-inspecting .tdp-main{margin-right:360px;}
         }
         .tdp-cols{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:16px;}
         .tdp-cols.manual{grid-template-columns:minmax(0,1fr) minmax(0,1fr);}
@@ -1289,19 +1377,14 @@ function TabDecoderProApp() {
         }
       `}</style>
 
+      <div className="tdp-main">
       <div style={{ position: "relative", maxWidth: 1100, margin: "0 auto", padding: "20px 16px 40px" }}>
         <header className="panel-rise" style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12, marginBottom: 16 }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
             <span style={{ fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: 22, letterSpacing: 1 }}>TAB<span style={{ color: C.amber }}>·</span>DECODER</span>
             <span style={{ color: C.dim, fontSize: 12, letterSpacing: 3 }}>TABTRANSLATOR PRO</span>
           </div>
-          <div role="tablist" aria-label="Mode" style={{ display: "flex", flexWrap: "wrap", gap: 6, maxWidth: "100%" }}>
-            {[["manual", "Manual"], ["pdf", "PDF Chart"], ["scan", "Scan 📷"], ["xml", "MusicXML / GP"], ["audio", "Audio 🎵"], ["lyrics", "Lyrics 🎙️"], ["live", "Live chords 🎶"], ["tuner", "Tuner 🎤"], ["library", "Library 📚"]].map(([m, lbl]) => (
-              <button key={m} role="tab" aria-selected={mode === m} onClick={() => { setMode(m); clearPick(); }} style={{ ...toggle(C), padding: "6px 14px", flex: "none", ...(mode === m ? activeToggle(C) : inactiveToggle(C)) }}>
-                {lbl}
-              </button>
-            ))}
-          </div>
+          {dest === "chart" && songTitle && <span data-song-title title={songTitle} style={{ flex: "1 1 160px", minWidth: 0, fontSize: 14, fontWeight: 600, color: C.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", textAlign: "right" }}>{songTitle}</span>}
         </header>
 
         {restoreAsk && (
@@ -1336,6 +1419,10 @@ function TabDecoderProApp() {
             <button onClick={() => setPlaySet(null)} style={{ ...toggle(C), flex: "none", padding: "3px 10px" }}>✕</button>
           </div>
         )}
+        {dest === "open" ? <OpenView C={C} mode={workMode} hasWork={workChosen} songTitle={songTitle} onPick={pickWayIn} onContinue={() => go("chart")} />
+        : dest === "chart" && !workChosen ? <ChartEmpty C={C} onOpen={() => go("open")} />
+        : <>
+        {dest === "listen" && <SubTabs C={C} label="Listen" items={LISTEN_TOOLS} value={mode} onPick={(m) => { if (m !== mode) { setMode(m); clearPick(); } }} />}
         {mode === "library" ? <LibraryPanel C={C} onOpen={openProject} currentId={projectId} /> : mode === "scan" ? <ScanPanel C={C} useSharp={useSharp} pdfReady={pdfReady} /> : mode === "tuner" ? <LiveTuner C={C} useSharp={useSharp} /> : mode === "live" ? <LiveChords C={C} useSharp={useSharp} /> : mode === "lyrics" ? <LyricsPanel C={C} /> : mode === "audio" ? <AudioImport C={C} useSharp={useSharp} incoming={audioIncoming} scoreFile={scoreFile} linkAsk={linkAsk} onLoaded={(f, bytes, dur) => { if (!audioIncoming || audioIncoming.name !== f.name) rememberProject({ kind: "audio", filename: f.name, bytes, duration: dur }); }} /> : (
         <div className={"tdp-cols" + (mode === "manual" ? " manual" : " solo")} style={{ position: "relative" }}>
           <section className="panel-rise" style={{ animationDelay: ".05s", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
@@ -1543,6 +1630,7 @@ function TabDecoderProApp() {
           )}
         </div>
         )}
+        </>}
 
         <footer className="no-print" style={{ position: "relative", marginTop: 18, fontSize: 11, color: C.dim, lineHeight: 1.6 }}>
           <details><summary style={{ cursor: "pointer" }}>About the engine</summary>
@@ -1551,8 +1639,67 @@ function TabDecoderProApp() {
           </details>
         </footer>
       </div>
+      </div>
+      {/* the bar (< 1024 px) / rail (≥ 1024 px): always on screen, so switching never means scrolling back up a chart */}
+      <nav className="tdp-nav no-print" aria-label="Main">
+        {DESTINATIONS.map(([d, label]) => (
+          <button key={d} data-dest={d} aria-current={dest === d ? "page" : undefined} onClick={() => go(d)}>
+            <span className="tdp-nav-icon"><NavIcon name={d} /></span>
+            <span>{label}</span>
+          </button>
+        ))}
+      </nav>
       <ToastHost C={C} />
     </div>
+  );
+}
+
+/* ---- navigation views (redesign step 4) -------------------------------------
+ * OpenView — every way in, one card each, with what it is for (step 5 replaces it with one drop zone routed by the
+ * file's bytes). The cards keep the old mode names as their accessible names, so links, docs and tests still find them.
+ * SubTabs — the Listen tools. ChartEmpty — Chart before anything is open. */
+function OpenView({ C, mode, hasWork, songTitle, onPick, onContinue }) {
+  return (
+    <section className="panel-rise" aria-labelledby="tdp-open-h" style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
+      <h2 id="tdp-open-h" style={{ margin: "0 0 4px", fontSize: 18, fontWeight: 700 }}>Open</h2>
+      <div style={{ fontSize: 13, color: C.dim, marginBottom: 14, lineHeight: 1.5 }}>Pick what you have. Everything stays on this device.</div>
+      {hasWork && (
+        <button data-continue onClick={onContinue} style={{ ...toggle(C), width: "100%", flex: "none", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "12px 14px", marginBottom: 14, borderColor: C.amber, color: C.text, textAlign: "left" }}>
+          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Back to <b>{songTitle || (WAYS_IN.find((w) => w[0] === mode) || [, "your chart"])[1]}</b></span>
+          <span style={{ color: C.amber }}>Chart →</span>
+        </button>
+      )}
+      <div role="tablist" aria-label="Ways in" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 10 }}>
+        {WAYS_IN.map(([m, label, desc]) => {
+          const on = hasWork && mode === m;
+          return (
+            <button key={m} role="tab" aria-selected={on} aria-label={label} aria-describedby={`tdp-way-${m}`} onClick={() => onPick(m)} data-way={m}
+              style={{ textAlign: "left", display: "flex", flexDirection: "column", gap: 4, padding: "14px 14px", borderRadius: 12, cursor: "pointer", background: C.bg, color: C.text, border: `1.5px solid ${on ? C.amber : C.border}`, textDecoration: "none" }}>
+              <span style={{ fontSize: 15, fontWeight: 700, color: on ? C.amber : C.text }}>{label}{on ? " · open" : ""}</span>
+              <span id={`tdp-way-${m}`} style={{ fontSize: 12.5, color: C.dim, lineHeight: 1.45, fontWeight: 400 }}>{desc}</span>
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+function SubTabs({ C, label, items, value, onPick }) {
+  return (
+    <div role="tablist" aria-label={label} style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
+      {items.map(([m, lbl, desc]) => (
+        <button key={m} role="tab" aria-selected={value === m} title={desc} onClick={() => onPick(m)} style={{ ...toggle(C), padding: "6px 14px", flex: "none", ...(value === m ? activeToggle(C) : inactiveToggle(C)) }}>{lbl}</button>
+      ))}
+    </div>
+  );
+}
+function ChartEmpty({ C, onOpen }) {
+  return (
+    <section data-chart-empty className="panel-rise" style={{ background: C.panel, border: `1px dashed ${C.border}`, borderRadius: 12, padding: "40px 16px", textAlign: "center" }}>
+      <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 6 }}>Nothing open yet</div>
+      <div style={{ fontSize: 13, color: C.dim, marginBottom: 16 }}>Open a file, a recording or a photo of a chart, and it shows here.</div>
+      <button onClick={onOpen} style={{ ...toggle(C), flex: "none", padding: "10px 22px", ...activeToggle(C) }}>Open a file</button>
+    </section>
   );
 }
 
@@ -3519,6 +3666,15 @@ function ChordSheet({ choices, start = 0, onClose, onRename, C, useSharp, sequen
   const sheet = useRef(null), closeBtn = useRef(null), dragRef = useRef(null);
   const [dragY, setDragY] = useState(0), [dragging, setDragging] = useState(false);
   const [renaming, setRenaming] = useState(false), [draftName, setDraftName] = useState("");
+  // step 4: on a wide window (≥ 1024 px, iPad landscape) the sheet is a right-hand INSPECTOR beside the chart —
+  // not modal: the chart stays usable, no focus trap, no scroll lock; the page makes room for it (html.tdp-inspecting)
+  const wide = useWide();
+  const wideRef = useRef(wide); wideRef.current = wide;
+  useEffect(() => {
+    if (!wide) return undefined;
+    const h = document.documentElement; h.classList.add("tdp-inspecting");
+    return () => h.classList.remove("tdp-inspecting");
+  }, [wide]);
   // choices: [{ symbol, frets? }] — the chord(s) tapped (a grid bar can hold several)
   const [idx, setIdx] = useState(start);
   const [stack, setStack] = useState([]);              // substitution taps: symbols opened from this chord
@@ -3550,7 +3706,7 @@ function ChordSheet({ choices, start = 0, onClose, onRename, C, useSharp, sequen
     loadSVGuitar().then((l) => { if (live) setLib(l); }).catch((err) => { if (live) setLibErr(err.message || String(err)); });
     const onKey = (e) => {
       if (e.key === "Escape") { closeRef.current(); return; }
-      if (e.key !== "Tab" || !sheet.current) return;                 // focus trap: Tab cycles inside the sheet
+      if (e.key !== "Tab" || !sheet.current || wideRef.current) return;   // focus trap (the modal sheet only): Tab cycles inside
       const f = _focusables(sheet.current); if (!f.length) return;
       const first = f[0], last = f[f.length - 1], at = document.activeElement;
       if (e.shiftKey && (at === first || !sheet.current.contains(at))) { e.preventDefault(); last.focus(); }
@@ -3558,7 +3714,7 @@ function ChordSheet({ choices, start = 0, onClose, onRename, C, useSharp, sequen
     };
     window.addEventListener("keydown", onKey);
     const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
+    if (!wideRef.current) document.body.style.overflow = "hidden";
     const returnTo = document.activeElement;
     try { if (closeBtn.current) closeBtn.current.focus({ preventScroll: true }); } catch (_) {}
     return () => {
@@ -3622,16 +3778,12 @@ function ChordSheet({ choices, start = 0, onClose, onRename, C, useSharp, sequen
     else setDragY(0);
   };
 
-  return (
-    <div role="dialog" aria-modal="true" aria-label={`${title} — chord and voicings`} onClick={onClose} className="tdp-sheet-backdrop"
-      style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(4,6,12,0.62)", display: "flex", alignItems: "flex-end", justifyContent: "center", paddingTop: "max(12px, env(safe-area-inset-top))" }}>
-      <div ref={sheet} data-chord-sheet className="tdp-sheet" onClick={(e) => e.stopPropagation()}
-        style={{ width: "100%", maxWidth: 640, maxHeight: "100%", display: "flex", flexDirection: "column", background: C.panel, border: `1.5px solid ${C.cyan}`, borderBottom: "none", borderRadius: "18px 18px 0 0", overflow: "hidden", boxShadow: "0 -12px 40px rgba(0,0,0,0.5)", paddingBottom: "env(safe-area-inset-bottom)",
-          transform: dragY ? `translateY(${dragY}px)` : undefined, transition: dragging ? "none" : "transform .26s cubic-bezier(.2,.9,.3,1.12)" }}>
-        <div data-sheet-handle aria-hidden="true" onPointerDown={onHandleDown} onPointerMove={onHandleMove} onPointerUp={onHandleUp} onPointerCancel={onHandleUp}
+  const inner = (
+    <>
+        {!wide && <div data-sheet-handle aria-hidden="true" onPointerDown={onHandleDown} onPointerMove={onHandleMove} onPointerUp={onHandleUp} onPointerCancel={onHandleUp}
           style={{ flex: "none", height: 26, display: "flex", alignItems: "center", justifyContent: "center", cursor: dragging ? "grabbing" : "grab", touchAction: "none" }}>
           <div style={{ width: 40, height: 5, borderRadius: 3, background: C.border }} />
-        </div>
+        </div>}
         {/* ONE scroll area under the handle (review on #165): on a short screen — a phone in landscape — the reading
             and the instrument rows no longer push the diagrams out of reach. The title row with × stays pinned. */}
         <div ref={body} data-sheet-scroll className="tdp-scroll" style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", overscrollBehavior: "contain", WebkitOverflowScrolling: "touch" }}>
@@ -3785,6 +3937,21 @@ function ChordSheet({ choices, start = 0, onClose, onRename, C, useSharp, sequen
           </div>
         </div>
         </div>
+    </>
+  );
+  if (wide) return (
+    <aside ref={sheet} role="dialog" aria-modal="false" aria-label={`${title} — chord and voicings`} data-chord-sheet data-inspector className="tdp-inspector"
+      style={{ position: "fixed", top: 0, right: 0, bottom: 0, width: 360, boxSizing: "border-box", zIndex: 45, display: "flex", flexDirection: "column", background: C.panel, borderLeft: `1.5px solid ${C.cyan}`, boxShadow: "-12px 0 32px rgba(0,0,0,0.4)", paddingTop: "max(14px, env(safe-area-inset-top))" }}>
+      {inner}
+    </aside>
+  );
+  return (
+    <div role="dialog" aria-modal="true" aria-label={`${title} — chord and voicings`} onClick={onClose} className="tdp-sheet-backdrop"
+      style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(4,6,12,0.62)", display: "flex", alignItems: "flex-end", justifyContent: "center", paddingTop: "max(12px, env(safe-area-inset-top))" }}>
+      <div ref={sheet} data-chord-sheet className="tdp-sheet" onClick={(e) => e.stopPropagation()}
+        style={{ width: "100%", maxWidth: 640, maxHeight: "100%", display: "flex", flexDirection: "column", background: C.panel, border: `1.5px solid ${C.cyan}`, borderBottom: "none", borderRadius: "18px 18px 0 0", overflow: "hidden", boxShadow: "0 -12px 40px rgba(0,0,0,0.5)", paddingBottom: "env(safe-area-inset-bottom)",
+          transform: dragY ? `translateY(${dragY}px)` : undefined, transition: dragging ? "none" : "transform .26s cubic-bezier(.2,.9,.3,1.12)" }}>
+        {inner}
       </div>
     </div>
   );
