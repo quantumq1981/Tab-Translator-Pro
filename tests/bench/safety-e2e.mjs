@@ -62,7 +62,7 @@ await page.locator("input:focus").fill("F#13"); await page.locator("input:focus"
 ok("#1 edit made", (await count("F#13")) > 0, before);
 await tab("MusicXML / GP"); await page.waitForTimeout(300);
 ok("#1 edit survives re-tapping the current tab", (await count("F#13")) > 0);
-await tab("Tuner 🎤"); await page.waitForTimeout(300); await tab("MusicXML / GP"); await page.waitForTimeout(300);
+await tab("Tuner"); await page.waitForTimeout(300); await tab("MusicXML / GP"); await page.waitForTimeout(300);
 ok("#1 edit survives Tuner → back", (await count("F#13")) > 0);
 await tab("PDF Chart"); await page.waitForTimeout(300);
 ok("#1 the PDF tab does not show the GP chart's edit", (await count("F#13")) === 0);
@@ -117,7 +117,7 @@ ok("#14 …and a reload restores the NEW file", await page.getByText(/Restored y
 await page.getByRole("button", { name: "Start fresh" }).click(); await page.waitForTimeout(11000); // leave a clean slate for #2
 
 // ---- #2 audio re-reads ask first
-await tab("Audio 🎵"); await page.waitForTimeout(500);
+await tab("Audio"); await page.waitForTimeout(500);
 if (!(await page.getByText("Upload audio / video").count())) { await page.screenshot({ path: path.join(os.tmpdir(), "safety-audio.png") }); console.log("audio panel missing; screenshot", path.join(os.tmpdir(), "safety-audio.png")); }
 // headless Chromium here doesn't decode this MP3 (unchanged main behaves the same), so feed 40 s of it as WAV
 const wav = path.join(site, "backing.wav");

@@ -13,10 +13,10 @@ and where to start looking. Nothing here blocks merging step 5 (#167): none of t
 | P2 | `note-editor-e2e`: dragging a fret number up a string doesn't re-string the note | Test failure | Before the redesign | **Fixed 2026-11-27** (bench) |
 | P3 | `tuning-e2e`: the "Use Drop D" button never appears | Test failure | Before the redesign | **Fixed 2026-11-27** (app: accessible names) |
 | U1 | Deleting the open song from the Library: it comes back on the next launch | Behaviour | Before the redesign | **Fixed 2026-11-27** |
-| U2 | Text sizes (UX review #11) | Open UX item | — | Low |
-| U3 | `window.prompt` for rename / tags / new setlist (UX review #13) | Open UX item | — | Low |
-| U4 | Emoji in the way-in names (UX review #16) | Open UX item | — | Low |
-| U5 | Scan and Audio panels still open with long prose (UX review #8) | Open UX item | — | Low |
+| U2 | Text sizes (UX review #11) | Open UX item | — | **Fixed 2026-11-27** |
+| U3 | `window.prompt` for rename / tags / new setlist (UX review #13) | Open UX item | — | **Fixed 2026-11-27** |
+| U4 | Emoji in the way-in names (UX review #16) | Open UX item | — | **Fixed 2026-11-27** |
+| U5 | Scan and Audio panels still open with long prose (UX review #8) | Open UX item | — | **Fixed 2026-11-27** |
 
 "Before the redesign" was verified by re-running the bench on commit `d64aac4` (main just before step 3; it already
 had steps 1–2 — and the step-4 benches showed the same three failing on main before that). Same failure, same message.
@@ -165,6 +165,8 @@ but the open chart's saved session re-adds it on the next launch. Fix: deleting 
 and the session restore path that calls `rememberProject`.
 
 ## U2–U5 — UX review items left open by design
+
+**Status: FIXED (2026-11-27)** — details in `docs/UX-REVIEW-2026-11-26.md`, Status ("Also fixed … after the redesign"). Note for the benches: the way-in names are now plain ("Audio", "Scan", "Lyrics", "Live chords", "Tuner") and must be matched with `exact: true`.
 
 From `docs/UX-REVIEW-2026-11-26.md`:
 - **#11 text sizes:** controls meet 44 px but text sizes are unchanged (many 10–12 px labels). The review proposes a

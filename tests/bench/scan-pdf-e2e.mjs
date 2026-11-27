@@ -1,4 +1,4 @@
-/* Scan 📷 with a DIGITAL score PDF (real app, headless Chromium): the text layer is read, not OCR'd.
+/* Scan with a DIGITAL score PDF (real app, headless Chromium): the text layer is read, not OCR'd.
  *   node bench/scan-pdf-e2e.mjs --deps <dir> --pdf <score.pdf> [--expect "Dm,C,Bb"] [--meter 3/4] [--section "Verse 1"]
  *     [--ocr]  also take the one-tap "Read with OCR instead" (needs cdn.jsdelivr.net for ONNX Runtime Web) and back
  * PDF.js 3.11.174 is served locally at the cdnjs URLs the app loads it from (the harness blocks cdnjs), the same
@@ -19,7 +19,7 @@ await page.context().route(/^https:\/\/cdnjs\.cloudflare\.com\/ajax\/libs\/pdf\.
 });
 const net = []; page.on("request", (r) => net.push(r.url()));
 await page.reload(); await page.waitForTimeout(1500);
-await page.getByRole("tab", { name: "Scan 📷" }).click();
+await page.getByRole("tab", { name: "Scan", exact: true }).click();
 const t0 = Date.now();
 await page.locator('input[type="file"]').first().setInputFiles(PDF);
 const stat = page.getByText(/systems · \d+ bars · \d+ chords/);

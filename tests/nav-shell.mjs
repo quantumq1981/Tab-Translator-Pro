@@ -15,7 +15,7 @@ expect(JSON.stringify(dests.map((d) => d[0])) === '["open","chart","listen","lib
 expect(ways.map((w) => w[0]).sort().join() === work.slice().sort().join() && tools.map((t) => t[0]).join() === listen.join(), "every way in is a work mode and every Listen tool a Listen mode");
 expect([...work, ...listen, "library"].sort().join() === "audio,library,live,lyrics,manual,pdf,scan,tuner,xml", "the nine old modes are all reachable, each once");
 expect(ways.every((w) => w[2].length > 30) && tools.every((t) => t[2].length > 20), "each way in / tool says what it is for");
-expect(ways.map((w) => w[1]).join("|") === "MusicXML / GP|Audio 🎵|PDF Chart|Scan 📷|Manual|Lyrics 🎙️" && tools.map((t) => t[1]).join("|") === "Live chords 🎶|Tuner 🎤", "the cards keep the old mode names as accessible names (links, docs and tests still find them)");
+expect(ways.map((w) => w[1]).join("|") === "MusicXML / GP|Audio|PDF Chart|Scan|Manual|Lyrics" && tools.map((t) => t[1]).join("|") === "Live chords|Tuner", "the cards keep the old mode names as accessible names (links, docs and tests still find them)");
 expect(!/role="tablist" aria-label="Mode"/.test(ui), "the 9-tab mode row is gone");
 
 // state: `mode` still names the panel; the destination is a view over it

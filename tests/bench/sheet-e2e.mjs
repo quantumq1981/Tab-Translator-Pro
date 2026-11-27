@@ -146,7 +146,7 @@ for (const [label, opts] of [["phone", { ...devices["iPhone 13"] }], ["iPad", { 
   if (shots) await page.screenshot({ path: path.join(shots, `${label}-sections.png`) });
 
   // ---- waveform scrubber (Audio)
-  await page.locator('.tdp-nav button[data-dest="open"]').click(); await modeTab("Audio 🎵").click(); await page.waitForTimeout(400);
+  await page.locator('.tdp-nav button[data-dest="open"]').click(); await modeTab("Audio").click(); await page.waitForTimeout(400);
   await page.locator("label", { hasText: "Upload audio" }).locator('input[type="file"]').setInputFiles(WAV);
   await page.locator("[data-waveform]").first().waitFor({ timeout: 90000 }); await page.waitForTimeout(500);
   const wv = page.locator("[data-waveform]").first(); const wb = await wv.boundingBox();

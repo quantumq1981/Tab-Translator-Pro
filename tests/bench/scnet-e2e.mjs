@@ -165,7 +165,7 @@ const sampleMem = () => { const v = chromePids().map(pss); const s = v.reduce((a
   page.on("worker", (w) => w.on("console", (m) => logs.push(`[worker ${m.type()}] ${m.text()}`)));
 
   memBase = (await page.goto(ORIGIN + "/"), await page.waitForTimeout(500), sampleMem());
-  await page.getByRole("tab", { name: "Audio 🎵" }).click({ timeout: 60000 });
+  await page.getByRole("tab", { name: "Audio", exact: true }).click({ timeout: 60000 });
   await page.locator('input[type="file"]:not([multiple])').first().setInputFiles(path.join(OUT, "mix.wav"));
   await page.getByRole("button", { name: "✂ Split this mix into stems" }).waitFor({ timeout: 120000 });
   await page.waitForFunction(() => typeof window.TTP_STEM_MODEL === "function", null, { timeout: 60000 });

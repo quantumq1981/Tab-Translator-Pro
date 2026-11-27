@@ -88,7 +88,7 @@ ok("⬇ Click track (WAV) downloads a WAV", head === "RIFF" && fs.statSync(wavPa
 
 // Live chords on the fake microphone
 await page.locator('.tdp-nav button[data-dest="listen"]').click();
-await page.getByRole("tab", { name: "Live chords 🎶" }).click();
+await page.getByRole("tab", { name: "Live chords", exact: true }).click();
 await page.getByRole("button", { name: "🎤 Listen" }).click();
 await page.waitForTimeout(9000);
 const chips = await page.locator("section span").evaluateAll((els) => els.map((e) => e.textContent.trim()).filter((t) => /^[A-G][#b]?(m|7|maj7|m7)?$/.test(t)));

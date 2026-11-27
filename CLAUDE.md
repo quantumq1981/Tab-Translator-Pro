@@ -105,7 +105,12 @@ Boot measured with `tests/bench/load-e2e.mjs` (site assembled as `pages.yml` doe
   / `Use capo N`. Found, not fixed: the chart's shown key and the Beginner level's key differ on 14 corpus files (see the
   handoff, P1). U1 FIXED (2026-11-27): deleting the OPEN song from the
   Library detaches it (`onProjectDeleted`: pending project save dropped, hash in `ttp:lib:detached`, which restore honours;
-  opening the file again re-adds it) — `bench/library-delete-e2e.mjs`. Still open: the UX items #8 #11 #13 #16.
+  opening the file again re-adds it) — `bench/library-delete-e2e.mjs`. UX #8 #11 #13 #16 FIXED (2026-11-27): no on-screen text below
+  12 px (`TYPE` scale; the print sheet and SVG drawings keep their own sizes — use `TYPE.*` for new text); no
+  `window.prompt` (`InlineField`: Enter saves, Escape cancels); the way-in names are plain ("Audio", "Scan", "Lyrics",
+  "Live chords", "Tuner" — benches match them with `exact: true`); Audio + Scan open with one line of purpose, the rest
+  folded under "How it works", and Audio's reading settings appear once a recording is loaded (`hasFile`). Nothing
+  from the UX review or the handoff is open except the key mismatch (handoff P1, a decision for the owner).
 
 ### Audit 2026-11-18 — fixed (PR #157 + the follow-up); read `docs/AUDIT-2026-11-18.md` for the evidence
 

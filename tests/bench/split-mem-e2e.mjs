@@ -65,7 +65,7 @@ const text = () => page.evaluate(() => document.body.innerText).catch(() => "");
 const waitText = async (re, min = 30) => { const end = Date.now() + min * 60000; while (Date.now() < end) { const t = await text(); if (re.test(t)) return t; await page.waitForTimeout(1000); } throw new Error("timed out waiting for " + re); };
 
 await page.goto(ORIGIN + "/");
-await page.getByRole("tab", { name: "Audio 🎵" }).click({ timeout: 60000 });
+await page.getByRole("tab", { name: "Audio", exact: true }).click({ timeout: 60000 });
 phase = "decode+chords";
 await page.locator('input[type="file"]:not([multiple])').first().setInputFiles(INPUT);
 await page.getByRole("button", { name: "✂ Split this mix into stems" }).waitFor({ timeout: 300000 });

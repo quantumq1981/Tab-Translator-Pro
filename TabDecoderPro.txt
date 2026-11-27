@@ -361,6 +361,9 @@ import { createSessionStore } from "./session-store.js";
 const UI_FONT = "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif";
 const MONO_FONT = "ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace";
 const CHORD_FONT = "'Space Mono', ui-monospace, monospace";
+/* Type scale (UX review #11, 2026-11-27): six steps, nothing on screen below 12 px. TYPE.xs is the floor for labels,
+ * hints and chips; the print sheet keeps its own smaller paper sizes. Use these for new text instead of raw numbers. */
+const TYPE = { xs: 12, sm: 13, md: 15, lg: 18, xl: 24 };
 /* Print (R1 fix, 2026-11-27): paper must not use system-ui. Where system-ui is an OpenType-CFF font (Inter, Cantarell …)
  * Chromium embeds it in the PDF as a Type 3 font, glyph by glyph, so a saved PDF's text reads "bl u e - s k y" and can't
  * be searched or copied. PRINT_FONT names TrueType sans faces first (Helvetica on Apple, Arial on Windows, its metric twin
@@ -379,13 +382,13 @@ const WORK_MODES = ["manual", "pdf", "scan", "xml", "audio", "lyrics"];
 const LISTEN_MODES = ["live", "tuner"];
 const WAYS_IN = [
   ["xml", "MusicXML / GP", "Guitar Pro, MusicXML, MIDI, Power Tab, AlphaTex or a Muscriptor zip — the exact notes, parts and timing."],
-  ["audio", "Audio 🎵", "A recording or a stem (MP3, M4A, WAV, video) — chords, notes, drums, tab and stems."],
+  ["audio", "Audio", "A recording or a stem (MP3, M4A, WAV, video) — chords, notes, drums, tab and stems."],
   ["pdf", "PDF Chart", "A tab PDF from Guitar Pro, alphaTab or Chord Sheet Maker Pro — chords read from the fret numbers."],
-  ["scan", "Scan 📷", "A lead sheet as a photo, a scan or a PDF — reads the printed chord symbols."],
+  ["scan", "Scan", "A lead sheet as a photo, a scan or a PDF — reads the printed chord symbols."],
   ["manual", "Manual", "Paste ASCII tab and read it one chord at a time."],
-  ["lyrics", "Lyrics 🎙️", "Strip the chords from a chords-over-lyrics sheet, or capture sung lyrics."],
+  ["lyrics", "Lyrics", "Strip the chords from a chords-over-lyrics sheet, or capture sung lyrics."],
 ];
-const LISTEN_TOOLS = [["live", "Live chords 🎶", "Names the chords you play into the microphone."], ["tuner", "Tuner 🎤", "Tunes each string; stretch, equal and Z temperaments."]];
+const LISTEN_TOOLS = [["live", "Live chords", "Names the chords you play into the microphone."], ["tuner", "Tuner", "Tunes each string; stretch, equal and Z temperaments."]];
 const DESTINATIONS = [["open", "Open"], ["chart", "Chart"], ["listen", "Listen"], ["library", "Library"]];
 /* 24 × 24 stroke icons for the bar / rail (inline: no icon font to download) */
 function NavIcon({ name }) {
@@ -1592,7 +1595,7 @@ function TabDecoderProApp() {
                 {xmlErr && <div style={{ marginTop: 10, color: C.red, fontSize: 12 }}>{xmlErr}</div>}
                 {xmlScore && xmlScore.parts && xmlScore.parts.length > 1 && (
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginTop: 12 }}>
-                    <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim }}>PART</span>
+                    <span style={{ fontSize: TYPE.xs, letterSpacing: 2, color: C.dim }}>PART</span>
                     {(
                       <button onClick={() => selectPart(HARMONY_PART)} title={`read every pitched part together (voices and drums left out)${xmlScore.merged && xmlScore.mergedParts ? ": " + xmlScore.mergedParts.join(", ") : ""}`}
                         style={{ ...chip(C), padding: "3px 9px", borderColor: xmlScore.partIndex === HARMONY_PART ? C.amber : C.border, color: xmlScore.partIndex === HARMONY_PART ? C.amber : C.dim }}>Harmony (all pitched parts)</button>
@@ -1604,7 +1607,7 @@ function TabDecoderProApp() {
                   </div>
                 )}
                 {xmlScore && scoreFile && (
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginTop: 10, fontSize: 11, color: C.dim }}>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginTop: 10, fontSize: TYPE.xs, color: C.dim }}>
                     <button onClick={() => { setLinkAsk((n) => n + 1); setMode("audio"); }}
                       title="have a recording of this song? link it to this score: the chords are read from the recording WITH the score as evidence, the bars follow the recording's tempo, and every place they disagree is listed"
                       style={{ ...chip(C), padding: "4px 12px", borderColor: C.cyan, color: C.cyan }}>🎧 Link a recording →</button>
@@ -1638,7 +1641,7 @@ function TabDecoderProApp() {
             <>
             <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: "22px 16px", textAlign: "center", marginBottom: 14 }}>
               <div key={symbol} className="chord-pop" style={{ fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: 54, lineHeight: 1, color: C.chord }}>{symbol}</div>
-              {result && result.isSlash && <div style={{ marginTop: 8, fontSize: 11, letterSpacing: 2, color: C.red }}>SLASH CHORD · BASS ≠ ROOT</div>}
+              {result && result.isSlash && <div style={{ marginTop: 8, fontSize: TYPE.xs, letterSpacing: 2, color: C.red }}>SLASH CHORD · BASS ≠ ROOT</div>}
             </div>
 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
@@ -1649,7 +1652,7 @@ function TabDecoderProApp() {
             </div>
 
             <div style={{ marginBottom: 16 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, letterSpacing: 2, color: C.dim, marginBottom: 5 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: TYPE.xs, letterSpacing: 2, color: C.dim, marginBottom: 5 }}>
                 <span>CONFIDENCE</span><span style={{ color: confColor }}>{best ? `${Math.round(conf * 100)}%` : "—"}{best && best.missing > 0 ? ` · missing ${best.missing}` : ""}{best && best.extra > 0 ? ` · +${best.extra} extra` : ""}</span>
               </div>
               <div style={{ height: 8, background: C.bg, borderRadius: 8, border: `1px solid ${C.border}`, overflow: "hidden" }}>
@@ -1662,7 +1665,7 @@ function TabDecoderProApp() {
                 <span style={{ color: C.cyan, fontWeight: 600 }}>🤖 2nd opinion</span>
                 <span style={{ color: C.text, fontFamily: "'Space Mono', monospace", fontWeight: 700 }}>{names[arb.secondOpinion.root]}{arb.secondOpinion.quality.suffix}</span>
                 <span style={{ color: C.dim }}>· {Math.round(arb.secondOpinion.confidence * 100)}% model</span>
-                <span style={{ flexBasis: "100%", color: C.dim, fontSize: 10, lineHeight: 1.4 }}>engine was unsure ({Math.round(conf * 100)}%); shown for reference — the chart keeps the engine's read.</span>
+                <span style={{ flexBasis: "100%", color: C.dim, fontSize: TYPE.xs, lineHeight: 1.4 }}>engine was unsure ({Math.round(conf * 100)}%); shown for reference — the chart keeps the engine's read.</span>
               </div>
             )}
 
@@ -1707,7 +1710,7 @@ function TabDecoderProApp() {
         )}
         </>}
 
-        <footer className="no-print" style={{ position: "relative", marginTop: 18, fontSize: 11, color: C.dim, lineHeight: 1.6 }}>
+        <footer className="no-print" style={{ position: "relative", marginTop: 18, fontSize: TYPE.xs, color: C.dim, lineHeight: 1.6 }}>
           <details><summary style={{ cursor: "pointer" }}>About the engine</summary>
           Engine: pure JS · masks derived via makeMask() · rotateRight() for root candidates · ranking score (−0.8·extra, −1.2·missing), Jaccard confidence ·
           Path A: PDF.js text-position reconstruction (string / column / measure geometry) → same engine → one-chord-per-bar collapse.
@@ -2140,7 +2143,7 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
   const settingsChanged = [showRoman, !!keyOv, simplify !== !!(autoSimplify && (melodic || rawScore.merged)), !!level, arrange !== "off", practice].filter(Boolean).length;
   return (
     <>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, fontSize: 11, color: C.dim, margin: "14px 0 6px" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, fontSize: TYPE.xs, color: C.dim, margin: "14px 0 6px" }}>
         <span style={{ color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 220 }}>{title}</span>
         <span>{meta}{semis ? ` · ${semis > 0 ? "+" : ""}${semis} st` : ""}{simplify && !lvl ? " · 1 chord/bar" : ""}
           {key ? <> · key <b style={{ color: key.manual ? C.green : C.dim }}>{kName(key)}</b>
@@ -2148,7 +2151,7 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
       </div>
       {describe && describe.tags.length > 0 && (
         <div className="no-print" title="a local read of this chart (the music skill's `describe`, on-device)"
-          style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 5, margin: "0 0 8px", fontSize: 10, color: C.dim }}>
+          style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 5, margin: "0 0 8px", fontSize: TYPE.xs, color: C.dim }}>
           <span style={{ letterSpacing: 1.5, textTransform: "uppercase", color: C.dim }}>{describe.complexity} · {describe.uniqueChords} chord{describe.uniqueChords === 1 ? "" : "s"}</span>
           {describe.tags.map((t, i) => (
             <span key={i} style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 999, padding: "1px 8px", color: C.dim, whiteSpace: "nowrap" }}>{t}</span>
@@ -2182,7 +2185,7 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
           <button onClick={togglePlay} title={playing ? "stop" : "play the chart"}
             style={{ ...chip(C), padding: "3px 12px", borderColor: playing ? C.green : C.amber, color: playing ? C.green : C.amber, fontWeight: 600 }}>{playing ? "■ Stop" : "▶ Play"}</button>
           <button onClick={() => bumpBpm(-5)} aria-label="Slower" style={{ ...chip(C), padding: "3px 8px" }}>−</button>
-          <span style={{ fontSize: 11, minWidth: 46, textAlign: "center", color: C.dim }} title={score.tempoMap ? "this chart follows the performance's tempo map; ♩= scales it" : undefined}>♩={score.tempoMap ? "~" : ""}{Math.round(bpm * 10) / 10}</span>
+          <span style={{ fontSize: TYPE.xs, minWidth: 46, textAlign: "center", color: C.dim }} title={score.tempoMap ? "this chart follows the performance's tempo map; ♩= scales it" : undefined}>♩={score.tempoMap ? "~" : ""}{Math.round(bpm * 10) / 10}</span>
           <button onClick={() => bumpBpm(5)} aria-label="Faster" style={{ ...chip(C), padding: "3px 8px" }}>+</button>
         </span>
         <span style={{ marginLeft: "auto", display: "inline-flex", gap: 6 }}>
@@ -2197,7 +2200,7 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
         <div id="tdp-chart-settings" className="no-print" role="region" aria-label="Chart settings"
           style={{ background: C.panel, border: `1px solid ${C.border}`, borderTop: "none", borderRadius: "0 0 10px 10px", padding: "10px 12px", display: "grid", gap: 10, maxHeight: "min(60vh, 560px)", overflowY: "auto", overscrollBehavior: "contain" }}>
           <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
-            <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim, minWidth: 110 }}>CHORD NAMES</span>
+            <span style={{ fontSize: TYPE.xs, letterSpacing: 2, color: C.dim, minWidth: 110 }}>CHORD NAMES</span>
             <button aria-pressed={showRoman} onClick={() => { if (!showRoman) { setShowRoman(true); setNashville(false); } else if (!nashville) setNashville(true); else { setShowRoman(false); setNashville(false); } }} title={key ? `key of ${kName(key)} · tap again for Nashville numbers` : "key analysis"}
               style={{ ...chip(C), padding: "3px 9px", borderColor: showRoman ? C.cyan : C.border, color: showRoman ? C.cyan : C.dim }}>{showRoman ? (nashville ? "1·5·6m" : "I·V·vi") : "I·V·vi"}</button>
             <KeyPicker C={C} value={keyOv} onChange={setKeyOv} cands={keyCands} useSharp={useSharp} semis={semis} />
@@ -2211,7 +2214,7 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
             )}
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
-            <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim, minWidth: 110 }}>ARRANGEMENT</span>
+            <span style={{ fontSize: TYPE.xs, letterSpacing: 2, color: C.dim, minWidth: 110 }}>ARRANGEMENT</span>
             <button aria-pressed={simplify} onClick={() => setSimplify((s) => !s)} title="aggregate each bar's notes into one chord (for dense transcriptions)"
               style={{ ...chip(C), padding: "3px 9px", borderColor: simplify ? C.green : C.border, color: simplify ? C.green : C.dim }}>{simplify ? "1 chord/bar" : "Simplify"}</button>
             <select value={level} onChange={(e) => setLevel(e.target.value)} aria-label="Playing level" title="a playing level: Beginner = triads, one chord per bar, quarter strums, open-chord key (+ capo) · Intermediate = 7ths + inversions, eighths · Advanced = the full Pro chart"
@@ -2231,14 +2234,14 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
             </select>
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
-            <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim, minWidth: 110 }}>PRACTICE</span>
+            <span style={{ fontSize: TYPE.xs, letterSpacing: 2, color: C.dim, minWidth: 110 }}>PRACTICE</span>
             <button aria-pressed={practice} onClick={() => { stopPlay(); setPractice((v) => !v); }} title="loop bars, slow down without changing pitch, metronome, count-in, wait-for-me coach"
               style={{ ...chip(C), padding: "4px 10px", borderColor: practice ? C.green : C.border, color: practice ? C.green : C.amber }}>🎯 Practice</button>
             <label style={{ ...chip(C), padding: "4px 10px", cursor: "pointer", display: "inline-flex", alignItems: "center" }}>
               🎵 Reference audio
               <input type="file" onChange={attachRef} style={{ display: "none" }} />
             </label>
-            <span style={{ fontSize: 11, color: C.dim }}>play a recording with the chart following it</span>
+            <span style={{ fontSize: TYPE.xs, color: C.dim }}>play a recording with the chart following it</span>
           </div>
         </div>
       )}
@@ -2251,7 +2254,7 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
             <span aria-hidden style={{ fontSize: 18, color: sent ? C.green : C.amber }}>→</span>
             <span style={{ display: "grid", gap: 2 }}>
               <b style={{ fontSize: 13, color: sent ? C.green : C.amber }}>{sent ? "Opening Chord Sheet Maker Pro…" : "Open in Chord Sheet Maker Pro"}</b>
-              <span style={{ fontSize: 11, color: C.dim }}>fake-book layout, slash rhythm, setlists — your edits, fingerings and rhythm go with it</span>
+              <span style={{ fontSize: TYPE.xs, color: C.dim }}>fake-book layout, slash rhythm, setlists — your edits, fingerings and rhythm go with it</span>
             </span>
           </button>
           <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
@@ -2269,21 +2272,21 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
                 style={{ textAlign: "left", display: "flex", alignItems: "center", gap: 10, padding: "6px 4px", border: "none", borderBottom: `1px solid ${C.raised}`, background: "transparent", color: C.text, cursor: "pointer", fontFamily: "inherit", width: "100%" }}>
                 <span style={{ flex: 1, display: "grid", gap: 1 }}>
                   <span style={{ fontSize: 13 }}>{head}</span>
-                  <span style={{ fontSize: 11, color: C.dim }}>{desc}</span>
+                  <span style={{ fontSize: TYPE.xs, color: C.dim }}>{desc}</span>
                 </span>
-                <span style={{ fontSize: 10, color: exp && exp.fmt === f ? C.cyan : C.dim, border: `1px solid ${exp && exp.fmt === f ? C.cyan : C.border}`, borderRadius: 6, padding: "2px 7px", whiteSpace: "nowrap" }}>{lbl}</span>
+                <span style={{ fontSize: TYPE.xs, color: exp && exp.fmt === f ? C.cyan : C.dim, border: `1px solid ${exp && exp.fmt === f ? C.cyan : C.border}`, borderRadius: 6, padding: "2px 7px", whiteSpace: "nowrap" }}>{lbl}</span>
               </button>
             ));
             return g.advanced
-              ? <details key={g.title}><summary style={{ cursor: "pointer", fontSize: 10, letterSpacing: 2, color: C.dim }}>{g.title}</summary><div style={{ marginTop: 4 }}>{rows}</div></details>
-              : <div key={g.title}><div style={{ fontSize: 10, letterSpacing: 2, color: C.dim, marginBottom: 2 }}>{g.title}</div>{rows}</div>;
+              ? <details key={g.title}><summary style={{ cursor: "pointer", fontSize: TYPE.xs, letterSpacing: 2, color: C.dim }}>{g.title}</summary><div style={{ marginTop: 4 }}>{rows}</div></details>
+              : <div key={g.title}><div style={{ fontSize: TYPE.xs, letterSpacing: 2, color: C.dim, marginBottom: 2 }}>{g.title}</div>{rows}</div>;
           })}
         </div>
       )}
       </div>
 
       {(refName || refErr) && (
-        <div className="no-print" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, marginBottom: 10, fontSize: 11, color: C.dim }}>
+        <div className="no-print" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, marginBottom: 10, fontSize: TYPE.xs, color: C.dim }}>
           {refName && <>
             <button onClick={toggleRef} title="play the recording with the chart highlighting in sync"
               style={{ ...chip(C), padding: "4px 12px", borderColor: refPlaying ? C.green : C.border, color: refPlaying ? C.green : C.amber }}>{refPlaying ? "■ Stop audio" : "▶ Play with chart"}</button>
@@ -2295,7 +2298,7 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
           {refErr && <span style={{ color: C.red }}>{refErr}</span>}
         </div>
       )}
-      {lvl && lvl.capo > 0 && <div className="no-print" style={{ fontSize: 11, color: C.amber, marginBottom: 8 }} title="these are the shapes; put a capo here to sound like the record">Capo {lvl.capo} to play along with the record.</div>}
+      {lvl && lvl.capo > 0 && <div className="no-print" style={{ fontSize: TYPE.xs, color: C.amber, marginBottom: 8 }} title="these are the shapes; put a capo here to sound like the record">Capo {lvl.capo} to play along with the record.</div>}
 
       {practice && <PracticePlayer C={C} score={tscore} getBuffer={getBuffer} bpm={bpm} onPlayKey={setPlayKey} />}
 
@@ -2310,7 +2313,7 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
         ? (tabTex.error
             ? <div style={{ fontSize: 12, color: C.dim, padding: "10px 4px" }}>{tabTex.error}</div>
             : <>
-                {simplify && <div style={{ fontSize: 11, color: C.dim, marginBottom: 6 }}>The tab shows every note as written — <b>1 chord/bar</b> only simplifies the Chart and Grid views.</div>}
+                {simplify && <div style={{ fontSize: TYPE.xs, color: C.dim, marginBottom: 6 }}>The tab shows every note as written — <b>1 chord/bar</b> only simplifies the Chart and Grid views.</div>}
                 <div className={printing ? "tdp-print-keep" : undefined}><TabView tex={tabTex.text} title={title} C={C} /></div>
               </>)
         : view === "chart"
@@ -2380,8 +2383,8 @@ function JobCancel({ C, model, stall, label = "this job" }) {
   const can = model && typeof model.cancel === "function";
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginLeft: 8 }}>
-      {can && <button onClick={() => { try { model.cancel(); } catch (_) { /* already finished */ } }} style={{ font: "inherit", fontSize: 11, padding: "2px 9px", borderRadius: 6, border: `1px solid ${C.red}`, background: "transparent", color: C.red, cursor: "pointer" }}>✕ Cancel</button>}
-      {stall > 0 && <span style={{ fontSize: 11, color: C.amber }}>No progress for {Math.round(stall / 60)} min — {label} may have stalled (a phone pauses work when the screen locks). Cancel and try a shorter section, or keep waiting.</span>}
+      {can && <button onClick={() => { try { model.cancel(); } catch (_) { /* already finished */ } }} style={{ font: "inherit", fontSize: TYPE.xs, padding: "2px 9px", borderRadius: 6, border: `1px solid ${C.red}`, background: "transparent", color: C.red, cursor: "pointer" }}>✕ Cancel</button>}
+      {stall > 0 && <span style={{ fontSize: TYPE.xs, color: C.amber }}>No progress for {Math.round(stall / 60)} min — {label} may have stalled (a phone pauses work when the screen locks). Cancel and try a shorter section, or keep waiting.</span>}
     </span>
   );
 }
@@ -2454,8 +2457,18 @@ function LibraryPanel({ C, onOpen, currentId, onDeleted }) {
   const list = useMemo(() => (recs ? searchProjects(recs, { q, tags: tag ? [tag] : [], sort }) : []), [recs, q, tag, sort]);
   const tags = useMemo(() => (recs ? projectTags(recs) : []), [recs]);
   const byId = useMemo(() => new Map((recs || []).map((r) => [r.id, r])), [recs]);
-  const editTags = async (r) => { const v = window.prompt("Tags (comma separated)", r.tags.join(", ")); if (v == null) return; await projectPut(makeProjectRecord({ ...r, tags: v.split(",") , createdAt: r.createdAt })); refresh(); };
-  const rename = async (r) => { const v = window.prompt("Title", r.title); if (!v) return; await projectPut({ ...r, title: v.slice(0, 200), updatedAt: Date.now() }); refresh(); };
+  /* UX review #13: rename / tags / new setlist ask in place (InlineField), not with window.prompt */
+  const [ask, setAsk] = useState(null);   // { kind: "rename" | "tags" | "setlist", id?, value }
+  const editTags = (r) => setAsk({ kind: "tags", id: r.id, value: r.tags.join(", ") });
+  const rename = (r) => setAsk({ kind: "rename", id: r.id, value: r.title });
+  const saveAsk = async (v) => {
+    const a = ask; setAsk(null); if (!a) return;
+    if (a.kind === "setlist") { const n = v.trim(); if (n) await setlistPut(createSetlist(n)); refresh(); return; }
+    const r = (recs || []).find((x) => x.id === a.id); if (!r) return;
+    if (a.kind === "rename") { const t = v.trim(); if (t) await projectPut({ ...r, title: t.slice(0, 200), updatedAt: Date.now() }); }
+    else await projectPut(makeProjectRecord({ ...r, tags: v.split(","), createdAt: r.createdAt }));
+    refresh();
+  };
   const dup = async (r) => { const b = await projectFileGet(r.id, r); const n = makeProjectRecord({ ...r, id: undefined, title: r.title + " (copy)", createdAt: undefined }); if (b) await projectFilePut(n.id, b); await projectPut(n); refresh(); };
   // delete = hide now, really delete when the Undo toast ends (UX review #13; the bytes stay until then)
   const [gone, setGone] = useState(() => new Set());
@@ -2484,7 +2497,7 @@ function LibraryPanel({ C, onOpen, currentId, onDeleted }) {
     try { const { project, source } = await importProjectBundle(new Uint8Array(await f.arrayBuffer())); if (source) await projectFilePut(project.id, source.bytes); await projectPut(project); setMsg(`Imported “${project.title}”.`); refresh(); }
     catch (err) { setMsg(err && err.message ? err.message : "Couldn't import that bundle."); }
   };
-  const newSet = async () => { const n = window.prompt("Setlist name", "Gig"); if (!n) return; await setlistPut(createSetlist(n)); refresh(); };
+  const newSet = () => setAsk({ kind: "setlist", value: "Gig" });
   const addTo = async (setId, r) => { const s = sets.find((x) => x.id === setId); if (!s) return; await setlistPut(setlistAdd(s, r.id)); refresh(); setMsg(`Added to ${s.name}.`); };
   const upd = async (s) => { await setlistPut(s); refresh(); };
   const fmtDate = (t) => { try { return new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric" }); } catch (_) { return ""; } };
@@ -2505,7 +2518,7 @@ function LibraryPanel({ C, onOpen, currentId, onDeleted }) {
         <button onClick={() => setTag("")} aria-pressed={!!(!tag)} style={ch(!tag)}>all</button>
         {tags.map((t) => <button key={t.tag} onClick={() => setTag(tag === t.tag ? "" : t.tag)} aria-pressed={!!(tag === t.tag)} style={ch(tag === t.tag, C.cyan)}>#{t.tag} {t.count}</button>)}
       </div>}
-      {msg && <div style={{ fontSize: 11, color: C.cyan, marginBottom: 8 }}>{msg}</div>}
+      {msg && <div style={{ fontSize: TYPE.xs, color: C.cyan, marginBottom: 8 }}>{msg}</div>}
       {recs === null ? <div style={{ fontSize: 12, color: C.dim }}>loading…</div> : !recs.length ? (
         <div style={{ fontSize: 12, color: C.dim, lineHeight: 1.6 }}>Nothing here yet. Open a PDF, Guitar Pro, MusicXML, MIDI or audio file and it's added automatically — with its chord edits, note edits and key.</div>
       ) : (
@@ -2514,8 +2527,8 @@ function LibraryPanel({ C, onOpen, currentId, onDeleted }) {
             <div key={r.id} style={{ border: `1px solid ${r.id === currentId ? C.amber : C.border}`, borderRadius: 10, padding: "8px 10px", background: C.bg }}>
               <div style={{ display: "flex", flexWrap: "wrap", alignItems: "baseline", gap: 8 }}>
                 <b style={{ color: C.text, fontSize: 13, cursor: "pointer" }} onClick={() => onOpen(r)}>{r.title}</b>
-                {r.artist && <span style={{ fontSize: 11, color: C.dim }}>{r.artist}</span>}
-                <span style={{ fontSize: 10, color: C.dim, marginLeft: "auto" }}>{r.kind}{r.key ? ` · ${r.key}` : ""}{r.bpm ? ` · ♩=${r.bpm}` : ""}{r.bars ? ` · ${r.bars} bars` : ""} · {fmtDate(r.updatedAt)}</span>
+                {r.artist && <span style={{ fontSize: TYPE.xs, color: C.dim }}>{r.artist}</span>}
+                <span style={{ fontSize: TYPE.xs, color: C.dim, marginLeft: "auto" }}>{r.kind}{r.key ? ` · ${r.key}` : ""}{r.bpm ? ` · ♩=${r.bpm}` : ""}{r.bars ? ` · ${r.bars} bars` : ""} · {fmtDate(r.updatedAt)}</span>
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 6, alignItems: "center" }}>
                 <button onClick={() => onOpen(r)} style={ch(true, C.green)}>Open</button>
@@ -2528,6 +2541,7 @@ function LibraryPanel({ C, onOpen, currentId, onDeleted }) {
                 </select>}
                 <button onClick={() => del(r)} style={{ ...ch(false), color: C.red }}>delete</button>
               </div>
+              {ask && ask.id === r.id && <InlineField C={C} label={ask.kind === "rename" ? "Title" : "Tags (comma separated)"} initial={ask.value} onSave={saveAsk} onCancel={() => setAsk(null)} />}
             </div>
           ))}
           {!list.filter((r) => !gone.has(r.id)).length && <div style={{ fontSize: 12, color: C.dim }}>No project matches.</div>}
@@ -2538,15 +2552,16 @@ function LibraryPanel({ C, onOpen, currentId, onDeleted }) {
           <SectionLabel C={C} style={{ margin: 0 }}>SETLISTS</SectionLabel>
           <button onClick={newSet} style={ch(false)}>＋ New setlist</button>
         </div>
+        {ask && ask.kind === "setlist" && <InlineField C={C} label="Setlist name" initial={ask.value} saveLabel="Create" onSave={saveAsk} onCancel={() => setAsk(null)} />}
         {sets.filter((s) => !gone.has(s.id)).map((s) => (
           <div key={s.id} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: "8px 10px", marginBottom: 8, background: C.bg }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-              <b style={{ color: C.text, fontSize: 13 }}>{s.name}</b><span style={{ fontSize: 11, color: C.dim }}>{s.items.length} songs</span>
+              <b style={{ color: C.text, fontSize: 13 }}>{s.name}</b><span style={{ fontSize: TYPE.xs, color: C.dim }}>{s.items.length} songs</span>
               <button onClick={() => s.items.length && onOpen(byId.get(s.items[0].projectId), { setlist: s, index: 0 })} disabled={!s.items.length} style={{ ...ch(true, C.green), marginLeft: "auto" }}>▶ Play set</button>
               <button aria-label={`Delete the setlist ${s.name}`} onClick={() => delSet(s)} style={{ ...ch(false), color: C.red }}>✕</button>
             </div>
             {s.items.map((it, i) => { const r = byId.get(it.projectId); return (
-              <div key={i} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 5, marginTop: 6, fontSize: 11, color: C.dim }}>
+              <div key={i} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 5, marginTop: 6, fontSize: TYPE.xs, color: C.dim }}>
                 <span style={{ minWidth: 16 }}>{i + 1}.</span>
                 <span style={{ color: r ? C.text : C.red, flex: "1 1 120px" }}>{r ? r.title : "(missing)"}</span>
                 <span>transpose</span>
@@ -2564,7 +2579,7 @@ function LibraryPanel({ C, onOpen, currentId, onDeleted }) {
           </div>
         ))}
       </div>
-      <div style={{ fontSize: 10, color: C.dim, marginTop: 10, lineHeight: 1.5 }}>Stored on this device only (IndexedDB + OPFS). A bundle (.ttp.zip) carries a project — its file and every edit — to another device.</div>
+      <div style={{ fontSize: TYPE.xs, color: C.dim, marginTop: 10, lineHeight: 1.5 }}>Stored on this device only (IndexedDB + OPFS). A bundle (.ttp.zip) carries a project — its file and every edit — to another device.</div>
     </section>
   );
 }
@@ -2702,7 +2717,7 @@ function LyricsSheetView({ C, score, title, overrides, playKey, getAudio, getBuf
   const mono = { fontFamily: MONO_FONT, whiteSpace: "pre", fontSize: 13, lineHeight: 1.35 };
   return (
     <div>
-      <div className="no-print" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginBottom: 8, fontSize: 11, color: C.dim }}>
+      <div className="no-print" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginBottom: 8, fontSize: TYPE.xs, color: C.dim }}>
         <button onClick={() => setEditing((v) => !v)} aria-pressed={!!(editing)} style={ch(editing, C.green)}>{editing ? "✓ Done" : "✎ Lyrics text"}</button>
         <button onClick={() => fileRef.current && fileRef.current.click()} style={ch(false)}>⬆ Load lyrics</button>
         <input ref={fileRef} type="file" onChange={onFile} style={{ display: "none" }} />
@@ -2719,7 +2734,7 @@ function LyricsSheetView({ C, score, title, overrides, playKey, getAudio, getBuf
           style={{ width: "100%", height: 160, resize: "vertical", boxSizing: "border-box", background: C.bg, color: C.text, border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, fontSize: 12, lineHeight: 1.5, fontFamily: MONO_FONT, outline: "none", marginBottom: 8 }} />
       )}
       {map && (
-        <div className="no-print" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginBottom: 8, fontSize: 11, color: C.dim }}>
+        <div className="no-print" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginBottom: 8, fontSize: TYPE.xs, color: C.dim }}>
           {sel >= 0 && <>
             <span>line {sel + 1}:</span>
             <button onClick={() => nudge(-1)} style={ch(false)} title="start a beat earlier">◀ beat</button>
@@ -2744,7 +2759,7 @@ function LyricsSheetView({ C, score, title, overrides, playKey, getAudio, getBuf
           {rows.map((r, i) => {
             if (r.type === "blank") return <div key={i} style={{ height: 10 }} />;
             if (r.type === "title") return <div key={i} style={{ fontSize: 15, fontWeight: 600, color: C.text }}>{r.text}</div>;
-            if (r.type === "section") return <div key={i} style={{ fontSize: 10, letterSpacing: 2, color: C.amber, textTransform: "uppercase", margin: "4px 0" }}>{r.text}</div>;
+            if (r.type === "section") return <div key={i} style={{ fontSize: TYPE.xs, letterSpacing: 2, color: C.amber, textTransform: "uppercase", margin: "4px 0" }}>{r.text}</div>;
             if (r.type === "chords") return <div key={i} style={{ ...mono, color: C.chord, fontWeight: 700 }}>{r.text}</div>;
             const l = map.lines[r.index], on = r.index === cur, picked = r.index === sel;
             return (
@@ -2762,7 +2777,7 @@ function LyricsSheetView({ C, score, title, overrides, playKey, getAudio, getBuf
           })}
         </div>
       )}
-      <div style={{ fontSize: 10, color: C.dim, marginTop: 6, lineHeight: 1.5 }}>
+      <div style={{ fontSize: TYPE.xs, color: C.dim, marginTop: 6, lineHeight: 1.5 }}>
         {map && map.source === "score" ? <>Every syllable is timed from the score's lyrics{scoreLyrics && scoreLyrics.linked ? " on the recording's clock (the link)" : " at the score's tempo"}; the chords sit over the syllable sung at each change. </> : null}Auto-align is line-level (words aren't timed individually). With a recording, lines snap to where singing starts; best on an isolated vocal stem (Audio mode → 🎤 Isolate vocals, or a split vocals stem). Lines marked ≈ are guesses — tap one and nudge it a beat.
       </div>
     </div>
@@ -2891,9 +2906,9 @@ function PracticePlayer({ C, score, getBuffer, bpm, onPlayKey }) {
   const step = (set, v, d) => set(nums[Math.max(0, Math.min(nums.length - 1, nums.indexOf(v) + d))]);
   const ch = (on, col) => ({ ...chip(C), padding: "3px 9px", borderColor: on ? col || C.amber : C.border, color: on ? col || C.amber : C.dim });
   return (
-    <div className="no-print" style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 10, marginBottom: 10, background: C.bg, fontSize: 11, color: C.dim }}>
+    <div className="no-print" style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 10, marginBottom: 10, background: C.bg, fontSize: TYPE.xs, color: C.dim }}>
       <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginBottom: 8 }}>
-        <span style={{ letterSpacing: 2, fontSize: 10 }}>PRACTICE</span>
+        <span style={{ letterSpacing: 2, fontSize: TYPE.xs }}>PRACTICE</span>
         <span>bars</span>
         <button onClick={() => step(setA, a, -1)} style={ch(false)}>−</button><b style={{ color: C.text, minWidth: 18, textAlign: "center" }}>{lo}</b><button onClick={() => step(setA, a, 1)} style={ch(false)}>+</button>
         <span>to</span>
@@ -3083,16 +3098,16 @@ function LiveChords({ C, useSharp }) {
       )}
       <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: "26px 16px", textAlign: "center", marginBottom: 12 }}>
         <div style={{ fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: 72, lineHeight: 1, color: sym ? C.chord : C.dim }}>{sym || (listening ? "…" : "—")}</div>
-        {capo > 0 && sym && <div style={{ marginTop: 6, fontSize: 11, color: C.dim }}>shape with capo {capo} · sounds {out.symbol}</div>}
-        {out && out.alternatives && out.alternatives.length > 0 && sym && <div style={{ marginTop: 8, fontSize: 11, color: C.dim }}>or {out.alternatives.map((a) => `${shape(a.symbol)} ${Math.round(a.confidence * 100)}%`).join(" · ")}</div>}
+        {capo > 0 && sym && <div style={{ marginTop: 6, fontSize: TYPE.xs, color: C.dim }}>shape with capo {capo} · sounds {out.symbol}</div>}
+        {out && out.alternatives && out.alternatives.length > 0 && sym && <div style={{ marginTop: 8, fontSize: TYPE.xs, color: C.dim }}>or {out.alternatives.map((a) => `${shape(a.symbol)} ${Math.round(a.confidence * 100)}%`).join(" · ")}</div>}
       </div>
-      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, letterSpacing: 2, color: C.dim, marginBottom: 4 }}><span>CONFIDENCE</span><span>{out && out.symbol ? `${Math.round(out.confidence * 100)}% · held ${out.stableFor.toFixed(1)} s` : "—"}</span></div>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: TYPE.xs, letterSpacing: 2, color: C.dim, marginBottom: 4 }}><span>CONFIDENCE</span><span>{out && out.symbol ? `${Math.round(out.confidence * 100)}% · held ${out.stableFor.toFixed(1)} s` : "—"}</span></div>
       <div style={{ height: 8, background: C.bg, borderRadius: 8, border: `1px solid ${C.border}`, overflow: "hidden", marginBottom: 6 }}><div style={{ width: `${(out && out.symbol ? out.confidence : 0) * 100}%`, height: "100%", background: C.cyan, transition: "width .15s" }} /></div>
       <div style={{ height: 4, background: C.bg, borderRadius: 4, overflow: "hidden", marginBottom: 12 }}><div style={{ width: `${level * 100}%`, height: "100%", background: C.green }} /></div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, minHeight: 28, marginBottom: 12 }}>
         {hist.map((h, i) => <span key={i} style={{ ...chip(C), padding: "3px 9px", color: i === hist.length - 1 ? C.chord : C.dim }}>{shape(h.sym)}</span>)}
       </div>
-      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, justifyContent: "center", fontSize: 11, color: C.dim }}>
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, justifyContent: "center", fontSize: TYPE.xs, color: C.dim }}>
         <button onClick={listening ? stop : start} style={{ ...toggle(C), flex: "none", padding: "8px 22px", fontSize: 14, borderColor: listening ? C.green : C.border, color: listening ? C.green : C.text }}>{listening ? "■ Stop" : "🎤 Listen"}</button>
         <span>capo</span>
         <button onClick={() => setCapo((c) => Math.max(0, c - 1))} style={{ ...chip(C), padding: "3px 8px" }}>−</button>
@@ -3105,10 +3120,10 @@ function LiveChords({ C, useSharp }) {
         {trainer && <select value={setName} disabled={listening} onChange={(e) => setSetName(e.target.value)} style={{ ...chip(C), padding: "3px 6px", background: C.raised, color: C.dim }}>
           <option value="open">open chords</option><option value="jazz">jazz ii–V</option><option value="blues">blues</option><option value="custom">my chords…</option>
         </select>}
-        {trainer && setName === "custom" && <input value={custom} disabled={listening} onChange={(e) => setCustom(e.target.value)} placeholder="C G Am F" style={{ width: 140, background: C.raised, color: C.text, border: `1px solid ${C.border}`, borderRadius: 6, padding: "4px 6px", fontFamily: "inherit", fontSize: 11 }} />}
+        {trainer && setName === "custom" && <input value={custom} disabled={listening} onChange={(e) => setCustom(e.target.value)} placeholder="C G Am F" style={{ width: 140, background: C.raised, color: C.text, border: `1px solid ${C.border}`, borderRadius: 6, padding: "4px 6px", fontFamily: "inherit", fontSize: TYPE.xs }} />}
       </div>
       {err && <div style={{ marginTop: 12, color: C.red, fontSize: 12, textAlign: "center" }}>{err}</div>}
-      <div style={{ marginTop: 14, fontSize: 11, color: C.dim, lineHeight: 1.6, textAlign: "center" }}>
+      <div style={{ marginTop: 14, fontSize: TYPE.xs, color: C.dim, lineHeight: 1.6, textAlign: "center" }}>
         Strum and let it ring — the readout changes only when a new chord wins twice in a row and the last one has held for 0.4 s. Nothing leaves your device. Best with one instrument in a quiet room.
       </div>
     </section>
@@ -3332,7 +3347,7 @@ function NoteEditorView({ score, edit, setEdit, C, useSharp, playKey, getAudio, 
 
   return (
     <div onKeyDown={onKey} tabIndex={0} style={{ outline: "none" }}>
-      <div className="no-print" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 5, marginBottom: 6, fontSize: 11, color: C.dim }}>
+      <div className="no-print" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 5, marginBottom: 6, fontSize: TYPE.xs, color: C.dim }}>
         {[["select", "↖ Select"], ["draw", "✎ Draw"], ["erase", "⌫ Erase"]].map(([t, l]) => <button key={t} onClick={() => setTool(t)} aria-pressed={!!(tool === t)} style={chip2(tool === t)}>{l}</button>)}
         <select value={snap} onChange={(e) => setSnap(e.target.value)} title="snap" style={{ ...chip(C), padding: "3px 6px", background: C.raised, color: C.dim }}>
           {Object.keys(EDIT_SNAPS).map((k) => <option key={k} value={k}>snap {k}</option>)}
@@ -3347,14 +3362,14 @@ function NoteEditorView({ score, edit, setEdit, C, useSharp, playKey, getAudio, 
         {getAudio && <button onClick={loadSpec} aria-pressed={!!(spec && spec.url)} style={chip2(spec && spec.url, C.cyan)} title="draw the recording's spectrogram under the notes">{spec && spec.busy ? "analysing…" : "🌈 Spectrogram"}</button>}
         {editCanUndo(edit) && <button onClick={() => { const prev = edit; setEdit(null); showToast({ text: "Note edits cleared.", action: { label: "Undo", fn: () => setEdit((cur) => cur || prev, { ifEmpty: true }) } }); }} style={chip2(false)}>Clear edits</button>}
       </div>
-      <div style={{ fontSize: 10, color: C.dim, marginBottom: 6, lineHeight: 1.5 }}>
+      <div style={{ fontSize: TYPE.xs, color: C.dim, marginBottom: 6, lineHeight: 1.5 }}>
         {summary ? <span style={{ color: C.green }}>✓ {summary}</span> : "Drag a note to move it (pitch + time), its right edge to change its length; drag a fret number to another string. Draw adds notes, Erase removes them."}
         {report && report.skipped > 0 && <span style={{ color: C.amber }}> · {report.skipped} edit{report.skipped === 1 ? "" : "s"} no longer match this chart (re-timed or re-parsed)</span>}
         {semis ? <span> · notes shown untransposed</span> : null}
         {spec && spec.err && <span style={{ color: C.red }}> · {spec.err}</span>}
       </div>
       {selN && (
-        <div className="no-print" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 5, marginBottom: 6, padding: "6px 8px", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 11, color: C.dim }}>
+        <div className="no-print" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 5, marginBottom: 6, padding: "6px 8px", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, fontSize: TYPE.xs, color: C.dim }}>
           <b style={{ color: C.chord, fontFamily: "'Space Mono', monospace" }}>{nameOf(selN.midi)}</b>
           <span>bar {selN.bar} · beat {(selN.onTick / (EDIT_PPQ * 4 / (L.bars[selN.barIndex].timeSig[1])) + 1).toFixed(2).replace(/\.00$/, "")}</span>
           {posOf(selN) && <span>· {_NE_STR[posOf(selN).string] || posOf(selN).string + 1} string fret {posOf(selN).fret}{posOf(selN).auto ? " (auto)" : ""}</span>}
@@ -3370,13 +3385,13 @@ function NoteEditorView({ score, edit, setEdit, C, useSharp, playKey, getAudio, 
             <button onClick={() => moveString(1)} style={chip2(false)} title="same pitch, next higher string">str ↑</button>
             <button onClick={() => moveString(-1)} style={chip2(false)} title="same pitch, next lower string">str ↓</button>
             <input value={fretDraft} onChange={(e) => setFretDraft(e.target.value.replace(/[^0-9]/g, "").slice(0, 2))} onBlur={setFret} onKeyDown={(e) => { if (e.key === "Enter") setFret(); }}
-              inputMode="numeric" aria-label="fret" style={{ width: 34, background: C.raised, color: C.text, border: `1px solid ${C.border}`, borderRadius: 6, padding: "3px 4px", fontSize: 11, fontFamily: "inherit" }} />
+              inputMode="numeric" aria-label="fret" style={{ width: 34, background: C.raised, color: C.text, border: `1px solid ${C.border}`, borderRadius: 6, padding: "3px 4px", fontSize: TYPE.xs, fontFamily: "inherit" }} />
           </>}
           <button onClick={refinger} style={chip2(false)} title="forget the strings of this chord and let the fingering choose">🎸 auto-finger</button>
           <button onClick={toggleLock} aria-pressed={!!(selOnset && selOnset.locked)} style={chip2(selOnset && selOnset.locked, C.green)} title="keep this chord name when its notes change">{selOnset && selOnset.locked ? "🔒 locked" : "🔓 lock chord"}</button>
           <button onClick={() => push({ t: "note.remove", id: selN.id })} style={{ ...chip2(false), color: C.red }}>🗑</button>
           {posOf(selN) && <span style={{ display: "inline-flex", flexWrap: "wrap", gap: 3 }}>
-            {_NE_TECH.map(([t, l]) => <button key={t} onClick={() => toggleTech(t)} style={{ ...chip2((selN.tech || []).includes(t), C.cyan), padding: "1px 6px", fontSize: 10 }}>{l}</button>)}
+            {_NE_TECH.map(([t, l]) => <button key={t} onClick={() => toggleTech(t)} style={{ ...chip2((selN.tech || []).includes(t), C.cyan), padding: "1px 6px", fontSize: TYPE.xs }}>{l}</button>)}
           </span>}
         </div>
       )}
@@ -3428,7 +3443,7 @@ function NoteEditorView({ score, edit, setEdit, C, useSharp, playKey, getAudio, 
           </svg>
         </div>
       </div>
-      <div style={{ fontSize: 10, color: C.dim, marginTop: 6, lineHeight: 1.5 }}>
+      <div style={{ fontSize: TYPE.xs, color: C.dim, marginTop: 6, lineHeight: 1.5 }}>
         Fret numbers in grey are the automatic fingering (what the tab export will write); white ones are written, cyan ones edited. An edited chord is re-named from its notes unless you 🔒 lock it. Keys: ←→ time · ↑↓ pitch (⇧ octave) · ⌫ delete · ⌘Z undo.
       </div>
     </div>
@@ -3463,7 +3478,7 @@ function KeyPicker({ C, value, onChange, cands, useSharp, semis }) {
 }
 function MelodicNudge({ C, onSimplify }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8, fontSize: 11, color: C.amber, background: "rgba(233,162,75,0.08)", border: `1px solid ${C.amber}`, borderRadius: 8, padding: "7px 10px", marginBottom: 10 }}>
+    <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8, fontSize: TYPE.xs, color: C.amber, background: "rgba(233,162,75,0.08)", border: `1px solid ${C.amber}`, borderRadius: 8, padding: "7px 10px", marginBottom: 10 }}>
       <span style={{ flex: "1 1 240px" }}>♪ Mostly single notes — this looks like a melodic line, not block chords. <b>Simplify</b> infers one chord per bar from the notes that sound.</span>
       <button onClick={onSimplify} style={{ ...chip(C), padding: "3px 10px", borderColor: C.amber, color: C.amber, fontWeight: 600 }}>Turn on Simplify</button>
     </div>
@@ -3490,9 +3505,9 @@ function LeadSheetView({ score, C, overrides, setOverrides, editMode, editKey, s
           if (bar.section) secCol = sectionColor(bar.section);
           return (
             <div key={bar.number} className="tdp-bar" style={{ position: "relative", borderLeft: `2px solid ${secCol ? secCol + "b0" : C.border}`, background: secCol ? `${secCol}0d` : "transparent", padding: "16px 8px 6px 10px", minHeight: 44 }}>
-              <span style={{ position: "absolute", top: 2, left: 10, fontSize: 9, color: C.dim }}>{bar.number}</span>
-              {bar.section && <span data-section={sectionKind(bar.section)} title={bar.section} style={{ position: "absolute", top: 2, left: 28, right: 34, fontSize: 9, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", color: secCol || C.dim, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{bar.section}</span>}
-              {sigChanged && <span style={{ position: "absolute", top: 2, right: 6, fontSize: 9, color: C.amber }}>{sig.join("/")}</span>}
+              <span style={{ position: "absolute", top: 2, left: 10, fontSize: TYPE.xs, color: C.dim }}>{bar.number}</span>
+              {bar.section && <span data-section={sectionKind(bar.section)} title={bar.section} style={{ position: "absolute", top: 2, left: 28, right: 34, fontSize: TYPE.xs, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", color: secCol || C.dim, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{bar.section}</span>}
+              {sigChanged && <span style={{ position: "absolute", top: 2, right: 6, fontSize: TYPE.xs, color: C.amber }}>{sig.join("/")}</span>}
               <div style={{ display: "grid", gridTemplateColumns: `repeat(${sig[0]}, 1fr)`, alignItems: "center", columnGap: 2, minHeight: 24 }}>
                 {bar.events.map((e, i) => {
                   const k = `${bar.number}.${e.beat}`;
@@ -3512,8 +3527,8 @@ function LeadSheetView({ score, C, overrides, setOverrides, editMode, editKey, s
                   return (
                     <button key={i} className={isPlaying ? "tdp-now" : undefined} onClick={() => (editMode ? (setEditKey(k), setDraft(cur)) : (onPick(k, e), onVoicings && onVoicings([{ symbol: cur, frets: e.frets, midis: e.midis, key: k, detected: e.symbol }])))} title={editMode ? "click to re-label" : `beat ${e.beat + 1} · tap for its notes and guitar voicings`}
                       style={{ gridColumn: gridCol, justifySelf: "start", textAlign: "left", background: isPlaying ? `${C.green}22` : "transparent", borderRadius: 4, border: "none", borderBottom: isSel ? `2px solid ${C.amber}` : "2px solid transparent", padding: "0 2px", cursor: "pointer", color: isPlaying ? C.green : edited ? C.green : isSel ? C.amber : C.cyan, fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: cur.length > 4 ? 13 : 16, lineHeight: 1.2, transition: "background .1s, color .1s, transform .09s" }}>
-                      <span style={{ display: "block", opacity: e.uncertain && !edited ? 0.55 : 1, borderBottom: e.uncertain && !edited ? `1px dashed ${C.amber}` : "none" }} title={e.uncertain && !edited ? "uncertain — see the review list" : undefined}>{cur}{edited ? "*" : ""}{e.uncertain && !edited ? <sup style={{ color: C.amber, fontSize: 9 }}>?</sup> : null}</span>
-                      {showRoman && musicKey && <span style={{ display: "block", fontSize: 9, fontWeight: 400, color: C.dim, marginTop: 1 }}>{nashville ? nashvilleFor(cur, musicKey) : romanFor(cur, musicKey)}</span>}
+                      <span style={{ display: "block", opacity: e.uncertain && !edited ? 0.55 : 1, borderBottom: e.uncertain && !edited ? `1px dashed ${C.amber}` : "none" }} title={e.uncertain && !edited ? "uncertain — see the review list" : undefined}>{cur}{edited ? "*" : ""}{e.uncertain && !edited ? <sup style={{ color: C.amber, fontSize: TYPE.xs }}>?</sup> : null}</span>
+                      {showRoman && musicKey && <span style={{ display: "block", fontSize: TYPE.xs, fontWeight: 400, color: C.dim, marginTop: 1 }}>{nashville ? nashvilleFor(cur, musicKey) : romanFor(cur, musicKey)}</span>}
                     </button>
                   );
                 })}
@@ -3522,7 +3537,7 @@ function LeadSheetView({ score, C, overrides, setOverrides, editMode, editKey, s
           );
         })}
       </div>
-      <div style={{ fontSize: 11, color: C.dim, marginTop: 8 }}>
+      <div style={{ fontSize: TYPE.xs, color: C.dim, marginTop: 8 }}>
         {editMode ? "Edit mode · click a chord to re-label it (blank = revert to detected). * marks edits." : "Lead sheet · chords sit on the beat they change. Tap a chord for its notes and voicings."}
       </div>
     </>
@@ -3545,12 +3560,12 @@ function StringShiftPanel({ systems, shifts, onBump, C }) {
   return (
     <div style={{ marginTop: 12, border: `1px solid ${C.border}`, borderRadius: 10, background: C.bg }}>
       <button onClick={() => setOpen(!open)}
-        style={{ width: "100%", background: "none", border: "none", color: C.dim, textAlign: "left", padding: "10px 12px", fontSize: 11, cursor: "pointer", fontFamily: UI_FONT }}>
+        style={{ width: "100%", background: "none", border: "none", color: C.dim, textAlign: "left", padding: "10px 12px", fontSize: TYPE.xs, cursor: "pointer", fontFamily: UI_FONT }}>
         {open ? "▾" : "▸"} ⌥ Fix string alignment{nudged ? ` · ${nudged} system${nudged > 1 ? "s" : ""} adjusted` : ""}
       </button>
       {open && (
         <div style={{ padding: "0 12px 12px" }}>
-          <div style={{ fontSize: 11, color: C.dim, lineHeight: 1.6, marginBottom: 10 }}>
+          <div style={{ fontSize: TYPE.xs, color: C.dim, lineHeight: 1.6, marginBottom: 10 }}>
             If a run of bars reads as the wrong chords, its staff probably never plays the high E
             string — so every note was read one string too high. Find the bars on the page and nudge
             that system <b>−1</b> (toward the bass). Most systems need no change.
@@ -3628,12 +3643,12 @@ function TabView({ tex, title, C }) {
         <select value={speed} onChange={(e) => setSpeed(+e.target.value)} title="playback speed" style={{ ...chip(C), padding: "3px 6px" }}>
           {[0.5, 0.75, 1, 1.25].map((x) => <option key={x} value={x}>{Math.round(x * 100)}%</option>)}
         </select>
-        <span style={{ fontSize: 11, color: C.dim }}>{pl.endSec ? `${mmss(pl.posSec)} / ${mmss(pl.endSec)}` : ""}</span>
+        <span style={{ fontSize: TYPE.xs, color: C.dim }}>{pl.endSec ? `${mmss(pl.posSec)} / ${mmss(pl.endSec)}` : ""}</span>
         <span style={{ flex: 1 }} />
         <button onClick={() => setProfile("score-tab")} style={btn(profile === "score-tab")}>Notation + tab</button>
         <button onClick={() => setProfile("tab")} style={btn(profile === "tab")}>Tab only</button>
       </div>
-      <div style={{ fontSize: 11, color: st.phase === "error" ? C.red : C.dim, marginBottom: 6 }}>{status}{title ? ` · ${title}` : ""}</div>
+      <div style={{ fontSize: TYPE.xs, color: st.phase === "error" ? C.red : C.dim, marginBottom: 6 }}>{status}{title ? ` · ${title}` : ""}</div>
       <div ref={scroller} className="tdp-scroll" style={{ background: "#fff", borderRadius: 8, border: `1px solid ${C.border}`, maxHeight: "70vh", overflow: "auto", WebkitOverflowScrolling: "touch" }}>
         <div ref={host} style={{ minHeight: 120 }} />
       </div>
@@ -3654,14 +3669,14 @@ function GridView({ score, C, symOf, selKey, onPick, onVoicings }) {
           return (
             <button key={k} className="meas" onClick={() => { onPick(k, bar.events[0] || {}); if (onVoicings && bar.events.length) onVoicings(bar.events.map((e) => ({ symbol: symOf(bar, e), frets: e.frets, midis: e.midis, key: `${bar.number}.${e.beat}`, detected: e.symbol })).filter((c, i, a) => i === 0 || c.symbol !== a[i - 1].symbol)); }}
               style={{ position: "relative", background: C.bg, border: `1px solid ${isSel ? C.amber : C.border}`, boxShadow: gridCol ? `inset 0 3px 0 ${gridCol}b0` : "none", borderRadius: 8, padding: "10px 4px 8px", cursor: "pointer", minHeight: 56, textAlign: "center" }}>
-              <span style={{ position: "absolute", top: 3, left: 6, fontSize: 9, color: C.dim }}>{bar.number}</span>
-              {bar.section && <span data-section={sectionKind(bar.section)} style={{ position: "absolute", top: 3, right: 6, left: 22, textAlign: "right", fontSize: 8, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: gridCol || C.dim, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{bar.section}</span>}
+              <span style={{ position: "absolute", top: 3, left: 6, fontSize: TYPE.xs, color: C.dim }}>{bar.number}</span>
+              {bar.section && <span data-section={sectionKind(bar.section)} style={{ position: "absolute", top: 3, right: 6, left: 22, textAlign: "right", fontSize: TYPE.xs, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: gridCol || C.dim, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{bar.section}</span>}
               <div style={{ marginTop: 6, fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: collapsed.join(" ").length > 6 ? 13 : 17, color: C.cyan, lineHeight: 1.15 }}>{collapsed.join(" ")}</div>
             </button>
           );
         })}
       </div>
-      <div style={{ fontSize: 11, color: C.dim, marginTop: 8 }}>Tap any bar for its notes and voicings.</div>
+      <div style={{ fontSize: TYPE.xs, color: C.dim, marginTop: 8 }}>Tap any bar for its notes and voicings.</div>
     </>
   );
 }
@@ -3912,13 +3927,13 @@ function ChordSheet({ choices, start = 0, onClose, onRename, C, useSharp, sequen
                 {reading.notes.map((n) => (
                   <span key={n.pc} style={{ display: "inline-flex", alignItems: "baseline", gap: 4, background: C.raised, border: `1px solid ${n.bass ? C.amber : C.border}`, borderRadius: 999, padding: "3px 10px", fontSize: 13 }}>
                     <b style={{ color: C.text, fontFamily: CHORD_FONT }}>{n.name}</b>
-                    {n.interval && <span style={{ color: C.cyan, fontSize: 11 }}>{n.interval}</span>}
-                    {n.bass && <span style={{ color: C.amber, fontSize: 10 }}>bass</span>}
+                    {n.interval && <span style={{ color: C.cyan, fontSize: TYPE.xs }}>{n.interval}</span>}
+                    {n.bass && <span style={{ color: C.amber, fontSize: TYPE.xs }}>bass</span>}
                   </span>
                 ))}
               </div>
               {reading.secondOpinion && (
-                <div style={{ fontSize: 11, color: C.dim, marginTop: 8, lineHeight: 1.5 }}>
+                <div style={{ fontSize: TYPE.xs, color: C.dim, marginTop: 8, lineHeight: 1.5 }}>
                   <span style={{ color: C.cyan }}>Second opinion:</span> <b style={{ color: C.text, fontFamily: CHORD_FONT }}>{reading.secondOpinion.symbol}</b> ({Math.round(reading.secondOpinion.confidence * 100)}%, model) — the engine was unsure; the chart keeps the engine's read.
                 </div>
               )}
@@ -3936,7 +3951,7 @@ function ChordSheet({ choices, start = 0, onClose, onRename, C, useSharp, sequen
               </div>
               {reading.alternatives.length > 0 && (
                 <div style={{ marginTop: 10 }}>
-                  <div style={{ fontSize: 11, color: C.dim, marginBottom: 6 }}>Could also be{canRename ? " — tap to use that name" : ""}</div>
+                  <div style={{ fontSize: TYPE.xs, color: C.dim, marginBottom: 6 }}>Could also be{canRename ? " — tap to use that name" : ""}</div>
                   <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                     {reading.alternatives.map((a) => (
                       <button key={a.symbol} onClick={() => (canRename ? rename(a.symbol) : setStack((st) => [...st, a.symbol]))} title={a.name}
@@ -3945,7 +3960,7 @@ function ChordSheet({ choices, start = 0, onClose, onRename, C, useSharp, sequen
                   </div>
                 </div>
               )}
-              <details data-readout-details style={{ marginTop: 8, fontSize: 11, color: C.dim }}>
+              <details data-readout-details style={{ marginTop: 8, fontSize: TYPE.xs, color: C.dim }}>
                 <summary style={{ cursor: "pointer", minHeight: 28, display: "flex", alignItems: "center" }}>Details: bit masks and ranking scores</summary>
                 <div style={{ marginTop: 6, lineHeight: 1.6, fontFamily: MONO_FONT }}>
                   <div>pitch classes 0b{toBinary12(reading.masks.chord)} = {reading.masks.chord}</div>
@@ -3961,7 +3976,7 @@ function ChordSheet({ choices, start = 0, onClose, onRename, C, useSharp, sequen
             ))}
             {fretted && <>
               <button onClick={() => setLeftHanded(!leftHanded)} title="mirror the diagrams for a left-handed player" style={{ ...chip(C), padding: "2px 9px", borderColor: leftHanded ? C.amber : C.border, color: leftHanded ? C.amber : C.dim }}>{leftHanded ? "left-handed ✓" : "left-handed"}</button>
-              <span style={{ fontSize: 11, color: C.dim }}>capo</span>
+              <span style={{ fontSize: TYPE.xs, color: C.dim }}>capo</span>
               <button onClick={() => setCapo((c) => Math.max(0, c - 1))} style={{ ...chip(C), padding: "2px 8px" }}>−</button>
               <b style={{ fontSize: 12, color: capo ? C.amber : C.dim, minWidth: 12, textAlign: "center" }}>{capo}</b>
               <button onClick={() => setCapo((c) => Math.min(7, c + 1))} style={{ ...chip(C), padding: "2px 8px" }}>+</button>
@@ -3990,22 +4005,22 @@ function ChordSheet({ choices, start = 0, onClose, onRename, C, useSharp, sequen
         </div>
 
         <div style={{ padding: "4px 16px 18px" }}>
-          {libErr && <div style={{ fontSize: 11, color: C.red, margin: "10px 0" }}>Chord diagrams couldn't load ({libErr}). Reload to retry.</div>}
-          {dict === null && <div style={{ fontSize: 11, color: C.amber, margin: "10px 0" }}>The chord dictionary couldn't load ({dictErr}) — showing generated voicings only. Close and reopen to retry.</div>}
+          {libErr && <div style={{ fontSize: TYPE.xs, color: C.red, margin: "10px 0" }}>Chord diagrams couldn't load ({libErr}). Reload to retry.</div>}
+          {dict === null && <div style={{ fontSize: TYPE.xs, color: C.amber, margin: "10px 0" }}>The chord dictionary couldn't load ({dictErr}) — showing generated voicings only. Close and reopen to retry.</div>}
           {data && !data.ok && (
             <div style={{ fontSize: 13, color: C.dim, margin: "16px 0", lineHeight: 1.6 }}>
               {data.parsed.error === "NO_CHORD" ? "No chord here (N.C. / rest)." : data.parsed.error === "UNKNOWN_QUALITY" ? `"${cur.symbol}" — the quality "${data.parsed.suffix}" isn't one the voicing parser knows.` : `"${cur.symbol}" isn't a chord symbol.`}
             </div>
           )}
           {data && data.ok && data.parsed.bass && (
-            <div style={{ fontSize: 11, color: C.dim, margin: "10px 0 0", lineHeight: 1.5 }}>
+            <div style={{ fontSize: TYPE.xs, color: C.dim, margin: "10px 0 0", lineHeight: 1.5 }}>
               Voicings for <b style={{ color: C.text }}>{data.parsed.lookup}</b>; grips with <b style={{ color: C.text }}>{data.parsed.bass}</b> in the bass are listed first.
             </div>
           )}
           {data && data.ok && data.groups.map((g) => (
             <section key={g.id} style={{ marginTop: 18 }}>
               <div style={{ font: "700 14px 'Space Mono', monospace", color: C.amber, letterSpacing: 1, textTransform: "uppercase" }}>{g.title}</div>
-              <div style={{ fontSize: 11, color: C.dim, margin: "2px 0 10px", lineHeight: 1.5 }}>{g.blurb}</div>
+              <div style={{ fontSize: TYPE.xs, color: C.dim, margin: "2px 0 10px", lineHeight: 1.5 }}>{g.blurb}</div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 10 }}>
                 {g.voicings.map((v, i) => {
                   const on = heard === (v.frets || v.midi).join(",");
@@ -4013,9 +4028,9 @@ function ChordSheet({ choices, start = 0, onClose, onRename, C, useSharp, sequen
                     <button key={g.id + i} onClick={() => audition(v)} title="tap to hear it"
                       style={{ position: "relative", background: C.bg, border: `1.5px solid ${on ? C.green : C.border}`, borderRadius: 12, padding: "10px 8px 6px", cursor: "pointer", textAlign: "center", color: C.text }}>
                       {v.frets && <span style={{ position: "absolute", top: 7, right: 7, background: C.chord, color: C.bg, borderRadius: 8, padding: "1px 7px", font: "700 11px 'Space Mono', monospace" }}>{badge(v)}</span>}
-                      <div style={{ fontSize: 11, color: C.cyan, minHeight: 28, padding: v.frets ? "0 40px 0 4px" : "0 4px", textAlign: "left", lineHeight: 1.3 }}>{v.title || v.label || ""}{v.rootless ? " · rootless" : ""}{prevVoicing && v.distance != null ? ` · ${v.distance} st move` : ""}</div>
+                      <div style={{ fontSize: TYPE.xs, color: C.cyan, minHeight: 28, padding: v.frets ? "0 40px 0 4px" : "0 4px", textAlign: "left", lineHeight: 1.3 }}>{v.title || v.label || ""}{v.rootless ? " · rootless" : ""}{prevVoicing && v.distance != null ? ` · ${v.distance} st move` : ""}</div>
                       {v.frets ? <VoicingDiagram v={v} mode={mode} lib={lib} C={C} leftHanded={leftHanded} /> : <KeyboardDiagram v={v} mode={mode} C={C} />}
-                      <div style={{ fontSize: 10, color: C.dim, letterSpacing: 1 }}>{v.frets ? (leftHanded ? v.frets.slice().reverse() : v.frets).map((f) => (f < 0 ? "x" : f)).join(" ") + (v.capo ? ` · capo ${v.capo}` : "") : v.hands && v.hands.left.length && v.hands.right.length ? "LH · RH" : v.hands && v.hands.left.length ? "left hand" : "right hand"}</div>
+                      <div style={{ fontSize: TYPE.xs, color: C.dim, letterSpacing: 1 }}>{v.frets ? (leftHanded ? v.frets.slice().reverse() : v.frets).map((f) => (f < 0 ? "x" : f)).join(" ") + (v.capo ? ` · capo ${v.capo}` : "") : v.hands && v.hands.left.length && v.hands.right.length ? "LH · RH" : v.hands && v.hands.left.length ? "left hand" : "right hand"}</div>
                     </button>
                   );
                 })}
@@ -4026,19 +4041,19 @@ function ChordSheet({ choices, start = 0, onClose, onRename, C, useSharp, sequen
             <section style={{ marginTop: 22, border: `1px solid ${C.border}`, borderRadius: 14, padding: "14px 14px 6px" }}>
               <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" }}>
                 <span style={{ font: "700 13px 'Space Mono', monospace", color: C.cyan, letterSpacing: 1 }}>SUBSTITUTIONS &amp; REHARMONIZATION</span>
-                <span style={{ fontSize: 11, color: C.dim }}>tap to explore</span>
+                <span style={{ fontSize: TYPE.xs, color: C.dim }}>tap to explore</span>
               </div>
               {subs.map((s, i) => (
                 <button key={i} onClick={() => setStack((st) => [...st, s.symbol])}
                   style={{ display: "block", width: "100%", textAlign: "left", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 12px", margin: "10px 0", cursor: "pointer", color: C.text }}>
                   <span style={{ font: "700 18px 'Space Mono', monospace", color: C.amber, marginRight: 8 }}>{s.symbol}</span>
-                  <span style={{ fontSize: 10, color: C.bg, background: C.cyan, borderRadius: 999, padding: "2px 8px", textTransform: "uppercase", letterSpacing: 1, verticalAlign: "middle" }}>{s.category}</span>
+                  <span style={{ fontSize: TYPE.xs, color: C.bg, background: C.cyan, borderRadius: 999, padding: "2px 8px", textTransform: "uppercase", letterSpacing: 1, verticalAlign: "middle" }}>{s.category}</span>
                   <div style={{ fontSize: 12, color: C.dim, marginTop: 6, lineHeight: 1.5 }}>{s.reason}</div>
                 </button>
               ))}
             </section>
           )}
-          <div style={{ fontSize: 10, color: C.dim, marginTop: 14, lineHeight: 1.5 }}>
+          <div style={{ fontSize: TYPE.xs, color: C.dim, marginTop: 14, lineHeight: 1.5 }}>
             {instrument === "guitar" ? "Standard tuning." : instrument === "piano" ? "Each hand within a 9th; ◀ / ▶ walk the chart and rank the next chord's voicings by how little the hands move." : `${INSTRUMENTS[instrument].name} in ${INSTRUMENTS[instrument].strings.map((m) => NOTE_SHARP[m % 12]).join(" ")}${capo ? `, capo ${capo} (frets above the capo)` : ""}. Every grip fits the hand (a "stretch" adds one fret).`} Tap a diagram to hear it. Guitar library shapes: tombatossals/chords-db (MIT), checked against each chord's notes; the rest are derived from the chord's intervals.
           </div>
         </div>
@@ -4096,10 +4111,10 @@ function useAbcExt() {
 const abcMimeFor = (ext) => (ext === "abc" ? ABC_MIME : "text/plain") + ";charset=utf-8";
 function AbcExtToggle({ C, ext, setExt }) {
   return (
-    <span style={{ fontSize: 11, color: C.dim }}>
+    <span style={{ fontSize: TYPE.xs, color: C.dim }}>
       Saves as <b style={{ color: C.text }}>.{ext}</b>{ext === "abc.txt" ? " — Apple devices read .abc as Alembic 3D, so the ABC standard's .txt fallback is used" : " — the standard ABC extension"}{" · "}
       <button onClick={() => setExt(ext === "abc" ? "abc.txt" : "abc")}
-        style={{ ...chip(C), padding: "1px 7px", fontSize: 10 }}>use .{ext === "abc" ? "abc.txt" : "abc"}</button>
+        style={{ ...chip(C), padding: "1px 7px", fontSize: TYPE.xs }}>use .{ext === "abc" ? "abc.txt" : "abc"}</button>
     </span>
   );
 }
@@ -4173,7 +4188,7 @@ function chordReadingOpts(songKey, keyUse, changes) {
 function ChordReadingControls({ C, songKey, onSongKey, detectedKey, keyUse, onKeyUse, changes, onChanges, disabled, useSharp }) {
   const det = detectedKey && typeof detectedKey.tonic === "number" ? keyName(detectedKey, useSharp) : null;
   return (
-    <span style={{ display: "inline-flex", flexWrap: "wrap", gap: 4, alignItems: "center", fontSize: 11, color: C.dim }}>
+    <span style={{ display: "inline-flex", flexWrap: "wrap", gap: 4, alignItems: "center", fontSize: TYPE.xs, color: C.dim }}>
       <select value={songKey || ""} onChange={(e) => onSongKey(e.target.value)} disabled={disabled}
         title="the song's key: pick it and the chords are re-read IN that key (and the chart, numerals and exports use it)"
         style={{ ...chip(C), padding: "3px 9px", borderColor: songKey ? C.green : C.border, color: songKey ? C.green : C.dim, background: C.raised, maxWidth: 170 }}>
@@ -4195,7 +4210,7 @@ function ChordReadingControls({ C, songKey, onSongKey, detectedKey, keyUse, onKe
 }
 function ChordVocabPicker({ C, value, onChange, sixNine, onSixNine, disabled }) {
   return (
-    <span style={{ display: "inline-flex", flexWrap: "wrap", gap: 4, alignItems: "center", fontSize: 11, color: C.dim }}>
+    <span style={{ display: "inline-flex", flexWrap: "wrap", gap: 4, alignItems: "center", fontSize: TYPE.xs, color: C.dim }}>
       Chord names:
       {VOCAB_CHOICES.map(([k, lbl, tip]) => (
         <button key={k} onClick={() => value !== k && onChange(k)} disabled={disabled} title={tip}
@@ -4237,7 +4252,7 @@ function ExportPanel({ exp, setExp, C, bpm, semis, copy, download, copied, downl
   return (
     <div style={{ marginTop: 12 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-        <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim }}>EXPORT · {exp.fmt === "abc" ? "ABC NOTATION" : exp.fmt === "musicxml" ? "MUSICXML" : exp.fmt === "midi" ? "MIDI FILE" : exp.fmt === "csmpn" ? "CSMPN" : exp.fmt === "csml" ? "CHORDSLASHML" : exp.fmt === "music" ? "LISTENHUB · GENERATE AUDIO" : exp.fmt === "alphatex" ? "ALPHATEX · TAB" : "CHORDPRO"}</span>
+        <span style={{ fontSize: TYPE.xs, letterSpacing: 2, color: C.dim }}>EXPORT · {exp.fmt === "abc" ? "ABC NOTATION" : exp.fmt === "musicxml" ? "MUSICXML" : exp.fmt === "midi" ? "MIDI FILE" : exp.fmt === "csmpn" ? "CSMPN" : exp.fmt === "csml" ? "CHORDSLASHML" : exp.fmt === "music" ? "LISTENHUB · GENERATE AUDIO" : exp.fmt === "alphatex" ? "ALPHATEX · TAB" : "CHORDPRO"}</span>
         <span style={{ display: "inline-flex", gap: 6 }}>
           {!exp.bytes && <button onClick={copy} style={{ ...chip(C), padding: "3px 9px", borderColor: copied ? C.green : C.border, color: copied ? C.green : C.dim }}>{copied ? "copied ✓" : "copy"}</button>}
           {share && typeof navigator !== "undefined" && navigator.share && <button onClick={share} title="send it with the share sheet (Files, Mail, AirDrop, another app)" style={{ ...chip(C), padding: "3px 9px", color: C.cyan }}>↗ share</button>}
@@ -4253,12 +4268,12 @@ function ExportPanel({ exp, setExp, C, bpm, semis, copy, download, copied, downl
         <textarea readOnly value={exp.text} spellCheck={false} className="tdp-scroll"
           style={{ width: "100%", height: 120, resize: "vertical", boxSizing: "border-box", background: C.bg, color: C.text, border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, fontSize: 12, lineHeight: 1.5, fontFamily: MONO_FONT, outline: "none" }} />
       )}
-      {exp.fmt === "abc" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6, lineHeight: 1.6 }}>ABC notation 2.1 (UTF-8, <code>%abc-2.1</code> header) — real, playable notes + chord symbols, pitches written against the key signature. Copy it into any ABC player (e.g. abcjs / the editor at abcnotation.com), or download.<br />{setAbcExt && <AbcExtToggle C={C} ext={abcExt} setExt={setAbcExt} />}</div>}
-      {exp.fmt === "musicxml" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>Save as <b>.musicxml</b> and open in MuseScore / Guitar Pro — carries chord symbols + notes + meter. Round-trips back into this app.</div>}
-      {exp.fmt === "csmpn" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}><b>Chord Sheet Maker Pro</b>'s native fake-book source (one chord = one bar; <code>_</code> splits a bar) — also carries the real fingering (<code>{"{tab}"}</code>) and decoded strum rhythm (<code>{"{hybrid}"}</code>). Paste into Pro's editor, or use <b>→ Chord Sheet Maker Pro</b> to send it straight there.</div>}
-      {exp.fmt === "csml" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}><b>ChordSlashML</b> — Pro's beat-slotted notation (<code>{"|"}</code> measures, <code>_</code> holds, <code>.</code> rests). Paste into Pro's <b>ChordSlashML</b> live editor.</div>}
-      {exp.fmt === "alphatex" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6, lineHeight: 1.6 }}><b>AlphaTex</b> — alphaTab's tab text: every note with its <b>string</b> and fret, the tuning, meter, sections, and the techniques the file carried (hammer-ons, slides, bends with their size, vibrato, palm mutes, harmonics…). To see and hear it, use the <b>Tab</b> view above, or upload the saved <b>.alphatex</b> in <b>MusicXML / GP</b> mode; any alphaTab viewer reads it too. Notes without a written tab (audio, ML or a transposed chart) get an <b>inferred</b> fingering — playable, not necessarily the player's.</div>}
-      {exp.fmt === "music" && <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>A ready-to-run <b>ListenHub / Mureka</b> command (<code>@marswave/listenhub-cli</code>, <code>npm i -g</code>, Node ≥ 20) that turns this chart's key / tempo / meter / progression into a prompt for a fresh AI track. The CLI needs Node + login, so it runs in <b>your</b> terminal — <b>copy</b> it, then <code>listenhub auth login</code> once and paste. The <b>recognize → generate</b> half of the pipeline.</div>}
+      {exp.fmt === "abc" && <div style={{ fontSize: TYPE.xs, color: C.dim, marginTop: 6, lineHeight: 1.6 }}>ABC notation 2.1 (UTF-8, <code>%abc-2.1</code> header) — real, playable notes + chord symbols, pitches written against the key signature. Copy it into any ABC player (e.g. abcjs / the editor at abcnotation.com), or download.<br />{setAbcExt && <AbcExtToggle C={C} ext={abcExt} setExt={setAbcExt} />}</div>}
+      {exp.fmt === "musicxml" && <div style={{ fontSize: TYPE.xs, color: C.dim, marginTop: 6 }}>Save as <b>.musicxml</b> and open in MuseScore / Guitar Pro — carries chord symbols + notes + meter. Round-trips back into this app.</div>}
+      {exp.fmt === "csmpn" && <div style={{ fontSize: TYPE.xs, color: C.dim, marginTop: 6 }}><b>Chord Sheet Maker Pro</b>'s native fake-book source (one chord = one bar; <code>_</code> splits a bar) — also carries the real fingering (<code>{"{tab}"}</code>) and decoded strum rhythm (<code>{"{hybrid}"}</code>). Paste into Pro's editor, or use <b>→ Chord Sheet Maker Pro</b> to send it straight there.</div>}
+      {exp.fmt === "csml" && <div style={{ fontSize: TYPE.xs, color: C.dim, marginTop: 6 }}><b>ChordSlashML</b> — Pro's beat-slotted notation (<code>{"|"}</code> measures, <code>_</code> holds, <code>.</code> rests). Paste into Pro's <b>ChordSlashML</b> live editor.</div>}
+      {exp.fmt === "alphatex" && <div style={{ fontSize: TYPE.xs, color: C.dim, marginTop: 6, lineHeight: 1.6 }}><b>AlphaTex</b> — alphaTab's tab text: every note with its <b>string</b> and fret, the tuning, meter, sections, and the techniques the file carried (hammer-ons, slides, bends with their size, vibrato, palm mutes, harmonics…). To see and hear it, use the <b>Tab</b> view above, or upload the saved <b>.alphatex</b> in <b>MusicXML / GP</b> mode; any alphaTab viewer reads it too. Notes without a written tab (audio, ML or a transposed chart) get an <b>inferred</b> fingering — playable, not necessarily the player's.</div>}
+      {exp.fmt === "music" && <div style={{ fontSize: TYPE.xs, color: C.dim, marginTop: 6 }}>A ready-to-run <b>ListenHub / Mureka</b> command (<code>@marswave/listenhub-cli</code>, <code>npm i -g</code>, Node ≥ 20) that turns this chart's key / tempo / meter / progression into a prompt for a fresh AI track. The CLI needs Node + login, so it runs in <b>your</b> terminal — <b>copy</b> it, then <code>listenhub auth login</code> once and paste. The <b>recognize → generate</b> half of the pipeline.</div>}
     </div>
   );
 }
@@ -4338,7 +4353,7 @@ function LiveTuner({ C, useSharp }) {
           {pitch ? pitch.note : listening ? "…" : "—"}
         </div>
         {pitch && <div style={{ marginTop: 10, fontSize: 12, color: C.dim }}>{pitch.freq.toFixed(1)} Hz · {pitch.cents > 0 ? "+" : ""}{pitch.cents}¢ · clarity {Math.round(pitch.clarity * 100)}%</div>}
-        {pitch && <div style={{ marginTop: 4, fontSize: 11, color: C.dim }}>{pitch.string ? `String ${pitch.string} · ` : ""}target {pitch.target.toFixed(1)} Hz</div>}
+        {pitch && <div style={{ marginTop: 4, fontSize: TYPE.xs, color: C.dim }}>{pitch.string ? `String ${pitch.string} · ` : ""}target {pitch.target.toFixed(1)} Hz</div>}
         {!pitch && listening && <div style={{ marginTop: 10, fontSize: 12, color: C.dim }}>Listening… play a single note.</div>}
       </div>
 
@@ -4347,7 +4362,7 @@ function LiveTuner({ C, useSharp }) {
         <div style={{ position: "absolute", left: "50%", top: 0, bottom: 0, width: 2, background: C.border, transform: "translateX(-50%)" }} />
         {pitch && <div style={{ position: "absolute", top: 1, bottom: 1, width: 6, borderRadius: 3, background: centsColor, left: `calc(${50 + Math.max(-50, Math.min(50, pitch.cents))}% - 3px)`, transition: "left .08s linear, background .1s" }} />}
       </div>
-      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: C.dim, marginBottom: 18 }}><span>♭ −50¢</span><span style={{ color: inTune ? C.green : C.dim }}>{inTune ? "IN TUNE" : "0"}</span><span>+50¢ ♯</span></div>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: TYPE.xs, color: C.dim, marginBottom: 18 }}><span>♭ −50¢</span><span style={{ color: inTune ? C.green : C.dim }}>{inTune ? "IN TUNE" : "0"}</span><span>+50¢ ♯</span></div>
 
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 6, fontSize: 12, color: C.dim }}>
         <label htmlFor="ttp-tuner-preset">Tuning</label>
@@ -4356,7 +4371,7 @@ function LiveTuner({ C, useSharp }) {
         </select>
       </div>
       {preset.strings.length > 0 && (
-        <div style={{ textAlign: "center", fontSize: 10, color: C.dim, marginBottom: 14, fontFamily: "'Space Mono', monospace" }}>
+        <div style={{ textAlign: "center", fontSize: TYPE.xs, color: C.dim, marginBottom: 14, fontFamily: "'Space Mono', monospace" }}>
           {[...preset.strings].reverse().map((x) => `${midiToNoteName(x.midi, useSharp)} ${x.freq.toFixed(1)}`).join(" · ")} Hz
         </div>
       )}
@@ -4367,7 +4382,7 @@ function LiveTuner({ C, useSharp }) {
         </button>
       </div>
       {err && <div style={{ marginTop: 12, color: C.red, fontSize: 12, textAlign: "center" }}>{err}</div>}
-      <div style={{ marginTop: 16, fontSize: 11, color: C.dim, lineHeight: 1.6, textAlign: "center" }}>
+      <div style={{ marginTop: 16, fontSize: TYPE.xs, color: C.dim, lineHeight: 1.6, textAlign: "center" }}>
         Pure-JS YIN detection — locks the fundamental, not an overtone. Best with a clean single note (a tuner / melody line), not full chords. Needs mic permission; nothing leaves your device.
       </div>
     </section>
@@ -4562,7 +4577,7 @@ function LyricsCapture({ C }) {
                 <span style={{ position: "relative", width: 90, height: 8, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 4, overflow: "hidden", display: "inline-block" }}>
                   <span style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: `${Math.min(100, Math.round(level * 400))}%`, background: level > 0.01 ? C.green : C.dim, transition: "width .09s linear" }} />
                 </span>
-                <span style={{ fontSize: 10, color: level > 0.01 ? C.green : C.dim }}>mic</span>
+                <span style={{ fontSize: TYPE.xs, color: level > 0.01 ? C.green : C.dim }}>mic</span>
               </span>
             )}
           </div>
@@ -4592,7 +4607,7 @@ function LyricsCapture({ C }) {
       )}
 
       {err && <div style={{ marginTop: 12, color: C.red, fontSize: 12 }}>{err}</div>}
-      <div style={{ marginTop: 16, fontSize: 11, color: C.dim, lineHeight: 1.6 }}>
+      <div style={{ marginTop: 16, fontSize: TYPE.xs, color: C.dim, lineHeight: 1.6 }}>
         Note: in Chrome the audio is sent to Google's speech servers for recognition (the recognizer is the browser's, not this app) — so unlike the rest of Tab Translator, lyrics capture isn't fully on-device. Needs mic permission.
       </div>
     </section>
@@ -4692,14 +4707,14 @@ function ScanReviewRow({ C, it, pg, tok, checked, onCheck, onApprove, onReject, 
         <input type="checkbox" checked={checked} onChange={(e) => onCheck(e.target.checked)} onPointerDown={(e) => e.stopPropagation()} onPointerUp={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}
           aria-label={`select bar ${it.bar} ${it.name}`} style={{ width: 18, height: 18, flex: "none" }} />
         <div aria-hidden style={{ flex: "none", width: Math.round(bw * k), height: Math.round(bh * k), borderRadius: 3, background: `#fff url(${pg.preview}) no-repeat`, backgroundSize: `${pg.width * k}px ${pg.height * k}px`, backgroundPosition: `${-bx0 * k}px ${-by0 * k}px` }} />
-        <span style={{ fontSize: 10, color: C.dim, flex: "none", width: 42 }}>bar {it.bar}</span>
+        <span style={{ fontSize: TYPE.xs, color: C.dim, flex: "none", width: 42 }}>bar {it.bar}</span>
         <span style={{ fontSize: 15, fontWeight: 700, color: col, flex: 1, minWidth: 0, fontFamily: UI_FONT }}>{it.name}</span>
         {it.status === "check" && onPick && it.alternatives.slice(0, 2).map((a) => (
           // the reader's runner-up readings: one tap uses (and approves) it
           <button key={a} onPointerDown={(e) => e.stopPropagation()} onPointerUp={(e) => e.stopPropagation()} onClick={(e) => { e.stopPropagation(); onPick(a); }}
-            title={`use ${a}`} style={{ ...chip(C), flex: "none", padding: "2px 7px", fontSize: 11, color: C.text }}>{a}</button>
+            title={`use ${a}`} style={{ ...chip(C), flex: "none", padding: "2px 7px", fontSize: TYPE.xs, color: C.text }}>{a}</button>
         ))}
-        <span style={{ fontSize: 11, color: col, flex: "none" }}>{badge}</span>
+        <span style={{ fontSize: TYPE.xs, color: col, flex: "none" }}>{badge}</span>
       </div>
       {children}
     </div>
@@ -4810,7 +4825,7 @@ function ScanPanel({ C, useSharp, pdfReady, incoming }) {
   const selItem = sel ? items.find((x) => x.key === sel) : null;
   const editor = selRead && selRead.t && (
     <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", padding: 8, borderTop: `1px solid ${C.amber}`, background: C.panel }}>
-      <span style={{ fontSize: 11, color: C.dim }}>{selItem ? `bar ${selItem.bar}` : "this box"}</span>
+      <span style={{ fontSize: TYPE.xs, color: C.dim }}>{selItem ? `bar ${selItem.bar}` : "this box"}</span>
       <input value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && draftOk) save(draft); }} placeholder="chord, e.g. Bb7"
         style={{ width: 110, background: C.bg, border: `1px solid ${draftOk ? C.border : C.red}`, color: C.text, borderRadius: 6, padding: "4px 8px", fontSize: 13, fontFamily: UI_FONT }} />
       <button disabled={!draftOk} onClick={() => save(draft)} style={{ ...chip(C), color: C.green }}>✓ Use</button>
@@ -4835,13 +4850,15 @@ function ScanPanel({ C, useSharp, pdfReady, incoming }) {
         {busy || "⬆  Upload a photo, screenshot or scanned PDF of a lead sheet"}
       </button>
       {/^reading chords/.test(busy) && <div style={{ marginTop: 6 }}><JobCancel C={C} model={window.TTP_CHORD_OCR} stall={ocrStall} label="the chord reader" /></div>}
-      <div style={{ fontSize: 11, color: C.dim, marginTop: 8, lineHeight: 1.6 }}>
-        Reads the <b>chord symbols</b> above each staff and puts them in their bars (4/4 assumed). Best on a flat, straight, well-lit page
+      {/* UX review #8: one line of purpose; the rest folds away */}
+      <div data-purpose style={{ fontSize: 13, color: C.dim, marginTop: 8 }}>Reads the <b>chord symbols</b> above each staff and puts them in their bars.</div>
+      <HowItWorks C={C} folded>
+        4/4 is assumed. Best on a flat, straight, well-lit page
         or an exported PDF — a digital PDF (Ultimate Guitar Pro, MuseScore, Guitar Pro export) is read exactly from its text layer, with its own time signatures, sections and tempo. Every chord is listed below to review; tap any box on the page to correct it. The notes themselves are not read.
         Runs on this device; the reader downloads once (~{CHORD_OCR_SIZE_HINT}).
-      </div>
+      </HowItWorks>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginTop: 8 }}>
-        <span style={{ fontSize: 11, color: C.dim }}>Book style:</span>
+        <span style={{ fontSize: TYPE.xs, color: C.dim }}>Book style:</span>
         {[["printed", "Printed / engraved"], ["hand", "Hand-copied (Real Book)"]].map(([id, label]) => (
           <button key={id} onClick={() => setStyle(id)} disabled={!!busy}
             style={{ ...chip(C), ...(style === id ? { borderColor: C.amber, color: C.amber } : {}) }}>{label}</button>
@@ -4876,7 +4893,7 @@ function ScanPanel({ C, useSharp, pdfReady, incoming }) {
               <button onClick={() => setPicked({})} style={chip(C)}>Clear</button>
             </>}
           </div>
-          <div style={{ fontSize: 10, color: C.dim, margin: "8px 2px 6px" }}>Swipe a row right to approve it, left if it isn't a chord; tap it to change it.</div>
+          <div style={{ fontSize: TYPE.xs, color: C.dim, margin: "8px 2px 6px" }}>Swipe a row right to approve it, left if it isn't a chord; tap it to change it.</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             {shown.length === 0 && <div style={{ fontSize: 12, color: C.dim, padding: 8 }}>{filter === "check" ? "Nothing left to check." : "None yet."}</div>}
             {shown.map((it) => (
@@ -4900,7 +4917,7 @@ function ScanPanel({ C, useSharp, pdfReady, incoming }) {
               <button key={k} onClick={() => pick(k)} title={r ? `${r.name} (${Math.round(r.prob * 100)}%)` : "not read as a chord — tap to add one"}
                 style={{ position: "absolute", left: `${(100 * (t.x0 - 3)) / p.width}%`, top: `${(100 * (t.y0 - 3)) / p.height}%`, width: `${(100 * (t.x1 - t.x0 + 7)) / p.width}%`, height: `${(100 * (t.y1 - t.y0 + 7)) / p.height}%`,
                   border: `${sel === k ? 3 : 1.5}px solid ${col}`, background: r ? "transparent" : "rgba(154,160,166,0.12)", borderRadius: 3, padding: 0, cursor: "pointer" }}>
-                {r && <span style={{ position: "absolute", left: 0, top: "100%", fontSize: 10, lineHeight: 1.1, color: "#fff", background: col, padding: "0 3px", borderRadius: 2, whiteSpace: "nowrap", fontFamily: UI_FONT }}>{r.name}</span>}
+                {r && <span style={{ position: "absolute", left: 0, top: "100%", fontSize: TYPE.xs, lineHeight: 1.1, color: "#fff", background: col, padding: "0 3px", borderRadius: 2, whiteSpace: "nowrap", fontFamily: UI_FONT }}>{r.name}</span>}
               </button>
             );
           })}
@@ -5072,8 +5089,8 @@ function LyricsImport({ C, incoming }) {
           <input type="file" onChange={onFile} style={{ display: "none" }} />
         </label>
         <button onClick={loadExample} style={{ ...chip(C), padding: "6px 14px" }}>Load example</button>
-        {fileName && <span style={{ fontSize: 11, color: C.dim }}>{fileName}</span>}
-        {stats && <span style={{ fontSize: 11, color: C.dim, marginLeft: "auto" }}>{stats.sections} section{stats.sections === 1 ? "" : "s"} · {stats.lines} line{stats.lines === 1 ? "" : "s"}</span>}
+        {fileName && <span style={{ fontSize: TYPE.xs, color: C.dim }}>{fileName}</span>}
+        {stats && <span style={{ fontSize: TYPE.xs, color: C.dim, marginLeft: "auto" }}>{stats.sections} section{stats.sections === 1 ? "" : "s"} · {stats.lines} line{stats.lines === 1 ? "" : "s"}</span>}
       </div>
 
       <textarea
@@ -5119,7 +5136,7 @@ function LyricsImport({ C, incoming }) {
       )}
 
       {err && <div style={{ marginTop: 12, color: C.red, fontSize: 12 }}>{err}</div>}
-      <div style={{ marginTop: 16, fontSize: 11, color: C.dim, lineHeight: 1.6 }}>
+      <div style={{ marginTop: 16, fontSize: TYPE.xs, color: C.dim, lineHeight: 1.6 }}>
         Recognised structure: ChordPro <code>{"{title}"}</code>, <code>{"{soc}"}</code>/<code>{"{sov}"}</code>/<code>{"{sob}: Label}"}</code> and <code>[Verse]</code>/<code>[Chorus]</code>-style headers, plus bare <b>Verse / Chorus / Bridge / Intro / Outro …</b> labels. A <code>{"{comment}"}</code> is treated as a <b>lyric line</b> unless it's a short section name (so files that store the words in comments still work). A lone bracketed chord — even a compound beat like <code>[A]</code> or <code>[G_C]</code> — reads as a chord and is removed; write sub-sections as <code>[Verse A]</code> if you want them kept.
       </div>
     </section>
@@ -5159,7 +5176,7 @@ function StaffView({ events, activeIdx, C, useSharp }) {
   };
   return (
     <div>
-      <div style={{ fontSize: 10, letterSpacing: 2, color: C.dim, marginBottom: 4 }}>
+      <div style={{ fontSize: TYPE.xs, letterSpacing: 2, color: C.dim, marginBottom: 4 }}>
         STAFF · {layout.clef === "bass" ? "BASS CLEF" : "TREBLE CLEF"} (auto from register)
       </div>
       <div ref={boxRef} className="tdp-scroll" style={{ overflowX: "auto", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, marginBottom: 10 }}>
@@ -5279,7 +5296,7 @@ function TempoBarsPanel({ C, bg, pos, onFindBars, canFindBars, label = "TEMPO & 
   const nMap = grid.tempoMap ? grid.tempoMap.length : 0;
   const seg = (on) => ({ ...chip(C), padding: "3px 9px", borderColor: on ? C.cyan : C.border, color: on ? C.cyan : C.dim });
   return (
-    <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 10, marginBottom: 10, fontSize: 11, color: C.dim }}>
+    <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 10, marginBottom: 10, fontSize: TYPE.xs, color: C.dim }}>
       <div style={{ letterSpacing: 2, marginBottom: 4 }}>{label}</div>
       <div style={{ lineHeight: 1.6, marginBottom: 8 }}>
         {!grid.detected ? <>No beat detected — set <b>♩=</b> so the bars line up.</>
@@ -5383,7 +5400,7 @@ function CheckByEar({ C, score, getBuffer, onStart }) {
     } catch (_) { stop(); }
   };
   return (
-    <span style={{ display: "inline-flex", flexWrap: "wrap", alignItems: "center", gap: 6, fontSize: 11, color: C.dim }}>
+    <span style={{ display: "inline-flex", flexWrap: "wrap", alignItems: "center", gap: 6, fontSize: TYPE.xs, color: C.dim }}>
       <button onClick={start} title="the recording in your LEFT ear, the chart in your RIGHT — hear a wrong chord or a bar line in the wrong place at once" style={{ ...chip(C), padding: "4px 12px", borderColor: on ? C.green : C.border, color: on ? C.green : C.cyan }}>{on ? "■ Stop check" : "🎧 Check by ear"}</button>
       <button onClick={() => setSplit(true)} style={{ ...chip(C), padding: "3px 8px", borderColor: split ? C.cyan : C.border, color: split ? C.cyan : C.dim }} title="recording left, chart right">L | R</button>
       <button onClick={() => setSplit(false)} style={{ ...chip(C), padding: "3px 8px", borderColor: !split ? C.cyan : C.border, color: !split ? C.cyan : C.dim }} title="both in the middle, with a balance slider">Mix</button>
@@ -5430,9 +5447,9 @@ function ScoreTabPanel({ C, r, parts, part, onPart, follow, onFollow, onSeek, fm
   }, [r]);
   const nm = (m) => _NOTE_NAMES[((m % 12) + 12) % 12] + (Math.floor(m / 12) - 1);
   return (
-    <div style={{ fontSize: 11, color: C.dim, marginBottom: 8, lineHeight: 1.6, border: `1px solid ${C.cyan}`, borderRadius: 8, padding: "8px 10px" }}>
+    <div style={{ fontSize: TYPE.xs, color: C.dim, marginBottom: 8, lineHeight: 1.6, border: `1px solid ${C.cyan}`, borderRadius: 8, padding: "8px 10px" }}>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
-        <span style={{ fontSize: 10, letterSpacing: 2 }}>TAB FROM THE SCORE</span>
+        <span style={{ fontSize: TYPE.xs, letterSpacing: 2 }}>TAB FROM THE SCORE</span>
         {parts.length > 1 && (
           <select value={part} onChange={(e) => onPart(e.target.value)} title="which score part gives the tab its strings and frets"
             style={{ ...chip(C), padding: "3px 9px", background: C.raised, color: C.cyan, borderColor: C.cyan, cursor: "pointer" }}>
@@ -5455,7 +5472,7 @@ function ScoreTabPanel({ C, r, parts, part, onPart, follow, onFollow, onSeek, fm
           <div className="tdp-scroll" style={{ display: "flex", flexWrap: "wrap", gap: 4, maxHeight: 110, overflow: "auto" }}>
             {byBar.map((b) => (
               <button key={b.bar} onClick={() => onSeek(b.t)} title={`${b.missed.length ? "not heard: " + b.missed.map(nm).join(" ") : ""}${b.missed.length && b.extra.length ? " · " : ""}${b.extra.length ? "heard, not in the part: " + b.extra.map(nm).join(" ") : ""}`}
-                style={{ ...chip(C), padding: "1px 7px", fontSize: 10, borderColor: C.amber, color: C.amber }}>
+                style={{ ...chip(C), padding: "1px 7px", fontSize: TYPE.xs, borderColor: C.amber, color: C.amber }}>
                 ▶ {b.bar}{b.sourceBar && b.sourceBar !== b.bar ? ` (${b.sourceBar})` : ""} · {fmt(b.t)}{b.missed.length ? ` −${b.missed.length}` : ""}{b.extra.length ? ` +${b.extra.length}` : ""}
               </button>
             ))}
@@ -5471,9 +5488,9 @@ function ScoreLinkPanel({ C, file, res, busy, follow, onFollow, onPick, openName
   const bars = lk && lk.bars ? lk.bars.filter((b) => b.matched) : [];
   const pct = (x) => `${Math.round(100 * (x || 0))}%`;
   return (
-    <div style={{ marginBottom: 14, border: `1px solid ${file ? C.cyan : C.border}`, borderRadius: 10, padding: "10px 12px", background: C.raised, fontSize: 11, lineHeight: 1.6 }}>
+    <div style={{ marginBottom: 14, border: `1px solid ${file ? C.cyan : C.border}`, borderRadius: 10, padding: "10px 12px", background: C.raised, fontSize: TYPE.xs, lineHeight: 1.6 }}>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
-        <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim }}>SCORE</span>
+        <span style={{ fontSize: TYPE.xs, letterSpacing: 2, color: C.dim }}>SCORE</span>
         {/* No `accept` filter — iOS greys out .gp/.gpx/.ptb (no UTI); the engine detects the format from the bytes. */}
         <label style={{ ...chip(C), padding: "4px 12px", cursor: busy ? "default" : "pointer", borderColor: file ? C.border : C.cyan, color: file ? C.dim : C.cyan }}>
           📎 {file ? "Link another score" : "Link a score"}
@@ -5492,7 +5509,8 @@ function ScoreLinkPanel({ C, file, res, busy, follow, onFollow, onPick, openName
         </span>}
         {file && <button onClick={onUnlink} disabled={busy} style={{ ...chip(C), padding: "3px 8px", color: C.dim }}>✕ Unlink</button>}
       </div>
-      {!file && <div style={{ color: C.dim, marginTop: 6 }}>Have a <b>MusicXML / Guitar Pro / Power Tab / MIDI</b> file of this song? Link it: the chords are read from the recording <b>with the score as evidence</b>, the bars become the score's bars on the recording's own tempo (rubato included), the score's sections come along, and every place the recording plays something else is listed for review.</div>}
+      {!file && <div style={{ color: C.dim, marginTop: 6 }}>Have this song as a <b>MusicXML / Guitar Pro / Power Tab / MIDI</b> file? Link it.</div>}
+      {!file && <HowItWorks C={C} folded>The chords are read from the recording <b>with the score as evidence</b>, the bars become the score's bars on the recording's own tempo (rubato included), the score's sections come along, and every place the recording plays something else is listed for review.</HowItWorks>}
       {file && !lk && <div style={{ color: C.dim, marginTop: 6 }}>📄 <b style={{ color: C.text }}>{file.name}</b> · {file.parts.length} part{file.parts.length === 1 ? "" : "s"} · {file.bars} bars{file.tempo ? ` · ♩=${file.tempo}` : ""} — {hasAudio ? (busy ? "linking…" : "ready") : "upload the recording above to link it"}.</div>}
       {lk && !lk.ok && <div style={{ color: C.amber, marginTop: 6 }}>⚠ Couldn't link {file ? file.name : "the score"}: {lk.reason}</div>}
       {lk && lk.ok && res.failed && (
@@ -6061,15 +6079,14 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
   const noteEvents = kind === "notes" ? raw.map((e) => ({ label: e.note, midi: e.midi, startSec: e.startSec, durSec: e.durSec })) : [];
   const fmt = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
   const activeIdx = noteEvents.findIndex((e) => pos >= e.startSec && pos < e.startSec + e.durSec);
+  const hasFile = !!name;   // UX review #8: reading settings appear once there is a recording to read
 
   return (
     <section className="panel-rise" style={{ position: "relative", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18 }}>
       <SectionLabel C={C}>AUDIO → CHART · isolated-stem recognition (experimental)</SectionLabel>
-      <div style={{ fontSize: 12, color: C.dim, lineHeight: 1.6, marginBottom: 12 }}>
-        Upload a <b>clean, isolated instrument stem</b> (one guitar / piano / bass) — an <b>audio file</b> (MP3/M4A/WAV) <b>or a video</b> (MP4/MOV; the audio track is extracted). Decoded + analysed entirely on your device; nothing is uploaded. Chordal stems → a chord chart (export / send to Pro); a single-note stem (bass/lead) → notes; a <b>drum</b> recording → <b>🥁 Drums</b> (a groove chart + drum MIDI / notation — no chords). For a <b>full stereo mix</b>, tap <b>🎤 Isolate vocals</b> to center-extract the vocal (where lead + backing harmony usually sit) before charting — the zero-download karaoke trick.
-        <br />No file? <b>🖥 Capture a tab</b> records a song playing in another browser tab (desktop Chrome/Edge — tick “Share tab audio”), or <b>🎙 Record</b> from the mic. Have a <b>full mix</b>? <b>✂ Split this mix into stems</b> below charts every instrument.
-        <br /><span style={{ color: C.dim }}>Already have real stems? A <b>ListenHub / Mureka</b> <code>listenhub music stem --audio song.mp3</code> split (per-instrument stems) drops straight in here — that separated stem is the cleanest possible input. <b>⚖ A/B clarity</b> tells you whether the separation actually helped before you commit to charting it.</span>
-      </div>
+      {/* UX review #8: one line of purpose, then the ways to bring a recording in; the rest folds away, and the reading
+          settings appear once there is a file to read */}
+      <div data-purpose style={{ fontSize: 13, color: C.dim, marginBottom: 10 }}>Chords, notes, drums, tab or stems from a recording — best on one isolated instrument.</div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 14 }}>
         <label style={{ ...toggle(C), flex: "none", padding: "8px 16px", cursor: "pointer", borderColor: C.amber, color: C.amber }}>
           ⬆ Upload audio / video
@@ -6084,9 +6101,9 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
             <button key={k} onClick={() => switchKind(k)} disabled={busy} style={{ ...chip(C), padding: "5px 10px", borderColor: kind === k ? C.cyan : C.border, color: kind === k ? C.cyan : C.dim }}>{lbl}</button>
           ))}
         </span>
-        {kind !== "drums" && <button onClick={toggleIsolate} disabled={busy} title="isolate the center channel (where vocals usually sit) before analysing — for scoring sung harmony from a full mix"
+        {hasFile && kind !== "drums" && <button onClick={toggleIsolate} disabled={busy} title="isolate the center channel (where vocals usually sit) before analysing — for scoring sung harmony from a full mix"
           style={{ ...chip(C), padding: "5px 10px", borderColor: isolate ? C.green : C.border, color: isolate ? C.green : C.dim }}>{isolate ? "🎤 Vocals isolated ✓" : "🎤 Isolate vocals"}</button>}
-        {kind === "chords" && <ChordVocabPicker C={C} value={vocab} onChange={(v) => setVocab(v)} sixNine={sixNine} onSixNine={(v) => setSixNine(v)} disabled={busy} />}
+        {hasFile && kind === "chords" && <ChordVocabPicker C={C} value={vocab} onChange={(v) => setVocab(v)} sixNine={sixNine} onSixNine={(v) => setSixNine(v)} disabled={busy} />}
         {pendingRead && (
           <div role="alert" data-pending-read style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", margin: "8px 0 12px", padding: "8px 12px", background: C.panel, border: `1px solid ${C.amber}`, borderRadius: 8, fontSize: 12, color: C.dim }}>
             <span>{pendingRead.label}: reading the recording again replaces the chart and removes your {chordEdits} chord edit{chordEdits === 1 ? "" : "s"}.{pendingRead.stale ? " Until then the chart shows the previous reading." : ""}</span>
@@ -6096,16 +6113,21 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
             </span>
           </div>
         )}
-        {kind === "chords" && <ChordReadingControls C={C} songKey={songKey} onSongKey={setSongKey} detectedKey={beatInfo && !songKey ? beatInfo.key : null} keyUse={keyUse} onKeyUse={setKeyUse} changes={changes} onChanges={setChanges} disabled={busy} useSharp={useSharp} />}
-        {kind === "chords" && <button onClick={voices} disabled={busy} title="per-VOICE note transcription (the actual sung notes, not just a chord) via a pluggable ML model — for dense vocal harmony"
+        {hasFile && kind === "chords" && <ChordReadingControls C={C} songKey={songKey} onSongKey={setSongKey} detectedKey={beatInfo && !songKey ? beatInfo.key : null} keyUse={keyUse} onKeyUse={setKeyUse} changes={changes} onChanges={setChanges} disabled={busy} useSharp={useSharp} />}
+        {hasFile && kind === "chords" && <button onClick={voices} disabled={busy} title="per-VOICE note transcription (the actual sung notes, not just a chord) via a pluggable ML model — for dense vocal harmony"
           style={{ ...chip(C), padding: "5px 10px", borderColor: mlScore ? C.green : C.border, color: mlScore ? C.green : C.dim }}>🎼 Voices (ML)</button>}
-        {kind !== "drums" && <button onClick={guitarTab} disabled={busy} title="guitar (or any plucked-string) stem → every note + the string it's on, as an editable tab chart (ML note model ≈ 25 MB, downloaded once; runs on this device)"
+        {hasFile && kind !== "drums" && <button onClick={guitarTab} disabled={busy} title="guitar (or any plucked-string) stem → every note + the string it's on, as an editable tab chart (ML note model ≈ 25 MB, downloaded once; runs on this device)"
           style={{ ...chip(C), padding: "5px 10px", borderColor: gtrScore ? C.green : C.border, color: gtrScore ? C.green : C.dim }}>🎸 Guitar → Tab (ML)</button>}
         {ref.current.stereo && kind !== "drums" && <button onClick={runAB} disabled={busy || ab === "busy"} title="does isolating the center actually clean up THIS file's harmony? compares chroma clarity of the mix vs. the isolated center"
           style={{ ...chip(C), padding: "5px 10px", borderColor: C.border, color: C.dim }}>{ab === "busy" ? "measuring…" : "⚖ A/B clarity"}</button>}
-        {name && <span style={{ fontSize: 11, color: C.dim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 180 }}>{name}{dur ? ` · ${fmt(dur)}` : ""}</span>}
+        {name && <span style={{ fontSize: TYPE.xs, color: C.dim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 180 }}>{name}{dur ? ` · ${fmt(dur)}` : ""}</span>}
       </div>
 
+      <HowItWorks C={C} folded>
+        Upload a <b>clean, isolated instrument stem</b> (one guitar / piano / bass) — an <b>audio file</b> (MP3/M4A/WAV) <b>or a video</b> (MP4/MOV; the audio track is extracted). Decoded + analysed entirely on your device; nothing is uploaded. Chordal stems → a chord chart (export / send to Pro); a single-note stem (bass/lead) → notes; a <b>drum</b> recording → <b>🥁 Drums</b> (a groove chart + drum MIDI / notation — no chords). For a <b>full stereo mix</b>, tap <b>🎤 Isolate vocals</b> to center-extract the vocal (where lead + backing harmony usually sit) before charting — the zero-download karaoke trick.
+        <br />No file? <b>🖥 Capture a tab</b> records a song playing in another browser tab (desktop Chrome/Edge — tick “Share tab audio”), or <b>🎙 Record</b> from the mic. Have a <b>full mix</b>? <b>✂ Split this mix into stems</b> below charts every instrument.
+        <br /><span style={{ color: C.dim }}>Already have real stems? A <b>ListenHub / Mureka</b> <code>listenhub music stem --audio song.mp3</code> split (per-instrument stems) drops straight in here — that separated stem is the cleanest possible input. <b>⚖ A/B clarity</b> tells you whether the separation actually helped before you commit to charting it.</span>
+      </HowItWorks>
       {busy && <div style={{ fontSize: 13, color: C.amber, marginBottom: 12 }}>{kind === "drums" ? `⏳ Reading the drums…${drumProg && drumProg.total ? ` ${Math.round((100 * drumProg.done) / drumProg.total)}%` : ""}` : gtrProg ? `⏳ Transcribing guitar… ${gtrProg.total ? `${gtrProg.done}/${gtrProg.total} × 10 s` : "loading the model"}` : "⏳ Analyzing… (FFT over the whole stem)"}{kind === "drums" && drumML ? <JobCancel C={C} model={window.TTP_DRUM_MODEL} stall={jobStall} label="the drum model" /> : gtrProg ? <JobCancel C={C} model={window.TTP_GUITAR_MODEL} stall={jobStall} label="the guitar model" /> : null}</div>}
       {err && <div style={{ fontSize: 12, color: C.red, marginBottom: 12 }}>{err}</div>}
 
@@ -6146,7 +6168,7 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
       {/* 🥁 DRUMS → the drum reader's groove grid + MIDI / notation / tab (no chords are read in this mode) */}
       {kind === "drums" && drumRes && (
         <div style={{ marginBottom: 14 }}>
-          <div style={{ fontSize: 11, letterSpacing: 2, color: C.dim, marginBottom: 6 }}>DRUMS · {drumRes.hits.length} hits{drumRes.flags.length ? ` · ${drumRes.flags.length} low-confidence stretch${drumRes.flags.length > 1 ? "es" : ""} left out` : ""}</div>
+          <div style={{ fontSize: TYPE.xs, letterSpacing: 2, color: C.dim, marginBottom: 6 }}>DRUMS · {drumRes.hits.length} hits{drumRes.flags.length ? ` · ${drumRes.flags.length} low-confidence stretch${drumRes.flags.length > 1 ? "es" : ""} left out` : ""}</div>
           <DrumChartView C={C} hits={drumRes.hits} model={drumRes.method === "oaf-drums"} timeline={tl} bpm={bpm} bpb={bpb} base={(name || "song").replace(/\.[^.]+$/, "").replace(/[^\w.-]+/g, "_") || "song"} note={drumRes.note}>
             <button onClick={() => { const v = !drumML; setDrumML(v); try { localStorage.setItem("ttp:drumModel", v ? "1" : "0"); } catch (_) {} runDrums(v); }} disabled={busy}
               title="read the drums with the drum model (Magenta Onsets & Frames drums, trained on real kits): kick · snare · toms · hi-hat · ride · crash with velocities — a 4.9 MB download the first time"
@@ -6160,12 +6182,12 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
           from the same raw notes, so switching is instant (no re-inference). */}
       {mlScore && (
         <div style={{ marginBottom: 14 }}>
-          <div style={{ fontSize: 11, color: C.green, marginBottom: 6, lineHeight: 1.6 }}>
+          <div style={{ fontSize: TYPE.xs, color: C.green, marginBottom: 6, lineHeight: 1.6 }}>
             🎼 Per-voice note transcription (ML) — the actual sung notes, editable + exportable like any chart.
             {mlNotes && mlNotes.length > 0 && <> <span style={{ color: C.dim }}>Voices split by pitch register (highest = voice 1). Rare voice crossings show as swaps — use ✎ Edit to fix.</span></>}
           </div>
           {ref.current.mlRaw && (
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 8, fontSize: 11 }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 8, fontSize: TYPE.xs }}>
               <span style={{ color: C.dim }} title="basic-pitch's default threshold is tuned for a prominent lead; quiet backing harmonies need a lower threshold. Re-derived instantly (no re-inference).">Sensitivity:</span>
               {["lead", "balanced", "full"].map((k) => (
                 <button key={k} onClick={() => { setSens(k); applySens(k); }}
@@ -6177,7 +6199,7 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
             </div>
           )}
           {mlNotes && mlNotes.length > 0 && (
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 8, fontSize: 11 }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 8, fontSize: TYPE.xs }}>
               <span style={{ color: C.dim }}>Split:</span>
               {[1, 2, 3, 4].map((n) => (
                 <button key={n} onClick={() => { setVoiceCount(n); setVoiceIdx(0); setOverrides({}); }}
@@ -6199,12 +6221,12 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
             </div>
           )}
           {mlNotes && mlNotes.length > 0 && (
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 8, fontSize: 11 }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 8, fontSize: TYPE.xs }}>
               <span style={{ color: C.dim }}>♩=<b style={{ color: C.amber }}>{bg.grid.follow ? "~" + Math.round(bpm) : +bpm.toFixed(1)}</b> · {bpb}/4 — set in <b>Tempo &amp; bars</b> above; the bars and note values of every chart from this recording follow it.</span>
             </div>
           )}
           {vocalParts.length > 0 && (
-            <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, padding: 10, marginBottom: 10, fontSize: 11 }}>
+            <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, padding: 10, marginBottom: 10, fontSize: TYPE.xs }}>
               <div style={{ color: C.cyan, marginBottom: 6 }}>
                 📄 Vocal score — {vocalParts.length} {vocalParts.length === 1 ? "staff" : "staves"}, every part on its own line for rehearsal
                 {voiceSuggest && voiceSuggest.count !== voiceCount && <span style={{ color: C.amber }}> · this stem sings up to {voiceSuggest.count} parts together</span>}
@@ -6279,7 +6301,7 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
                 meta={`${mlDisplayScore.bars.length} bars · from ML notes${voiceCount > 1 ? ` · voice ${voiceIdx + 1} of ${voiceCount}` : ""}`}
                 C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey="" onPick={() => {}}
                 getAudio={() => (ref.current.cur ? { samples: ref.current.cur, sr: ref.current.sr } : null)} getBuffer={() => ref.current.audioBuf || null} />
-            : <div style={{ fontSize: 11, color: C.dim, padding: 8 }}>Voice {voiceIdx + 1} of {voiceCount} — no notes fell into this slot on this stem.</div>}
+            : <div style={{ fontSize: TYPE.xs, color: C.dim, padding: 8 }}>Voice {voiceIdx + 1} of {voiceCount} — no notes fell into this slot on this stem.</div>}
         </div>
       )}
 
@@ -6289,12 +6311,12 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
           {gtrLinked ? (
             <ScoreTabPanel C={C} r={gtrLinked} parts={gtrLinkParts} part={gtrLinkPart} onPart={setGtrLinkPart} follow={linkFollow} onFollow={setLinkFollow} onSeek={(t) => play(Math.max(0, t - 0.5))} fmt={fmt} useSharp={useSharp} />
           ) : (
-          <div style={{ fontSize: 11, color: C.dim, marginBottom: 6, lineHeight: 1.6 }}>
+          <div style={{ fontSize: TYPE.xs, color: C.dim, marginBottom: 6, lineHeight: 1.6 }}>
             🎸 <b style={{ color: C.text }}>{gtrNotes.length} notes</b> from the guitar model · strings <b>inferred</b> (fingerScore — playable, not necessarily the player's) · bars come from <b>Tempo &amp; bars</b> above · <b>AlphaTex (tab)</b> exports every note with its string.
             {linkedNow && !gtrLinkParts.length && <> · the linked score has no guitar part to take strings from.</>}
           </div>
           )}
-          {!gtrLinked && <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 6, fontSize: 11, color: C.dim }}>
+          {!gtrLinked && <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 6, fontSize: TYPE.xs, color: C.dim }}>
             <select value={gtrTuning} onChange={(e) => setGtrTuning(e.target.value)} title="the guitar's tuning — the tab is fingered and labelled on it"
               style={{ ...chip(C), padding: "3px 9px", borderColor: gtrTuning !== "standard" ? C.amber : C.border, color: gtrTuning !== "standard" ? C.amber : C.dim, background: C.raised, cursor: "pointer" }}>
               {GUITAR_TUNINGS.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
@@ -6306,22 +6328,22 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
             {gtrCapo > 0 && <span>frets relative to the capo</span>}
           </div>}
           {!gtrLinked && gtrSuggest && gtrSuggest.id !== gtrTuning && (
-            <div style={{ fontSize: 11, color: C.amber, border: `1px dashed ${C.amber}`, borderRadius: 6, padding: "5px 8px", marginBottom: 6, lineHeight: 1.5 }}>
+            <div style={{ fontSize: TYPE.xs, color: C.amber, border: `1px dashed ${C.amber}`, borderRadius: 6, padding: "5px 8px", marginBottom: 6, lineHeight: 1.5 }}>
               Detected: <b>{gtrSuggest.label}</b> ({Math.round((gtrSuggest.confidence || 0.6) * 100)}%) — {gtrSuggest.standard.unplayable} note{gtrSuggest.standard.unplayable === 1 ? "" : "s"} sit below standard tuning's low E.{" "}
               <button aria-label={`Use ${gtrSuggest.label}`} onClick={() => { setGtrUndo({ tuning: gtrTuning, capo: gtrCapo }); setGtrTuning(gtrSuggest.id); }} style={{ ...chip(C), padding: "2px 9px", borderColor: C.amber, color: C.amber }}>Apply</button>
               <span style={{ color: C.dim }}> (a full mix's bass can do this too — keep standard if the guitar is in standard)</span>
             </div>
           )}
           {!gtrLinked && gtrDetect && gtrDetect.capo && gtrDetect.capo.capo !== gtrCapo && (
-            <div style={{ fontSize: 11, color: C.amber, border: `1px dashed ${C.amber}`, borderRadius: 6, padding: "5px 8px", marginBottom: 6, lineHeight: 1.5 }}>
+            <div style={{ fontSize: TYPE.xs, color: C.amber, border: `1px dashed ${C.amber}`, borderRadius: 6, padding: "5px 8px", marginBottom: 6, lineHeight: 1.5 }}>
               Sounds like <b>capo {gtrDetect.capo.capo}</b> ({Math.round(gtrDetect.capo.confidence * 100)}%) — {Math.round(gtrDetect.capo.openShare * 100)}% of the notes fall on its open strings (vs {Math.round(gtrDetect.capo.openShare0 * 100)}% without).{" "}
               <button aria-label={`Use capo ${gtrDetect.capo.capo}`} onClick={() => { setGtrUndo({ tuning: gtrTuning, capo: gtrCapo }); setGtrCapo(gtrDetect.capo.capo); }} style={{ ...chip(C), padding: "2px 9px", borderColor: C.amber, color: C.amber }}>Apply</button>
             </div>
           )}
           {gtrUndo && (gtrUndo.tuning !== gtrTuning || gtrUndo.capo !== gtrCapo) && (
-            <div style={{ fontSize: 11, color: C.dim, marginBottom: 6 }}>Applied — <button onClick={() => { setGtrTuning(gtrUndo.tuning); setGtrCapo(gtrUndo.capo); setGtrUndo(null); }} style={{ ...chip(C), padding: "2px 9px" }}>Undo</button></div>
+            <div style={{ fontSize: TYPE.xs, color: C.dim, marginBottom: 6 }}>Applied — <button onClick={() => { setGtrTuning(gtrUndo.tuning); setGtrCapo(gtrUndo.capo); setGtrUndo(null); }} style={{ ...chip(C), padding: "2px 9px" }}>Undo</button></div>
           )}
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginBottom: 6, fontSize: 11, color: C.dim }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginBottom: 6, fontSize: TYPE.xs, color: C.dim }}>
             <button onClick={() => { const v = !gtrTechOn; setGtrTechOn(v); try { localStorage.setItem("ttp:gtrTech", v ? "1" : "0"); } catch (_) {} }}
               title="read bends, vibrato, slides, hammer-ons / pull-offs, palm mutes and ghost notes from the recording (single-line notes)"
               style={{ ...chip(C), padding: "2px 9px", borderColor: gtrTechOn ? C.green : C.border, color: gtrTechOn ? C.green : C.dim }}>{gtrTechOn ? "techniques ✓" : "techniques"}</button>
@@ -6354,7 +6376,7 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
       {/* CHORDS → editable chart + export/handoff, with a tempo/meter grid control */}
       {kind === "chords" && audioScore && (
         <>
-          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10, marginBottom: 8, fontSize: 11, color: C.dim }}>
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10, marginBottom: 8, fontSize: TYPE.xs, color: C.dim }}>
             <button onClick={() => play()} style={{ ...chip(C), padding: "4px 12px", borderColor: playing ? C.green : C.border, color: playing ? C.green : C.amber }}>{playing ? "■ Stop stem" : "▶ Play stem"}</button>
             <span>{fmt(pos)} / {fmt(dur)}</span>
             <WaveformScrubber peaks={peaks} dur={dur} pos={pos} onSeek={(t) => play(t)} marks={sections.map((x) => x.startSec)} fmt={fmt} C={C} />
@@ -6365,7 +6387,7 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
             </span>
           </div>
           {beatInfo && beatInfo.adapted && (
-            <div style={{ fontSize: 11, color: C.amber, background: `${C.amber}12`, border: `1px solid ${C.amber}55`, borderRadius: 8, padding: "7px 10px", marginBottom: 8, lineHeight: 1.6 }}>
+            <div style={{ fontSize: TYPE.xs, color: C.amber, background: `${C.amber}12`, border: `1px solid ${C.amber}55`, borderRadius: 8, padding: "7px 10px", marginBottom: 8, lineHeight: 1.6 }}>
               ⚠ <b>Weak chord evidence</b> ({Math.round(100 * (beatInfo.evidence || 0))}% average confidence) — this sounds like a <b>full mix</b> (vocals, drums, bass and horns over the chords), so the chords were read more steadily: at least a beat each, fewer changes.
               {" "}On rendered full mixes this decoder is right about the root ~55% of the time, against ~77% on a clean guitar/keys stem — for a chart you can rely on, <button onClick={() => { const el = document.getElementById("ttp-stems"); if (el) el.scrollIntoView({ behavior: "smooth", block: "start" }); }} style={{ ...chip(C), padding: "1px 8px", borderColor: C.amber, color: C.amber }}>✂ split the mix</button> and use the <b>Full band</b> or <b>Guitar / keys</b> chart (chords from the guitar + keys stem, bass from the bass stem).
               {songKey ? null : <> Knowing the key? Pick <b>Song key</b> above — the chords are re-read in it.</>}
@@ -6377,7 +6399,7 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
               : `${audioScore.bars.length} bars · ♩=${bg.grid.follow ? "~" + Math.round(bpm) + " (follows the performance)" : +bpm.toFixed(1)} · from audio${songKey ? ` · read in ${songKey}` : ""}`} C={C} useSharp={useSharp} overrides={overrides} setOverrides={setOverrides} selKey="" onPick={() => {}}
             keyOverride={songKey} setKeyOverride={(k) => setSongKey(k || "")}
             getAudio={() => (ref.current.cur ? { samples: ref.current.cur, sr: ref.current.sr } : null)} getBuffer={() => ref.current.audioBuf || null} />
-          <div style={{ fontSize: 11, color: C.dim, marginTop: 10, lineHeight: 1.6 }}>
+          <div style={{ fontSize: TYPE.xs, color: C.dim, marginTop: 10, lineHeight: 1.6 }}>
             Decoded with <b>SynHarmonics v2</b> (note-level NNLS transcription, tuning compensation, inversions + slash chords, calibrated confidence). Faded chords with a <b style={{ color: C.amber }}>?</b> are the uncertain ones — fix them from the review list or <b>✎ Edit</b>, check the bar lines with <b>🎧 Check by ear</b>, then <b>CSMPN</b> / <b>→ Chord Sheet Maker Pro</b> to send it on. Dense voicings / heavy bleed still mislabel.
           </div>
         </>
@@ -6388,7 +6410,7 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
         <>
           <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
             <button onClick={() => play()} style={{ ...chip(C), padding: "5px 14px", borderColor: playing ? C.green : C.border, color: playing ? C.green : C.amber }}>{playing ? "■ Stop" : "▶ Play"}</button>
-            <span style={{ fontSize: 11, color: C.dim }}>{fmt(pos)} / {fmt(dur)} · {noteEvents.length} notes</span>
+            <span style={{ fontSize: TYPE.xs, color: C.dim }}>{fmt(pos)} / {fmt(dur)} · {noteEvents.length} notes</span>
             <WaveformScrubber peaks={peaks} dur={dur} pos={pos} onSeek={(t) => play(t)} marks={sections.map((x) => x.startSec)} fmt={fmt} C={C} />
           </div>
           <StaffView events={noteEvents} activeIdx={activeIdx} C={C} useSharp={useSharp} />
@@ -6396,11 +6418,11 @@ function AudioImport({ C, useSharp, incoming, scoreFile, linkAsk, onLoaded }) {
             {noteEvents.map((e, i) => (
               <div key={i} title={`${fmt(e.startSec)} · ${e.durSec.toFixed(2)}s`} style={{ minWidth: 54, textAlign: "center", padding: "8px 6px", borderRadius: 8, border: `1px solid ${i === activeIdx ? C.amber : C.border}`, background: i === activeIdx ? `${C.amber}18` : C.bg }}>
                 <div style={{ fontFamily: "'Space Mono', monospace", fontWeight: 700, fontSize: 15, color: i === activeIdx ? C.amber : C.cyan }}>{e.label}</div>
-                <div style={{ fontSize: 9, color: C.dim, marginTop: 2 }}>{fmt(e.startSec)}</div>
+                <div style={{ fontSize: TYPE.xs, color: C.dim, marginTop: 2 }}>{fmt(e.startSec)}</div>
               </div>
             ))}
           </div>
-          <div style={{ fontSize: 11, color: C.dim, marginTop: 12, lineHeight: 1.6 }}>The bass/lead line (YIN) on a real staff — clef auto-picked from the register, ♯/♭ per the spelling toggle. For an isolated-vocal stem this traces the (loudest) sung line; for a bass stem, the root movement. The cards above carry the timestamps.</div>
+          <div style={{ fontSize: TYPE.xs, color: C.dim, marginTop: 12, lineHeight: 1.6 }}>The bass/lead line (YIN) on a real staff — clef auto-picked from the register, ♯/♭ per the spelling toggle. For an isolated-vocal stem this traces the (loudest) sung line; for a bass stem, the root movement. The cards above carry the timestamps.</div>
         </>
       )}
     </section>
@@ -6496,7 +6518,7 @@ function LiveCapture({ C, onCaptured, disabled }) {
           {canMic && <button onClick={() => start("mic")} disabled={disabled} title="Record from the microphone (e.g. the song playing on a speaker), then stop to analyse." style={{ ...chip(C), padding: "5px 10px" }}>🎙 Record</button>}
         </>
       )}
-      {msg && <span style={{ fontSize: 11, color: C.amber }}>{msg}</span>}
+      {msg && <span style={{ fontSize: TYPE.xs, color: C.amber }}>{msg}</span>}
     </span>
   );
 }
@@ -6524,8 +6546,8 @@ const _STEM_KIND_HOW = { notes: "pitch line", chords: "harmony", drums: "kick ·
 function StemsVsScore({ C, rows, name }) {
   const pct = (x) => `${Math.round(100 * (x || 0))}%`;
   return (
-    <div style={{ fontSize: 11, color: C.dim, lineHeight: 1.6, border: `1px solid ${C.cyan}`, borderRadius: 8, padding: "8px 10px", marginBottom: 8 }}>
-      <div style={{ fontSize: 10, letterSpacing: 2, marginBottom: 4 }}>STEMS VS THE SCORE{name ? ` · ${name}` : ""}</div>
+    <div style={{ fontSize: TYPE.xs, color: C.dim, lineHeight: 1.6, border: `1px solid ${C.cyan}`, borderRadius: 8, padding: "8px 10px", marginBottom: 8 }}>
+      <div style={{ fontSize: TYPE.xs, letterSpacing: 2, marginBottom: 4 }}>STEMS VS THE SCORE{name ? ` · ${name}` : ""}</div>
       {rows.map((r) => (
         <div key={r.role} style={{ marginBottom: 3 }}>
           <b style={{ color: C.text }}>{STEM_ROLE_NAMES[r.role] || r.role}</b>
@@ -6846,10 +6868,8 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, reading
 
   return (
     <div id="ttp-stems" style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 12, marginBottom: 14 }}>
-      <div style={{ fontSize: 11, color: C.dim, letterSpacing: 2, marginBottom: 6 }}>STEMS → PER-INSTRUMENT CHARTS</div>
-      <div style={{ fontSize: 11, color: C.dim, lineHeight: 1.6, marginBottom: 8 }}>
-        Split a <b>full mix</b> into vocals · drums · bass · other (guitar/keys) on your device, or import stems you already have (Moises can export guitar and piano separately). Every chart shares one beat grid, so bars line up across instruments.
-      </div>
+      <div style={{ fontSize: TYPE.xs, color: C.dim, letterSpacing: 2, marginBottom: 6 }}>STEMS → PER-INSTRUMENT CHARTS</div>
+      <div style={{ fontSize: TYPE.sm, color: C.dim, marginBottom: 8 }}>Split a <b>full mix</b> into instruments, or import stems you already have.</div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 8 }}>
         <button onClick={split} disabled={!!busy} style={{ ...chip(C), padding: "5px 12px", color: C.amber, borderColor: C.amber }}>✂ Split this mix into stems</button>
         <label style={{ ...chip(C), padding: "5px 12px", cursor: "pointer" }}>📂 Import stems
@@ -6857,25 +6877,26 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, reading
         </label>
         <button onClick={() => setCompact(!compact)} disabled={!!busy} title="A smaller version of the same separator that fits a phone's memory — about 2 dB less separation per stem" style={{ ...chip(C), padding: "5px 12px", color: compact ? C.green || C.cyan : C.dim, borderColor: compact ? C.green || C.cyan : C.border }}>📱 Low-memory {compact ? "on" : "off"}</button>
         <button onClick={() => setFast(!fast)} disabled={!!busy} title="Overlap the model's windows 25 % instead of 50 %: about a third less time for slightly less separation (~0.5–0.9 dB). On by default on older iPhones/iPads." style={{ ...chip(C), padding: "5px 12px", color: fast ? C.green || C.cyan : C.dim, borderColor: fast ? C.green || C.cyan : C.border }}>⚡ Faster {fast ? "on" : "off"}</button>
-        {busy && <span style={{ fontSize: 11, color: C.cyan }}>{busy}{stage && !(prog && prog.done) ? ` · ${STEM_STAGE_TEXT[stage] || stage}` : ""}{prog && prog.total ? ` ${Math.round((100 * prog.done) / prog.total)}%` : ""}{prog && prog.total ? (() => { const eta = progressEta(prog, Date.now()); return eta == null ? " · estimating time left…" : eta < 60 ? " · under a minute left" : ` · ~${Math.round(eta / 60)} min left`; })() : ""}</span>}
+        {busy && <span style={{ fontSize: TYPE.xs, color: C.cyan }}>{busy}{stage && !(prog && prog.done) ? ` · ${STEM_STAGE_TEXT[stage] || stage}` : ""}{prog && prog.total ? ` ${Math.round((100 * prog.done) / prog.total)}%` : ""}{prog && prog.total ? (() => { const eta = progressEta(prog, Date.now()); return eta == null ? " · estimating time left…" : eta < 60 ? " · under a minute left" : ` · ~${Math.round(eta / 60)} min left`; })() : ""}</span>}
         {busy && stage && <button onClick={cancelSplit} style={{ ...chip(C), padding: "3px 10px", color: C.red || C.amber }}>✕ Cancel</button>}
       </div>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginBottom: 8, fontSize: 11, color: C.dim }}>
+      <HowItWorks C={C} folded>Vocals · drums · bass · other (guitar/keys), split on your device. Moises and similar apps can export guitar and piano separately — import those stems instead. Every chart shares one beat grid, so bars line up across instruments.</HowItWorks>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginBottom: 8, fontSize: TYPE.xs, color: C.dim }}>
         <span>Split:</span>
         {[0, 30, 60, 90].map((sec) => (
           <button key={sec} onClick={() => setSectionSec(sec)} disabled={!!busy} style={{ ...chip(C), padding: "3px 9px", color: sectionSec === sec ? C.cyan : C.dim, borderColor: sectionSec === sec ? C.cyan : C.border }}>{sec ? `${sec} s` : "Whole song"}</button>
         ))}
-        {sectionSec > 0 && <label style={{ display: "flex", alignItems: "center", gap: 4 }}>from <input value={sectionFrom} onChange={(ev) => setSectionFrom(ev.target.value)} disabled={!!busy} inputMode="decimal" style={{ width: 52, background: C.raised, color: C.text || C.cyan, border: `1px solid ${C.border}`, borderRadius: 6, padding: "2px 6px", fontSize: 11 }} /></label>}
+        {sectionSec > 0 && <label style={{ display: "flex", alignItems: "center", gap: 4 }}>from <input value={sectionFrom} onChange={(ev) => setSectionFrom(ev.target.value)} disabled={!!busy} inputMode="decimal" style={{ width: 52, background: C.raised, color: C.text || C.cyan, border: `1px solid ${C.border}`, borderRadius: 6, padding: "2px 6px", fontSize: TYPE.xs }} /></label>}
         {sectionSec > 0 && <span>— a section finishes far sooner on an older device; its charts cover just that part.</span>}
       </div>
       {busy && stage && prog && prog.tAt && (() => {
         // stalled = quiet for 3 min, or 4× the device's own measured gap between progress events if that's longer
         const quiet = (Date.now() - prog.tAt) / 1000, gap = prog.n ? (prog.tAt - prog.t0) / 1000 / prog.n : 0;
         const limit = Math.max(180, 4 * gap);
-        return quiet > limit ? <div style={{ fontSize: 11, color: C.amber, marginBottom: 8 }}>No progress for {Math.round(quiet / 60)} min (stage: {STEM_STAGE_TEXT[stage] || stage}). Older iPads can be very slow — keep this tab in front with the screen on. If it still doesn't move, Cancel and split a 30–60 s section.</div> : null;
+        return quiet > limit ? <div style={{ fontSize: TYPE.xs, color: C.amber, marginBottom: 8 }}>No progress for {Math.round(quiet / 60)} min (stage: {STEM_STAGE_TEXT[stage] || stage}). Older iPads can be very slow — keep this tab in front with the screen on. If it still doesn't move, Cancel and split a 30–60 s section.</div> : null;
       })()}
-      {err && <div style={{ fontSize: 11, color: C.red || C.amber, marginBottom: 8 }}>{err}</div>}
-      {recovered && !busy && <div style={{ fontSize: 11, color: C.amber, marginBottom: 8 }}>{recovered}</div>}
+      {err && <div style={{ fontSize: TYPE.xs, color: C.red || C.amber, marginBottom: 8 }}>{err}</div>}
+      {recovered && !busy && <div style={{ fontSize: TYPE.xs, color: C.amber, marginBottom: 8 }}>{recovered}</div>}
 
       {tracks && (
         <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
@@ -6892,7 +6913,7 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, reading
               <button onClick={() => saveBytes(encodeWav16([tr.L, tr.R || tr.L], tracks.sampleRate), `${base}-${tr.role}.wav`, "audio/wav")} style={{ ...chip(C), padding: "2px 8px" }}>⬇ WAV</button>
             </div>
           ))}
-          <div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 11 }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: TYPE.xs }}>
             <button onClick={play} style={{ ...chip(C), padding: "4px 12px", color: playing ? C.green : C.amber }}>{playing ? "■ Stop" : "▶ Play stems"}</button>
             <span style={{ color: C.dim }}>{fmt(pos)} · S = solo · M = mute (live)</span>
             {tracks.imported && <button onClick={() => analyse(tracks)} disabled={!!busy} style={{ ...chip(C), padding: "4px 12px", color: C.green }}>♫ Chart these stems</button>}
@@ -6914,10 +6935,10 @@ function StemsPanel({ C, useSharp, vocab, setVocab, sixNine, setSixNine, reading
           {vsScore && <StemsVsScore C={C} rows={vsScore} name={linkName} />}
           <TempoBarsPanel C={C} bg={bg} label="TEMPO & BARS · shared by every stem chart" canFindBars={!!tracks}
             onFindBars={() => { if (!tracks) return; bg.findBars(stemMono(tracks.list), tracks.sampleRate); }} />
-          {!res.charts.length && <div style={{ fontSize: 11, color: C.dim }}>No instrument produced a chart.</div>}
+          {!res.charts.length && <div style={{ fontSize: TYPE.xs, color: C.dim }}>No instrument produced a chart.</div>}
           {chart && chart.kind === "notes" && (
             chart.notes.length ? <StaffView events={chart.notes.map((n) => ({ label: n.note, midi: n.midi, startSec: n.startSec, durSec: n.durSec }))} activeIdx={-1} C={C} useSharp={useSharp} />
-              : <div style={{ fontSize: 11, color: C.dim }}>No clear notes in this stem.</div>
+              : <div style={{ fontSize: TYPE.xs, color: C.dim }}>No clear notes in this stem.</div>
           )}
           {chartScore && (
             <ChartPanel score={chartScore} vocabPicker={false} title={`${base} — ${chart.name}`} meta={`${chartScore.bars.length} bars · ♩=${bg.grid.follow ? "~" + Math.round(bpm) : +bpm.toFixed(1)} · ${chart.name}`}
@@ -6955,10 +6976,10 @@ function DrumChartView({ C, hits, model, timeline, bpm, bpb, base, fullKit, note
   const placed = useMemo(() => (hits || []).map((h) => ({ ...h, beat: timelineBeatsAt(timeline, h.t) })).filter((h) => isFinite(h.beat) && h.beat > -0.1), [hits, timeline]);
   const groove = useMemo(() => drumPattern(placed, { bpm, beatsPerBar: bpb }), [placed, bpm, bpb]);
   const beatHits = () => placed.map((h) => ({ type: h.type, beat: h.beat }));
-  if (!hits || !hits.length) return <div style={{ fontSize: 11, color: C.dim }}>No drum hits found in this recording.{note ? " " + note : ""}</div>;
+  if (!hits || !hits.length) return <div style={{ fontSize: TYPE.xs, color: C.dim }}>No drum hits found in this recording.{note ? " " + note : ""}</div>;
   return (
     <div>
-      <div className="tdp-scroll" style={{ display: "grid", gap: 8, maxHeight: 360, overflow: "auto", fontFamily: "'Space Mono', monospace", fontSize: 11 }}>
+      <div className="tdp-scroll" style={{ display: "grid", gap: 8, maxHeight: 360, overflow: "auto", fontFamily: "'Space Mono', monospace", fontSize: TYPE.xs }}>
         {groove.bars.map((b) => (
           <div key={b.number} style={{ display: "grid", gridTemplateColumns: "28px 1fr", gap: 2 }}>
             <span style={{ color: C.dim, gridRow: "span 9" }}>{b.number}</span>
@@ -6976,7 +6997,7 @@ function DrumChartView({ C, hits, model, timeline, bpm, bpb, base, fullKit, note
           style={{ ...chip(C), padding: "4px 12px" }}>⬇ Drum tab (.txt)</button>
         {children}
       </div>
-      <div style={{ fontSize: 11, color: C.dim, marginTop: 6 }}>{model
+      <div style={{ fontSize: TYPE.xs, color: C.dim, marginTop: 6 }}>{model
         ? <>C crash · R ride · H hi-hat (open or closed) · S snare · T2 toms (one class) · K kick, sixteenths per beat. Read by the drum model (Magenta Onsets &amp; Frames drums, trained on real kits); the MIDI keeps each hit's velocity. Measured on held-out E-GMD drums: kick, snare, hi-hat ≈ 78 % F1, toms 94 %, cymbals 54 % — soft ghost notes are still often missed.{note ? " " + note : ""}</>
         : <>C crash · R ride · O open hi-hat · H hi-hat · S snare · T1/T2/FT toms · K kick, sixteenths per beat. Soft ghost notes are left out. Full kit names toms / open hat / crash / ride (measured on a rendered kit; on real drums it misreads many snares — the drum model is better).{note ? " " + note : ""}</>}</div>
     </div>
@@ -7011,7 +7032,7 @@ function ChordReview({ events, C, fmt, onSeek, onCommit, auto, onAuto, onRemove,
       style={{ ...chip(C), padding: "2px 10px", color: C.amber }}>⇤ Merge {shortN} chord{shortN === 1 ? "" : "s"} shorter than a beat</button>
   ) : null;
   if (!rows.length) {
-    return scored ? <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: C.dim, marginBottom: 8 }}>{autoBtn}<span>✓ All {scored} chords decoded with confidence — none to review.</span>{mergeBtn}</div> : null;
+    return scored ? <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: TYPE.xs, color: C.dim, marginBottom: 8 }}>{autoBtn}<span>✓ All {scored} chords decoded with confidence — none to review.</span>{mergeBtn}</div> : null;
   }
   const pending = rows.filter(({ e }) => e.ambiguous).length, autoN = rows.length - pending;
   const shown = open ? rows : rows.slice(0, 6);
@@ -7021,7 +7042,7 @@ function ChordReview({ events, C, fmt, onSeek, onCommit, auto, onAuto, onRemove,
   const commit = (idx) => onCommit(idx.map((i) => ({ index: i, symbol: choice[i] != null ? choice[i] : events[i].symbol })));
   return (
     <div style={{ border: `1px dashed ${(pending ? C.amber : C.green)}66`, borderRadius: 8, padding: "8px 10px", marginBottom: 10, background: `${pending ? C.amber : C.green}0d` }}>
-      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, fontSize: 11, marginBottom: 6 }}>
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, fontSize: TYPE.xs, marginBottom: 6 }}>
         {autoBtn}
         <span style={{ color: pending ? C.amber : C.green }}>
           {pending ? <>⚠ <b>{pending}</b> of {scored || events.length} chords uncertain — listen, choose, commit.</> : null}
@@ -7044,8 +7065,8 @@ function ChordReview({ events, C, fmt, onSeek, onCommit, auto, onAuto, onRemove,
             <div key={i} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, fontSize: 12 }}>
               <input type="checkbox" checked={sel.has(i)} onChange={() => toggle(i)} aria-label={`select chord at ${fmt(e.startSec)}`} />
               <button onClick={() => onSeek(e.startSec)} title="play from here" style={{ ...chip(C), padding: "2px 8px" }}>▶ {fmt(e.startSec)}</button>
-              <span title="how long this chord lasts" style={{ fontSize: 10, color: beatSec && e.durSec < 0.95 * beatSec ? C.amber : C.dim, minWidth: 34 }}>{e.durSec < 10 ? e.durSec.toFixed(1) : Math.round(e.durSec)}s</span>
-              {e.autoResolved ? <span style={{ fontSize: 9, color: C.green }}>auto</span> : null}
+              <span title="how long this chord lasts" style={{ fontSize: TYPE.xs, color: beatSec && e.durSec < 0.95 * beatSec ? C.amber : C.dim, minWidth: 34 }}>{e.durSec < 10 ? e.durSec.toFixed(1) : Math.round(e.durSec)}s</span>
+              {e.autoResolved ? <span style={{ fontSize: TYPE.xs, color: C.green }}>auto</span> : null}
               {cands.map((a) => (
                 <button key={a.symbol} onClick={() => pick(i, a.symbol)} title={a.symbol === e.symbol ? `keep ${a.symbol}` : `use ${a.symbol}`}
                   style={{ ...chip(C), padding: "2px 8px", fontFamily: "'Space Mono', monospace", fontWeight: a.symbol === cur ? 700 : 400, color: a.symbol === cur ? C.cyan : C.dim, borderColor: a.symbol === cur ? C.cyan : C.border }}>
@@ -7074,7 +7095,7 @@ function SectionEditor({ C, sections, names, barOf, pos, dur, busy, sens, onSens
   return (
     <div style={{ marginBottom: 14, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 12px", background: C.raised }}>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: sections.length ? 8 : 0 }}>
-        <span style={{ fontSize: 10, letterSpacing: 2, color: C.dim }}>SECTIONS</span>
+        <span style={{ fontSize: TYPE.xs, letterSpacing: 2, color: C.dim }}>SECTIONS</span>
         <button onClick={onDetect} disabled={busy} title="find the song's structure in the audio (self-similarity + novelty), then correct it here"
           style={{ ...chip(C), padding: "4px 12px", borderColor: sections.length ? C.green : C.amber, color: busy ? C.dim : sections.length ? C.green : C.amber }}>
           {busy ? "listening…" : sections.length ? "⟳ Re-detect" : "🔎 Detect sections"}</button>
@@ -7094,7 +7115,7 @@ function SectionEditor({ C, sections, names, barOf, pos, dur, busy, sens, onSens
               background: i === active ? `${C.amber}14` : "transparent" }}>
               <button onClick={() => onSeek(s.startSec)} title="play the stem from here"
                 style={{ ...chip(C), padding: "2px 8px", color: i === active ? C.amber : C.cyan, borderColor: i === active ? C.amber : C.border }}>▶</button>
-              <span style={{ fontFamily: "'Space Mono', monospace", fontSize: 11, color: C.dim, minWidth: 42 }}>{fmt(s.startSec)}</span>
+              <span style={{ fontFamily: "'Space Mono', monospace", fontSize: TYPE.xs, color: C.dim, minWidth: 42 }}>{fmt(s.startSec)}</span>
               <input value={s.label} onChange={(e) => onRename(i, e.target.value)} aria-label={`section ${i + 1} name`}
                 style={{ width: 108, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, color: C.text, padding: "3px 6px", fontSize: 12, fontFamily: "inherit" }} />
               <select value="" onChange={(e) => { if (e.target.value) onRename(i, e.target.value); }} aria-label="preset name"
@@ -7102,20 +7123,20 @@ function SectionEditor({ C, sections, names, barOf, pos, dur, busy, sens, onSens
                 <option value="">▾</option>
                 {names.map((n) => <option key={n} value={n}>{n}</option>)}
               </select>
-              <span style={{ fontSize: 10, color: C.dim, minWidth: 76 }}>bar {barOf(s.startSec)}–{Math.max(barOf(s.startSec), barOf(s.endSec) - 1)}</span>
-              <span style={{ fontSize: 10, color: C.dim, minWidth: 30 }}>{Math.round(s.endSec - s.startSec)}s</span>
+              <span style={{ fontSize: TYPE.xs, color: C.dim, minWidth: 76 }}>bar {barOf(s.startSec)}–{Math.max(barOf(s.startSec), barOf(s.endSec) - 1)}</span>
+              <span style={{ fontSize: TYPE.xs, color: C.dim, minWidth: 30 }}>{Math.round(s.endSec - s.startSec)}s</span>
               {i > 0 && <>
                 <button onClick={() => onNudge(i, -1)} title="move this boundary one bar earlier" style={{ ...chip(C), padding: "2px 7px" }}>◀</button>
                 <button onClick={() => onNudge(i, 1)} title="move this boundary one bar later" style={{ ...chip(C), padding: "2px 7px" }}>▶|</button>
                 <button onClick={() => onRemove(i)} title="merge into the section above" style={{ ...chip(C), padding: "2px 7px", color: C.red }}>⤒</button>
               </>}
               {s.letter && s.letter !== "?" && <span title="repetition group — sections sharing a letter were detected as the same part"
-                style={{ fontSize: 9, color: C.dim, border: `1px solid ${C.border}`, borderRadius: 999, padding: "0 6px" }}>{s.letter}</span>}
+                style={{ fontSize: TYPE.xs, color: C.dim, border: `1px solid ${C.border}`, borderRadius: 999, padding: "0 6px" }}>{s.letter}</span>}
             </div>
           ))}
         </div>
       )}
-      <div style={{ fontSize: 10, color: C.dim, marginTop: 8, lineHeight: 1.6 }}>
+      <div style={{ fontSize: TYPE.xs, color: C.dim, marginTop: 8, lineHeight: 1.6 }}>
         Boundaries come from the recording (repetition + novelty); the NAMES are the pop template (most-repeated + loudest = chorus), so treat them as a first draft. Labels ride into <b>CSMPN</b>/<b>ChordSlashML</b>/<b>MusicXML</b> and the Pro handoff. On an isolated stem you get the STEM's structure — where that instrument plays.
       </div>
     </div>
@@ -7175,9 +7196,29 @@ function ToastHost({ C }) {
   );
 }
 
+/* UX review #13: a one-line text field asked in place (replaces window.prompt). Focused and selected on open;
+ * Enter saves, Escape cancels; Save / Cancel buttons for touch. */
+function InlineField({ C, label, initial, onSave, onCancel, saveLabel = "Save" }) {
+  const [v, setV] = useState(initial || "");
+  const inp = useRef(null);
+  useEffect(() => { const el = inp.current; if (el) { try { el.focus(); el.select(); } catch (_) {} } }, []);
+  return (
+    <form role="group" aria-label={label} onSubmit={(e) => { e.preventDefault(); onSave(v); }}
+      style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginTop: 8 }}>
+      <label style={{ display: "flex", alignItems: "center", gap: 6, flex: "1 1 220px", fontSize: 12, color: C.dim }}>
+        {label}
+        <input ref={inp} value={v} onChange={(e) => setV(e.target.value)} onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); onCancel(); } }}
+          style={{ flex: 1, minWidth: 0, background: C.raised, color: C.text, border: `1px solid ${C.border}`, borderRadius: 6, padding: "6px 8px", fontSize: 14, fontFamily: UI_FONT }} />
+      </label>
+      <button type="submit" style={{ ...toggle(C), flex: "none", padding: "6px 14px", ...activeToggle(C) }}>{saveLabel}</button>
+      <button type="button" onClick={onCancel} style={{ ...toggle(C), flex: "none", padding: "6px 14px" }}>Cancel</button>
+    </form>
+  );
+}
+
 /* UX review #8: a panel's "how this works" prose, shown in full before a file is open and folded once one is */
 function HowItWorks({ C, folded, children }) {
-  const style = { fontSize: 11, color: C.dim, marginTop: 8, lineHeight: 1.6 };
+  const style = { fontSize: TYPE.xs, color: C.dim, marginTop: 8, lineHeight: 1.6 };
   return folded
     ? <details style={style}><summary style={{ cursor: "pointer" }}>How it works</summary>{children}</details>
     : <div style={style}>{children}</div>;
@@ -7216,11 +7257,11 @@ function WaveformScrubber({ peaks, dur, pos, onSeek, marks, fmt, C }) {
   );
 }
 
-function SectionLabel({ children, C, style }) { return <div style={{ fontSize: 10, letterSpacing: 2.5, color: C.dim, margin: "0 0 8px", ...style }}>{children}</div>; }
-function Control({ label, children, C }) { return (<div><div style={{ fontSize: 10, letterSpacing: 2, color: C.dim, marginBottom: 5 }}>{label}</div>{children}</div>); }
+function SectionLabel({ children, C, style }) { return <div style={{ fontSize: TYPE.xs, letterSpacing: 2.5, color: C.dim, margin: "0 0 8px", ...style }}>{children}</div>; }
+function Control({ label, children, C }) { return (<div><div style={{ fontSize: TYPE.xs, letterSpacing: 2, color: C.dim, marginBottom: 5 }}>{label}</div>{children}</div>); }
 function Field({ k, v, C, color }) {
   return (<div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, padding: "8px 10px" }}>
-    <div style={{ fontSize: 9, letterSpacing: 2, color: C.dim }}>{k}</div>
+    <div style={{ fontSize: TYPE.xs, letterSpacing: 2, color: C.dim }}>{k}</div>
     <div style={{ fontSize: 18, color: color || C.text, marginTop: 2 }}>{v}</div></div>);
 }
 function LedRow({ mask, labels, C, litColor, dbMask }) {
@@ -7233,13 +7274,13 @@ function LedRow({ mask, labels, C, litColor, dbMask }) {
       const border = missing ? `1px dashed ${C.red}` : extra ? `1px solid ${C.red}` : `1px solid ${C.border}`;
       return (<div key={i} className="led" style={{ textAlign: "center" }}>
         <div style={{ height: 22, borderRadius: 4, background: bg, border, boxShadow: lit ? `0 0 10px ${litColor}88` : "none" }} />
-        <div style={{ fontSize: 9, color: lit ? litColor : missing ? C.red : C.dim, marginTop: 3 }}>{labels[i]}</div></div>);
+        <div style={{ fontSize: TYPE.xs, color: lit ? litColor : missing ? C.red : C.dim, marginTop: 3 }}>{labels[i]}</div></div>);
     })}
   </div>);
 }
 
 /* ---- inline style atoms --------------------------------------------------- */
-const chip = (C) => ({ background: C.bg, border: `1px solid ${C.border}`, color: C.dim, borderRadius: 999, padding: "4px 10px", fontSize: 11, cursor: "pointer", fontFamily: UI_FONT });
+const chip = (C) => ({ background: C.bg, border: `1px solid ${C.border}`, color: C.dim, borderRadius: 999, padding: "4px 10px", fontSize: TYPE.xs, cursor: "pointer", fontFamily: UI_FONT });
 const toggle = (C) => ({ flex: 1, background: C.bg, border: `1px solid ${C.border}`, color: C.dim, borderRadius: 6, padding: "7px 4px", fontSize: 12, cursor: "pointer", fontFamily: UI_FONT });
 const activeToggle = (C) => ({ borderColor: C.amber, color: C.amber, boxShadow: `inset 0 0 12px ${C.amber}22` });
 /* the same keys, unselected: React DELETES a style key that disappears, and deleting borderColor under the `border`
