@@ -62,6 +62,10 @@ const syms = await page.locator('button[title*="guitar voicings"]').allInnerText
 const clean = syms.map((s) => s.split("\n")[0].trim()).filter(Boolean);
 ok("Level: Beginner shows plain triads", clean.length > 4 && clean.every((s) => /^[A-G][#b]?m?(\*)?$/.test(s)), clean.slice(0, 12));
 ok("…moved to an open-chord key with a capo hint to play along (B♭ → A shapes, capo 1)", (await page.getByText(/capo 1 to play along/i).count()) === 1);
+// handoff P1 key mismatch: the key on screen is the level's key (B♭ moved to A), the same key the capo hint came from
+{ const autoLbl = await page.locator("select option[value='']").filter({ hasText: /^Key: auto/ }).first().innerText().catch(() => "");
+  const meta = await page.getByText(/· key [A-G]/).first().innerText().catch(() => "");
+  ok("the shown key is the level's key (auto label + meta row read A)", /auto \(A\)/.test(autoLbl) && /key A \(/.test(meta), { autoLbl, meta }); }
 await page.screenshot({ path: path.join(OUT, "level-beginner.png") });
 ok("no console errors", app.errors().length === 0, app.errors());
 await app.close();

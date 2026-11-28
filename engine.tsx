@@ -2704,6 +2704,31 @@ function analyzeKey(score) {
   const c = analyzeKeyCandidates(score, { limit: 1 })[0];
   return c ? { tonic: c.tonic, mode: c.mode, confidence: c.confidence } : null;
 }
+/* The key a CHART shows. `source` is the chart's notes as written (per onset, untransposed),
+ * `named` the chart as displayed (simplified / arranged, named in its vocabulary, transposed).
+ *   - Block harmony → analyzeKeyCandidates(named): chord FUNCTION is the strong signal there
+ *     (measured on the corpus's Harmony charts: notes alone misread The Weight as A, Power of
+ *     Love as C, Lowdown as D).
+ *   - A melodic chart (isMelodicScore: a lead line, an arpeggiated part) → keyFromNotes over the
+ *     notes themselves. Its displayed chords are Simplify's guesses, one per bar, and their key
+ *     drifts to a neighbour (Anthropology's melody: shown C, the notes say B♭; Billie's Bounce
+ *     horns: Dm for F). On the corpus's single-line parts of tunes with a known key the notes
+ *     were right on 25 of 33, the inferred chords on 15.
+ * `opts.shift` moves the note-based reading by a transposition (the notes are untransposed).
+ * → candidates in analyzeKeyCandidates' shape ({ tonic, mode, confidence }), best first. */
+function chartKeyCandidates(source, named, opts = {}) {
+  const limit = opts.limit != null ? opts.limit : 5;
+  if (source && source.bars && isMelodicScore(source)) {
+    const notes = [];
+    for (const b of source.bars) for (const e of b.events || []) if (e.midis && e.midis.length) notes.push({ midis: e.midis, durBeat: e.qdur != null ? e.qdur : e.durBeats });
+    const k = keyFromNotes(notes);
+    if (k) {
+      const sh = opts.shift || 0;
+      return k.candidates.slice(0, Math.max(1, limit)).map((c) => ({ tonic: (((c.tonic + sh) % 12) + 12) % 12, mode: c.mode, confidence: c.confidence, from: "notes" }));
+    }
+  }
+  return named ? analyzeKeyCandidates(named, { limit }) : [];
+}
 /* The 24 keys as pickable names (family-default spelling), and the parser the manual
  * key override uses. Accepts "D", "Dm", "F#m", "Bbm", "Eb major", "c minor" — so a
  * pasted/typed key from anywhere resolves to the same { tonic, mode } the analysis
@@ -15021,6 +15046,7 @@ export {
   qualCompatible,
   _keyChordWeight,
   analyzeKeyCandidates,
+  chartKeyCandidates,
   KEY_CHOICES,
   parseKeyName,
   analyzeKey,

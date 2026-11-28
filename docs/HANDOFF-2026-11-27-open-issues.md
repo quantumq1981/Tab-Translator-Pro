@@ -12,6 +12,7 @@ and where to start looking. Nothing here blocks merging step 5 (#167): none of t
 | P1 | `instruments-e2e`: the Beginner "capo 1 to play along" hint | Test failure | Before the redesign | **Fixed 2026-11-27** (bench) |
 | P2 | `note-editor-e2e`: dragging a fret number up a string doesn't re-string the note | Test failure | Before the redesign | **Fixed 2026-11-27** (bench) |
 | P3 | `tuning-e2e`: the "Use Drop D" button never appears | Test failure | Before the redesign | **Fixed 2026-11-27** (app: accessible names) |
+| K1 | Shown key vs the Beginner level's key (14 corpus files) | Behaviour | Before the redesign | **Fixed 2026-11-28** |
 | U1 | Deleting the open song from the Library: it comes back on the next launch | Behaviour | Before the redesign | **Fixed 2026-11-27** |
 | U2 | Text sizes (UX review #11) | Open UX item | — | **Fixed 2026-11-27** |
 | U3 | `window.prompt` for rename / tags / new setlist (UX review #13) | Open UX item | — | **Fixed 2026-11-27** |
@@ -84,6 +85,26 @@ Pro-named, simplified score) and the key the Beginner level uses (`analyzeKey` o
 differ on 14 corpus files (Anthropology Harmony: shown F, level Gm; Cheryl: C vs Am; Take Five: Em vs E …), so the capo
 hint can disagree with the key on screen. Options: make the level use the shown key (or the user's key, which it already
 does), or show the level's key. Not changed here.
+
+**Key mismatch — FIXED (2026-11-28), one key on screen.** Measured with `node bench/level-key.mjs --list` (in `tests/`)
+(79 files): the 14 disagreements reproduced. Three changes:
+1. **The level starts from the key the chart shows** (or the user's): `writtenKey` in `ChartPanel` (the chart as written:
+   simplify / arrange, current chord names, untransposed) → `arrangementLevels(…, { key })`.
+2. **With a level on, the chart shows that key moved by the level** (`keyShift = semis + lvl.transposedBy`; the picker's
+   "auto" label too), never a re-analysis of the level's triads (that disagreed on 2 files: Jazz Chord Soloing, My
+   Favorite Things). A key the user set also moves with the level now (it used to stay put while the chords moved).
+3. **A melodic chart reads its key from its notes** (`chartKeyCandidates` in the engine: `keyFromNotes`, Krumhansl–Kessler,
+   when `isMelodicScore`; chord function otherwise). Making the level follow the shown key exposed that the shown key of a
+   single-line part was the weak one: Simplify's one-chord-per-bar guesses drift to a neighbour key (Anthropology melody
+   C for B♭, Billie's Bounce horns Dm for F, Confirmation Dm for F). On the corpus's single-line parts of tunes with a known
+   key: notes 25 / 33 right, inferred chords 15, the old raw read 17. On Harmony / chord charts the notes are worse (The
+   Weight A, Power of Love C, Lowdown D), so chord charts keep the chord-function key — Cheryl shows C as before, and its
+   Beginner level now starts from C (it started from Am).
+
+Capo hints changed on 3 files (Anthropology melody keeps capo 1 — now from B♭ on screen too; Loverman 2 → 0; Confirmation
+head 0 → 1, from F). Still wrong (both before and after, the user's key fixes them): Anthropology Harmony shows F (B♭),
+Donna Lee's melody reads Fm (A♭), Grapevine Ab (E♭ minor). Guards: `tests/ui-polish.mjs` (6), `bench/instruments-e2e.mjs`
+(the shown key = the level's key, 13/13).
 
 **What happens.** Peg.gp4 → ⚙ Settings → Level: **Beginner**. The chords become plain triads (that check passes),
 but the text `capo 1 to play along` is not found. The test expects the chart to move to an open-chord key with
