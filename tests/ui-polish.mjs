@@ -104,6 +104,14 @@ const between = (a, b) => { const i = ui.indexOf(a); return i < 0 ? "" : ui.slic
   // U1 (2026-11-27): deleting the OPEN song detaches it — the pending project save is dropped and restore honours the mark
   expect(/onDeleted=\{onProjectDeleted\}/.test(ui) && /if \(onDeleted\) onDeleted\(r\)/.test(ui) && /clearTimeout\(projTimer\.current\);\s*if \(open\) \{ projRef\.current = null/.test(ui), "deleting the open song detaches the chart from the library");
   expect(/_lsGet\(LIB_DETACHED_KEY\) !== hash\) rememberProject/.test(ui) && /if \(_lsGet\(LIB_DETACHED_KEY\) === hash\) _lsSet\(LIB_DETACHED_KEY, null\)/.test(ui), "restore doesn't re-add a deleted song; opening it again does");
+  // UX review #8 #11 #13 #16 (2026-11-27)
+  { const pre = ui.slice(0, ui.indexOf("function PrintSheet(")), post = ui.slice(ui.indexOf("\nfunction ", ui.indexOf("function PrintSheet(") + 10));
+    expect(/const TYPE = \{ xs: 12, sm: 13, md: 15, lg: 18, xl: 24 \}/.test(ui) && !/fontSize: (8|9|10|11)(?![0-9.])/.test(pre + post), "#11 type scale: no on-screen text below 12 px (the print sheet keeps its paper sizes)"); }
+  expect(!/window\.prompt\(/.test(ui) && /function InlineField\(/.test(ui) && /kind: "setlist", value: "Gig"/.test(ui) && /e\.key === "Escape"/.test(between("function InlineField(", "\nfunction ")), "#13 no window.prompt: rename / tags / new setlist ask in place (Escape cancels)");
+  expect(/<InlineField key=\{ask\.kind\}/.test(ui), "#13 switching rename ↔ tags on one song opens a fresh field (no draft carried over — Codex P2 on #170)");
+  expect(!/(🎵|📷|🎙️|🎶|🎤)"/.test(between("const WAYS_IN = [", "const DESTINATIONS")), "#16 the way-in names carry no emoji");
+  expect(/const hasFile = !!name;/.test(ui) && /\{hasFile && kind === "chords" && <ChordReadingControls/.test(ui) && /\{hasFile && kind !== "drums" && <button onClick=\{guitarTab\}/.test(ui), "#8 Audio: the reading settings appear once a recording is loaded");
+  expect((ui.match(/data-purpose/g) || []).length >= 2 && /<HowItWorks C=\{C\} folded>\s*Upload a <b>clean/.test(ui) && /<HowItWorks C=\{C\} folded>\s*4\/4 is assumed/.test(ui), "#8 Audio + Scan: one line of purpose, the rest folded under How it works");
   // P3 (2026-11-27): the tuning / capo suggestions both show "Apply"; their accessible names say what they apply
   expect(/aria-label=\{`Use \$\{gtrSuggest\.label\}`\}/.test(ui) && /aria-label=\{`Use capo \$\{gtrDetect\.capo\.capo\}`\}/.test(ui), "the tuning and capo suggestion buttons are named Use <tuning> / Use capo N");
   expect(/<span style=\{\{ fontFamily: PRINT_NOTE_FONT \}\}>♩<\/span>/.test(ui) && /const PRINT_NOTE_FONT = "'Apple Symbols'[^"]*'DejaVu Sans'/.test(ui), "the printed ♩ comes from a font that has it");

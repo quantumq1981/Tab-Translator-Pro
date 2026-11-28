@@ -1,4 +1,4 @@
-/* Scan 📷 (real app, headless Chromium): a picture of a lead sheet → chord chart.
+/* Scan (real app, headless Chromium): a picture of a lead sheet → chord chart.
  *   node bench/scan-e2e.mjs --deps <dir> --image <page.png|jpg> [--expect "Cm7,F7,…"] [--out <dir>]
  * Uploads the image in the Scan mode, waits for the worker (the real model on the pinned ONNX Runtime
  * 1.23.2 from jsDelivr), checks the boxes, the review list (every chord, swipe right = approve, swipe
@@ -11,7 +11,7 @@ const IMG = arg("image"); if (!IMG) { console.error("--image <page> required"); 
 const want = (arg("expect", "") || "").split(",").filter(Boolean);
 const app = await startApp({ width: 430, height: 1100 }); const { page, ok } = app;
 const net = []; page.on("request", (r) => net.push(r.url()));
-await page.getByRole("tab", { name: "Scan 📷" }).click();
+await page.getByRole("tab", { name: "Scan", exact: true }).click();
 const t0 = Date.now();
 await page.locator('input[type="file"]').first().setInputFiles(IMG);
 const stat = page.getByText(/systems · \d+ bars · \d+ chords/);

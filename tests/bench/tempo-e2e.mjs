@@ -45,7 +45,7 @@ const panelText = async () => (await page.getByText(/^TEMPO & BARS$/).locator("x
 const tempoOf = (t) => { const m = /♩=~?([\d.]+)/.exec(t); return m ? +m[1] : null; };
 
 await page.goto(ORIGIN + "/"); await page.waitForTimeout(500);
-await page.getByRole("tab", { name: "Audio 🎵" }).click({ timeout: 60000 });
+await page.getByRole("tab", { name: "Audio", exact: true }).click({ timeout: 60000 });
 await page.locator('input[type="file"]:not([multiple])').first().setInputFiles(path.join(GS, TRACK + ".wav"));
 await page.getByText(/^TEMPO & BARS$/).waitFor({ timeout: 300000 });
 await page.waitForFunction(() => !document.body.innerText.includes("⏳ Analyzing"), null, { timeout: 300000 });

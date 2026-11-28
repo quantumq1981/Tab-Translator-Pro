@@ -36,7 +36,7 @@ await page.screenshot({ path: path.join(OUT, "lyrics-gp.png") });
 
 // 2) audio: the real vocal stem
 await page.locator('.tdp-nav button[data-dest="open"]').click();
-await page.getByRole("tab", { name: "Audio 🎵" }).click();
+await page.getByRole("tab", { name: "Audio", exact: true }).click();
 await page.locator('input[type="file"]').first().setInputFiles(VOCAL);
 await page.getByText(/bars · ♩=/).first().waitFor({ timeout: 300000 });
 await page.getByRole("tab", { name: "Lyrics", exact: true }).first().click({ timeout: 60000 });

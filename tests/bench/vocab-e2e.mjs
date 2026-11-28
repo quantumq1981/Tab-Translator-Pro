@@ -66,7 +66,7 @@ if (arg("gp")) {
   await page.screenshot({ path: path.join(arg("out", process.cwd()), "vocab-e2e-gp.png") });
   console.log(JSON.stringify(res, null, 2)); await browser.close(); server.close(); process.exit(0);
 }
-await page.getByRole("tab", { name: "Audio 🎵" }).click({ timeout: 60000 });
+await page.getByRole("tab", { name: "Audio", exact: true }).click({ timeout: 60000 });
 await page.locator('label', { hasText: 'Upload audio' }).locator('input[type="file"]').setInputFiles(AUDIO);
 const out = {};
 out.chart = stats(await settle());
@@ -83,7 +83,7 @@ out.basic = stats(await settle());
 out.stored = await page.evaluate(() => localStorage.getItem("ttp:chordVocab"));
 await page.screenshot({ path: path.join(arg("out", process.cwd()), "vocab-e2e.png"), fullPage: false });
 await page.reload(); await page.waitForTimeout(500);
-await page.getByRole("tab", { name: "Audio 🎵" }).click({ timeout: 60000 });
+await page.getByRole("tab", { name: "Audio", exact: true }).click({ timeout: 60000 });
 await page.locator('label', { hasText: 'Upload audio' }).locator('input[type="file"]').setInputFiles(AUDIO);
 await settle();
 out.afterReload = (await page.getByRole("button", { name: "Basic ✓" }).first().isVisible()) ? "Basic ✓" : "lost";

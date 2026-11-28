@@ -80,12 +80,12 @@ for (const [label, opts] of [["phone", { ...devices["iPhone 13"] }], ["iPad port
   await nav("listen").click(); await page.waitForTimeout(300);
   const listen = await page.evaluate(() => [...document.querySelectorAll('[role="tablist"][aria-label="Listen"] [role="tab"]')].map((t) => `${t.textContent}:${t.getAttribute("aria-selected")}`));
   ok(L("Listen = Live chords + Tuner"), (await current()) === "listen" && listen.length === 2 && /Live chords/.test(listen[0]) && /Tuner/.test(listen[1]), listen);
-  await page.getByRole("tab", { name: "Tuner 🎤", exact: true }).click(); await page.waitForTimeout(300);
+  await page.getByRole("tab", { name: "Tuner", exact: true }).click(); await page.waitForTimeout(300);
   ok(L("Tuner opens inside Listen"), (await page.getByText(/Tuning/).first().isVisible()) && (await current()) === "listen");
   await nav("chart").click(); await page.waitForTimeout(400);
   ok(L("Chart comes back to the same chart"), (await page.locator(".tdp-bar").count()) > 50 && /Peg/.test(await page.locator("[data-song-title]").innerText()));
   await nav("listen").click(); await page.waitForTimeout(200);
-  ok(L("Listen remembers the last tool (Tuner)"), await page.getByRole("tab", { name: "Tuner 🎤", exact: true }).evaluate((t) => t.getAttribute("aria-selected") === "true"));
+  ok(L("Listen remembers the last tool (Tuner)"), await page.getByRole("tab", { name: "Tuner", exact: true }).evaluate((t) => t.getAttribute("aria-selected") === "true"));
   await nav("library").click(); await page.waitForTimeout(400);
   ok(L("Library"), (await current()) === "library");
   await nav("open").click(); await page.waitForTimeout(200);

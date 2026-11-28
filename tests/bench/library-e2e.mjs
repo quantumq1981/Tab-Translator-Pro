@@ -12,7 +12,8 @@ const pdfjs = require("pdfjs-dist/legacy/build/pdf.js");
 const pdfText = async (buf) => { const doc = await pdfjs.getDocument({ data: new Uint8Array(buf) }).promise; let t = ""; for (let i = 1; i <= doc.numPages; i++) t += (await (await doc.getPage(i)).getTextContent()).items.map((x) => x.str).join(" ") + "\n"; return { pages: doc.numPages, text: t }; };
 const app = await startApp(); const { page, ok } = app;
 const answers = [];
-page.on("dialog", (d) => { const a = answers.shift(); if (d.type() === "prompt") d.accept(a != null ? a : d.defaultValue()); else d.accept(); });
+let promptSeen = false;
+page.on("dialog", (d) => { if (d.type() === "prompt") promptSeen = true; const a = answers.shift(); if (d.type() === "prompt") d.accept(a != null ? a : d.defaultValue()); else d.accept(); });
 const open = async (f) => { await page.locator('.tdp-nav button[data-dest="open"]').click(); await page.getByRole("tab", { name: "MusicXML / GP" }).click(); await page.locator('input[type="file"]').first().setInputFiles(path.resolve(app.repo, f)); await page.getByText(/bars ·/).first().waitFor({ timeout: 60000 }); await page.waitForTimeout(800); };
 const lib = async () => { await page.locator('.tdp-nav button[data-dest="library"]').click(); await page.waitForTimeout(600); };
 await open("blue-sky.gp");
@@ -27,7 +28,11 @@ await page.getByPlaceholder(/search title/).fill("peg");
 ok("search narrows to the match", (await page.locator(".tdp-main").getByRole("button", { name: "Open", exact: true }).count()) === 1);   // .tdp-main: not the bar's Open
 await page.getByPlaceholder(/search title/).fill("");
 // setlist: Friday = [Peg (+2), Blue Sky]
-answers.push("Friday"); await page.getByRole("button", { name: "＋ New setlist" }).click(); await page.waitForTimeout(400);
+// UX review #13: the name is asked in place (no window.prompt) — and Escape must cancel without creating anything
+await page.getByRole("button", { name: "＋ New setlist" }).click(); await page.keyboard.press("Escape"); await page.waitForTimeout(200);
+ok("setlist name: Escape cancels without creating one", (await page.getByRole("group", { name: "Setlist name" }).count()) === 0 && !(await page.locator("section b").allInnerTexts()).includes("Gig"));
+await page.getByRole("button", { name: "＋ New setlist" }).click();
+await page.getByRole("textbox", { name: "Setlist name" }).fill("Friday"); await page.keyboard.press("Enter"); await page.waitForTimeout(400);
 for (const t of ["Steely Dan - Peg", "blue-sky"]) { const card = page.locator("section > div > div").filter({ has: page.locator("b", { hasText: t }) }).first(); await card.locator("select").selectOption({ label: "Friday" }); await page.waitForTimeout(300); }
 const setBox = page.locator("div").filter({ has: page.locator("b", { hasText: /^Friday$/ }) }).filter({ has: page.getByText("transpose").first() }).last();
 await setBox.getByRole("button", { name: "+", exact: true }).first().click(); await page.waitForTimeout(200);
@@ -54,6 +59,16 @@ const pdf2 = await page.pdf({ format: "A4", preferCSSPageSize: true }); fs.write
 const t2 = await pdfText(pdf2);
 ok("print: the 165-bar tab runs over many pages (not clipped to the screen box)", t2.pages >= 5, t2.pages);
 await page.emulateMedia({ media: "screen" }); await page.evaluate(() => { document.body.classList.remove("tdp-printing"); window.dispatchEvent(new Event("afterprint")); });
+// rename in place (UX review #13)
+await lib();
+{ const c = page.locator("section > div > div").filter({ has: page.locator("b", { hasText: "blue-sky" }) }).first();
+  await c.getByRole("button", { name: "rename", exact: true }).click();
+  // switching to #tags mid-rename must not carry the title draft into the tags field (Codex P2 on #170)
+  await page.getByRole("textbox", { name: "Title" }).fill("DRAFT"); await c.getByRole("button", { name: /^#tags/ }).click(); await page.waitForTimeout(200);
+  ok("rename → #tags opens the tags with their own value, not the title draft", (await page.getByRole("textbox", { name: "Tags (comma separated)" }).inputValue()) === "");
+  await page.keyboard.press("Escape"); await c.getByRole("button", { name: "rename", exact: true }).click();
+  await page.getByRole("textbox", { name: "Title" }).fill("Blue Sky (live)"); await page.getByRole("button", { name: "Save", exact: true }).click(); await page.waitForTimeout(500);
+  ok("rename in place (no window.prompt)", (await page.locator("section b").allInnerTexts()).includes("Blue Sky (live)") && !promptSeen, await page.locator("section b").allInnerTexts()); }
 // bundle → delete → import
 await lib();
 const card = page.locator("section > div > div").filter({ has: page.locator("b", { hasText: "Steely Dan - Peg" }) }).first();
@@ -66,7 +81,7 @@ ok("the bundle imports back", (await page.locator("section b").allInnerTexts()).
 // persistence across reload
 await page.reload(); await page.waitForTimeout(800); await lib();
 const after = await page.locator("section b").allInnerTexts();
-ok("the library survives a reload (IndexedDB)", after.includes("Steely Dan - Peg") && after.includes("blue-sky") && after.includes("Friday"), after);
+ok("the library survives a reload (IndexedDB)", after.includes("Steely Dan - Peg") && after.includes("Blue Sky (live)") && after.includes("Friday"), after);
 await page.screenshot({ path: path.join(OUT, "library.png"), fullPage: true });
 ok("no console errors", app.errors().length === 0, app.errors());
 await app.close();

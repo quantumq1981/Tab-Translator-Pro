@@ -69,7 +69,7 @@ const stats = (s) => ({ chords: s.length, outOfG: s.filter(outOfG).length, sampl
 const out = { song: meta.file, idx };
 await page.goto(ORIGIN + "/"); await page.waitForTimeout(500);
 if (arg("debug")) { await page.waitForTimeout(8000); await page.screenshot({ path: path.join(OUT, "boot.png") }); console.log(logs.join("\n")); console.log((await page.locator("body").innerText()).slice(0, 600)); process.exit(0); }
-await page.getByRole("tab", { name: "Audio 🎵" }).click({ timeout: 60000 });
+await page.getByRole("tab", { name: "Audio", exact: true }).click({ timeout: 60000 });
 await page.locator("label", { hasText: "Upload audio" }).locator('input[type="file"]').setInputFiles(WAV);
 out.auto = stats(await settle());
 out.weakBanner = await page.getByText("Weak chord evidence").first().isVisible().catch(() => false);
@@ -88,7 +88,8 @@ await page.getByRole("button", { name: /^Only key chords/ }).first().click();
 out.only = stats(await settle());
 out.keyUseStored = await page.evaluate(() => localStorage.getItem("ttp:keyUse"));
 
-// the chart's own key picker drives the decode
+// the chart's own key picker drives the decode (since redesign step 2 it lives in the chart's ⚙ Settings panel)
+{ const b = page.getByRole("button", { name: /^⚙ Settings/ }).first(); if ((await b.getAttribute("aria-expanded")) !== "true") { await b.click(); await page.waitForTimeout(300); } }
 const chartKey = page.locator('select[title^="the detected key drives"]').first();
 await chartKey.selectOption("D");
 out.chartPickerD = stats(await settle());

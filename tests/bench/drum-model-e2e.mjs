@@ -24,7 +24,7 @@ const ua = arg("ua");
 const app = await startApp(ua ? { context: { userAgent: ua } } : {}); const { page, ok } = app;
 const net = [];
 page.on("request", (r) => net.push(r.url()));
-await page.getByRole("tab", { name: "Audio 🎵" }).click();
+await page.getByRole("tab", { name: "Audio", exact: true }).click();
 const t0 = Date.now();
 await page.locator('label:has-text("Import stems") input[type="file"]').setInputFiles([path.join(dir, "song - drums.wav"), path.join(dir, "song - other.wav")]);
 await page.getByRole("button", { name: "♫ Chart these stems" }).click({ timeout: 60000 });
