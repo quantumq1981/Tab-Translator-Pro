@@ -3584,7 +3584,7 @@ expect(!/hopSec: 0\.12, smoothSec: 0\.5, recoverGaps: true/.test(uiSrc), "the ch
   expect(/selectPart\(HARMONY_PART\)/.test(ui) && /Harmony \(all pitched parts\)/.test(ui) && /prev\._midbuf\) next = parseMidiFile\(prev\._midbuf, sharp, idx\)/.test(ui) && /next\._midbuf = prev\._midbuf/.test(ui),
     "UI: Harmony chip in the part picker; MIDI re-parse keeps its bytes for ♯♭ / part switch");
   expect(/meta\.partIndex != null && meta\.partIndex !== sc\.partIndex/.test(ui), "restore re-applies a saved part only when it differs from where the file lands (a zip lands on Harmony)");
-  expect(/_usePref\(_SPELL_KEY, "key"/.test(ui) && /keySpelled \? spellScoreForKey\(nscore, key\) : nscore/.test(ui) && /spellKey: keySpelled/.test(ui) && /analyzeKeyCandidates\(nscore/.test(ui) && /isMelodicScore\(rawScore\) \|\| !!rawScore\.merged/.test(ui),
+  expect(/_usePref\(_SPELL_KEY, "key"/.test(ui) && /keySpelled \? spellScoreForKey\(nscore, key\) : nscore/.test(ui) && /spellKey: keySpelled/.test(ui) && /chartKeyCandidates\(lvl \? lvl\.score : score, nscore,/.test(ui) && /isMelodicScore\(rawScore\) \|\| !!rawScore\.merged/.test(ui),
     "UI: spelling for the key by default (after naming, key read from the unspelled chart); a Harmony reading simplifies to one chord per bar");
 }
 

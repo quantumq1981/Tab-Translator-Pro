@@ -109,8 +109,11 @@ Boot measured with `tests/bench/load-e2e.mjs` (site assembled as `pages.yml` doe
   12 px (`TYPE` scale; the print sheet and SVG drawings keep their own sizes — use `TYPE.*` for new text); no
   `window.prompt` (`InlineField`: Enter saves, Escape cancels); the way-in names are plain ("Audio", "Scan", "Lyrics",
   "Live chords", "Tuner" — benches match them with `exact: true`); Audio + Scan open with one line of purpose, the rest
-  folded under "How it works", and Audio's reading settings appear once a recording is loaded (`hasFile`). Nothing
-  from the UX review or the handoff is open except the key mismatch (handoff P1, a decision for the owner).
+  folded under "How it works", and Audio's reading settings appear once a recording is loaded (`hasFile`). Key mismatch FIXED (2026-11-28, handoff P1): one key on screen — a level starts from the shown key (`writtenKey`),
+  shows it moved by the level (`keyShift`, picker label too, never re-analysed from the triads), and a MELODIC chart's key
+  comes from its notes (`chartKeyCandidates`: `keyFromNotes` when `isMelodicScore`, chord function otherwise — notes 25/33
+  vs inferred chords 15/33 on single-line parts; worse on chord charts, so those keep chord function). `bench/level-key.mjs`.
+  Nothing from the UX review or the handoff is open.
 
 ### Audit 2026-11-18 — fixed (PR #157 + the follow-up); read `docs/AUDIT-2026-11-18.md` for the evidence
 

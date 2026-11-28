@@ -115,6 +115,27 @@ const between = (a, b) => { const i = ui.indexOf(a); return i < 0 ? "" : ui.slic
   // P3 (2026-11-27): the tuning / capo suggestions both show "Apply"; their accessible names say what they apply
   expect(/aria-label=\{`Use \$\{gtrSuggest\.label\}`\}/.test(ui) && /aria-label=\{`Use capo \$\{gtrDetect\.capo\.capo\}`\}/.test(ui), "the tuning and capo suggestion buttons are named Use <tuning> / Use capo N");
   expect(/<span style=\{\{ fontFamily: PRINT_NOTE_FONT \}\}>♩<\/span>/.test(ui) && /const PRINT_NOTE_FONT = "'Apple Symbols'[^"]*'DejaVu Sans'/.test(ui), "the printed ♩ comes from a font that has it");
+  // Handoff P1 key mismatch (2026-11-28): a level starts from the key the chart SHOWS, and with a level on the shown
+  // key is that key moved by the level — never re-analysed from the level's simpler chords
+  expect(/const writtenKey = useMemo\(\(\) => \{\s*if \(!level\) return null;/.test(ui) && /key: manual \|\| writtenKey \|\| undefined/.test(ui), "the level starts from the shown (written) key, or the user's");
+  expect(/const keyShift = semis \+ \(lvl \? lvl\.transposedBy : 0\)/.test(ui) && /if \(manual\) return \{ tonic: \(\(\(manual\.tonic \+ keyShift\)/.test(ui) && /if \(lvl && writtenKey\) return \{ tonic: \(\(\(writtenKey\.tonic \+ keyShift\)/.test(ui), "with a level on, the shown key (auto or set) moves with the level's transposition");
+  expect(/<KeyPicker [^>]*autoKey=\{autoKey\}[^>]*semis=\{keyShift\}/.test(ui) && /const autoK = autoKey \|\| \(cands && cands\[0\]\)/.test(ui), "the key picker's auto label is the chart's key");
+  { // behaviour: Cheryl (Harmony) shows C; the Beginner level from that key stays in C, no capo (it used to start from Am)
+    const bytes = new Uint8Array(fs.readFileSync(path.join(repo, "parker_charlie-cheryl.gp4")));
+    const h = await E.parseGuitarProOrXML(bytes, "cheryl.gp4", true, E.HARMONY_PART);
+    const shown = E.chartKeyCandidates(h, E.respellScore(E.simplifyScore(h, true), "chart", { useSharp: true }), { limit: 1 })[0];
+    const lv = E.arrangementLevels(h, "beginner", { useSharp: true, key: shown });
+    expect(shown && E.keyName(shown, true) === "C" && E.keyName(E.analyzeKey(h), true) === "Am" && lv.transposedBy === 0 && lv.capo === 0, "Cheryl: shown key C (raw analysis Am); the Beginner level from C needs no move, no capo");
+    // a melodic chart reads its key from the notes: Anthropology's melody is B♭ (its Simplify chords read C)
+    const ab = new Uint8Array(fs.readFileSync(path.join(repo, "Charlie Parker - Anthropology.gp5")));
+    const m = await E.parseGuitarProOrXML(ab, "anthropology.gp5", true, 0);
+    const named = E.respellScore(E.simplifyScore(m, true), "chart", { useSharp: true });
+    const mk = E.chartKeyCandidates(m, named, { limit: 3 }), chordK = E.analyzeKeyCandidates(named, { limit: 1 })[0];
+    const ml = E.arrangementLevels(m, "beginner", { useSharp: true, key: mk[0] });
+    expect(E.isMelodicScore(m) && E.keyName(mk[0], true) === "Bb" && mk[0].from === "notes" && E.keyName(chordK, true) === "C" && ml.capo === 1, "a melodic chart's key comes from its notes (Anthropology melody: B♭, not the inferred chords' C) → Beginner A shapes, capo 1");
+    expect(E.keyName(E.chartKeyCandidates(m, named, { shift: 2 })[0], true) === "C", "the note-based key moves with the transpose");
+    expect(E.chartKeyCandidates(h, E.respellScore(h, "chart", { useSharp: true }))[0].from === undefined, "a chord chart keeps the chord-function key");
+  }
 }
 
 fs.rmSync(enginePath, { force: true });

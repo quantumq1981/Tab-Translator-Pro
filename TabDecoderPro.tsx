@@ -152,6 +152,7 @@ import {
   qualCompatible,
   analyzeKey,
   analyzeKeyCandidates,
+  chartKeyCandidates,
   KEY_CHOICES,
   parseKeyName,
   detectSections,
@@ -1877,11 +1878,25 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
   // from the same engine passes; "" = as written (the simplify / arrange controls below apply)
   const [level, setLevel] = useState("");
   const localKeyOvRef = useRef("");
+  const [vocab, setVocab] = useChordVocab();
+  const [sixNine, setSixNine] = useSixNine();
+  /* The key the chart SHOWS before a level is chosen (chartKeyCandidates, as `keyCands` below, on the
+   * chart as written: simplify / arrange applied, chord names in the current vocabulary, untransposed).
+   * A level starts from THIS key — or the user's — so its capo hint and the key on screen agree. It
+   * used to read analyzeKey on the raw score, which disagreed on 14 of 79 corpus files (Cheryl: shown
+   * C, level Am). Only computed while a level is on. */
+  const writtenKey = useMemo(() => {
+    if (!level) return null;
+    const s0 = simplify ? simplifyScore(score, useSharp) : score;
+    const b0 = arrange === "off" ? s0 : arrangeScore(s0, arrange);
+    const c = chartKeyCandidates(score, respellScore(b0, vocab, { sixNine, useSharp }), { limit: 1 })[0];
+    return c ? { tonic: c.tonic, mode: c.mode, confidence: c.confidence } : null;
+  }, [level, score, simplify, arrange, vocab, sixNine, useSharp]);
   const lvl = useMemo(() => {
     if (!level) return null;
     const manual = parseKeyName(keyOverride !== undefined ? keyOverride : localKeyOvRef.current);
-    return arrangementLevels(score, level, { useSharp, key: manual || undefined });
-  }, [level, score, useSharp, keyOverride]); // eslint-disable-line
+    return arrangementLevels(score, level, { useSharp, key: manual || writtenKey || undefined });
+  }, [level, score, useSharp, keyOverride, writtenKey]); // eslint-disable-line
   const simp = useMemo(() => (lvl ? lvl.score : simplify ? simplifyScore(score, useSharp) : score), [lvl, simplify, score, useSharp]);
   const base = useMemo(() => (lvl || arrange === "off" ? simp : arrangeScore(simp, arrange)), [lvl, simp, arrange]);
   /* Chord NAMES follow the shared Chart / Basic / Full setting for every chart, not just audio
@@ -1889,8 +1904,6 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
    * (the oracle's literal E6/9/C# in Full). Last in the chain, because transpose re-names from
    * the notes. Key analysis reads nscore; display, exports and the Pro handoff read tscore
    * (nscore spelled for the key, below). */
-  const [vocab, setVocab] = useChordVocab();
-  const [sixNine, setSixNine] = useSixNine();
   const nscore = useMemo(() => respellScore(transposeScore(base, semis, useSharp), lvl ? lvl.vocabulary : vocab, { sixNine, useSharp }), [base, semis, useSharp, vocab, sixNine, lvl]);
   // The TAB (Tab view + AlphaTex export) skips Simplify: Simplify replaces a melodic line with one
   // inferred chord per bar, which is right for a chord chart and wrong for a tab — a tab must show
@@ -1906,13 +1919,21 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
   localKeyOvRef.current = localKeyOv;
   const keyOv = keyOverride !== undefined ? keyOverride : localKeyOv;
   const setKeyOv = setKeyOverride || setLocalKeyOv;
-  const keyCands = useMemo(() => analyzeKeyCandidates(nscore, { limit: 5 }), [nscore]);
-  const key = useMemo(() => {
-    const manual = parseKeyName(keyOv);
-    if (manual) return { tonic: (((manual.tonic + semis) % 12) + 12) % 12, mode: manual.mode, confidence: 1, manual: true };
+  // a melodic chart's key comes from its notes, not from Simplify's inferred chords (chartKeyCandidates)
+  const keyCands = useMemo(() => chartKeyCandidates(lvl ? lvl.score : score, nscore, { limit: 5, shift: semis }), [lvl, score, nscore, semis]);
+  // a level moves the chart by lvl.transposedBy (Beginner: to an open-chord key), so a set key and the
+  // level's starting key move with it — never re-analysed from the level's simpler chords
+  const keyShift = semis + (lvl ? lvl.transposedBy : 0);
+  const autoKey = useMemo(() => {
+    if (lvl && writtenKey) return { tonic: (((writtenKey.tonic + keyShift) % 12) + 12) % 12, mode: writtenKey.mode, confidence: writtenKey.confidence };
     const c = keyCands[0];
     return c ? { tonic: c.tonic, mode: c.mode, confidence: c.confidence } : null;
-  }, [keyOv, keyCands, semis]);
+  }, [keyCands, keyShift, lvl, writtenKey]);
+  const key = useMemo(() => {
+    const manual = parseKeyName(keyOv);
+    if (manual) return { tonic: (((manual.tonic + keyShift) % 12) + 12) % 12, mode: manual.mode, confidence: 1, manual: true };
+    return autoKey;
+  }, [keyOv, keyShift, autoKey]);
   /* SPELLING — chord roots and slash basses spelled for the key (Dbmaj7 in F minor, G#m in E),
    * the default; "family" keeps the family table (C# Eb F# Ab Bb). Only on the default ♯♭
    * setting: an explicit Flats ♭ choice stays all-flat. Spelling only — the notes never move,
@@ -2203,7 +2224,7 @@ function ChartPanel({ score: rawScore, title, meta, C, useSharp, overrides, setO
             <span style={{ fontSize: TYPE.xs, letterSpacing: 2, color: C.dim, minWidth: 110 }}>CHORD NAMES</span>
             <button aria-pressed={showRoman} onClick={() => { if (!showRoman) { setShowRoman(true); setNashville(false); } else if (!nashville) setNashville(true); else { setShowRoman(false); setNashville(false); } }} title={key ? `key of ${kName(key)} · tap again for Nashville numbers` : "key analysis"}
               style={{ ...chip(C), padding: "3px 9px", borderColor: showRoman ? C.cyan : C.border, color: showRoman ? C.cyan : C.dim }}>{showRoman ? (nashville ? "1·5·6m" : "I·V·vi") : "I·V·vi"}</button>
-            <KeyPicker C={C} value={keyOv} onChange={setKeyOv} cands={keyCands} useSharp={useSharp} semis={semis} />
+            <KeyPicker C={C} value={keyOv} onChange={setKeyOv} cands={keyCands} autoKey={autoKey} useSharp={useSharp} semis={keyShift} />
             {vocabPicker && <ChordVocabPicker C={C} value={vocab} onChange={setVocab} sixNine={sixNine} onSixNine={setSixNine} />}
             {useSharp && (
               <select value={spelling} onChange={(e) => setSpelling(e.target.value)} aria-label="Spelling" title="for key: Dbmaj7 in F minor, G#m in E · family: always C# Eb F# Ab Bb"
@@ -3455,8 +3476,11 @@ function NoteEditorView({ score, edit, setEdit, C, useSharp, playKey, getAudio, 
  * user can see WHY it chose what it chose — the relative major/minor mix-up that made
  * "Can't You See" read E minor is right there at the top of the list. Pure + controlled:
  * the value is a key NAME string ("" = auto), which is what gets persisted. */
-function KeyPicker({ C, value, onChange, cands, useSharp, semis }) {
-  const auto = cands && cands[0] ? keyName(cands[0], useSharp) : null;
+function KeyPicker({ C, value, onChange, cands, autoKey, useSharp, semis }) {
+  // "auto" names the key the chart uses (autoKey: with a level on, the written key moved by the level),
+  // so the label can't disagree with the chart; `semis` is every shift since the written chart
+  const autoK = autoKey || (cands && cands[0]);
+  const auto = autoK ? keyName(autoK, useSharp) : null;
   const alts = (cands || []).slice(0, 4).map((c) => ({ name: keyName(c, useSharp), pct: Math.round(c.confidence * 100) }));
   // the stored override names the UNTRANSPOSED key, so the list must be un-transposed
   // by the current transpose to stay consistent with what the chart shows.
